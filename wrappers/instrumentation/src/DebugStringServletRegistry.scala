@@ -38,6 +38,17 @@ object DebugStringServletRegistry extends HttpHandler {
   val actions: ConcurrentHashMap[ActionKey, ActionWithResult] =
     new ConcurrentHashMap[ActionKey, ActionWithResult]()
 
+  /** Flag to control whether debug actions are enabled. Should only be true in development. */
+  @volatile private var debugActionsEnabled: Boolean = false
+
+  /**
+   * Enables or disables debug actions. This should only be called during initialization in
+   * controlled environments (e.g., development/testing).
+   */
+  def setDebugActionsEnabled(enabled: Boolean): Unit = {
+    debugActionsEnabled = enabled
+  }
+
   /** The map of component names to their debug string. */
   val components: ConcurrentHashMap[String, HasDebugString] =
     new ConcurrentHashMap[String, HasDebugString]()
@@ -75,7 +86,24 @@ object DebugStringServletRegistry extends HttpHandler {
       val actionNameOpt: Option[String] = queryMap.get(QueryParam.ACTION)
       val componentOpt: Option[String] = queryMap.get(QueryParam.COMPONENT)
 
+      // Authenticate and authorize before rendering debug page or executing actions
+      if (!isAuthorizedRequest(exchange)) {
+        exchange.sendResponseHeaders(401, 0)
+        val errorMessage = "Unauthorized: Authentication required to access debug information."
+        exchange.getResponseBody.write(errorMessage.getBytes("UTF-8"))
+        exchange.getResponseBody.close()
+        return
+      }
+
       if (actionNameOpt.isDefined) {
+        // Verify that debug actions are explicitly enabled before allowing execution
+        if (!debugActionsEnabled) {
+          exchange.sendResponseHeaders(403, 0)
+          val errorMessage = "Forbidden: Debug actions are not enabled."
+          exchange.getResponseBody.write(errorMessage.getBytes("UTF-8"))
+          exchange.getResponseBody.close()
+          return
+        }
         val userInputOpt: Option[String] = queryMap.get(QueryParam.USER_INPUT)
         val argsOpt: Option[String] = queryMap.get(QueryParam.ARGS)
         performAction(requestMethod, actionNameOpt.get, userInputOpt, argsOpt)
@@ -87,6 +115,19 @@ object DebugStringServletRegistry extends HttpHandler {
         val errorMessage = s"Error processing request: ${e.getMessage}"
         exchange.getResponseBody.write(errorMessage.getBytes("UTF-8"))
         exchange.getResponseBody.close()
+    }
+  }
+
+  /** Checks if the request is authorized to execute debug actions. */
+  private def isAuthorizedRequest(exchange: HttpExchange): Boolean = {
+    // Check if request is from localhost only (most secure for debug server)
+    val remoteAddress = exchange.getRemoteAddress
+    if (remoteAddress != null) {
+      val hostAddress = remoteAddress.getAddress.getHostAddress
+      // Only allow localhost connections for debug actions
+      hostAddress == "127.0.0.1" || hostAddress == "::1" || hostAddress == "localhost"
+    } else {
+      false
     }
   }
 
