@@ -2,6 +2,7 @@ package com.databricks.dicer.common
 
 import com.databricks.api.proto.dicer.common.DiffAssignmentP.TransferP
 import com.databricks.dicer.common.Assignment.ResourceMap
+import com.databricks.dicer.friend.Squid
 
 /**
  * Represents a request to transfer/copy state for state transfer. The transfer should be from

@@ -31,7 +31,7 @@ trait ServerConf extends RPCPortConf {
    * verify peer certificates against the configured trust store. Enabled when all three
    * `databricks.rpc` confs (cert, key, truststore) are set.
    */
-  val sslArgs: SslArguments = {
+  lazy val sslArgs: SslArguments = {
     if (cert.isDefined && key.isDefined && truststore.isDefined) {
       SslArguments(cert, key, truststore)
     } else {

@@ -20,17 +20,15 @@ class InternalClientConfigSuite extends DatabricksTest {
     for (timeout <- validTimeouts) {
       val config = InternalClientConfig(
         clientType = ClientType.Clerk,
-        subscriberDebugName = "test-clerk",
         watchAddress = URI.create("https://localhost:8080"),
         tlsOptionsOpt = None,
         target = Target("test-service"),
         watchStubCacheTime = 5.minutes,
         watchFromDataPlane = false,
-        rejectWatchRequestsOnFatalTargetMismatch = false,
         watchRpcTimeout = timeout,
         minRetryDelay = 1.second,
         maxRetryDelay = 10.seconds,
-        assignmentLatencySampleFraction = 0.0
+        enableRateLimiting = false
       )
 
       assert(config.watchRpcTimeout == timeout)
@@ -46,17 +44,15 @@ class InternalClientConfigSuite extends DatabricksTest {
       assertThrow[IllegalArgumentException]("at least 1 second") {
         InternalClientConfig(
           clientType = ClientType.Clerk,
-          subscriberDebugName = "test-clerk",
           watchAddress = URI.create("https://localhost:8080"),
           tlsOptionsOpt = None,
           target = Target("test-service"),
           watchStubCacheTime = 5.minutes,
           watchFromDataPlane = false,
-          rejectWatchRequestsOnFatalTargetMismatch = false,
           watchRpcTimeout = timeout,
           minRetryDelay = 1.second,
           maxRetryDelay = 10.seconds,
-          assignmentLatencySampleFraction = 0.0
+          enableRateLimiting = false
         )
       }
     }

@@ -23,10 +23,10 @@ import com.databricks.dicer.common.{
   Generation,
   SliceletSubscriberSlicezData,
   SlicezAssignmentKeyTracker,
-  Squid,
   TargetSlicezData
 }
 import com.databricks.dicer.external.{Slice, SliceKey, Target}
+import com.databricks.dicer.friend.Squid
 import com.databricks.instrumentation.DebugStringServletRegistry
 
 /** The class that manages the Slicez data for all clients that register with it. */

@@ -1,7 +1,13 @@
 package com.databricks.dicer.client
 
-import com.databricks.caching.util.TestUtils
+import java.time.Instant
+
+import scala.collection.immutable.SortedMap
+import scala.collection.mutable.ArrayBuffer
+import scala.concurrent.duration._
+
 import com.databricks.api.proto.dicer.common.ClientRequestP.SliceletDataP
+import com.databricks.caching.util.MetricUtils.ChangeTracker
 import com.databricks.caching.util.{
   AssertionWaiter,
   Cancellable,
@@ -13,26 +19,21 @@ import com.databricks.caching.util.{
   StreamCallback,
   TestUtils
 }
-import com.databricks.dicer.common.SliceletData.{KeyLoad, SliceLoad}
 import com.databricks.dicer.common.{
   Assignment,
   ClientType,
   ClerkData,
   ProposedSliceAssignment,
   SliceletData,
-  Squid,
   TestAssigner
 }
+import com.databricks.dicer.common.SliceletData.{KeyLoad, SliceLoad}
+import com.databricks.dicer.common.TestAssigner.AssignerReplyType
 import com.databricks.dicer.common.TestSliceUtils.{createTestSquid, sampleProposal}
 import com.databricks.dicer.external.{Slice, SliceKey}
-import com.databricks.dicer.friend.SliceMap
+import com.databricks.dicer.friend.{SliceMap, Squid}
 import io.grpc.Status
 import io.prometheus.client.CollectorRegistry
-import java.time.Instant
-
-import scala.collection.immutable.SortedMap
-import scala.collection.mutable.ArrayBuffer
-import scala.concurrent.duration._
 
 /**
  * Includes the common test cases from [[SliceLookupSuiteBase]] plus test cases that apply to the
@@ -44,35 +45,36 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
   /** Creates a test DicerClientProtoLogger using the given SEC and config. */
   private def createTestLogger(
       sec: SequentialExecutionContext,
-      config: InternalClientConfig): DicerClientProtoLogger = {
+      config: InternalClientConfig,
+      subscriberDebugName: String,
+      protoLoggerConf: DicerClientProtoLoggerConf): DicerClientProtoLogger = {
     DicerClientProtoLogger.create(
+      conf = protoLoggerConf,
       clientType = config.clientType,
-      subscriberDebugName = config.subscriberDebugName,
-      keySampleFraction = config.assignmentLatencySampleFraction,
-      executor = sec
+      subscriberDebugName = subscriberDebugName,
+      sec = sec
     )
   }
 
   override protected def withLookup(
       testAssigner: TestAssigner,
       watchStubCacheTime: FiniteDuration = 20.seconds,
-      assignmentLatencySampleFraction: Double = 0)(
+      protoLoggerConf: DicerClientProtoLoggerConf = TestableDicerClientProtoLoggerConf.create())(
       func: (SliceLookupDriver, LoggingStreamCallback[Assignment]) => Unit): Unit = {
     fakeS2SProxy.setFallbackUpstreamPorts(Vector(testAssigner.localUri.getPort))
+    val subscriberDebugName: String = "test-clerk"
     val config: InternalClientConfig =
       createInternalClientConfig(
         ClientType.Clerk,
-        debugName = "test-clerk",
         portToConnectTo(testAssigner),
-        watchStubCacheTime,
-        assignmentLatencySampleFraction
+        watchStubCacheTime
       )
     val lookup =
       SliceLookup.createUnstarted(
         sec,
         config,
-        () => ClerkData,
-        createTestLogger(sec, config),
+        subscriberDebugName,
+        createTestLogger(sec, config, subscriberDebugName, protoLoggerConf),
         serviceBuilderOpt = None
       )
     val callback = new LoggingStreamCallback[Assignment](sec)
@@ -83,9 +85,10 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
           callback.executeOnSuccess(assignment)
         }
       })
-    lookup.start()
+    val driver = new ScalaSliceLookupDriver(lookup, () => ClerkData)
+    driver.start()
     try {
-      func(new ScalaSliceLookupDriver(lookup), callback)
+      func(driver, callback)
     } finally {
       lookup.cancel()
       watchHandle.cancel(Status.CANCELLED.withDescription("cleaning up after withLookup"))
@@ -97,10 +100,10 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
       clientType: ClientType,
       watchStubCacheTime: FiniteDuration = 20.seconds,
       sec: SequentialExecutionContext = sec): SliceLookupDriver = {
+    val subscriberDebugName: String = "test-clerk"
     val config: InternalClientConfig =
       createInternalClientConfig(
         clientType,
-        debugName = "test-clerk",
         portToConnectTo(testAssigner),
         watchStubCacheTime
       )
@@ -108,11 +111,16 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
       SliceLookup.createUnstarted(
         sec,
         config,
-        () => ClerkData,
-        createTestLogger(sec, config),
+        subscriberDebugName,
+        createTestLogger(
+          sec,
+          config,
+          subscriberDebugName,
+          TestableDicerClientProtoLoggerConf.create()
+        ),
         serviceBuilderOpt = None
       )
-    new ScalaSliceLookupDriver(lookup)
+    new ScalaSliceLookupDriver(lookup, () => ClerkData)
   }
 
   override protected def readPrometheusMetric(
@@ -180,6 +188,87 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
       unattributedLoadOpt = None
     )
 
+    // Create SliceLookups for the clerk and slicelet1 first. We will later write an assignment to
+    // the Assigner, which will propagate to all started SliceLookups. We make initial assertions
+    // before writing the assignment.
+
+    // Configure the fake S2S proxy to forward requests to the assigner (for data plane tests).
+    fakeS2SProxy.setFallbackUpstreamPorts(
+      Vector(singleAssignerTestEnv.testAssigner.localUri.getPort)
+    )
+
+    val clerkConfig: InternalClientConfig = createInternalClientConfig(
+      ClientType.Clerk,
+      portToConnectTo(singleAssignerTestEnv.testAssigner),
+      watchStubCacheTime = 20.seconds
+    )
+    val clerkSliceLookup = SliceLookup.createUnstarted(
+      fakeSec,
+      clerkConfig,
+      clerkDebugName,
+      createTestLogger(
+        fakeSec,
+        clerkConfig,
+        clerkDebugName,
+        TestableDicerClientProtoLoggerConf.create()
+      ),
+      serviceBuilderOpt = None
+    )
+
+    clerkSliceLookup.start(() => ClerkData)
+    val slicelet1Config: InternalClientConfig =
+      clerkConfig.copy(clientType = ClientType.Slicelet)
+    val slicelet1SliceLookup = SliceLookup.createUnstarted(
+      fakeSec,
+      slicelet1Config,
+      slicelet1DebugName,
+      createTestLogger(
+        fakeSec,
+        slicelet1Config,
+        slicelet1DebugName,
+        TestableDicerClientProtoLoggerConf.create()
+      ),
+      serviceBuilderOpt = None
+    )
+    slicelet1SliceLookup.start(() => slicelet1Data)
+
+    // Verify that the generated ClientTargetSlicezData is as expected for the clerk and slicelet1.
+    val clerkSlicezData: ClientTargetSlicezData =
+      TestUtils.awaitResult(clerkSliceLookup.getSlicezData, Duration.Inf)
+    val slicelet1SlicezData: ClientTargetSlicezData =
+      TestUtils.awaitResult(slicelet1SliceLookup.getSlicezData, Duration.Inf)
+
+    // The last successful heartbeat and watch address timestamps are not deterministic (and we
+    // don't need to test the correctness of those values), so we use the actual values from the
+    // SliceLookups to set the expected values.
+    val expectedClerkSlicezData = ClientTargetSlicezData(
+      target,
+      sliceletsData = ArrayBuffer.empty,
+      clerksData = ArrayBuffer.empty,
+      assignmentOpt = None,
+      reportedLoadPerResourceOpt = None,
+      reportedLoadPerSliceOpt = None,
+      topKeysOpt = None,
+      squidOpt = None,
+      unattributedLoadBySliceOpt = None,
+      subscriberDebugName = clerkDebugName,
+      watchAddress = clerkConfig.watchAddress,
+      lastSuccessfulHeartbeat = clerkSlicezData.lastSuccessfulHeartbeat,
+      watchAddressUsedSince = clerkSlicezData.watchAddressUsedSince
+    )
+    val expectedSlicelet1SlicezData: ClientTargetSlicezData =
+      expectedClerkSlicezData.copy(
+        subscriberDebugName = slicelet1DebugName,
+        reportedLoadPerResourceOpt = Some(Map((squid1, 100.0))),
+        reportedLoadPerSliceOpt = Some(Map((Slice.FULL, 100.0))),
+        unattributedLoadBySliceOpt = Some(Map.empty),
+        squidOpt = Some(squid1),
+        topKeysOpt = Some(SortedMap((SliceKey.MIN, 100.0))),
+        lastSuccessfulHeartbeat = slicelet1SlicezData.lastSuccessfulHeartbeat,
+        watchAddressUsedSince = slicelet1SlicezData.watchAddressUsedSince
+      )
+
+    // Now handle `slicelet2`.
     // SliceletData for `squid2` with only unattributed load and top keys.
     val slicelet2Data = SliceletData(
       squid2,
@@ -198,93 +287,60 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
       )
     )
 
-    // Create SliceLookups for the clerk and slicelets.
-    val clerkConfig: InternalClientConfig = createInternalClientConfig(
-      ClientType.Clerk,
-      clerkDebugName,
-      singleAssignerTestEnv.getAssignerPort,
-      watchStubCacheTime = 20.seconds
-    )
-    val clerkSliceLookup = SliceLookup.createUnstarted(
-      fakeSec,
-      clerkConfig,
-      () => ClerkData,
-      createTestLogger(fakeSec, clerkConfig),
-      serviceBuilderOpt = None
-    )
-    val slicelet1Config: InternalClientConfig =
-      clerkConfig.copy(clientType = ClientType.Slicelet, subscriberDebugName = slicelet1DebugName)
-    val slicelet1SliceLookup = SliceLookup.createUnstarted(
-      fakeSec,
-      slicelet1Config,
-      () => slicelet1Data,
-      createTestLogger(fakeSec, slicelet1Config),
-      serviceBuilderOpt = None
-    )
+    // Start slicelet2's SliceLookup.
     val slicelet2Config: InternalClientConfig =
-      clerkConfig.copy(clientType = ClientType.Slicelet, subscriberDebugName = slicelet2DebugName)
+      clerkConfig.copy(clientType = ClientType.Slicelet)
     val slicelet2SliceLookup = SliceLookup.createUnstarted(
       fakeSec,
       slicelet2Config,
-      () => slicelet2Data,
-      createTestLogger(fakeSec, slicelet2Config),
+      slicelet2DebugName,
+      createTestLogger(
+        fakeSec,
+        slicelet2Config,
+        slicelet2DebugName,
+        TestableDicerClientProtoLoggerConf.create()
+      ),
       serviceBuilderOpt = None
     )
-    // Inject the assignments into the slicelet2's SliceLookup.
+    slicelet2SliceLookup.start(() => slicelet2Data)
+
+    assertResult(expectedClerkSlicezData)(clerkSlicezData)
+    assertResult(expectedSlicelet1SlicezData)(slicelet1SlicezData)
+
+    // Write an assignment to the Assigner, which will propagate asynchronously to all started
+    // SliceLookups.
     val proposal: SliceMap[ProposedSliceAssignment] = sampleProposal()
     val assignment: Assignment =
       TestUtils.awaitResult(
         singleAssignerTestEnv.setAndFreezeAssignment(target, proposal),
         Duration.Inf
       )
-    slicelet2SliceLookup.forTest.injectAssignment(assignment)
 
-    // Verify that the generated ClientTargetSlicezData is as expected.
-    val clerkSlicezData: ClientTargetSlicezData =
-      TestUtils.awaitResult(clerkSliceLookup.getSlicezData, Duration.Inf)
-    val slicelet1SlicezData: ClientTargetSlicezData =
-      TestUtils.awaitResult(slicelet1SliceLookup.getSlicezData, Duration.Inf)
-    val slicelet2SlicezData: ClientTargetSlicezData =
-      TestUtils.awaitResult(slicelet2SliceLookup.getSlicezData, Duration.Inf)
+    // Verify: Wait for slicelet2 to receive the assignment.
+    AssertionWaiter("Wait for slicelet2 to receive assignment").await {
+      val slicelet2SlicezData: ClientTargetSlicezData =
+        TestUtils.awaitResult(slicelet2SliceLookup.getSlicezData, Duration.Inf)
 
-    val expectedClerkSlicezData = ClientTargetSlicezData(
-      target,
-      sliceletsData = ArrayBuffer.empty,
-      clerksData = ArrayBuffer.empty,
-      assignmentOpt = None,
-      reportedLoadPerResourceOpt = None,
-      reportedLoadPerSliceOpt = None,
-      topKeysOpt = None,
-      squidOpt = None,
-      unattributedLoadBySliceOpt = None,
-      subscriberDebugName = clerkDebugName,
-      watchAddress = clerkConfig.watchAddress,
-      watchAddressUsedSince = fakeSec.getClock.instant(),
-      lastSuccessfulHeartbeat = Instant.EPOCH
-    )
-    val expectedSlicelet1SlicezData: ClientTargetSlicezData =
-      expectedClerkSlicezData.copy(
-        subscriberDebugName = slicelet1DebugName,
-        reportedLoadPerResourceOpt = Some(Map((squid1, 100.0))),
-        reportedLoadPerSliceOpt = Some(Map((Slice.FULL, 100.0))),
-        unattributedLoadBySliceOpt = Some(Map.empty),
-        squidOpt = Some(squid1),
-        topKeysOpt = Some(SortedMap((SliceKey.MIN, 100.0)))
-      )
-    val expectedSlicelet2SlicezData: ClientTargetSlicezData =
-      expectedClerkSlicezData.copy(
-        assignmentOpt = Some(assignment),
-        subscriberDebugName = slicelet2DebugName,
-        reportedLoadPerResourceOpt = Some(Map((squid2, 0.0))),
-        reportedLoadPerSliceOpt = Some(Map.empty),
-        unattributedLoadBySliceOpt = Some(Map((Slice.FULL, 100.0))),
-        squidOpt = Some(squid2),
-        topKeysOpt = Some(SortedMap((SliceKey.MIN, 200.0)))
-      )
+      val expectedSlicelet2SlicezData: ClientTargetSlicezData =
+        expectedClerkSlicezData.copy(
+          assignmentOpt = Some(assignment),
+          subscriberDebugName = slicelet2DebugName,
+          reportedLoadPerResourceOpt = Some(Map((squid2, 0.0))),
+          reportedLoadPerSliceOpt = Some(Map.empty),
+          unattributedLoadBySliceOpt = Some(Map((Slice.FULL, 100.0))),
+          squidOpt = Some(squid2),
+          topKeysOpt = Some(SortedMap((SliceKey.MIN, 200.0))),
+          lastSuccessfulHeartbeat = slicelet2SlicezData.lastSuccessfulHeartbeat,
+          watchAddressUsedSince = slicelet2SlicezData.watchAddressUsedSince
+        )
 
-    assertResult(expectedClerkSlicezData)(clerkSlicezData)
-    assertResult(expectedSlicelet1SlicezData)(slicelet1SlicezData)
-    assertResult(expectedSlicelet2SlicezData)(slicelet2SlicezData)
+      assertResult(expectedSlicelet2SlicezData)(slicelet2SlicezData)
+    }
+
+    // Cleanup: Cancel all lookups.
+    clerkSliceLookup.cancel()
+    slicelet1SliceLookup.cancel()
+    slicelet2SliceLookup.cancel()
   }
 
   // This test case is not exercised for Rust, because the Rust implementation currently (as of
@@ -299,15 +355,19 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
     val subscriberDebugName: String = "slice-lookup-client-slicez-register-test"
     val config: InternalClientConfig = createInternalClientConfig(
       ClientType.Clerk,
-      debugName = subscriberDebugName,
       portToConnectTo(singleAssignerTestEnv.testAssigner),
       watchStubCacheTime = 20.seconds
     )
     val lookup: SliceLookup = SliceLookup.createUnstarted(
       sec,
       config,
-      () => ClerkData,
-      createTestLogger(sec, config),
+      subscriberDebugName,
+      createTestLogger(
+        sec,
+        config,
+        subscriberDebugName,
+        TestableDicerClientProtoLoggerConf.create()
+      ),
       serviceBuilderOpt = None
     )
 
@@ -319,7 +379,7 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
     )
 
     // Setup: Start the lookup to trigger registration.
-    lookup.start()
+    lookup.start(() => ClerkData)
 
     // Verify: After starting, the lookup should be registered in ClientSlicez.
     AssertionWaiter("Wait for the lookup to be registered").await {
@@ -345,4 +405,51 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
       )
     }
   }
+
+  test("start is idempotent") {
+    // Test plan: Verify that calling start() multiple times is safe and only the first call
+    // has any effect. The lookup should continue to work correctly after multiple start() calls.
+
+    val lookup: SliceLookupDriver = createUnstartedSliceLookup(
+      singleAssignerTestEnv.testAssigner,
+      ClientType.Clerk
+    )
+
+    try {
+      // Call start() the first time - this should initialize the lookup.
+      lookup.start()
+
+      // Call start() multiple additional times - these should be no-ops.
+      lookup.start()
+      lookup.start()
+
+      // Verify the lookup still works correctly by receiving an assignment.
+      val proposal: SliceMap[ProposedSliceAssignment] = sampleProposal()
+      val assignment: Assignment =
+        TestUtils.awaitResult(
+          singleAssignerTestEnv.setAndFreezeAssignment(target, proposal),
+          Duration.Inf
+        )
+
+      AssertionWaiter("Wait for assignment after multiple start() calls").await {
+        assert(lookup.assignmentOpt.isDefined)
+        assert(lookup.assignmentOpt.get.generation == assignment.generation)
+      }
+
+      // Verify we can receive subsequent assignments as well.
+      val proposal2: SliceMap[ProposedSliceAssignment] = sampleProposal()
+      val assignment2: Assignment =
+        TestUtils.awaitResult(
+          singleAssignerTestEnv.setAndFreezeAssignment(target, proposal2),
+          Duration.Inf
+        )
+
+      AssertionWaiter("Wait for second assignment").await {
+        assert(lookup.assignmentOpt.get.generation == assignment2.generation)
+      }
+    } finally {
+      lookup.cancel()
+    }
+  }
+
 }

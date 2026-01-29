@@ -21,7 +21,6 @@ import com.databricks.dicer.common.{
   GetSliceletWatchServerPortResponseP,
   IncrementSliceKeyHandleLoadByRequestP,
   SliceHelper,
-  Squid,
   StartSliceletRequestP,
   StartSliceletResponseP,
   StopSliceletRequestP
@@ -34,7 +33,7 @@ import scala.concurrent.{Promise}
 import scala.concurrent.duration.Duration
 import scala.util.control.NonFatal
 
-import com.databricks.dicer.friend.SliceletAccessor
+import com.databricks.dicer.friend.{SliceletAccessor, Squid}
 import com.databricks.caching.util.TestUtils
 
 /**

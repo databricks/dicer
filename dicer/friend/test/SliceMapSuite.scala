@@ -11,11 +11,9 @@ import com.databricks.dicer.common.{
   SliceAssignment,
   SliceHelper,
   SliceMapHelper,
-  SliceWithResources,
-  Squid
+  SliceWithResources
 }
 import com.databricks.dicer.common.SliceHelper.RichSlice
-import com.databricks.dicer.friend.SliceMap.{GapEntry, IntersectionEntry}
 import com.databricks.dicer.common.TestSliceUtils._
 import com.databricks.dicer.common.test.SliceMapTestDataP
 import com.databricks.dicer.common.test.SliceMapTestDataP.IntersectTestCaseP.{
@@ -32,6 +30,7 @@ import com.databricks.dicer.common.test.SliceMapTestDataP.PartialSliceMapTestCas
   ValueTypeP
 }
 import com.databricks.dicer.external.{Slice, SliceKey}
+import com.databricks.dicer.friend.SliceMap.{GapEntry, IntersectionEntry}
 import com.databricks.testing.DatabricksTest
 
 /**

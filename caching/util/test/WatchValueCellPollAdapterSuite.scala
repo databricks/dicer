@@ -1,13 +1,12 @@
 package com.databricks.caching.util
 
 import com.databricks.testing.DatabricksTest
-import com.databricks.threading.NamedExecutor
 import com.databricks.caching.util.TestUtils.TestName
 import io.grpc.Status
-import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.{ConcurrentHashMap, Executors}
 
 import scala.concurrent.duration._
-import scala.concurrent.Await
+import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.collection.mutable
 import scala.collection.JavaConverters._
 
@@ -135,9 +134,6 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
   /** The interval between each poll. */
   private val TEST_POLL_INTERVAL: FiniteDuration = 100.milliseconds
 
-  /** A sequential execution context for test. */
-  private val sec = SequentialExecutionContext.createWithDedicatedPool("test-sec")
-
   test("Test WatchValueCellPollAdapterSuite with a single subscriber") {
     // Test plan:
     // 1. Create a WatchValueCellPollAdapter where the pollerThunk is pollCurrentValue.
@@ -151,14 +147,15 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
     //    verify that the subscriber's value hasn't been changed.
     val mockSafeBatchFlag = new MockSafeBatchFlag(INITIAL_MAP_VALUE_RAW)
 
+    val sec = SequentialExecutionContext.createWithDedicatedPool(s"ec-$getSafeName")
     val watchValueCellAdapter = new WatchValueCellPollAdapter[RawValueType, ParsedValueMap](
-      INITIAL_MAP_VALUE_PARSED,
+      Some(INITIAL_MAP_VALUE_PARSED),
       () => mockSafeBatchFlag.getCurrentValue,
       transformation,
       TEST_POLL_INTERVAL,
-      NamedExecutor.create(name = s"ec-$getSafeName", maxThreads = 1),
       sec
     )
+    watchValueCellAdapter.start()
 
     val subscriber = new TestSubscriber(0)
     watchValueCellAdapter.watch(subscriber.valueStreamCallback)
@@ -201,14 +198,15 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
     // things still work well when there are multiple subscribers.
     val mockSafeBatchFlag = new MockSafeBatchFlag(INITIAL_MAP_VALUE_RAW)
 
+    val sec = SequentialExecutionContext.createWithDedicatedPool(s"ec-$getSafeName")
     val watchValueCellAdapter = new WatchValueCellPollAdapter[RawValueType, ParsedValueMap](
-      INITIAL_MAP_VALUE_PARSED,
+      Some(INITIAL_MAP_VALUE_PARSED),
       () => mockSafeBatchFlag.getCurrentValue,
       transformation,
       TEST_POLL_INTERVAL,
-      NamedExecutor.create(name = s"ec-$getSafeName", maxThreads = 1),
       sec
     )
+    watchValueCellAdapter.start()
 
     val subscriber0 = new TestSubscriber(0)
     val subscriber1 = new TestSubscriber(1)
@@ -289,14 +287,15 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
     // by the subscriber's callback as a StreamCallback.
     val mockSafeBatchFlag = new MockSafeBatchFlag(INITIAL_MAP_VALUE_RAW)
 
+    val sec = SequentialExecutionContext.createWithDedicatedPool(s"ec-$getSafeName")
     val watchValueCellAdapter = new WatchValueCellPollAdapter[RawValueType, ParsedValueMap](
-      INITIAL_MAP_VALUE_PARSED,
+      Some(INITIAL_MAP_VALUE_PARSED),
       () => mockSafeBatchFlag.getCurrentValue,
       transformation,
       TEST_POLL_INTERVAL,
-      NamedExecutor.create(name = s"ec-$getSafeName", maxThreads = 1),
       sec
     )
+    watchValueCellAdapter.start()
 
     val subscriber = new TestSubscriber(0)
     watchValueCellAdapter.watch(subscriber.streamCallback)
@@ -321,5 +320,207 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
       assert(watchValueCellAdapter.getLatestValueOpt == Some(expectedParsedValue))
       assert(subscriber.getLatestKeyValueMap == expectedParsedValue)
     }
+  }
+
+  test("Test cancel before start is no-op") {
+    // Test plan: Verify that calling cancel() before start() is harmless. Create an adapter, call
+    // cancel(), then call start(), and verify that the adapter still works correctly by observing
+    // that a subscriber receives value updates.
+    val mockSafeBatchFlag = new MockSafeBatchFlag(INITIAL_MAP_VALUE_RAW)
+
+    val sec = SequentialExecutionContext.createWithDedicatedPool(s"ec-$getSafeName")
+    val watchValueCellAdapter = new WatchValueCellPollAdapter[RawValueType, ParsedValueMap](
+      Some(INITIAL_MAP_VALUE_PARSED),
+      () => mockSafeBatchFlag.getCurrentValue,
+      transformation,
+      TEST_POLL_INTERVAL,
+      sec
+    )
+
+    // Cancel before start - this should be a no-op.
+    watchValueCellAdapter.cancel()
+
+    watchValueCellAdapter.start()
+
+    val subscriber = new TestSubscriber(0)
+    watchValueCellAdapter.watch(subscriber.valueStreamCallback)
+
+    AssertionWaiter("cancel-before-start-assertion-0").await {
+      assert(subscriber.getLatestKeyValueMap == INITIAL_MAP_VALUE_PARSED)
+    }
+
+    mockSafeBatchFlag.updateValue("raw-key-2", "raw-value-2-1")
+
+    // Verify: The subscriber receives the updated value, confirming that the adapter is polling,
+    // despite being canceled before start.
+    val expectedParsedValue: ParsedValueMap = Map[String, ParsedValue](
+      "parsed-key-1" -> ParsedValue("raw-value-1"),
+      "parsed-key-2" -> ParsedValue("raw-value-2-1"),
+      "parsed-key-3" -> ParsedValue("raw-value-3")
+    )
+    AssertionWaiter("cancel-before-start-assertion-1").await {
+      assert(watchValueCellAdapter.getLatestValueOpt == Some(expectedParsedValue))
+      assert(subscriber.getLatestKeyValueMap == expectedParsedValue)
+    }
+
+    watchValueCellAdapter.cancel()
+  }
+
+  test("Test multiple start calls is a no-op") {
+    // Test plan: Verify that calling start() multiple times creates only one poller. Call start()
+    // multiple times, then issue a single cancel(), and verify that no more updates are received.
+    // If multiple start() calls created multiple pollers, a single cancel() would not stop them
+    // all.
+    val mockSafeBatchFlag = new MockSafeBatchFlag(INITIAL_MAP_VALUE_RAW)
+
+    val sec = SequentialExecutionContext.createWithDedicatedPool(s"ec-$getSafeName")
+    val watchValueCellAdapter = new WatchValueCellPollAdapter[RawValueType, ParsedValueMap](
+      Some(INITIAL_MAP_VALUE_PARSED),
+      () => mockSafeBatchFlag.getCurrentValue,
+      transformation,
+      TEST_POLL_INTERVAL,
+      sec
+    )
+
+    watchValueCellAdapter.start()
+    watchValueCellAdapter.start()
+    watchValueCellAdapter.start()
+
+    val subscriber = new TestSubscriber(0)
+    watchValueCellAdapter.watch(subscriber.valueStreamCallback)
+
+    AssertionWaiter("multiple-start-assertion-0").await {
+      assert(subscriber.getLatestKeyValueMap == INITIAL_MAP_VALUE_PARSED)
+    }
+
+    watchValueCellAdapter.cancel()
+
+    // Drain the sec to ensure cancel() has taken effect and any in-flight polls completed.
+    TestUtils.awaitResult(sec.call { () }, Duration.Inf)
+
+    mockSafeBatchFlag.updateValue("raw-key-2", "raw-value-2-1")
+
+    // Verify: After waiting, the subscriber should NOT have received the new value, confirming
+    // that a single cancel() stopped all polling (i.e., there was only one poller).
+    TestUtils.shamefullyAwaitForNonEventInAsyncTest()
+    assert(subscriber.getLatestKeyValueMap == INITIAL_MAP_VALUE_PARSED)
+  }
+
+  test("Test periodic polling continues when first poll throws exception") {
+    // Test plan: Verify that periodic polling is scheduled even if the first poll throws an
+    // exception. This tests the try/finally block in start(). Create the SEC on a separate thread
+    // to prevent uncaught exceptions from interrupting the test thread. Set up a poller that throws
+    // on the first call but succeeds on subsequent calls, call start(), and verify that
+    // subscribers eventually receive updates from the subsequent successful polls.
+
+    // Setup: Create a mock batch flag with a special marker key to track whether the first poll
+    // has occurred.
+    val mockSafeBatchFlag = new MockSafeBatchFlag(INITIAL_MAP_VALUE_RAW)
+    val FIRST_POLL_MARKER_KEY = "first-poll-completed"
+
+    // Create the SEC on a throwaway thread so uncaught exceptions don't interrupt the test thread
+    // (uncaught exceptions will result in an interruption of the thread on which the executor is
+    // created).
+    val secFuture: Future[SequentialExecutionContext] = Future {
+      SequentialExecutionContext.createWithDedicatedPool(s"ec-$getSafeName")
+    }(ExecutionContext.fromExecutor(Executors.newSingleThreadExecutor()))
+    val sec: SequentialExecutionContext = Await.result(secFuture, Duration.Inf)
+    val watchValueCellAdapter = new WatchValueCellPollAdapter[RawValueType, ParsedValueMap](
+      Some(INITIAL_MAP_VALUE_PARSED),
+      () => {
+        val currentValue: RawValueType = mockSafeBatchFlag.getCurrentValue
+        if (!currentValue.contains(FIRST_POLL_MARKER_KEY)) {
+          // Mark that the first poll has been attempted, then throw.
+          mockSafeBatchFlag.updateValue(FIRST_POLL_MARKER_KEY, "true")
+          throw new RuntimeException("First poll intentionally fails")
+        }
+        // Remove the marker key so it doesn't interfere with transformation.
+        currentValue - FIRST_POLL_MARKER_KEY
+      },
+      transformation,
+      TEST_POLL_INTERVAL,
+      sec
+    )
+
+    val subscriber = new TestSubscriber(0)
+    watchValueCellAdapter.watch(subscriber.valueStreamCallback)
+
+    // Setup: Start the adapter. The first poll will throw, but the periodic poller should still
+    // be scheduled.
+    watchValueCellAdapter.start()
+
+    // Verify: Despite the first poll throwing, the subscriber should eventually receive the
+    // initial value once the second poll succeeds.
+    AssertionWaiter("first-poll-throws-assertion-0").await {
+      assert(subscriber.getLatestKeyValueMap == INITIAL_MAP_VALUE_PARSED)
+    }
+
+    // Setup: Update the mock flag value.
+    mockSafeBatchFlag.updateValue("raw-key-2", "raw-value-2-1")
+
+    // Verify: The subscriber receives the updated value from a subsequent poll, confirming that
+    // periodic polling was scheduled despite the exception in the first poll.
+    val expectedParsedValue: ParsedValueMap = Map[String, ParsedValue](
+      "parsed-key-1" -> ParsedValue("raw-value-1"),
+      "parsed-key-2" -> ParsedValue("raw-value-2-1"),
+      "parsed-key-3" -> ParsedValue("raw-value-3")
+    )
+    AssertionWaiter("first-poll-throws-assertion-1").await {
+      assert(watchValueCellAdapter.getLatestValueOpt == Some(expectedParsedValue))
+      assert(subscriber.getLatestKeyValueMap == expectedParsedValue)
+    }
+
+    watchValueCellAdapter.cancel()
+  }
+
+  test("Test that initial value is set from first poll when initialValueOpt is None") {
+    // Test plan: Verify that when initialValueOpt is None, the cell has no value until the first
+    // poll completes, and then the subscriber receives the polled value. Create a mock flag,
+    // create an adapter with None as the initial value, add a subscriber, start the adapter, and
+    // verify the subscriber receives the value from the first poll.
+
+    // Setup: Create a mock flag with initial data.
+    val mockSafeBatchFlag = new MockSafeBatchFlag(INITIAL_MAP_VALUE_RAW)
+
+    val sec = SequentialExecutionContext.createWithDedicatedPool(s"ec-$getSafeName")
+    val watchValueCellAdapter = new WatchValueCellPollAdapter[RawValueType, ParsedValueMap](
+      initialValueOpt = None,
+      poller = () => mockSafeBatchFlag.getCurrentValue,
+      transformation,
+      TEST_POLL_INTERVAL,
+      sec
+    )
+
+    // Setup: Add a subscriber before starting.
+    val subscriber = new TestSubscriber(0)
+    watchValueCellAdapter.watch(subscriber.valueStreamCallback)
+
+    // Verify: Before starting, the adapter should have no value.
+    assert(watchValueCellAdapter.getLatestValueOpt.isEmpty)
+
+    // Setup: Start the adapter. The first poll should set the value.
+    watchValueCellAdapter.start()
+
+    // Verify: The subscriber should receive the initial value from the first poll.
+    AssertionWaiter("none-initial-value-assertion-0").await {
+      assert(watchValueCellAdapter.getLatestValueOpt == Some(INITIAL_MAP_VALUE_PARSED))
+      assert(subscriber.getLatestKeyValueMap == INITIAL_MAP_VALUE_PARSED)
+    }
+
+    // Setup: Update the mock flag value.
+    mockSafeBatchFlag.updateValue("raw-key-2", "raw-value-2-1")
+
+    // Verify: The subscriber receives the updated value from subsequent polls.
+    val expectedParsedValue: ParsedValueMap = Map[String, ParsedValue](
+      "parsed-key-1" -> ParsedValue("raw-value-1"),
+      "parsed-key-2" -> ParsedValue("raw-value-2-1"),
+      "parsed-key-3" -> ParsedValue("raw-value-3")
+    )
+    AssertionWaiter("none-initial-value-assertion-1").await {
+      assert(watchValueCellAdapter.getLatestValueOpt == Some(expectedParsedValue))
+      assert(subscriber.getLatestKeyValueMap == expectedParsedValue)
+    }
+
+    watchValueCellAdapter.cancel()
   }
 }

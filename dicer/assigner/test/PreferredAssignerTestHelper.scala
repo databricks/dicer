@@ -28,10 +28,10 @@ import com.databricks.dicer.common.{
   InternalDicerTestEnvironment,
   Redirect,
   SliceletData,
-  Squid,
   TestAssigner
 }
 import com.databricks.dicer.external.{Clerk, ResourceAddress, Slicelet, Target}
+import com.databricks.dicer.friend.Squid
 import com.databricks.rpc.RPCContext
 import com.databricks.rpc.testing.JettyTestRPCContext
 import io.prometheus.client.CollectorRegistry

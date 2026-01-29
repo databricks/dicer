@@ -9,9 +9,7 @@ import scala.util.control.NonFatal
 
 import com.github.blemale.scaffeine.{Cache, Scaffeine}
 import com.google.common.collect.{ImmutableRangeSet, Range}
-import com.google.common.hash.Hashing
 import io.grpc.{Grpc, InsecureServerCredentials, Server, ServerBuilder, ServerCredentials}
-import java.util.concurrent.{ExecutorService, Executors}
 
 import com.databricks.DatabricksMain
 import com.databricks.api.proto.dicer.demo.{
@@ -27,7 +25,7 @@ import com.databricks.backend.common.util.Project
 import com.databricks.caching.util.{PrefixLogger, ServerConf}
 import com.databricks.common.util.ShutdownHookManager
 import com.databricks.conf.Config
-import com.databricks.conf.trusted.{ProjectConf, RPCPortConf}
+import com.databricks.conf.trusted.ProjectConf
 import com.databricks.dicer.demo.common.DemoCommon
 import com.databricks.dicer.external.{
   InfinitySliceKey,
@@ -39,8 +37,6 @@ import com.databricks.dicer.external.{
   SliceletListener,
   Target
 }
-import com.databricks.logging.ConsoleLogging
-import com.databricks.rpc.SslArguments
 import com.databricks.rpc.tls.{TLSOptions, TLSOptionsMigration}
 
 /** Configuration for the Demo Server. */

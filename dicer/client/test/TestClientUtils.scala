@@ -5,7 +5,8 @@ import java.io.File
 import io.prometheus.client.CollectorRegistry
 import com.databricks.backend.common.util.Project
 import com.databricks.caching.util.AssertMacros.iassert
-import com.databricks.caching.util.{AssertionWaiter, MetricUtils}
+import com.databricks.caching.util.{AssertionWaiter, MetricUtils, NonReentrantLock}
+import com.databricks.caching.util.Lock.withLock
 import com.databricks.conf.trusted.ProjectConf
 import com.databricks.conf.trusted.RPCPortConf
 import com.databricks.conf.Config
@@ -24,6 +25,9 @@ import com.databricks.dicer.external.{
 }
 import com.databricks.rpc.tls.TLSOptions
 import com.databricks.rpc.testing.TestTLSOptions
+
+import scala.concurrent.{Await, Promise}
+import scala.concurrent.duration.Duration
 
 /** Paths to the keystore and truststore files for constructing a [[TlsOptions]]. */
 case class TlsFilePaths(keystorePath: String, truststorePath: String)
@@ -342,6 +346,48 @@ object TestClientUtils {
             .build()
         )
       case _ => None
+    }
+  }
+
+  /**
+   * A fake [[BlockingReadinessProvider]] for testing that allows dynamically changing the readiness
+   * status and optionally blocking the [[isReady]] call.
+   */
+  final class FakeBlockingReadinessProvider extends BlockingReadinessProvider {
+    private val lock = new NonReentrantLock()
+
+    private var isPodReady: Boolean = false
+    private var blockingPromiseOpt: Option[Promise[Unit]] = None
+
+    /** Used to block the [[isReady]] call until [[unblock]] is called. */
+    def blockForever(): Unit = withLock(lock) {
+      blockingPromiseOpt = Some(Promise[Unit]())
+    }
+
+    /** Completes the promise; if [[isReady]] was called and is blocking, it will unblock. */
+    def unblock(): Unit = withLock(lock) {
+      for (promise <- blockingPromiseOpt) {
+        promise.success(())
+      }
+      blockingPromiseOpt = None
+    }
+
+    /** Sets the readiness status to the given value. */
+    def setReady(isReady: Boolean): Unit = withLock(lock) {
+      isPodReady = isReady
+    }
+
+    /** Returns the current readiness status. The call will block until the source is unblocked. */
+    override def isReady: Boolean = {
+      val promiseOpt = withLock(lock) { blockingPromiseOpt }
+
+      for (promise <- promiseOpt) {
+        Await.result(promise.future, Duration.Inf)
+      }
+
+      withLock(lock) {
+        isPodReady
+      }
     }
   }
 }

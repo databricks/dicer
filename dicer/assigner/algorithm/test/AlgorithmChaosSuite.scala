@@ -16,10 +16,11 @@ import com.databricks.dicer.assigner.config.InternalTargetConfig.{
   KeyReplicationConfig,
   LoadBalancingMetricConfig
 }
-import com.databricks.dicer.common.{Assignment, Squid}
+import com.databricks.dicer.common.Assignment
 import com.databricks.dicer.common.SliceKeyHelper.RichSliceKey
 import com.databricks.dicer.common.TestSliceUtils._
 import com.databricks.dicer.external.{Slice, SliceKey}
+import com.databricks.dicer.friend.Squid
 
 /** Chaos tests for the Algorithm. */
 class AlgorithmChaosSuite extends AlgorithmSuiteBase {

@@ -15,36 +15,29 @@ import com.databricks.rpc.tls.TLSOptions
  * Internal config for a Clerk or Slicelet.
  *
  * @param clientType Type of the client, either Clerk or Slicelet
- * @param subscriberDebugName Name of the subscriber passed to the Assigner for debugging purposes
  * @param watchAddress URI to which the client connects to watch assignments
  * @param tlsOptionsOpt TLS options for the gRPC connection
  * @param target Resources for which the assignment is being watcher
  * @param watchStubCacheTime How long to cache the gRPC stub for the watch RPC
  * @param watchFromDataPlane Whether the client is running in the data plane and watching
  *                           assignments from the Dicer Assigner running in the region's general
- *                           cluster
- * @param rejectWatchRequestsOnFatalTargetMismatch See param in [[InternalClientConf]] of the same
- *                                                 name.
- * @param watchRpcTimeout The deadline sent in the client request for each RPC
- * @param minRetryDelay Minimum time to retry a failed RPC call for exponential backoff
- * @param maxRetryDelay Maximum time to retry a failed RPC call for exponential backoff
- * @param assignmentLatencySampleFraction Fraction of assignment propagation latency events to
- *                                        sample for logging.
- *                                        Should be between [0, 1]. 0.0 disables latency logging.
+ *                           cluster.
+ * @param watchRpcTimeout The deadline sent in the client request for each RPC.
+ * @param minRetryDelay Minimum time to retry a failed RPC call for exponential backoff.
+ * @param maxRetryDelay Maximum time to retry a failed RPC call for exponential backoff.
+ * @param enableRateLimiting Whether rate limiting is enabled for watch RPC calls.
  */
 case class InternalClientConfig(
     clientType: ClientType,
-    subscriberDebugName: String,
     watchAddress: URI,
     tlsOptionsOpt: Option[TLSOptions],
     target: Target,
     watchStubCacheTime: FiniteDuration,
     watchFromDataPlane: Boolean,
-    rejectWatchRequestsOnFatalTargetMismatch: Boolean,
     watchRpcTimeout: FiniteDuration = WATCH_RPC_TIMEOUT,
     minRetryDelay: FiniteDuration = 1.second,
     maxRetryDelay: FiniteDuration = 10.seconds,
-    assignmentLatencySampleFraction: Double) {
+    enableRateLimiting: Boolean) {
   validateWatchRpcTimeout(watchRpcTimeout)
 
   /** Client name to use for the RPC stub. */

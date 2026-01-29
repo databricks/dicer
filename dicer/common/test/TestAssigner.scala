@@ -53,7 +53,7 @@ import com.databricks.dicer.assigner.{
 }
 import com.databricks.dicer.common.TestAssigner.AssignerReplyType
 import com.databricks.dicer.external.Target
-import com.databricks.dicer.friend.SliceMap
+import com.databricks.dicer.friend.{SliceMap, Squid}
 import com.databricks.caching.util.Lock.withLock
 import com.databricks.caching.util.{EtcdClient, EtcdTestEnvironment}
 import com.databricks.dicer.assigner.config.InternalTargetConfig.HealthWatcherTargetConfig

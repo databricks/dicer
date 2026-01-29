@@ -1,0 +1,215 @@
+syntax = "proto2";
+
+package dicer.test;
+
+import "dicer/common/proto/common.proto";
+import "dicer/friend/proto/friend.proto";
+import "scalapb.proto";
+
+option java_package = "com.databricks.dicer.common";;
+option java_generate_equals_and_hash = true;
+option java_outer_classname = "SliceletTestDriverProto";
+option java_multiple_files = true;
+option (scalapb.options) = {
+  package_name: "com.databricks.dicer.common",
+  flat_package: true,
+};
+
+// Test driver service for Slicelet operations.
+service SliceletTestDriver {
+  // Creates a Rust `Slicelet` instance.
+  rpc CreateSlicelet(CreateSliceletRequestP) returns (CreateSliceletResponseP);
+
+  // Calls the `start` method on a previously created Rust `Slicelet` instance.
+  //
+  // If the Slicelet is started successfully, then there will be exactly one `is_started` response
+  // followed by a stream of `assignment_updated` responses for each time a new assignment is
+  // discovered.
+  //
+  // If starting the Slicelet fails, then the stream will be terminated with an error.
+  rpc StartSlicelet(StartSliceletRequestP) returns (stream StartSliceletResponseP);
+
+  // Drops a previously created Rust `Slicelet` instance.
+  rpc StopSlicelet(StopSliceletRequestP) returns (StopSliceletResponseP);
+
+  // Retrieves the watch server port of a previously created Rust `Slicelet` instance.
+  rpc GetSliceletWatchServerPort(GetSliceletWatchServerPortRequestP)
+      returns (GetSliceletWatchServerPortResponseP);
+
+  // Calls the `assigned_slices` method on a previously created Rust `Slicelet` instance.
+  rpc GetAssignedSlices(GetAssignedSlicesRequestP) returns (GetAssignedSlicesResponseP);
+
+  // Calls the `get_latest_assignment_for_test` function for a previously created Rust `Slicelet`
+  // instance.
+  rpc GetLatestAssignment(GetLatestAssignmentRequestP) returns (GetLatestAssignmentResponseP);
+
+  // Retrieves the SQUID of a previously created Rust `Slicelet` instance.
+  rpc GetSliceletSquid(GetSliceletSquidRequestP) returns (GetSliceletSquidResponseP);
+
+  // Creates a slice key handle using a previously created Rust `Slicelet` instance.
+  rpc CreateSliceKeyHandle(CreateSliceKeyHandleRequestP) returns (CreateSliceKeyHandleResponseP);
+
+  // Checks whether a slice key handle is continuously assigned.
+  rpc GetSliceKeyHandleIsAssignedContinuously(
+      GetSliceKeyHandleIsAssignedContinuouslyRequestP)
+      returns (GetSliceKeyHandleIsAssignedContinuouslyResponseP);
+
+  // Closes a previously created slice key handle.
+  rpc CloseSliceKeyHandle(CloseSliceKeyHandleRequestP)
+      returns (CloseSliceKeyHandleResponseP);
+
+  // Increments load by a given value for a slice key handle.
+  rpc IncrementSliceKeyHandleLoadBy(IncrementSliceKeyHandleLoadByRequestP)
+      returns (IncrementSliceKeyHandleLoadByResponseP);
+}
+
+// A request to create a Rust `Slicelet`.
+//
+// The fields of this proto correspond to parameters of `Slicelet::builder` and of the methods on
+// `SliceletBuilder`.
+message CreateSliceletRequestP {
+  optional TargetP target = 1;
+
+  // OPTIONAL
+  optional string slicelet_hostname = 2;
+
+  // OPTIONAL
+  optional string slicelet_uuid = 3;
+
+  // OPTIONAL
+  optional string slicelet_kubernetes_namespace = 4;
+}
+
+// The response to a `CreateSlicelet` request.
+message CreateSliceletResponseP {
+  // The ID that can be passed to other RPCs to interact with the Slicelet.
+  optional int64 slicelet_id = 1;
+}
+
+// A request to call `start` on a Rust `Slicelet`.
+message StartSliceletRequestP {
+  // The ID for the Slicelet that was previously returned by a `CreateSlicelet` request.
+  optional int64 slicelet_id = 1;
+
+  // The port to pass to the `start` method.
+  optional int32 self_port = 2;
+}
+
+// The response to a `StartSlicelet` request.
+message StartSliceletResponseP {
+  oneof response {
+    // Indicates that the Slicelet was started successfully.
+    //
+    // The value is always true.
+    bool is_started = 1;
+
+    // Indicates that the Slicelet has received a new assignment.
+    //
+    // The value is always true.
+    bool assignment_updated = 2;
+  }
+}
+
+// A request to drop a Rust `Slicelet`.
+message StopSliceletRequestP {
+  // The ID for the Slicelet that was previously returned by a `CreateSlicelet` request.
+  optional int64 slicelet_id = 1;
+}
+
+// The response to a `StopSlicelet` request.
+message StopSliceletResponseP {}
+
+// A request to call `assigned_slices` on a Rust `Slicelet`.
+message GetAssignedSlicesRequestP {
+  // The ID for the Slicelet that was previously returned by a `CreateSlicelet` request.
+  optional int64 slicelet_id = 1;
+}
+
+// The response to a `GetAssignedSlices` request.
+message GetAssignedSlicesResponseP {
+  repeated friend.SliceP slices = 1;
+}
+
+// A request to call `get_latest_assignment_for_test` for a Rust `Slicelet`.
+message GetLatestAssignmentRequestP {
+  // The ID for the Slicelet that was previously returned by a `CreateSlicelet` request.
+  optional int64 slicelet_id = 1;
+}
+
+// The response to a `GetLatestAssignment` request.
+message GetLatestAssignmentResponseP {
+  // The latest assignment for the Slicelet.
+  //
+  // OPTIONAL
+  optional DiffAssignmentP assignment = 1;
+}
+
+// A request to retrieve the SQUID of a Rust `Slicelet`.
+message GetSliceletSquidRequestP {
+  // The ID for the Slicelet that was previously returned by a `CreateSlicelet` request.
+  optional int64 slicelet_id = 1;
+}
+
+// The response to a `GetSliceletSquid` request.
+message GetSliceletSquidResponseP {
+  optional dicer.friend.SquidP squid = 1;
+}
+
+// A request to create a slice key handle using a Rust `Slicelet`.
+message CreateSliceKeyHandleRequestP {
+  // The ID for the Slicelet that was previously returned by a `CreateSlicelet` request.
+  optional int64 slicelet_id = 1;
+
+  // The slice key to create a handle for.
+  optional bytes slice_key = 2;
+}
+
+// The response to a `CreateSliceKeyHandle` request.
+message CreateSliceKeyHandleResponseP {
+  // The ID that can be passed to other RPCs to interact with the handle.
+  optional int64 handle_id = 1;
+}
+
+// A request to check whether a slice key handle is continuously assigned.
+message GetSliceKeyHandleIsAssignedContinuouslyRequestP {
+  // The ID for the handle that was previously returned by a `CreateSliceKeyHandle` request.
+  optional int64 handle_id = 1;
+}
+
+// The response to a `GetSliceKeyHandleIsAssignedContinuously` request.
+message GetSliceKeyHandleIsAssignedContinuouslyResponseP {
+  optional bool is_assigned_continuously = 1;
+}
+
+// A request to close a slice key handle.
+message CloseSliceKeyHandleRequestP {
+  // The ID for the handle that was previously returned by a `CreateSliceKeyHandle` request.
+  optional int64 handle_id = 1;
+}
+
+// The response to a `CloseSliceKeyHandle` request.
+message CloseSliceKeyHandleResponseP {}
+
+// A request to increment load by a given value for a slice key handle.
+message IncrementSliceKeyHandleLoadByRequestP {
+  // The ID for the handle that was previously returned by a `CreateSliceKeyHandle` request.
+  optional int64 handle_id = 1;
+
+  // The load value to increment by. Must be positive.
+  optional int32 value = 2;
+}
+
+// The response to a `IncrementSliceKeyHandleLoadBy` request.
+message IncrementSliceKeyHandleLoadByResponseP {}
+
+// A request to get the watch server port of a Rust `Slicelet`.
+message GetSliceletWatchServerPortRequestP {
+  // The ID for the Slicelet that was previously returned by a `CreateSlicelet` request.
+  optional int64 slicelet_id = 1;
+}
+
+// The response to a `GetSliceletWatchServerPort` request.
+message GetSliceletWatchServerPortResponseP {
+  // The port on which the Slicelet's watch server is listening.
+  optional int32 port = 1;
+}

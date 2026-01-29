@@ -1,5 +1,5 @@
-package com.databricks
-package caching.util
+package com.databricks.caching.util
+
 import com.google.protobuf.ByteString
 import com.databricks.caching.util.EtcdClient.{KeyNamespace, ScopedKey, Version}
 
@@ -411,7 +411,7 @@ object EtcdKeyValueMapper {
       val keyDecodingMap: Map[String, Char] = KEY_ENCODING_MAP.map(_.swap)
 
       // Split the key into the path components, and decode each component.
-      val components = keyString
+      val components: Vector[String] = keyString
         .split("/")
         .map { component: String =>
           val decodedComponent = new StringBuilder(component)
@@ -420,9 +420,10 @@ object EtcdKeyValueMapper {
           // Replace encoded characters with their decoded values.
           while (i < decodedComponent.length) {
             if (decodedComponent(i) == '%') {
-              val encodedChar = decodedComponent.substring(i, i + 3)
-              val decodedChar = keyDecodingMap.getOrElse(encodedChar, encodedChar)
-              decodedComponent.replace(i, i + 3, decodedChar.toString)
+              val encodedChar: String = decodedComponent.substring(i, i + 3)
+              val decodedChar: String =
+                keyDecodingMap.get(encodedChar).map((_: Char).toString).getOrElse(encodedChar)
+              decodedComponent.replace(i, i + 3, decodedChar)
             }
             i += 1
           }

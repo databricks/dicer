@@ -1,7 +1,5 @@
 package com.databricks.dicer.assigner
 
-import java.net.URI
-
 import io.grpc.{StatusException, Status}
 
 object AssignerRpcTestHelper {

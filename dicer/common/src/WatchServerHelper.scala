@@ -4,17 +4,16 @@ import scala.concurrent.duration._
 
 import com.databricks.rpc.DatabricksServerWrapper
 import scala.concurrent.{ExecutionContext, Future}
-import java.util.concurrent.{Executors, ExecutorService}
+import java.util.concurrent.ExecutorService
 
 import com.databricks.rpc.RPCContext
-import com.databricks.rpc.tls.TLSOptions
+import com.databricks.threading.InstrumentedScheduledThreadPoolExecutor
 import io.grpc.Grpc
 import io.grpc.InsecureServerCredentials
 import io.grpc.ServerBuilder
 import io.grpc.ServerCredentials
-import io.grpc.ServerServiceDefinition
 
-import com.databricks.caching.util.{ByteSize, GenericRpcServiceBuilder}
+import com.databricks.caching.util.GenericRpcServiceBuilder
 import com.databricks.api.proto.dicer.common.{
   AssignmentServiceGrpc,
   ClientRequestP,
@@ -82,7 +81,8 @@ object WatchServerHelper {
     // Configure a few critical knobs:
     // - cap message sizes to handle large assignment payloads
     // - use a dedicated thread pool sized by config
-    val executor: ExecutorService = Executors.newFixedThreadPool(conf.watchServerNumThreads)
+    val executor: ExecutorService =
+      InstrumentedScheduledThreadPoolExecutor.create("watch-server", conf.watchServerNumThreads)
 
     // Use gRPC's transport-independent TLS API.
     val credentials: ServerCredentials = conf.getDicerServerTlsOptions match {

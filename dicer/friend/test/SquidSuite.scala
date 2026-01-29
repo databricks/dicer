@@ -1,6 +1,6 @@
-package com.databricks.dicer.common
+package com.databricks.dicer.friend
 
-import com.databricks.api.proto.dicer.common.SquidP
+import com.databricks.api.proto.dicer.friend.SquidP
 import com.databricks.dicer.external.ResourceAddress
 import com.databricks.caching.util.TestUtils.{
   assertThrow,

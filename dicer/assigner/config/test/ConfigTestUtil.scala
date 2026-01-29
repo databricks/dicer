@@ -5,7 +5,10 @@ import scala.concurrent.duration._
 import io.prometheus.client.CollectorRegistry
 import org.scalatest.Assertions.assertResult
 import os.Path
-import com.databricks.api.proto.dicer.common.{AdvancedTargetConfigFieldsP, LoadWatcherConfigP}
+import com.databricks.api.proto.dicer.assigner.config.{
+  AdvancedTargetConfigFieldsP,
+  LoadWatcherConfigP
+}
 import com.databricks.api.proto.dicer.external.LoadBalancingMetricConfigP.{
   ImbalanceToleranceHintP,
   ReservationHintP

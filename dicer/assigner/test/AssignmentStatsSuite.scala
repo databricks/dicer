@@ -20,10 +20,10 @@ import com.databricks.dicer.common.{
   AssignmentConsistencyMode,
   ProposedAssignment,
   SliceAssignment,
-  Squid,
   TestSliceUtils
 }
 import com.databricks.dicer.external.Slice
+import com.databricks.dicer.friend.Squid
 import com.databricks.testing.DatabricksTest
 
 class AssignmentStatsSuite extends DatabricksTest with TestName {

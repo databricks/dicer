@@ -80,10 +80,7 @@ private[assigner] class SubscriberManager(
           target,
           getSuggestedClerkRpcTimeoutFn,
           suggestedSliceletRpcTimeout,
-          SubscriberHandler.Location.Assigner,
-          // This value doesn't actually matter because we always find or create a
-          // `SubscriberHandler` with a matching target.
-          rejectRequestsOnFatalTargetMismatch = true
+          SubscriberHandler.Location.Assigner
         )
       )
   }

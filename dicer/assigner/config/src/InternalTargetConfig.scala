@@ -4,7 +4,7 @@ import scala.collection.mutable
 import scala.concurrent.duration._
 import scala.util.{Failure, Success, Try}
 
-import com.databricks.api.proto.dicer.common.{
+import com.databricks.api.proto.dicer.assigner.config.{
   AdvancedTargetConfigFieldsP,
   InternalDicerTargetConfigP,
   LoadWatcherConfigP,

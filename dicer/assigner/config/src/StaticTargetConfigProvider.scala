@@ -2,7 +2,6 @@ package com.databricks.dicer.assigner.config
 
 import scala.concurrent.duration.FiniteDuration
 import com.databricks.caching.util.{Cancellable, ValueStreamCallback}
-import com.databricks.dicer.assigner.config.InternalTargetConfigMap
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
 
 /**

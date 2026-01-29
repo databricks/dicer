@@ -1,0 +1,34 @@
+syntax = "proto2";
+
+package dicer;
+
+import "dicer/assigner/config/proto/advanced_target_config.proto";
+import "dicer/external/proto/target.proto";
+import "scalapb.proto";
+
+option java_package = "com.databricks.api.proto.dicer.assigner.config";;
+option java_generate_equals_and_hash = true;
+option java_outer_classname = "InternalTargetConfigProto";
+option java_multiple_files = true;
+option (scalapb.options) = {
+  package_name: "com.databricks.api.proto.dicer.assigner.config",
+  flat_package: true,
+};
+
+// The overall Dicer configuration for a target name. This message is used for data
+// (de)serialization in exchange with SAFE.
+message InternalDicerTargetConfigP {
+  // The name of targets for which this configuration applies. (Targets may also be scoped to
+  // particular clusters, which is why we define the configuration as applying to configurations
+  // with a particular target name, rather than applying to a particular target.)
+  // NOTE: for legacy reasons, the field is named "target", but a more reasonable name would be
+  //       "target_name". Since the protos are serialized in json format, a rename would be a
+  //       breaking change.
+  optional string target = 1;
+
+  // Contains the derived target configuration after applying scope specific overrides.
+  optional TargetConfigFieldsP target_config = 2;
+
+  // Contains the derived advanced target configuration after applying scope specific overrides.
+  optional AdvancedTargetConfigFieldsP advanced_config = 3;
+}

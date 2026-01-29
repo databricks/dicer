@@ -9,7 +9,7 @@ import com.databricks.featureflag.client.utils.RuntimeContext
 import com.databricks.rpc.DatabricksObjectMapper
 import com.typesafe.config.Config
 
-import com.databricks.api.proto.dicer.common.InternalDicerTargetConfigP
+import com.databricks.api.proto.dicer.assigner.config.InternalDicerTargetConfigP
 import com.databricks.dicer.assigner.config.{
   InternalTargetConfig,
   NamedInternalTargetConfig,
@@ -64,7 +64,7 @@ class TestableDicerAssignerConf(config: Config)
   /** Switches on / off dynamic config by setting the value of enableDynamicConfig. */
   def setDynamicConfig(enabled: Boolean): Unit = {
     // According to the guide of SAFE flag unit tests:
-    // https://databricks.atlassian.net/wiki/spaces/UN/pages/2876703423/Testing+with+SAFE#Unit-tests
+    // <internal link>
     // due to the design limitations of the test-only `mockFeatureFlagReader`, it's important that
     // the runtime context where we set the value with `mockFeatureFlagReader.setMockValue` matches
     // the context where we retrieve the value using `getCurrentValue`. In production Dicer,

@@ -31,7 +31,7 @@ import org.apache.logging.log4j.core.layout.PatternLayout
  * Note that all logs from PrefixLogger currently get attributed to the same line, which may hit the
  * located message limit (see <internal link>). As the method to locate log lines
  * is quite expensive, for now in caching services we have disabled the located/nonlocated limits.
- * See https://databricks.atlassian.net/browse/<internal bug> for more details.
+ * See <internal link> for more details.
  */
 class PrefixLogger private (className: String, prefix: String, clock: TypedClock) {
 

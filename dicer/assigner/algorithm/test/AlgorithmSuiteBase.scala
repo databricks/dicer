@@ -21,12 +21,12 @@ import com.databricks.dicer.common.{
   AssignmentConsistencyMode,
   Generation,
   ProposedAssignment,
-  Squid,
   TargetHelper,
   TestSliceUtils
 }
 import com.databricks.dicer.common.TestSliceUtils._
 import com.databricks.dicer.external.Target
+import com.databricks.dicer.friend.Squid
 import com.databricks.testing.DatabricksTest
 
 /**

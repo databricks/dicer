@@ -122,7 +122,7 @@ private[dicer] class ClerkImpl[Stub <: AnyRef] private (
    * assignments, and registering Slicez.
    */
   private def start(): Unit = {
-    lookup.start()
+    lookup.start(() => ClerkData)
     lookup.cellConsumer.watch(ClerkWatchCallback)
   }
 
@@ -156,31 +156,32 @@ private[dicer] object ClerkImpl {
         target
     }
 
-    val podName = InetAddress.getLocalHost.getHostName
+    val podName: String = InetAddress.getLocalHost.getHostName
     val clerkIndex: Int = assignNextClerkIndex()
     val clerkDebugName = s"C$clerkIndex-$targetBestEffortFullyQualified-$podName"
-    val config = InternalClientConfig(
-      ClientType.Clerk,
-      clerkDebugName,
-      watchAddress,
-      clerkConf.getDicerClientTlsOptions,
-      targetBestEffortFullyQualified,
-      clerkConf.watchStubCacheTimeSeconds.seconds,
-      watchFromDataPlane = false,
-      ALWAYS_REJECT_WATCH_REQUESTS_ON_FATAL_TARGET_MISMATCH,
-      assignmentLatencySampleFraction = 0
-    )
 
     Version.recordClientVersion(
       targetBestEffortFullyQualified,
       AssignmentMetricsSource.Clerk,
       clerkConf.branch
     )
+
+    val config: InternalClientConfig = InternalClientConfig(
+      ClientType.Clerk,
+      watchAddress,
+      clerkConf.getDicerClientTlsOptions,
+      targetBestEffortFullyQualified,
+      clerkConf.watchStubCacheTimeSeconds.seconds,
+      watchFromDataPlane = false,
+      enableRateLimiting = clerkConf.enableClerkRateLimiting
+    )
+
     createInternal(
       secPoolOpt = None,
       protoLoggerSecPoolOpt = None,
       config,
       clerkIndex,
+      clerkDebugName,
       stubFactory
     )
   }
@@ -205,36 +206,42 @@ private[dicer] object ClerkImpl {
       target: Target,
       assignerAddress: URI,
       stubFactory: ResourceAddress => Stub): ClerkImpl[Stub] = {
-    target match {
-      case kubernetesTarget: KubernetesTarget =>
-        iassert(kubernetesTarget.clusterOpt.isDefined, "target must have the cluster URI populated")
-      case _: AppTarget =>
-        // AppTargets differentiate themselves from other instances with the same target name in
-        // the same cluster as the assigner with their globally unique instance IDs.
-        ()
-    }
-
-    val podName = InetAddress.getLocalHost.getHostName
-    val clerkIndex: Int = assignNextClerkIndex()
-    val clerkDebugName = s"C$clerkIndex-$target-$podName"
-    val config = InternalClientConfig(
-      ClientType.Clerk,
-      clerkDebugName,
-      assignerAddress,
-      clerkConf.getDicerClientTlsOptions,
-      target,
-      clerkConf.watchStubCacheTimeSeconds.seconds,
-      watchFromDataPlane = true,
-      ALWAYS_REJECT_WATCH_REQUESTS_ON_FATAL_TARGET_MISMATCH,
-      assignmentLatencySampleFraction = 0
-    )
-
-    Version.recordClientVersion(target, AssignmentMetricsSource.Clerk, clerkConf.branch)
-    createInternal(
+    createForDataPlaneCommon(
       secPoolOpt,
       protoLoggerSecPoolOpt,
-      config,
-      clerkIndex,
+      clerkConf,
+      target,
+      assignerAddress,
+      stubFactory
+    )
+  }
+
+  /**
+   * PRECONDITION: `target` must have the cluster URI populated.
+   *
+   * Creates a clerk for use in a MultiClerk setup, where multiple clerks share execution context
+   * pools and watch the Assigner from the control plane.
+   *
+   * @param secPoolOpt            If provided, the SEC pool to use for the clerk's async operations
+   *                              other than proto logging. If None, a dedicated pool is created for
+   *                              this clerk.
+   * @param protoLoggerSecPoolOpt If provided, the SEC pool to use for the proto logger's async
+   *                              operations. If None, a dedicated pool is created for this clerk's
+   *                              proto logger.
+   */
+  def createForMultiClerk[Stub <: AnyRef](
+      secPoolOpt: Option[SequentialExecutionContextPool],
+      protoLoggerSecPoolOpt: Option[SequentialExecutionContextPool],
+      clerkConf: ClerkConf,
+      target: Target,
+      assignerAddress: URI,
+      stubFactory: ResourceAddress => Stub): ClerkImpl[Stub] = {
+    createForDataPlaneCommon(
+      secPoolOpt,
+      protoLoggerSecPoolOpt,
+      clerkConf,
+      target,
+      assignerAddress,
       stubFactory
     )
   }
@@ -242,6 +249,7 @@ private[dicer] object ClerkImpl {
   /**
    * Creates and returns a new [[ClerkImpl]] specifically for a Dicer-integrated stub.
    */
+  // TODO(<internal bug>): Enforce the singleton Clerk constraint.
   def createForShardedStub(
       target: Target,
       watchAddress: URI,
@@ -267,20 +275,20 @@ private[dicer] object ClerkImpl {
 
     val config = InternalClientConfig(
       ClientType.Clerk,
-      clerkDebugName,
       watchAddress,
       tlsOptions,
       targetBestEffortFullyQualified,
       watchStubCacheTime,
       watchFromDataPlane = false,
-      ALWAYS_REJECT_WATCH_REQUESTS_ON_FATAL_TARGET_MISMATCH,
-      assignmentLatencySampleFraction = 0
+      // TODO(<internal bug>): Enable rate limiting for the sharded stub.
+      enableRateLimiting = false
     )
     createInternal(
       secPoolOpt = None,
       protoLoggerSecPoolOpt = None,
       config,
       clerkIndex,
+      clerkDebugName,
       stubFactory = (resourceAddress: ResourceAddress) => resourceAddress
     )
   }
@@ -323,8 +331,8 @@ private[dicer] object ClerkImpl {
       protoLoggerSecPoolOpt: Option[SequentialExecutionContextPool],
       config: InternalClientConfig,
       clerkIndex: Int,
+      subscriberDebugName: String,
       stubFactory: ResourceAddress => Stub): ClerkImpl[Stub] = {
-    val clerkDebugName: String = config.subscriberDebugName
 
     val sec: SequentialExecutionContext =
       createExecutor(secPoolOpt, config.target, clerkIndex, secNameSuffix = "")
@@ -337,16 +345,16 @@ private[dicer] object ClerkImpl {
       )
 
     val protoLogger: DicerClientProtoLogger = DicerClientProtoLogger.create(
+      conf = DicerClientProtoLoggerConf,
       clientType = config.clientType,
-      subscriberDebugName = clerkDebugName,
-      keySampleFraction = config.assignmentLatencySampleFraction,
-      executor = protoLoggerSec
+      subscriberDebugName = subscriberDebugName,
+      sec = protoLoggerSec
     )
 
     val lookup = SliceLookup.createUnstarted(
       sec,
       config,
-      subscriberDataSupplier = () => ClerkData,
+      subscriberDebugName,
       protoLogger,
       serviceBuilderOpt = None
     )
@@ -355,7 +363,7 @@ private[dicer] object ClerkImpl {
       sec,
       config.target,
       lookup,
-      clerkDebugName,
+      subscriberDebugName,
       stubFactory
     )
     clerk.start()
@@ -394,6 +402,62 @@ private[dicer] object ClerkImpl {
     }
   }
 
+  /**
+   * Create a Clerk for the data plane.
+   *
+   * @param secPoolOpt            If provided, the SEC pool to use for the clerk's async operations
+   *                              other than proto logging. If None, a dedicated pool is created
+   *                              for this clerk.
+   * @param protoLoggerSecPoolOpt If provided, the SEC pool to use for the proto logger's async
+   *                              operations. If None, a dedicated pool is created for this clerk's
+   *                              proto logger.
+   * @param clerkConf             The Clerk configuration.
+   * @param target                The target to create the Clerk for.
+   * @param assignerAddress       The address of the assigner to create the Clerk for.
+   * @param stubFactory           The factory to create the stub for the Clerk.
+   * @return The created Clerk.
+   */
+  private def createForDataPlaneCommon[Stub <: AnyRef](
+      secPoolOpt: Option[SequentialExecutionContextPool],
+      protoLoggerSecPoolOpt: Option[SequentialExecutionContextPool],
+      clerkConf: ClerkConf,
+      target: Target,
+      assignerAddress: URI,
+      stubFactory: ResourceAddress => Stub): ClerkImpl[Stub] = {
+    target match {
+      case kubernetesTarget: KubernetesTarget =>
+        iassert(kubernetesTarget.clusterOpt.isDefined, "target must have the cluster URI populated")
+      case _: AppTarget =>
+        // AppTargets differentiate themselves from other instances with the same target name in
+        // the same cluster as the assigner with their globally unique instance IDs.
+        ()
+    }
+
+    val podName: String = InetAddress.getLocalHost.getHostName
+    val clerkIndex: Int = assignNextClerkIndex()
+    val clerkDebugName = s"C$clerkIndex-$target-$podName"
+
+    val config = InternalClientConfig(
+      ClientType.Clerk,
+      assignerAddress,
+      clerkConf.getDicerClientTlsOptions,
+      target,
+      clerkConf.watchStubCacheTimeSeconds.seconds,
+      watchFromDataPlane = true,
+      enableRateLimiting = clerkConf.enableClerkRateLimiting
+    )
+
+    Version.recordClientVersion(target, AssignmentMetricsSource.Clerk, clerkConf.branch)
+    createInternal(
+      secPoolOpt,
+      protoLoggerSecPoolOpt,
+      config,
+      clerkIndex,
+      clerkDebugName,
+      stubFactory
+    )
+  }
+
   /** Assigns an index number for the next Clerk to be created. */
   private def assignNextClerkIndex(): Int = nextClerkIndex.getAndIncrement()
 
@@ -403,10 +467,4 @@ private[dicer] object ClerkImpl {
    */
   private val nextClerkIndex = new AtomicInteger()
 
-  /**
-   * This value doesn't matter in practice because Clerks don't distribute assignments currently,
-   * but if they were going to, they should always reject watch requests with fatal target
-   * mismatches. See `InternalClientConf` for why this option exists.
-   */
-  private val ALWAYS_REJECT_WATCH_REQUESTS_ON_FATAL_TARGET_MISMATCH: Boolean = true
 }

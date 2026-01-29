@@ -563,6 +563,7 @@ scala_library(
     ],
     deps = [
         "//wrappers/util:executor",
+        "@maven//:com_google_guava_guava",
     ],
 )
 
@@ -808,6 +809,28 @@ scala_library(
     srcs = ["src/TypedClock.scala"],
     exports = [":ticker_time"],
     deps = [":ticker_time"],
+)
+
+scala_library(
+    name = "token_bucket",
+    srcs = ["src/TokenBucket.scala"],
+    deps = [
+        ":ticker_time",
+        ":typed_clock",
+    ],
+)
+
+scala_test(
+    name = "token_bucket_test",
+    srcs = ["test/TokenBucketSuite.scala"],
+    timeout = "short",
+    deps = [
+        ":fake_typed_clock",
+        ":test_util",
+        ":token_bucket",
+        "//wrappers/util:async_test_helpers",
+        "//wrappers/util:databricks-test",
+    ],
 )
 
 scala_macro_library(

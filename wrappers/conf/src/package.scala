@@ -1,14 +1,8 @@
 package com.databricks
 
-import java.io.File
-import java.io.FileNotFoundException
-import java.nio.file.NoSuchFileException
-
 import scala.collection.JavaConverters._
-import scala.util.Try
 
-import com.typesafe.config.{ConfigValue, ConfigFactory, ConfigParseOptions, ConfigRenderOptions}
-import org.apache.commons.io.FileUtils
+import com.typesafe.config.ConfigFactory
 
 /**
  * Provides config management methods. This is a thin wrapper around the Typesafe Config library,

@@ -10,6 +10,7 @@ import com.databricks.caching.util.{
 import com.databricks.conf.Configs
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
 import com.databricks.dicer.external.{Clerk, ResourceAddress, Slicelet, Target}
+import com.databricks.dicer.friend.Squid
 import com.databricks.testing.DatabricksTest
 
 import scala.concurrent.duration.Duration

@@ -44,6 +44,13 @@ object SliceletAccessor {
    */
   @throws[IllegalStateException]("if start() has not been called")
   def resourceAddress(slicelet: Slicelet): ResourceAddress = slicelet.impl.squid.resourceAddress
+
+  /**
+   * If [[start]] has been called, returns the Squid for the given Slicelet.
+   * @throws IllegalStateException if start() has not been called
+   */
+  @throws[IllegalStateException]("if start() has not been called")
+  def getSquid(slicelet: Slicelet): Squid = slicelet.impl.squid
 }
 
 object ResourceAddressAccessor {

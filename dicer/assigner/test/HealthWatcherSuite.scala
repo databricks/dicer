@@ -15,6 +15,7 @@ import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.common.TestSliceUtils.{createRandomProposal, createTestSquid}
 import com.databricks.dicer.common._
 import com.databricks.dicer.external.Target
+import com.databricks.dicer.friend.Squid
 import com.databricks.testing.DatabricksTest
 
 import java.time.Instant

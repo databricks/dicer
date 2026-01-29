@@ -72,7 +72,7 @@ Dicer is composed of an Assigner service and two client libraries, shown in use 
 
 ### 1.4. Dicer features
 
-* **Zero down time**: Dicer moves slices away from pods ahead of shutdown for planned restarts, ensuring zero down time during events such as rolling updates, auto-scaling, pod rescheduling, node upgrades, etc.
+* **Zero downtime**: Dicer moves slices away from pods ahead of shutdown for planned restarts, ensuring zero downtime during events such as rolling updates, auto-scaling, pod rescheduling, node upgrades, etc.
 
 * **Crash detection**: Dicer detects when pods have crashed or are otherwise unresponsive and moves slices away to keep the service highly available.
 
@@ -86,9 +86,22 @@ Dicer is composed of an Assigner service and two client libraries, shown in use 
 
 * **(Future) State transfer**: Dicer can move key *values* between pods during reassignments to enable applications to avoid cold cache misses after rolling restarts or rebalancing.
 
+### 1.5. Comparison
+
+[Apache Helix](https://helix.apache.org/) is another system that can be used to shard services. Fundamentally, Helix was designed and created to support sharding of distributed databases, whereas Dicer was created for sharding of in-memory soft state and RPC services.
+
+Compared to Helix:
+ * Helix maintains a consistent view of its assignment on servers, whereas Dicer favors availability with eventual consistency
+ * Dicer load balances based on real-time signals to ensure individual servers don't get overloaded and can be run with good utilization. Helix does not support load balancing based on load reporting.
+    * Dicer's partitioning scheme is more flexible: slice boundaries are dynamic and can adapt to changing load patterns, and Dicer can even isolate a single hot key to its own slice and assign it to a dedicated pod if needed. In addition, Dicer supports asymmetric key replication, where the replication factor of slices can vary dynamically based on load.
+    * In contrast, with Helix the slices (partitions in Helix terminology) and their replication factors are fixed. It uses fixed ranges, and simply balances the *number* of partitions per server.
+ * Dicer leverages the Slicelet (server side library) to automatically communicate planned termination events, enabling zero downtime for services even if there is just a single replica. Helix requires manual integration into the application lifecycle to react to termination events, and relies on multiple replicas for zero downtime.
+ * Helix can configure leaders and standbys within each partition/slice, which is not something Dicer currently supports
+ * Helix requires Zookeeper, whereas Dicer does not need any other dependency for its operation
+
 ## 2. How to build and test
 
-All the binaries and libraries can be built using [bazel](https://bazel.build/):
+All the binaries and libraries can be built using [bazel](https://bazel.build/) (we recommend installing [bazelisk](https://github.com/bazelbuild/bazelisk)):
 
 ```
 bazel build //...; bazel test //...
@@ -140,16 +153,12 @@ For questions, feedback, or general discussion about Dicer, please start a discu
 
 **\[1\]** Atul Adya, Daniel Myers, Jon Howell, Jeremy Elson, Colin Meek, Vishesh Khemani, Stefan Fulger, Pan Gu, Lakshminath Bhuvanagiri, Jason Hunter, Roberto Peon, Larry Kai, Alexander Shraer, Arif Merchant, Kfir Lev-Ari. [*Slicer: Auto-Sharding for Datacenter Applications*.](https://www.usenix.org/system/files/conference/osdi16/osdi16-adya.pdf) Proceedings of the 12th USENIX Symposium on Operating Systems Design and Implementation (OSDI), 2016, pp. 739–753.
 
-**\[2\]** Atul Adya, Jonathan Ellithorpe. [*Stateful services: low latency, efficiency, scalability — pick three*.](https://hpts.ws/papers/2024/2024_session8_adya.pptx) High Performance Transaction Systems Workshop (HPTS) 2024, Pacific Grove, California, September 15–18, 2024\.  
+**\[2\]** Atul Adya, Jonathan Ellithorpe. [*Stateful services: low latency, efficiency, scalability — pick three*.](https://hpts.ws/papers/2024/2024_session8_adya.pptx) High Performance Transaction Systems Workshop (HPTS) 2024, Pacific Grove, California, September 15–18, 2024\.
 
-**\[3\]** Atul Adya, Robert Grandl, Daniel Myers, Henry Qin. [*Fast key-value stores: An idea whose time has come and gone*](https://dl.acm.org/doi/10.1145/3317550.3321434). Proceedings of the Workshop on Hot Topics in Operating Systems (HotOS ’19), May 13–15, 2019, Bertinoro, Italy. ACM, 7 pages. DOI: 10.1145/3317550.3321434. 
+**\[3\]** Atul Adya, Robert Grandl, Daniel Myers, Henry Qin. [*Fast key-value stores: An idea whose time has come and gone*](https://dl.acm.org/doi/10.1145/3317550.3321434). Proceedings of the Workshop on Hot Topics in Operating Systems (HotOS ’19), May 13–15, 2019, Bertinoro, Italy. ACM, 7 pages. DOI: 10.1145/3317550.3321434.
 
 **\[4\]** Atul Adya, James Dunagan, Alexander Wolman. [*Centrifuge: Integrated Lease Management and Partitioning for Cloud Services*.](http://static.usenix.org/events/nsdi10/tech/full_papers/adya.pdf) Proceedings of the 7th USENIX Symposium on Networked Systems Design and Implementation (NSDI), 2010\.
 
-**\[5\]** Sangmin Lee, Zhenhua Guo, Omer Sunercan, Jun Ying, Chunqiang Tang, et al. [*Shard Manager: A Generic Shard Management Framework for Geo distributed Applications*](https://research.facebook.com/file/245575980870853/Shard-Manager-A-Generic-Shard-Management-Framework-for-Geo-distributed-Applications.pdf). Proceedings of the ACM SIGOPS 28th Symposium on Operating Systems Principles (SOSP), 2021\. DOI: 10.1145/3477132.3483546. 
+**\[5\]** Sangmin Lee, Zhenhua Guo, Omer Sunercan, Jun Ying, Chunqiang Tang, et al. [*Shard Manager: A Generic Shard Management Framework for Geo distributed Applications*](https://research.facebook.com/file/245575980870853/Shard-Manager-A-Generic-Shard-Management-Framework-for-Geo-distributed-Applications.pdf). Proceedings of the ACM SIGOPS 28th Symposium on Operating Systems Principles (SOSP), 2021\. DOI: 10.1145/3477132.3483546.
 
 **\[6\]** Ziming Mao, Jonathan Ellithorpe, Atul Adya, Rishabh Iyer, Matei Zaharia, Scott Shenker, Ion Stoica (2025). [*Rethinking the cost of distributed caches for datacenter services*](https://doi.org/10.1145/3772356.3772388). Proceedings of the 24th ACM Workshop on Hot Topics in Networks, 1–8.
-
-
-
-

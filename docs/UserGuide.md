@@ -62,7 +62,7 @@ Once textprotos are ready, you can apply them in dev, staging, or prod, as appro
     - **cluster-type**: Cluster type or purpose identifier
     - **instance**: Unique cluster instance number within the cluster type
 
-    Dicer uses location information to:
+    Dicer uses location information for:
      - Sharding - servers with the same target name but a different cluster URI will be considered independent. This allows Dicer to be multi-tenant and a single Assigner can manage sharding for multiple Kubernetes clusters.
      - Metrics - relevant metrics are published with the cluster URI as a label
      - Configuration - a target can specify different configuration overrides for different cluster URIs, see [target.proto](../dicer/external/proto/target.proto) for more details

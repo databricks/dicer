@@ -62,6 +62,7 @@ object SequentialExecutionContextPool {
     createInternal(poolName, numThreads, exceptionHandler, enableContextPropagation)
   }
 
+
   private def createInternal(
       poolName: String,
       numThreads: Int,
@@ -181,6 +182,7 @@ object SequentialExecutionContextPool {
         enableContextPropagation: Boolean): SequentialExecutionContextPool = {
       createInternal(poolName, numThreads, exceptionHandler, enableContextPropagation)
     }
+
   }
 }
 

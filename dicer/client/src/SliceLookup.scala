@@ -21,7 +21,6 @@ import com.databricks.caching.util.{
   PrefixLogger,
   SequentialExecutionContext,
   StateMachineDriver,
-  StatusOr,
   StatusUtils
 }
 import com.databricks.common.instrumentation.SCaffeineCacheInfoExporter
@@ -39,7 +38,6 @@ import com.databricks.dicer.common.{
   Redirect,
   SliceletData,
   SliceletSubscriberSlicezData,
-  Squid,
   SubscriberData,
   SubscriberHandler,
   SyncAssignmentState,
@@ -47,6 +45,7 @@ import com.databricks.dicer.common.{
   WatchServerHelper
 }
 import com.databricks.dicer.external.{Slice, SliceKey}
+import com.databricks.dicer.friend.Squid
 import com.databricks.logging.activity.ActivityContextFactory.withBackgroundActivity
 import java.util.Random
 import javax.annotation.concurrent.{GuardedBy, ThreadSafe}
@@ -67,32 +66,48 @@ import javax.annotation.concurrent.{GuardedBy, ThreadSafe}
 class SliceLookup private (
     sec: SequentialExecutionContext,
     config: InternalClientConfig,
-    subscriberDataSupplier: () => SubscriberData,
+    subscriberDebugName: String,
     protoLogger: DicerClientProtoLogger)
     extends ClientTargetSlicezDataExporter {
 
-  private val logger = PrefixLogger.create(this.getClass, config.subscriberDebugName)
+  private val logger = PrefixLogger.create(this.getClass, subscriberDebugName)
 
   /** The cell used for communicating a new `Assignment` to various parts of the Clerk/Slicelet. */
   private val cell = new AssignmentValueCell
 
   /**
-   * The default stub (i.e. to `config.watchAddress`) used to make RPCs for syncing assignments.
+   * A helper class that creates watch stubs for the SliceLookup.
    *
    * Note: If this is a data plane client, `config.watchAddress` is the address of the s2sproxy
    * which forwards our watch requests.
    */
-  private val defaultWatchStub: AssignmentServiceStub =
-    WatchStubHelper.createWatchStub(
-      config.clientName,
-      config.watchAddress,
-      config.tlsOptionsOpt,
-      config.watchFromDataPlane
-    )
+  private val watchStubHelper = new WatchStubHelper(
+    clientName = config.clientName,
+    subscriberDebugName = subscriberDebugName,
+    defaultWatchAddress = config.watchAddress,
+    tlsOptionsOpt = config.tlsOptionsOpt,
+    watchFromDataPlane = config.watchFromDataPlane
+  )
+
+  /**
+   * Supplies [[SubscriberData]] to include in watch requests. Set when [[start()]] is called.
+   *
+   * This is guaranteed not to be invoked before [[start()]] returns.
+   */
+  @GuardedBy("sec")
+  private var subscriberDataSupplier: () => SubscriberData = _
+
+  /** Tracks whether [[start()]] has been called to ensure idempotency. */
+  @GuardedBy("sec")
+  private var started: Boolean = false
 
   /**
    * Cache of address to its stub. Used when we are asked to redirect a request to a specific
    * address.
+   *
+   * TODO(<internal bug>): Now that we will be using dynamicGrpcChannel in [[WatchStubHelper]],
+   * creating watch stubs to preferred assigner targets is a very lightweight operation.
+   * Therefore, this cache is no longer necessary and should be removed.
    */
   @GuardedBy("sec")
   private val watchStubsCache: Cache[URI, AssignmentServiceStub] =
@@ -129,7 +144,7 @@ class SliceLookup private (
   private val driver =
     new StateMachineDriver[Event, DriverAction, AssignmentSyncStateMachine](
       sec,
-      new AssignmentSyncStateMachine(config, new Random),
+      new AssignmentSyncStateMachine(config, new Random, subscriberDebugName),
       performAction
     )
 
@@ -142,8 +157,7 @@ class SliceLookup private (
       // defined in `WatchServerConf`.
       getSuggestedClerkRpcTimeoutFn = () => config.watchRpcTimeout,
       suggestedSliceletRpcTimeout = config.watchRpcTimeout,
-      getHandlerLocation,
-      config.rejectWatchRequestsOnFatalTargetMismatch
+      getHandlerLocation
     )
 
   /** Cell consumer exposing the latest assignments.  */
@@ -155,10 +169,24 @@ class SliceLookup private (
   /**
    * Starts the syncer to watch for assignments, handle requests, etc. Also registers this lookup
    * to [[ClientSlicez]].
+   *
+   * Only the first call to this method will start the SliceLookup. Subsequent calls will be
+   * ignored, even if a different subscriberDataSupplier is provided.
+   *
+   * We pass the subscriberDataSupplier in as a parameter to guarantee it is not called before this
+   * method.
+   *
+   * @param subscriberDataSupplier A function that returns the latest [[SubscriberData]]. This will
+   *                               be invoked on `sec` and is guaranteed not to be called before
+   *                               this method returns.
    */
-  def start(): Unit = sec.run {
-    ClientSlicez.register(this)
-    driver.start()
+  def start(subscriberDataSupplier: () => SubscriberData): Unit = sec.run {
+    if (!started) {
+      started = true
+      this.subscriberDataSupplier = subscriberDataSupplier
+      ClientSlicez.register(this)
+      driver.start()
+    }
   }
 
   /**
@@ -226,7 +254,7 @@ class SliceLookup private (
               topKeysOpt = Some(SortedMap.empty[SliceKey, Double] ++ combinedTopKeys),
               squidOpt = Some(sliceletData.squid),
               unattributedLoadBySliceOpt = Some(unattributedLoadBySlice),
-              config.subscriberDebugName,
+              subscriberDebugName,
               watchAddress,
               lastWatchAddressUsedSince,
               lastSuccessfulHeartbeat
@@ -244,7 +272,7 @@ class SliceLookup private (
               topKeysOpt = None,
               squidOpt = None,
               unattributedLoadBySliceOpt = None,
-              config.subscriberDebugName,
+              subscriberDebugName,
               watchAddress,
               lastWatchAddressUsedSince,
               lastSuccessfulHeartbeat
@@ -298,7 +326,7 @@ class SliceLookup private (
         val request: ClientRequest = ClientRequest(
           config.target,
           syncState,
-          config.subscriberDebugName,
+          subscriberDebugName,
           watchRpcTimeout,
           subscriberData,
           supportsSerializedAssignment = true
@@ -311,34 +339,16 @@ class SliceLookup private (
             }
             watchStubsCache.get(
               address,
-              _ => {
-                if (!config.watchFromDataPlane) {
-                  WatchStubHelper.createWatchStub(
-                    config.clientName,
-                    address,
-                    config.tlsOptionsOpt,
-                    config.watchFromDataPlane
-                  )
-                } else {
-                  WatchStubHelper.createS2SProxyWatchStub(defaultWatchStub, address) match {
-                    case StatusOr.Success(stub: AssignmentServiceStub) => stub
-                    case StatusOr.Failure(status: Status) =>
-                      logger.error(
-                        s"Failed to create a proxied watch stub for address $address: " +
-                        s"${status.getDescription}. Falling back to default s2sproxy watch stub.",
-                        every = 30.seconds
-                      )
-                      defaultWatchStub
-                  }
-                }
-              }
+              _ => watchStubHelper.createWatchStub(Some(address))
             )
           case None =>
             if (lastWatchAddress.isDefined) {
               lastWatchAddress = None
               lastWatchAddressUsedSince = sec.getClock.instant()
             }
-            defaultWatchStub
+            // Creates a stub to the default watch address (config.watchAddress) that was provided
+            // when the WatchStubHelper was instantiated.
+            watchStubHelper.createWatchStub(redirectAddressOpt = None)
         }
         val responseFuture: Future[ClientResponse] = performWatchCall(stub, request)
         // Handle the read success/failure and call the corresponding syncer method.
@@ -472,20 +482,20 @@ object SliceLookup {
    *
    * @param sec Used for the asynchronous isolation domain that fetches assignments.
    * @param config The internal configuration parameters used by the Clerk/Slicelet.
-   * @param subscriberDataSupplier A function that returns the latest [[SubscriberData]]. Invoked on
-   *                               `sec`.
    * @param protoLogger Logger for assignment propagation latency events.
+   * @param subscriberDebugName The debug name for the subscriber.
    * @param serviceBuilderOpt If present, the builder on which the created lookup can add a service
    *                          for listening to RPCs.
    */
   def createUnstarted(
       sec: SequentialExecutionContext,
       config: InternalClientConfig,
-      subscriberDataSupplier: () => SubscriberData,
+      subscriberDebugName: String,
       protoLogger: DicerClientProtoLogger,
       serviceBuilderOpt: Option[GenericRpcServiceBuilder]
   ): SliceLookup = {
-    val lookup = new SliceLookup(sec, config, subscriberDataSupplier, protoLogger)
+    val lookup =
+      new SliceLookup(sec, config, subscriberDebugName, protoLogger)
 
     // Register an AssignmentService to serve watch requests (from Clerks or other Slicelets).
     for (serviceBuilder: GenericRpcServiceBuilder <- serviceBuilderOpt) {

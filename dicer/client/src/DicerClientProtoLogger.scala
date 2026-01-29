@@ -1,70 +1,50 @@
 package com.databricks.dicer.client
 
 import java.time.Instant
-import scala.concurrent.ExecutionContext
 
+import com.databricks.caching.util.SequentialExecutionContext
 import com.databricks.dicer.common.{ClientType, Generation}
 
 /**
  * Client-specific proto logger that provides convenience methods for Dicer client logging.
- * Logging is disabled in this implementation.
+ * This is a no-op implementation for OSS builds - logging is disabled.
+ *
+ * @param conf the configuration (unused in OSS).
+ * @param clientType the type of client (unused in OSS).
+ * @param subscriberDebugName the debug name of the subscriber (unused in OSS).
+ * @param sec the sequential execution context (unused in OSS).
  */
-private[client] trait DicerClientProtoLogger {
+private[client] class DicerClientProtoLogger(
+    conf: DicerClientProtoLoggerConf,
+    clientType: ClientType,
+    subscriberDebugName: String,
+    sec: SequentialExecutionContext) {
 
   /**
    * Convenience method to log assignment propagation latency.
+   * No-op in OSS.
    *
    * @param generation the assignment generation.
    * @param currentTime the current time when this assignment was received.
    */
-  def logAssignmentPropagationLatency(generation: Generation, currentTime: Instant): Unit
-
-  /**
-   * Gets the current sampling fraction.
-   *
-   * @return the current sampling fraction.
-   */
-  def getKeySampleFraction: Double
-
-  /**
-   * Updates the sampling fraction.
-   *
-   * @param newFraction the new sampling fraction.
-   */
-  def setKeySampleFraction(newFraction: Double): Unit
+  def logAssignmentPropagationLatency(generation: Generation, currentTime: Instant): Unit = ()
 }
 
 private[client] object DicerClientProtoLogger {
 
   /**
-   * Creates a new [[DicerClientProtoLogger]] instance. Always returns a no-op logger.
+   * Creates a new [[DicerClientProtoLogger]] instance. Always returns a no-op logger for OSS.
    *
+   * @param conf the configuration.
    * @param clientType the type of client (Clerk or Slicelet).
    * @param subscriberDebugName the debug name of the subscriber.
-   * @param keySampleFraction the fraction of keys to sample.
-   * @param executor the execution context.
+   * @param sec the sequential execution context.
    */
   def create(
+      conf: DicerClientProtoLoggerConf,
       clientType: ClientType,
       subscriberDebugName: String,
-      keySampleFraction: Double,
-      executor: ExecutionContext): DicerClientProtoLogger = {
-    NoopDicerClientProtoLogger
-  }
-
-  /** No-op implementation that does not perform any logging. */
-  private object NoopDicerClientProtoLogger extends DicerClientProtoLogger {
-    override def logAssignmentPropagationLatency(
-        generation: Generation,
-        currentTime: Instant): Unit = {
-      // No-op: do nothing
-      ()
-    }
-
-    /** No-op implementation that always returns 0.0. */
-    override def getKeySampleFraction: Double = 0.0
-
-    /** No-op implementation that does nothing. */
-    override def setKeySampleFraction(newFraction: Double): Unit = ()
+      sec: SequentialExecutionContext): DicerClientProtoLogger = {
+    new DicerClientProtoLogger(conf, clientType, subscriberDebugName, sec)
   }
 }

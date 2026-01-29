@@ -5,7 +5,7 @@ import scala.collection.mutable
 import scala.io.{BufferedSource, Source}
 
 import com.databricks.api.proto.caching.external.ConfigScopeP
-import com.databricks.api.proto.dicer.common.{
+import com.databricks.api.proto.dicer.assigner.config.{
   AdvancedTargetConfigFieldsP,
   AdvancedTargetConfigOverrideP,
   AdvancedTargetConfigP
@@ -48,7 +48,7 @@ object TargetConfigReader {
    * Creates a mapping from [[TargetName]]s to [[InternalTargetConfig]]s specifically for
    * `configScopeOpt`.
    *
-   * @param configScopeOpt the [[ConfigScope]] that this storelet is currently running in, or None
+   * @param configScopeOpt the [[ConfigScope]] that this assigner is currently running in, or None
    *                       if the (cloud, region) tuple cannot be parsed into a valid scope, in
    *                       which case default configs are used.
    * @note `new java.io.File` only throws if a null path argument is provided.

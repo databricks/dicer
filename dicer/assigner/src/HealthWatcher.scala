@@ -43,8 +43,9 @@ import com.databricks.dicer.assigner.TargetMetrics.AssignmentDistributionSource
 import com.databricks.dicer.assigner.TargetMetrics.AssignmentDistributionSource.AssignmentDistributionSource
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.assigner.conf.HealthConf
-import com.databricks.dicer.common.{Assignment, Generation, Squid}
+import com.databricks.dicer.common.{Assignment, Generation}
 import com.databricks.dicer.external.Target
+import com.databricks.dicer.friend.Squid
 
 /**
  * The health watcher is a state machine which tracks the health status of resources based on

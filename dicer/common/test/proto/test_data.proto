@@ -202,20 +202,20 @@ message SquidTestDataP {
   repeated InvalidSquidTestCaseP invalid_squid_test_cases = 1;
   message InvalidSquidTestCaseP {
     // Invalid SQUID.
-    optional SquidP squid = 1;
+    optional dicer.friend.SquidP squid = 1;
 
     // The error message that should be returned when the SQUID is parsed.
     optional string expected_error = 2;
   }
 
   // Sequence of SQUIDs in expected sort order.
-  repeated SquidP ordered_squids = 2;
+  repeated dicer.friend.SquidP ordered_squids = 2;
 
   // Groups of SQUIDs that should be considered equal. SQUIDs in different groups should not be
   // considered equal.
   repeated EqualityGroupP squid_equality_groups = 3;
   message EqualityGroupP {
-    repeated SquidP squids = 1;
+    repeated dicer.friend.SquidP squids = 1;
   }
 }
 
@@ -682,8 +682,8 @@ message FatalTargetMismatchTestDataP {
 
   message TestCaseP {
     optional string description = 1;
-    optional ClientRequestP.TargetP target1 = 2;
-    optional ClientRequestP.TargetP target2 = 3;
+    optional TargetP target1 = 2;
+    optional TargetP target2 = 3;
   }
 
   // Test cases where the targets are considered fatally mismatched.

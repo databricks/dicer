@@ -27,7 +27,7 @@ import com.databricks.dicer.external.{
   Slicelet,
   Target
 }
-import com.databricks.dicer.friend.SliceMap
+import com.databricks.dicer.friend.{SliceMap, Squid}
 import com.databricks.dicer.common.test.SimpleDiffAssignmentP
 import com.databricks.dicer.common.test.SimpleDiffAssignmentP.{
   SimpleSliceAssignmentP,

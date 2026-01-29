@@ -6,8 +6,9 @@ import scala.collection.mutable
 
 import com.databricks.caching.util.AssertMacros.iassert
 import com.databricks.dicer.assigner.config.ChurnConfig
-import com.databricks.dicer.common.{SliceAssignment, SliceWithResources, Squid}
+import com.databricks.dicer.common.{SliceAssignment, SliceWithResources}
 import com.databricks.dicer.external.{Slice, SliceKey}
+import com.databricks.dicer.friend.Squid
 import com.databricks.dicer.friend.SliceMap
 
 /**
@@ -753,6 +754,10 @@ private[assigner] class MutableAssignment(
       allocatedReplicasByResource(resource).isNewlyAssigned
     }
 
+    override def toString: String = {
+      s"MutableSliceAssignment(slice=$slice, numReplicas=$currentNumReplicas)"
+    }
+
     /** Returns the set of [[ResourceState]]s currently assigned with this `slice`. */
     private def allocatedResourcesSet(): Set[ResourceState] =
       getAllocatedResourceStates.toSet
@@ -783,10 +788,6 @@ private[assigner] class MutableAssignment(
         s"Its mutation APIs must not be called."
       )
     }
-
-    override def toString: String =
-      s"MutableSliceAssignment(slice=$slice, numReplicas=$currentNumReplicas, " +
-      s"allocatedResources=${allocatedReplicasByResource.size})"
   }
 
   object MutableSliceAssignment {
@@ -887,6 +888,11 @@ private[assigner] class MutableAssignment(
       assignedSlices.contains(slice)
     }
 
+    override def toString: String = {
+      s"ResourceState(resource=$resource, totalLoad=$totalLoad, " +
+      s"numAssignedSlices=${assignedSlices.size})"
+    }
+
     /**
      * PRECONDITION: `this` is currently already tracked in the `sliceState`.
      *
@@ -928,10 +934,6 @@ private[assigner] class MutableAssignment(
         resourceStatesByTotalLoad.add(this)
       }
     }
-
-    override def toString: String =
-      s"ResourceState(resource=$resource, totalLoad=$totalLoad, " +
-      s"assignedSlices=${assignedSlices.size})"
 
     object forTest {
 

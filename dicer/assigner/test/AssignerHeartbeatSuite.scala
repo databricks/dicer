@@ -10,6 +10,7 @@ import com.databricks.dicer.common.{
 }
 import com.databricks.rpc.testing.TestTLSOptions
 import com.databricks.testing.DatabricksTest
+import com.databricks.api.proto.dicer.assigner.PreferredAssignerServiceGrpc.PreferredAssignerServiceStub
 
 import java.net.URI
 import java.util.UUID
@@ -50,17 +51,19 @@ class AssignerHeartbeatSuite extends DatabricksTest {
     opId
   }
 
+  /** A helper class for creating PreferredAssigner stubs. */
+  private val preferredAssignerServerHelper = new PreferredAssignerServerHelper(
+    assignerTlsOptionsOpt = Some(TestTLSOptions.clientTlsOptions)
+  )
+
   /** Constructs and Sends the heartbeat response and verifies it against the expected response. */
   private def sendHeartbeatAndVerifyResponse(
       receiver: TestAssigner,
       heartbeatRequest: HeartbeatRequest,
       expectedHeartbeatResponse: HeartbeatResponse): Unit = {
     AssertionWaiter("Assigner parrots back the opId in heartbeat response").await {
-      val stub =
-        PreferredAssignerServerHelper.createStub(
-          receiver.localUri,
-          TestTLSOptions.clientTlsOptionsOpt
-        )
+      val stub: PreferredAssignerServiceStub =
+        preferredAssignerServerHelper.createStub(receiver.localUri)
 
       val heartbeatResponse: HeartbeatResponseP =
         TestUtils.awaitResult(stub.heartbeat(heartbeatRequest.toProto), Duration.Inf)

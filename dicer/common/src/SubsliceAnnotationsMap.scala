@@ -2,7 +2,7 @@ package com.databricks.dicer.common
 
 import com.databricks.dicer.common.SubsliceAnnotationsMap.SliceWithAnnotations
 import com.databricks.dicer.external.{HighSliceKey, Slice, SliceKey}
-import com.databricks.dicer.friend.SliceMap
+import com.databricks.dicer.friend.{SliceMap, Squid}
 import com.databricks.dicer.friend.SliceMap.GapEntry
 import com.databricks.caching.util.UnixTimeVersion
 

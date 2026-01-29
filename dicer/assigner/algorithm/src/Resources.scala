@@ -2,8 +2,8 @@ package com.databricks.dicer.assigner.algorithm
 
 import scala.collection.mutable
 
-import com.databricks.dicer.common.Squid
 import com.databricks.dicer.external.ResourceAddress
+import com.databricks.dicer.friend.Squid
 
 /**
  * The resources for which an assignment is being generated.

@@ -19,13 +19,18 @@ import io.grpc.Grpc
 import io.grpc.InsecureChannelCredentials
 import io.grpc.ManagedChannel
 
-/** Helper utilities for preferred assigner server implementations. */
-object PreferredAssignerServerHelper {
+/**
+ * Helper class for preferred assigner server implementations.
+ *
+ * @note This does not actually need to be a class in OSS, but it's here
+ * to match the internal implementation signature for compatibility.
+ */
+class PreferredAssignerServerHelper(
+    assignerTlsOptionsOpt: Option[TLSOptions]
+) {
 
   /** Creates a heartbeat stub to `address`. */
-  def createStub(
-      address: URI,
-      assignerTlsOptionsOpt: Option[TLSOptions]): PreferredAssignerServiceStub = {
+  def createStub(address: URI): PreferredAssignerServiceStub = {
     // Use gRPC's transport-independent TLS API.
     val credentials: ChannelCredentials = assignerTlsOptionsOpt match {
       case Some(tlsOptions) =>
@@ -38,6 +43,10 @@ object PreferredAssignerServerHelper {
       Grpc.newChannelBuilderForAddress(address.getHost, address.getPort, credentials).build()
     PreferredAssignerServiceGrpc.stub(channel)
   }
+}
+
+/** Helper utilities for preferred assigner server implementations. */
+object PreferredAssignerServerHelper {
 
   /**
    * Registers a PreferredAssignerService that handles heartbeat RPCs from other Assigners with the

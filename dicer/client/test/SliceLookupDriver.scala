@@ -1,9 +1,10 @@
 package com.databricks.dicer.client
 
 import com.databricks.caching.util.TestUtils
-import com.databricks.dicer.common.{Assignment, Generation, SliceSetImpl, Squid}
+import com.databricks.dicer.common.{Assignment, Generation, SliceSetImpl, SubscriberData}
 
 import com.databricks.dicer.external.SliceKey
+import com.databricks.dicer.friend.Squid
 
 import scala.concurrent.duration.Duration
 
@@ -53,8 +54,9 @@ trait SliceLookupDriver {
 }
 
 /** The [[SliceLookupDriver]] that exercises the Scala [[SliceLookup]] implementation. */
-class ScalaSliceLookupDriver(sliceLookup: SliceLookup) extends SliceLookupDriver {
-  override def start(): Unit = sliceLookup.start()
+class ScalaSliceLookupDriver(sliceLookup: SliceLookup, subscriberDataSupplier: () => SubscriberData)
+    extends SliceLookupDriver {
+  override def start(): Unit = sliceLookup.start(subscriberDataSupplier)
   override def cancel(): Unit = sliceLookup.cancel()
   override def assignmentOpt: Option[Assignment] = sliceLookup.assignmentOpt
   override def isInBackoff: Boolean =

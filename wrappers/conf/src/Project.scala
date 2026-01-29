@@ -1,7 +1,5 @@
 package com.databricks.backend.common.util
 
-import scala.language.implicitConversions
-
 /** Enum containing different services. Minimal open source version. */
 object Project extends Enumeration {
   type Project = ProjectDetails

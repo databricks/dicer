@@ -8,8 +8,9 @@ import com.github.blemale.scaffeine.{Cache, Scaffeine}
 import com.databricks.common.instrumentation.SCaffeineCacheInfoExporter
 
 import com.databricks.dicer.common.Assignment.AssignmentValueCellConsumer
-import com.databricks.dicer.common.{Assignment, Squid}
+import com.databricks.dicer.common.Assignment
 import com.databricks.dicer.external.{ResourceAddress, SliceKey}
+import com.databricks.dicer.friend.Squid
 import com.databricks.caching.util.PrefixLogger
 
 /**

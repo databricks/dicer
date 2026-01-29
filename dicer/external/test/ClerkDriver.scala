@@ -3,9 +3,11 @@ package com.databricks.dicer.external
 import com.databricks.caching.util.TestUtils
 import com.databricks.dicer.common.{
   ClerkGetStubForKeyRequestP,
+  ClerkGetStubForKeyResponseP,
   ClerkReadyRequestP,
   ClerkReadyResponseP,
   ClerkSampleStubForKeyRequestP,
+  ClerkSampleStubForKeyResponseP,
   CreateClerkRequestP,
   CreateClerkResponseP,
   CreateCrossClusterClerkRequestP,

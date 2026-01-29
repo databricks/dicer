@@ -31,10 +31,12 @@ import com.databricks.dicer.common.{
   Redirect,
   TestAssigner
 }
+import com.databricks.backend.common.util.Project
 import com.databricks.dicer.external.Target
 import com.databricks.testing.DatabricksTest
 import com.databricks.rpc.RPCContext
 import com.databricks.rpc.testing.JettyTestRPCContext
+import io.prometheus.client.CollectorRegistry
 
 class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName {
 
@@ -342,6 +344,7 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
       assert(assignmentOpt.get.assignedResources.contains(testSquid2))
     }
   }
+
 
   test("Assigner loses and then reassumes preferred assignership") {
     // Test plan: Verify that when an assigner loses the preferred assignership, it can reassume

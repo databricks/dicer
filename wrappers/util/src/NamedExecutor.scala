@@ -1,15 +1,18 @@
 package com.databricks.threading
 
-import java.util.concurrent.{Executor, Executors, ExecutorService}
+import java.util.concurrent.Executors
+
+import com.google.common.util.concurrent.ThreadFactoryBuilder
 import scala.concurrent.ExecutionContext
 
 import com.databricks.logging.ConsoleLogging
 
 /**
  * Minimal open-source implementation of an executor with a name, which just delegates to an
- * underlying ExecutionContext.
+ * underlying ExecutionContext. Note `name` is just provided for convenience, `underlying` is
+ * responsible for actually setting the name of any threads it creates.
  */
-class NamedExecutor private (val name: String, private val underlying: ExecutionContext)
+class NamedExecutor private (val name: String, underlying: ExecutionContext)
     extends ExecutionContext {
 
   override def execute(runnable: Runnable): Unit = {
@@ -24,29 +27,9 @@ class NamedExecutor private (val name: String, private val underlying: Execution
 object NamedExecutor extends ConsoleLogging {
   override def loggerName: String = "NamedExecutor"
 
-  /**
-   * Alias to the global implicit ExecutionContext. For compatibility with internal Databricks code.
-   */
+  /** Alias to the global implicit ExecutionContext. */
   val globalImplicit: NamedExecutor =
     new NamedExecutor("globalImplicit", ExecutionContext.Implicits.global)
-
-  /**
-   * Creates a NamedExecutor backed by an ExecutorService. Logs uncaught exceptions.
-   *
-   * @param name The name of the executor
-   * @param executorService The underlying executor service
-   * @param enableContextPropagation Ignored in OSS
-   * @param enableUsageLogging Ignored in OSS
-   */
-  def fromExecutorService(
-      name: String,
-      executorService: ExecutorService,
-      enableContextPropagation: Boolean = true,
-      enableUsageLogging: Boolean = true): NamedExecutor = {
-    val executionContext =
-      ExecutionContext.fromExecutorService(executorService, createReporter(name))
-    new NamedExecutor(name, executionContext)
-  }
 
   /**
    * Creates a NamedExecutor with the given parameters.
@@ -63,8 +46,13 @@ object NamedExecutor extends ConsoleLogging {
       maxThreads: Int,
       enableContextPropagation: Boolean = true,
       enableUsageLogging: Boolean = true): NamedExecutor = {
-    val executorService = Executors.newFixedThreadPool(maxThreads)
-    fromExecutorService(name, executorService)
+    val executorService = Executors.newFixedThreadPool(
+      maxThreads,
+      new ThreadFactoryBuilder().setNameFormat(s"$name-%d").build()
+    )
+    val executionContext =
+      ExecutionContext.fromExecutorService(executorService, createReporter(name))
+    new NamedExecutor(name, executionContext)
   }
 
   /**
@@ -79,7 +67,9 @@ object NamedExecutor extends ConsoleLogging {
       enableContextPropagation: Boolean = true,
       enableUsageLogging: Boolean = true): NamedExecutor = {
     val name: String = executor.getName()
-    fromExecutorService(name, executor, enableContextPropagation, enableUsageLogging)
+    val executionContext =
+      ExecutionContext.fromExecutorService(executor, createReporter(name))
+    new NamedExecutor(name, executionContext)
   }
 
   /**

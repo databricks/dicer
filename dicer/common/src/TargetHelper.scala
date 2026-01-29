@@ -1,6 +1,6 @@
 package com.databricks.dicer.common
 
-import com.databricks.api.proto.dicer.common.ClientRequestP.TargetP
+import com.databricks.api.proto.dicer.common.TargetP
 import com.databricks.dicer.external.{AppTarget, KubernetesTarget, Target}
 import java.net.URI
 

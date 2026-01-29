@@ -3,7 +3,7 @@ package com.databricks.dicer.assigner.config
 import java.time.Instant
 import scala.concurrent.duration._
 
-import com.databricks.api.proto.dicer.common.{
+import com.databricks.api.proto.dicer.assigner.config.{
   AdvancedTargetConfigFieldsP,
   HealthWatcherConfigP,
   LoadWatcherConfigP
@@ -26,7 +26,8 @@ import com.databricks.dicer.assigner.config.InternalTargetConfig.{
   LoadWatcherTargetConfig
 }
 import com.databricks.dicer.common.TestSliceUtils._
-import com.databricks.dicer.common.{SliceAssignment, Squid, SubsliceAnnotation}
+import com.databricks.dicer.common.{SliceAssignment, SubsliceAnnotation}
+import com.databricks.dicer.friend.Squid
 import com.databricks.rpc.DatabricksObjectMapper
 import com.databricks.testing.DatabricksTest
 

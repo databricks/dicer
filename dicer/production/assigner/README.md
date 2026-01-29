@@ -14,6 +14,8 @@ We also provide a [demo](../../demo/README.md) that deploys the Dicer Assigner a
 
 ### Prerequisites
 
+**NOTE**: Dicer is only designed to run in trusted environments. The Dicer Assigner service should not be reachable from untrusted services, and the Slicelet and Clerk libraries should not run in a process that can execute untrusted code.
+
  - Helm v3
  - A Kubernetes cluster
 

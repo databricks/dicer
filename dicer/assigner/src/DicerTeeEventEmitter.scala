@@ -1,14 +1,15 @@
 package com.databricks.dicer.assigner
 
-import com.databricks.dicer.external.Target
-import com.databricks.dicer.assigner.AssignmentGenerator.Event
 import com.databricks.caching.util.SequentialExecutionContext
+import com.databricks.dicer.assigner.AssignmentGenerator.Event
+import com.databricks.dicer.external.Target
 import com.databricks.rpc.tls.TLSOptions
+
 import java.net.URI
 
 /**
  * A trait for emitting events to the DicerTee, which uses production data to test potentially
- * different new assigner algorithms. No-op emitter implementation.
+ * different new assigner algorithms. See <internal link> for more details.
  */
 trait DicerTeeEventEmitter {
 
@@ -44,12 +45,8 @@ object DicerTeeEventEmitter {
   }
 
   /**
-   * Create a DicerTeeEventEmitter instance. This is equivalent to [[getNoopEmitter]].
-   *
-   * @param sec The execution context (unused).
-   * @param dicerTeeURI The URI of the DicerTee service (unused).
-   * @param tlsOptions The TLS options (unused).
-   * @return A no-op DicerTeeEventEmitter.
+   * Create a [[DicerTeeEventEmitterImpl]] instance. See the doc for [[DicerTeeEventEmitterImpl]]
+   * for more details.
    */
   def create(
       sec: SequentialExecutionContext,
@@ -57,7 +54,6 @@ object DicerTeeEventEmitter {
       tlsOptionsOpt: Option[TLSOptions],
       timeoutMs: Long,
       numRetryAttempts: Int): DicerTeeEventEmitter = {
-    // Always returns the no-op emitter since Dicer Tee is not available
-    NoopEmitter
+    DicerTeeEventEmitterImpl.create(sec, dicerTeeURI, tlsOptionsOpt, timeoutMs, numRetryAttempts)
   }
 }

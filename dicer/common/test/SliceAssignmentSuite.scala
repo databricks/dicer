@@ -4,6 +4,7 @@ import scala.util.Random
 import com.databricks.dicer.common.TestSliceUtils._
 import com.databricks.dicer.common.test.{SimpleDiffAssignmentP, SliceAssignmentTestDataP}
 import com.databricks.dicer.external.Slice
+import com.databricks.dicer.friend.Squid
 import com.databricks.caching.util.TestUtils.{assertThrow, loadTestData}
 import com.databricks.dicer.common.test.SimpleDiffAssignmentP.TransferP
 import com.databricks.testing.DatabricksTest

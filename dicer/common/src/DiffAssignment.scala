@@ -4,10 +4,11 @@ import scala.collection.mutable
 import scala.concurrent.duration._
 
 import com.databricks.api.proto.dicer.common.DiffAssignmentP.SliceAssignmentP
-import com.databricks.api.proto.dicer.common.{DiffAssignmentP, GenerationP, SquidP}
+import com.databricks.api.proto.dicer.common.{DiffAssignmentP, GenerationP}
+import com.databricks.api.proto.dicer.friend.SquidP
 import com.databricks.caching.util.PrefixLogger
 import com.databricks.dicer.common.Assignment.ResourceMap
-import com.databricks.dicer.friend.SliceMap
+import com.databricks.dicer.friend.{SliceMap, Squid}
 import com.databricks.dicer.friend.SliceMap.GapEntry
 import scalapb.TextFormat
 import scala.util.control.NonFatal

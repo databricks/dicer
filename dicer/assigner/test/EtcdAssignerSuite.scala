@@ -14,13 +14,12 @@ import com.databricks.dicer.common.{
   Assignment,
   Generation,
   InternalDicerTestEnvironment,
-  Squid,
   TestAssigner
 }
 import com.databricks.dicer.external.{Slicelet, Target}
 import com.databricks.caching.util.{EtcdTestEnvironment, EtcdClient, EtcdKeyValueMapper}
 import com.databricks.caching.util.UnixTimeVersion
-import com.databricks.dicer.friend.SliceletAccessor
+import com.databricks.dicer.friend.{SliceletAccessor, Squid}
 import com.databricks.testing.DatabricksTest
 
 /**

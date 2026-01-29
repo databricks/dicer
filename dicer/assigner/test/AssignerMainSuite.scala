@@ -140,7 +140,7 @@ class AssignerMainSuite extends DatabricksTest {
     ) {
       // Needed so that the Assigner doesn't throw an exception when trying to start the watch
       // server and thus fail this test.
-      override val sslArgs: SslArguments = TestSslArguments.serverSslArgs
+      override lazy val sslArgs: SslArguments = TestSslArguments.serverSslArgs
     }
     etcd.initializeStore(Assigner.getPreferredAssignerEtcdNamespace(conf))
 

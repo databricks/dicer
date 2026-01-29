@@ -9,7 +9,7 @@ bazel_dep(name = "rules_proto", version = "7.0.2")
 
 # Use precompiled protoc rather than building it from source, which saves about 30 seconds on a
 # new build. See
-# https://github.com/bazel-contrib/rules_scala/tree/master?tab=readme-ov-file#using-a-precompiled-protocol-compiler
+# https://github.com/bazel-contrib/rules_scala/tree/v7.0.0?tab=readme-ov-file#using-a-precompiled-protocol-compiler
 # for more details.
 register_toolchains(
     "@rules_scala_protoc_toolchains//...:all",

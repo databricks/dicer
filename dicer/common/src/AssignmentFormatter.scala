@@ -8,7 +8,7 @@ import scala.collection.mutable
 import com.databricks.caching.util.AsciiTable
 import com.databricks.caching.util.AsciiTable.Header
 import com.databricks.dicer.external.{HighSliceKey, InfinitySliceKey, Slice, SliceKey}
-import com.databricks.dicer.friend.SliceMap
+import com.databricks.dicer.friend.{SliceMap, Squid}
 import com.databricks.dicer.friend.SliceMap.GapEntry
 import com.databricks.caching.util.UnixTimeVersion
 

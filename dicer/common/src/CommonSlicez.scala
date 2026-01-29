@@ -12,6 +12,7 @@ import scalatags.Text.all._
 
 import com.databricks.dicer.common.ZPageHelpers.createCollapseButton
 import com.databricks.dicer.external.{Slice, SliceKey}
+import com.databricks.dicer.friend.Squid
 
 import javax.annotation.concurrent.ThreadSafe
 

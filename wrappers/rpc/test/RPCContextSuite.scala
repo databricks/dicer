@@ -1,7 +1,6 @@
 package com.databricks.rpc
 
 import com.databricks.testing.DatabricksTest
-import com.databricks.rpc.RPCContext
 import com.databricks.common.serviceidentity.ServiceIdentity
 
 class RPCContextSuite extends DatabricksTest {

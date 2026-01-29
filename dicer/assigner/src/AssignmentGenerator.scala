@@ -60,11 +60,10 @@ import com.databricks.dicer.common.{
   ProposedAssignment,
   ProposedSliceAssignment,
   SliceletData,
-  Squid,
   SyncAssignmentState
 }
 import com.databricks.dicer.external.{AppTarget, KubernetesTarget, Slice, SliceKey, Target}
-import com.databricks.dicer.friend.SliceMap
+import com.databricks.dicer.friend.{SliceMap, Squid}
 import java.net.URI
 
 import scala.collection.mutable
@@ -982,7 +981,6 @@ class AssignmentGenerator(
   /** Informs the generator that it should shut down. */
   private def handleShutdown(outputBuilder: StateMachineOutput.Builder[DriverAction]): Unit = {
     iassert(runState == RunState.Running, s"advanceStateMachine called with runState $runState")
-
     TargetMetrics.clearTerminatedGeneratorFromMetrics(target, resources)
     runState = RunState.Shutdown
     // Stop the watchers because there is no longer a need for these signals.

@@ -12,11 +12,31 @@ option (scalapb.options) = {
 };
 
 // This file provides restricted access to internal Dicer protos, that are also needed for state
-// transfer purposes.
+// transfer purposes and Linkstore testing purposes.
 
 // Range of keys in Dicer, e.g., Slices are assigned to Slicelets. It is of the form:
 // [low_inclusive, high_inclusive) with the infinity key being a special key.
 message SliceP {
   optional bytes low_inclusive = 1;
   optional bytes high_exclusive = 2; // If not present, it means the Infinity key.
+}
+
+// Globally unique identifier for a Slicelet incarnation. See `com.databricks.dicer.friend.Squid`
+// for detailed documentation.
+// Note: If we change this proto, we need to change the corresponding proto in the logs package.
+// `LoggedSquidP` is present in `proto/logs/caching/caching_team_log.proto`.
+// 
+// The Squid proto is necessary for reuse of Linkstore Scala tests for both Scala and Rust.
+message SquidP {
+  // URI that is used to route requests to the Slicelet.
+  optional string resource_address = 1;
+
+  // Creation time for the SQUID.
+  optional int64 creation_time_millis = 2;
+
+  // Most significant bits of the resource UUID.
+  optional int64 resource_uuid_high = 3;
+
+  // Least significant bits of the resource UUID.
+  optional int64 resource_uuid_low = 4;
 }

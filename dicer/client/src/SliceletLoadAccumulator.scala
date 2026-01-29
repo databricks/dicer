@@ -15,10 +15,10 @@ import com.databricks.dicer.client.SliceletLoadAccumulator.{
   TOP_KEYS_MINIMUM_LOAD_FRACTION,
   TOP_KEYS_SUPPORT
 }
-import com.databricks.dicer.common.{Assignment, Generation, SliceAssignment, SliceletData, Squid}
+import com.databricks.dicer.common.{Assignment, Generation, SliceAssignment, SliceletData}
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.external.{Slice, SliceKey, Target}
-import com.databricks.dicer.friend.SliceMap
+import com.databricks.dicer.friend.{SliceMap, Squid}
 import com.databricks.dicer.friend.SliceMap.GapEntry
 import io.prometheus.client.Counter
 

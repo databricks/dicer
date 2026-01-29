@@ -15,11 +15,10 @@ import com.databricks.dicer.common.{
   ProposedSliceAssignment,
   SliceAssignment,
   SliceMapHelper,
-  SliceWithResources,
-  Squid
+  SliceWithResources
 }
 import com.databricks.dicer.external.{Slice, Target}
-import com.databricks.dicer.friend.SliceMap
+import com.databricks.dicer.friend.{SliceMap, Squid}
 
 /**
  * The "stateless" algorithm that given the previous assignment and various signals, generates

@@ -2,10 +2,10 @@ package com.databricks.dicer.common
 
 import scala.collection.{immutable, mutable}
 
-import com.databricks.api.proto.dicer.common.SquidP
+import com.databricks.api.proto.dicer.friend.SquidP
 import com.databricks.caching.util.WatchValueCell
 import com.databricks.dicer.external.SliceKey
-import com.databricks.dicer.friend.SliceMap
+import com.databricks.dicer.friend.{SliceMap, Squid}
 import com.databricks.dicer.friend.SliceMap.GapEntry
 
 /** Consistency mode for assignment checks. */

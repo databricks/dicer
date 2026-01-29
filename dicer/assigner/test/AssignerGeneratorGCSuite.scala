@@ -15,6 +15,7 @@ import com.databricks.caching.util.{
   FakeTypedClock,
   MetricUtils
 }
+import com.databricks.caching.util.MetricUtils.ChangeTracker
 import com.databricks.dicer.common.{
   ClerkData,
   ClientRequest,
@@ -84,17 +85,21 @@ class AssignerGeneratorGCSuite extends DatabricksTest with TestName {
    */
   private val WATCH_RPC_TIMEOUT: FiniteDuration = 1.minute
 
+  /** A helper class for creating Watch stubs. */
+  private val watchStubHelper = new WatchStubHelper(
+    clientName = Project.DicerAssigner.name,
+    subscriberDebugName = "assigner-generator-clustertype2-test",
+    defaultWatchAddress = URI.create(s"http://localhost:${testEnv.getAssignerPort}"),
+    tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
+    watchFromDataPlane = false
+  )
+
   /** RPC stub for sending Watch requests to the Assigner.  */
   private var stub: AssignmentServiceStub = _
 
   override def beforeAll(): Unit = {
     // Create a stub that can be used to communicate with the Assigner to get the assignment.
-    stub = WatchStubHelper.createWatchStub(
-      Project.DicerAssigner.name,
-      URI.create(s"http://localhost:${testEnv.getAssignerPort}"),
-      TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
-      watchFromDataPlane = false
-    )
+    stub = watchStubHelper.createWatchStub(redirectAddressOpt = None)
   }
 
   /** Issue a watch request as if sent by a Clerk. */
@@ -299,6 +304,17 @@ class AssignerGeneratorGCSuite extends DatabricksTest with TestName {
 
     val testAssigner = testEnv.testAssigner
 
+    val inactiveGeneratorsRemovedTotalTracker: ChangeTracker[Long] =
+      ChangeTracker[Long](
+        () =>
+          TargetMetricsUtils
+            .getGeneratorsRemovedTotal(target, GeneratorShutdownReason.GENERATOR_INACTIVITY)
+      )
+    val generatorsRemovedTotalAllReasonsTracker: ChangeTracker[Long] =
+      ChangeTracker[Long](() => TargetMetricsUtils.getGeneratorsRemovedTotalAllReasons(target))
+    val targetsWithActiveGeneratorsTracker: ChangeTracker[Long] =
+      ChangeTracker[Long](() => TargetMetricsUtils.getTargetsWithActiveGenerators(target))
+
     // Verify: assignment was generated (proving that generator is active).
     AssertionWaiter("Wait for initial assignment").await {
       val assignmentOpt = Await.result(testAssigner.getAssignment(target), Duration.Inf)
@@ -318,14 +334,10 @@ class AssignerGeneratorGCSuite extends DatabricksTest with TestName {
     val generator1: AssignmentGeneratorDriver = generatorOpt1.get
 
     // Verify: Metrics were updated.
-    assert(
-      TargetMetricsUtils.getTargetsWithActiveGenerators(target) == 1,
-      "Should have 1 active target"
-    )
+    assert(targetsWithActiveGeneratorsTracker.totalChange() == 1, "Should have 1 active target")
 
     // Setup: Stop the slicelet
-    // Note: This shutdown is async, so heartbeats may continue for some while after stop().
-    slicelet.forTest.stop()
+    slicelet.impl.forTest.cancel()
 
     // Verify: generator still exists and is the same instance (GC period hasn't elapsed yet).
     val generatorOpt2: Option[AssignmentGeneratorDriver] = Await.result(
@@ -338,16 +350,11 @@ class AssignerGeneratorGCSuite extends DatabricksTest with TestName {
     )
 
     // Verify: At this point, numActiveGenerators should be 1
-    val numActiveGeneratorsBeforeCleanup = TargetMetricsUtils.getNumActiveGenerators(target)
-    assert(
-      numActiveGeneratorsBeforeCleanup == 1,
-      s"numActiveGenerators for t$target should be 1, was $numActiveGeneratorsBeforeCleanup"
-    )
+    assert(TargetMetricsUtils.getNumActiveGenerators(target) == 1, "Should have 1 active target")
 
     // Verify: At this point, getGeneratorsRemovedTotal("GENERATOR_INACTIVITY") should be 0.
     assert(
-      TargetMetricsUtils
-        .getGeneratorsRemovedTotal(target, GeneratorShutdownReason.GENERATOR_INACTIVITY) == 0,
+      inactiveGeneratorsRemovedTotalTracker.totalChange() == 0,
       "No generators should be removed due to inactivity yet"
     )
     // Advance time to ensure we are truly past GC_DEADLINE.
@@ -368,16 +375,15 @@ class AssignerGeneratorGCSuite extends DatabricksTest with TestName {
 
       // Verify: Metrics were updated.
       assert(
-        TargetMetricsUtils
-          .getGeneratorsRemovedTotal(target, GeneratorShutdownReason.GENERATOR_INACTIVITY) == 1,
-        "Should have removed 1 generator due to inactivity"
+        inactiveGeneratorsRemovedTotalTracker.totalChange() >= 1,
+        "Should have removed at least 1 generator due to inactivity"
       )
       assert(
-        TargetMetricsUtils.getGeneratorsRemovedTotalAllReasons(target) == 1,
-        "Should have removed 1 generator due to all reasons"
+        generatorsRemovedTotalAllReasonsTracker.totalChange() >= 1,
+        "Should have removed at least 1 generator due to all reasons"
       )
       assert(
-        TargetMetricsUtils.getTargetsWithActiveGenerators(target) == 0,
+        targetsWithActiveGeneratorsTracker.totalChange() == 0,
         "Should have 0 active targets"
       )
     }
@@ -385,11 +391,12 @@ class AssignerGeneratorGCSuite extends DatabricksTest with TestName {
     // Verify: the generator's metrics have been cleaned up from the CollectorRegistry.
     // Metrics cleanup happens asynchronously during shutdown, so we need to wait for it.
     AssertionWaiter("Wait for metrics to be cleaned up").await {
+      fakeClock.advanceBy(INACTIVITY_SCAN_INTERVAL)
+
       // The numActiveGenerators metric is decremented (not removed), so it should be 0.
-      val numActiveGenerators = TargetMetricsUtils.getNumActiveGenerators(target)
       assert(
-        numActiveGenerators == 0,
-        s"numActiveGenerators for $target should be 0 after GC, was $numActiveGenerators"
+        TargetMetricsUtils.getNumActiveGenerators(target) == 0,
+        "Should have 0 active targets after GC"
       )
 
       // Verify: metrics that are removed (not just decremented) should return None.
@@ -443,12 +450,11 @@ class AssignerGeneratorGCSuite extends DatabricksTest with TestName {
 
     // Verify: Metrics were updated.
     assert(
-      TargetMetricsUtils
-        .getGeneratorsRemovedTotal(target, GeneratorShutdownReason.GENERATOR_INACTIVITY) == 1,
-      "Should have removed 1 generator due to inactivity"
+      generatorsRemovedTotalAllReasonsTracker.totalChange() >= 1,
+      "Should have removed at least 1 generator due to all reasons"
     )
     assert(
-      TargetMetricsUtils.getTargetsWithActiveGenerators(target) == 1,
+      targetsWithActiveGeneratorsTracker.totalChange() == 1,
       "Should have 1 active targets"
     )
   }

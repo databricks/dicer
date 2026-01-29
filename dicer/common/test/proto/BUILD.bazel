@@ -25,8 +25,24 @@ scala_proto_library(
 )
 
 proto_library(
-    name = "test_driver_proto",
-    srcs = ["test_driver.proto"],
+    name = "clerk_test_driver_proto",
+    srcs = ["clerk_test_driver.proto"],
+    visibility = ["//dicer:internal"],
+    deps = [
+        "//dicer/common/proto:common_proto",
+        "//wrappers/rpc:scalapb_proto",
+    ],
+)
+
+scala_proto_library(
+    name = "clerk_test_driver_proto_scala_lib",
+    visibility = ["//dicer:internal"],
+    deps = [":clerk_test_driver_proto"],
+)
+
+proto_library(
+    name = "slicelet_test_driver_proto",
+    srcs = ["slicelet_test_driver.proto"],
     visibility = ["//dicer:internal"],
     deps = [
         "//dicer/common/proto:common_proto",
@@ -36,7 +52,7 @@ proto_library(
 )
 
 scala_proto_library(
-    name = "test_driver_proto_scala_lib",
+    name = "slicelet_test_driver_proto_scala_lib",
     visibility = ["//dicer:internal"],
-    deps = [":test_driver_proto"],
+    deps = [":slicelet_test_driver_proto"],
 )

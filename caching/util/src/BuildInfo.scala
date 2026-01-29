@@ -82,7 +82,7 @@ object BuildInfo {
     // This is extracted from [[LocationConf.branch]]. It depends on the assumption that
     // the timestamp from the branch name is the commit timestamp of the PR of branch
     // being built on. Unfortunately, there is no commit hash in the LocationConf.
-    // go/APP-3756 has been filed to do this properly.
+    // <internal link> has been filed to do this properly.
 
     // Parse the commit timestamp and git branch out of the branch string.
     val regexMatch: Option[Regex.Match] = CLIENT_VERSION_REGEX.findFirstMatchIn(branch)

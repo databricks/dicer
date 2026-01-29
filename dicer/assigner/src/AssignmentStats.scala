@@ -5,9 +5,9 @@ import scala.collection.mutable
 import com.databricks.caching.util.AssertMacros.iassert
 import com.databricks.dicer.assigner.algorithm.{Algorithm, LoadMap}
 import com.databricks.dicer.assigner.config.InternalTargetConfig.LoadBalancingConfig
-import com.databricks.dicer.common.{Assignment, SliceAssignment, Squid}
+import com.databricks.dicer.common.{Assignment, SliceAssignment}
 import com.databricks.dicer.external.Slice
-import com.databricks.dicer.friend.SliceMap
+import com.databricks.dicer.friend.{SliceMap, Squid}
 
 object AssignmentStats {
 

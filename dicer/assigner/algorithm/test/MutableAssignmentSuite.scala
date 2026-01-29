@@ -1,7 +1,5 @@
 package com.databricks.dicer.assigner.algorithm
 
-import java.time.Instant
-
 import scala.concurrent.duration._
 import scala.collection.immutable.SortedMap
 
@@ -14,13 +12,12 @@ import com.databricks.dicer.common.{
   AssignmentConsistencyMode,
   Generation,
   SliceWithResources,
-  Squid,
   SubsliceAnnotation,
   TestSliceUtils
 }
 import com.databricks.dicer.external.SliceKey
 import com.databricks.dicer.friend.SliceMap
-import com.databricks.caching.util.UnixTimeVersion
+import com.databricks.dicer.friend.Squid
 import com.databricks.testing.DatabricksTest
 
 class MutableAssignmentSuite extends DatabricksTest {

@@ -124,7 +124,7 @@ class DebugHttpServerSuite extends DatabricksTest {
     val jsonArgs = """{"key1":"value1"}"""
     val encodedArgs = URLEncoder.encode(jsonArgs, StandardCharsets.UTF_8.name())
     val actionUrl = s"$baseUrl/debug?action=testInputAction&args=$encodedArgs&userInput=testValue"
-    val response = makeHttpPostRequest(actionUrl, "")
+    makeHttpPostRequest(actionUrl, "")
 
     // Verify the action was executed with correct parameters.
     eventually {
@@ -178,7 +178,7 @@ class DebugHttpServerSuite extends DatabricksTest {
     val jsonArgs = """{"linkKey":"linkValue"}"""
     val encodedArgs = URLEncoder.encode(jsonArgs, StandardCharsets.UTF_8.name())
     val actionUrl = s"$baseUrl/debug?action=testLinkAction&args=$encodedArgs"
-    val response = makeHttpRequest(actionUrl)
+    makeHttpRequest(actionUrl)
 
     // Verify the action was executed with correct parameters.
     eventually {

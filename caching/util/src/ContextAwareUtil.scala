@@ -3,7 +3,9 @@ package com.databricks.caching.util
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ThreadFactory
 import scala.concurrent.ExecutionContext
+
 import com.databricks.threading.AbstractInstrumentedScheduledThreadPoolExecutor
+import com.google.common.util.concurrent.ThreadFactoryBuilder
 import com.databricks.util.advanced.AdvancedInstrumentedScheduledThreadPoolExecutor
 
 /**
@@ -55,7 +57,7 @@ object ContextAwareUtil {
     val executor = new AbstractInstrumentedScheduledThreadPoolExecutor(
       name,
       maxThreads,
-      java.util.concurrent.Executors.defaultThreadFactory(),
+      new ThreadFactoryBuilder().setNameFormat(s"$name-%d").build(),
       enableContextPropagation
     )
     ExecutionContext.fromExecutorService(executor)

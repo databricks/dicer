@@ -12,23 +12,21 @@ import scala.util.matching.Regex
 import io.grpc.Status
 
 import com.databricks.api.proto.dicer.common.ClientRequestP.SliceletDataP
-import com.databricks.caching.util.AssertMacros.iassert
 import com.databricks.caching.util.InstantiationTracker.{
   PerProcessSingleton,
   PerProcessSingletonType
 }
-import com.databricks.caching.util.Lock.withLock
 import com.databricks.caching.util.{
   Cancellable,
   GenericRpcServiceBuilder,
   InstantiationTracker,
-  NonReentrantLock,
   PrefixLogger,
   RealtimeTypedClock,
   SequentialExecutionContext,
   UnixTimeVersion,
   ValueStreamCallback,
   WatchValueCell,
+  WatchValueCellPollAdapter,
   WhereAmIHelper
 }
 import com.databricks.common.util.ShutdownHookManager
@@ -40,7 +38,6 @@ import com.databricks.dicer.common.{
   Generation,
   SliceSetImpl,
   SliceletData,
-  Squid,
   SubsliceAnnotationsMap,
   Version,
   WatchServerHelper
@@ -56,7 +53,7 @@ import com.databricks.dicer.external.{
 }
 import com.databricks.dicer.friend.ShutdownHookConstants.SLICELET_TERMINATION_SHUTDOWN_HOOK_PRIORITY
 import com.databricks.dicer.friend.SliceMap.GapEntry
-import com.databricks.dicer.friend.SliceWithStateProvider
+import com.databricks.dicer.friend.{SliceWithStateProvider, Squid}
 import com.databricks.rpc.DatabricksServerWrapper
 import com.databricks.rpc.armeria.ReadinessProbeTracker
 import javax.annotation.concurrent.GuardedBy
@@ -66,6 +63,7 @@ private[dicer] class SliceletImpl private (
     sec: SequentialExecutionContext,
     sliceletConf: SliceletConf,
     config: InternalClientConfig,
+    subscriberDebugName: String,
     sliceletHostName: String,
     sliceletUuid: UUID,
     server: DatabricksServerWrapper,
@@ -73,7 +71,7 @@ private[dicer] class SliceletImpl private (
     private[client] val loadAccumulator: SliceletLoadAccumulator,
     lookup: SliceletSliceLookup) {
 
-  private val logger = PrefixLogger.create(getClass, config.subscriberDebugName)
+  private val logger = PrefixLogger.create(getClass, subscriberDebugName)
 
   metrics.recordLocationInfo()
 
@@ -114,15 +112,7 @@ private[dicer] class SliceletImpl private (
    *
    * Globally unique identifier for the current Slicelet incarnation.
    */
-  def squid: Squid = {
-    lookup.latestSliceletAssignment.squidOpt match {
-      case Some(squid: Squid) => squid
-      case None =>
-        throw new IllegalStateException(
-          "Slicelet must be started before calling SliceletImpl.squid"
-        )
-    }
-  }
+  def squid: Squid = lookup.squidOrThrowIfUnstarted()
 
   /** The sharded target. */
   def target: Target = config.target
@@ -212,7 +202,7 @@ private[dicer] class SliceletImpl private (
       .getOrElse(Set.empty)
   }
 
-  override def toString: String = config.subscriberDebugName
+  override def toString: String = subscriberDebugName
 
   /**
    * Get the first generation when `key` was assigned to `resourceAddress`, or [[Generation.EMPTY]]
@@ -266,18 +256,47 @@ private[dicer] class SliceletImpl private (
     }
 
     /**
-     * Stops the watcher that communicates with the remote service to obtain assignments, stops the
-     * Slicelet RPC service, and cancels any background tasks.
+     * Stops the Slicelet for testing by setting the terminating state while allowing the
+     * assignment watcher to continue sending heartbeats to the Assigner. This ensures the Assigner
+     * recognizes the Slicelet as terminated and removes it from assignments.
+     *
+     * Note: This method does NOT fully cancel the SliceLookup connection to the Assigner.
+     * For a complete shutdown that cancels all connections, see [[cancel]].
+     *
+     * @see [[SliceletSliceLookup.forTest.stop]] for the underlying SliceLookup stop behavior.
+     * @see <internal bug> for the tracking JIRA on unifying stop/cancel behavior.
      */
     def stop(): Unit = {
-      backgroundUpdateMetricsHandle.cancel(Status.CANCELLED)
       lookup.forTest.stop()
-      // Synchronously stopping the server was measured to take about 2s in tests, causing tests
-      // times for suites making use of many slicelets to balloon significantly. We avoid this here
-      // by stopping the server asynchronously instead. Note that stopping the lookup (above) is
-      // already asynchronous.
+      stopMetricsAndServer()
+      logger.info(s"Stopped Slicelet (terminating state set, heartbeats may continue)")
+    }
+
+    /**
+     * Fully stops the Slicelet in the test environment by cancelling the SliceLookup connection
+     * to the Assigner and stopping the Slicelet RPC service. Unlike [[stop]], this method
+     * immediately cancels all communication with the Assigner rather than setting a terminating
+     * state. This method is limited to Dicer team for internal use only.
+     *
+     * Note: This method is a stop gap solution until <internal bug> is resolved.
+     *
+     * TODO(<internal bug>): Once we verify that no customer tests depend on the assigner getting a
+     * termination notice from the Slicelet after `SliceletImpl.forTest.stop` is called, we should
+     * replace `SliceletImpl.forTest.stop` with this method.
+     */
+    private[dicer] def cancel(): Unit = {
+      lookup.forTest.cancel()
+      stopMetricsAndServer()
+      logger.info(s"Fully stopped Slicelet (SliceLookup connection cancelled)")
+    }
+
+    // Cancels background metric updates and stops the Slicelet RPC server asynchronously.
+    // Synchronously stopping the server was measured to take about 2s in tests, causing test
+    // times for suites making use of many Slicelets to balloon significantly. We avoid this by
+    // stopping the server asynchronously instead.
+    private def stopMetricsAndServer(): Unit = {
+      backgroundUpdateMetricsHandle.cancel(Status.CANCELLED)
       server.stopAsync()
-      logger.info(s"Stopped Slicelet")
     }
   }
 }
@@ -287,6 +306,9 @@ private[dicer] object SliceletImpl {
 
   /** Interval with which to regularly update load accumulator metrics. */
   private val SLICELET_LOAD_ACCUMULATOR_UPDATE_METRICS_INTERVAL: FiniteDuration = 5.seconds
+
+  /** The interval at which the readiness poller polls the readiness provider for readiness. */
+  private val READINESS_PROVIDER_POLL_INTERVAL: FiniteDuration = 1.second
 
   /**
    * Used to enforce that only a single `SliceletImpl` instance is created per process, except in
@@ -310,14 +332,13 @@ private[dicer] object SliceletImpl {
    * `target` parameter is expected to already be populated with the cluster URI (if available).
    *
    * @param assignerWatchAddress the address of the assigner to send the watch address to.
-   * @param readinessReporter a ReadinessReporter that reports the pod's readiness
    */
   def create(
       sec: SequentialExecutionContext,
       assignerWatchAddress: URI,
       sliceletConf: SliceletConf,
       target: Target,
-      readinessReporter: ReadinessReporter): SliceletImpl = {
+      readinessProvider: BlockingReadinessProvider): SliceletImpl = {
     if (!sliceletConf.allowMultipleClientInstances) {
       instantiationTracker.enforceAndRecord(PerProcessSingleton)
     }
@@ -354,14 +375,12 @@ private[dicer] object SliceletImpl {
 
     val config = InternalClientConfig(
       ClientType.Slicelet,
-      sliceletDebugName,
       assignerWatchAddress,
       sliceletConf.getDicerClientTlsOptions,
       target,
       sliceletConf.watchStubCacheTimeSeconds.seconds,
       sliceletConf.watchFromDataPlane,
-      sliceletConf.rejectWatchRequestsOnFatalTargetMismatch,
-      assignmentLatencySampleFraction = 0
+      enableRateLimiting = sliceletConf.enableSliceletRateLimiting
     )
 
     // Create a service builder on which the SliceLookup can register a watch handler.
@@ -376,11 +395,26 @@ private[dicer] object SliceletImpl {
 
     // Create the logger for assignment propagation latency events.
     val protoLogger: DicerClientProtoLogger = DicerClientProtoLogger.create(
+      conf = DicerClientProtoLoggerConf,
       clientType = config.clientType,
       subscriberDebugName = sliceletDebugName,
-      keySampleFraction = config.assignmentLatencySampleFraction,
-      executor = protoLoggerSec
+      sec = protoLoggerSec
     )
+
+    // The readiness provider runs on a separate thread from the main Slicelet thread because
+    // isReady() calls an external API on the ReadinessProbeTracker. This is currently a
+    // non-blocking call, but there is no guarantee it will remain non-blocking. We don't want to
+    // risk blocking the main Slicelet thread, which handles assignment updates and client requests.
+    val readinessProviderSec: SequentialExecutionContext =
+      SequentialExecutionContext.createWithDedicatedPool("Slicelet-ReadinessProvider")
+    val readinessPoller =
+      new WatchValueCellPollAdapter[Boolean, Boolean](
+        initialValueOpt = None,
+        poller = () => readinessProvider.isReady,
+        transform = identity,
+        pollInterval = SliceletImpl.READINESS_PROVIDER_POLL_INTERVAL,
+        sec = readinessProviderSec
+      )
 
     // Accumulates load observed by this Slicelet.
     val metrics = new SliceletMetrics(target)
@@ -389,12 +423,13 @@ private[dicer] object SliceletImpl {
       new SliceletSliceLookup(
         sec,
         config,
+        readinessPoller,
         serviceBuilder,
         loadAccumulator,
         kubernetesNamespace,
-        readinessReporter,
         metrics,
-        protoLogger
+        protoLogger,
+        sliceletDebugName
       )
 
     // Create the server, which will be started in start().
@@ -411,6 +446,7 @@ private[dicer] object SliceletImpl {
       sec,
       sliceletConf,
       config,
+      sliceletDebugName,
       hostName,
       uuid,
       server,
@@ -487,14 +523,13 @@ private[dicer] object SliceletImpl {
       sliceletConf.dicerAssignerRpcPort
     )
 
-    val slicelet =
-      SliceletImpl.create(
-        sec,
-        assignerURI,
-        sliceletConf,
-        fullyQualifiedTargetIfNeeded,
-        new ReadinessReporterImpl
-      )
+    val slicelet = SliceletImpl.create(
+      sec,
+      assignerURI,
+      sliceletConf,
+      fullyQualifiedTargetIfNeeded,
+      RealBlockingReadinessProvider
+    )
 
     // In production, make the transition to the terminating state automatically when the process
     // receives a shutdown signal. Tests should manually induce the terminating state on indivudal
@@ -529,51 +564,20 @@ private[dicer] object SliceletImpl {
   }
 }
 
-/** A trait for reporting a pod's readiness. */
-private[dicer] trait ReadinessReporter {
+/**
+ * A trait for a blocking readiness provider that can be used to query the current readiness status.
+ */
+private[dicer] trait BlockingReadinessProvider {
 
-  /**
-   * Returns whether the Slicelet's pod is ready.
-   *
-   * @return true if the pod is ready, otherwise false.
-   */
+  /** Returns the current readiness status. `true` means ready, `false` means not ready. */
   def isReady: Boolean
 }
 
-/** A class which wraps a readiness probe tracker to report pod readiness. */
-private[dicer] class ReadinessReporterImpl extends ReadinessReporter {
-  @GuardedBy("lock")
-  private var isPodReady: Boolean = false
-
-  // Used to track if update requests are already in flight.
-  @GuardedBy("lock")
-  private var isUpdatePending: Boolean = false
-
-  // Getting the pod's readiness status involves a call to an external API, which is not guaranteed
-  // to be non-blocking. As such, we make this call on its own thread and protect the isPodReady
-  // variable with a lock.
-  private val sec: SequentialExecutionContext =
-    SequentialExecutionContext.createWithDedicatedPool("Slicelet-ReadinessReporter")
-
-  private val lock = new NonReentrantLock()
-
-  /**
-   * Returns the memoized value and schedules an asynchronous update of the readiness status. To
-   * avoid buildup in the sec queue, only schedules an update if there is not already an update in
-   * flight.
-   */
-  override def isReady: Boolean = withLock(lock) {
-    if (!isUpdatePending) {
-      isUpdatePending = true
-      sec.run {
-        withLock(lock) {
-          isPodReady = ReadinessProbeTracker.isPodReady
-          isUpdatePending = false
-        }
-      }
-    }
-    isPodReady
-  }
+/**
+ * Real implementation of [[BlockingReadinessProvider]] that queries the [[ReadinessProbeTracker]].
+ */
+private[dicer] object RealBlockingReadinessProvider extends BlockingReadinessProvider {
+  override def isReady: Boolean = ReadinessProbeTracker.isPodReady
 }
 
 /**
@@ -629,22 +633,31 @@ object SliceletAssignment {
 private[client] final class SliceletSliceLookup(
     sec: SequentialExecutionContext,
     config: InternalClientConfig,
+    readinessPoller: WatchValueCellPollAdapter[Boolean, Boolean],
     serviceBuilder: GenericRpcServiceBuilder,
     loadAccumulator: SliceletLoadAccumulator,
     kubernetesNamespace: String,
-    readinessReporter: ReadinessReporter,
     metrics: SliceletMetrics,
-    protoLogger: DicerClientProtoLogger) {
-  private val logger = PrefixLogger.create(this.getClass, config.subscriberDebugName)
+    protoLogger: DicerClientProtoLogger,
+    subscriberDebugName: String) {
+  import SliceletSliceLookup.StateEnum
+
+  private val logger = PrefixLogger.create(this.getClass, subscriberDebugName)
+
+  /**
+   * The delay before attempting to start the lookup if the readiness poller is blocked. This
+   * ensures the lookup starts even if readiness checking encounters issues.
+   */
+  private val BLOCKED_READINESS_CHECK_START_DELAY: FiniteDuration = 5.seconds
 
   /** The wrapped [[SliceLookup]] instance. */
   private val baseLookup =
     SliceLookup.createUnstarted(
       sec,
       config,
-      () => createSliceletData(),
+      subscriberDebugName,
       protoLogger,
-      Some(serviceBuilder)
+      serviceBuilderOpt = Some(serviceBuilder)
     )
 
   /**
@@ -662,29 +675,40 @@ private[client] final class SliceletSliceLookup(
   @GuardedBy("sec")
   private var cellHandle: Cancellable = _
 
-  /** Identifies this Slicelet. Populated in [[start()]]. */
+  /** The current state of the Slicelet. */
   @GuardedBy("sec")
-  private var squidOpt: Option[Squid] = None
-
-  /** Whether the Slicelet is in the Terminating state. */
-  @GuardedBy("sec")
-  private var isTerminating: Boolean = false
+  private var state: StateEnum = StateEnum.NotReady
 
   /** Supplies assignments as they are updated to the given `callback`. */
   def watch(callback: ValueStreamCallback[SliceletAssignment]): Unit = cell.watch(callback)
 
-  /** Starts the lookup. */
+  /**
+   * REQUIRES: this method has not been called for this Slicelet yet.
+   *
+   * Starts the lookup and creates/populates the squid for this Slicelet. Also starts a poller to
+   * watch the readiness status of the Slicelet.
+   *
+   * In the spirit of coarse-grained locking, we prefer for method definitions to be enclosed
+   * entirely by `sec.run`. This method deviates from that convention because it must make the squid
+   * available immediately after the method returns. Callers have no way to determine whether the
+   * sec tasks have been executed yet. We thus set the squid synchronously before running any sec
+   * tasks.
+   *
+   * After this call returns, [[squidOrThrowIfUnstarted()]] will return successfully.
+   */
   def start(resourceUuid: UUID, resourceAddress: ResourceAddress): Unit = {
     // Create a globally unique identifier for the current Slicelet incarnation, that is different
-    // across pod restarts.
+    // across pod restarts. Calling this method multiple times will create multiple Squids for the
+    // same Slicelet, which is why start() must only be called once.
     val squid = Squid.createForNewIncarnation(RealtimeTypedClock, resourceAddress, resourceUuid)
 
     // Make the resource address available via `Slicelet.resourceAddress` immediately after `start`
-    // returns.
+    // returns by executing this outside of `sec.run`. This is required because callers may access
+    // the squid after this method returns, but they have no way to determine whether the sec tasks
+    // have been executed yet.
     cell.setValue(SliceletAssignment(Some(squid), None))
+
     sec.run {
-      squidOpt = Some(squid)
-      baseLookup.start()
       cellHandle = baseLookup.cellConsumer.watch(new ValueStreamCallback[Assignment](sec) {
         override protected def onSuccess(assignment: Assignment): Unit = {
           // Set the latest Slicelet assignment if the given assignment is new.
@@ -700,6 +724,41 @@ private[client] final class SliceletSliceLookup(
           }
         }
       })
+
+      readinessPoller.watch(new ValueStreamCallback[Boolean](sec) {
+        @GuardedBy("sec")
+        private var gotFirstStatus: Boolean = false
+
+        override protected def onSuccess(isReady: Boolean): Unit = {
+          // Start the lookup on first status update (regardless of ready/not ready).
+          if (!gotFirstStatus) {
+            gotFirstStatus = true
+            baseLookup.start(() => createSliceletData())
+          }
+
+          // Update state based on readiness, preserving Terminating state.
+          val newState: StateEnum = state match {
+            case StateEnum.Terminating =>
+              StateEnum.Terminating
+            case StateEnum.NotReady | StateEnum.Running =>
+              if (isReady) StateEnum.Running else StateEnum.NotReady
+          }
+
+          state = newState
+        }
+      })
+
+      readinessPoller.start()
+
+      // Schedule a call to start the `baseLookup` in case the `readinessPoller` is blocked. It's
+      // safe to start the lookup multiple times. If the lookup was already started, the underlying
+      // state machine will already be in a started state and will not re-initiate the connection or
+      // watch.
+      sec.schedule(
+        name = "lookup-start",
+        delay = BLOCKED_READINESS_CHECK_START_DELAY,
+        () => baseLookup.start(() => createSliceletData())
+      )
     }
   }
 
@@ -710,45 +769,53 @@ private[client] final class SliceletSliceLookup(
     latestAssignmentOpt.get
   }
 
-  /** Set the state reported by [[baseLookup]] to TERMINATING. */
-  def setTerminatingState(): Unit = sec.run {
-    logger.info(s"Setting state of $squidOpt to terminating.")
-    isTerminating = true
-  }
-
-  /** Returns the Slicelet's state based on the pod's reported readiness. */
-  private def getLatestState: SliceletDataP.State = {
-    val isReady: Boolean = readinessReporter.isReady
-
-    if (this.isTerminating) {
-      SliceletDataP.State.TERMINATING
-    } else {
-      if (isReady) {
-        SliceletDataP.State.RUNNING
-      } else {
-        SliceletDataP.State.NOT_READY
-      }
+  /**
+   * REQUIRES: [[start]] has been called.
+   *
+   * Returns the squid for this Slicelet.
+   *
+   * @throws IllegalStateException if start() has not been called
+   */
+  def squidOrThrowIfUnstarted(): Squid = {
+    latestSliceletAssignment.squidOpt match {
+      case Some(squid: Squid) => squid
+      case None =>
+        throw new IllegalStateException("Slicelet must be started before accessing squid")
     }
   }
 
+  /** Set the state reported by [[baseLookup]] to TERMINATING. */
+  def setTerminatingState(): Unit = sec.run {
+    logger.info(s"Setting state of ${latestSliceletAssignment.squidOpt} to terminating.")
+
+    // `Terminating`` is a terminal state, and is ok set blindly.
+    state = StateEnum.Terminating
+  }
+
   /**
+   * REQUIRES: [[start]] has written a non-empty squidOpt to the cell. Note that start() may not
+   * have returned yet when this is called, since this method is invoked as a callback from within
+   * start()'s sec.run block. However, it is safe to call [[squidOrThrowIfUnstarted()]] because
+   * start() writes the squid to the cell synchronously before entering the sec.run block.
+   *
    * Creates [[SliceletData]] instance describing the current Slicelet and providing a summary of
    * the load it is handling. The Slicelet's current state is selected and included in the
    * [[SliceletData]].
    */
   private def createSliceletData(): SliceletData = {
     sec.assertCurrentContext()
-    iassert(squidOpt.isDefined, "must not be called before start()")
+
+    val squid: Squid = squidOrThrowIfUnstarted()
     val (attributedLoads, unattributedLoad): (
         Vector[SliceletData.SliceLoad],
         SliceletData.SliceLoad) = loadAccumulator.readLoad()
 
-    val state: SliceletDataP.State = getLatestState
-    metrics.onHeartbeat(state)
+    val stateP: SliceletDataP.State = StateEnum.toProto(state)
+    metrics.onHeartbeat(stateP)
 
     SliceletData(
-      squidOpt.get,
-      state,
+      squid,
+      stateP,
       kubernetesNamespace,
       attributedLoads,
       Some(unattributedLoad)
@@ -762,6 +829,15 @@ private[client] final class SliceletSliceLookup(
       baseLookup.forTest.injectAssignment(assignment)
     }
 
+    /**
+     * Stops the Slicelet by setting the terminating state while allowing heartbeats to continue.
+     *
+     * This method sets the Slicelet's state to terminating so the Assigner will ignore future
+     * heartbeats and remove the Slicelet from resources. However, unlike [[cancel]], heartbeats
+     * continue to flow, allowing the Assigner to receive the termination notice.
+     *
+     * @see <internal bug> for the tracking JIRA on unifying stop/cancel behavior.
+     */
     def stop(): Unit = {
       sec.run {
         if (cellHandle != null) {
@@ -790,6 +866,47 @@ private[client] final class SliceletSliceLookup(
         // next heartbeat and ignore any subsequent heartbeats.
         setTerminatingState()
       }
+    }
+
+    /**
+     * Cancels the underlying [[SliceLookup]] instance for the [[SliceletSliceLookup]].
+     *
+     * This method immediately terminates all communication with the Assigner (hard break),
+     * but does not send a termination notification. The Assigner will only detect the Slicelet
+     * is gone when heartbeats stop arriving (after the heartbeat timeout expires).
+     *
+     * In contrast, [[stop]] sends a termination notice to the Assigner but never actually
+     * cancels the communication, leaving the subscriber running which can lead to unwanted
+     * behavior in tests (e.g. flakiness due to ongoing heartbeats).
+     *
+     * @see [[stop]] for termination with notification (but without cancelling communication).
+     */
+    private[dicer] def cancel(): Unit = baseLookup.cancel()
+  }
+}
+
+/** Companion object for [[SliceletSliceLookup]]. */
+private[dicer] object SliceletSliceLookup {
+
+  /**
+   * Represents the readiness and lifecycle state of a [[Slicelet]].
+   *
+   * The states are:
+   *  - [[StateEnum.NotReady]]: The Slicelet is not ready to serve traffic.
+   *  - [[StateEnum.Running]]: The Slicelet is ready to serve traffic.
+   *  - [[StateEnum.Terminating]]: The Slicelet is shutting down and should not be assigned.
+   */
+  private sealed trait StateEnum
+  private object StateEnum {
+    case object NotReady extends StateEnum
+    case object Running extends StateEnum
+    case object Terminating extends StateEnum
+
+    /** Converts a [[StateEnum]] to its protobuf representation. */
+    def toProto(state: StateEnum): SliceletDataP.State = state match {
+      case StateEnum.NotReady => SliceletDataP.State.NOT_READY
+      case StateEnum.Running => SliceletDataP.State.RUNNING
+      case StateEnum.Terminating => SliceletDataP.State.TERMINATING
     }
   }
 }

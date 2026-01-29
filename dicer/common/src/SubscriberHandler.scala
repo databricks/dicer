@@ -32,6 +32,7 @@ import com.databricks.dicer.common.SubscriberHandler.{
   SubscriberInfo
 }
 import com.databricks.dicer.external.{AppTarget, KubernetesTarget, Target}
+import com.databricks.dicer.friend.Squid
 import com.databricks.rpc.RPCContext
 
 /**
@@ -46,11 +47,6 @@ import com.databricks.rpc.RPCContext
  *                                      timeout for [[Clerk]].
  * @param suggestedSliceletRpcTimeout the suggested watch RPC timeout for [[Slicelet]].
  * @param handlerLocation the location of this handler.
- * @param rejectRequestsOnFatalTargetMismatch whether to reject requests on fatal target mismatches.
- *                                            Should always be set to `true` in production, and only
- *                                            exists as an option to work around broken customer
- *                                            tests, and should be removed when those tests are
- *                                            fixed.
  */
 @ThreadSafe
 class SubscriberHandler(
@@ -58,8 +54,7 @@ class SubscriberHandler(
     target: Target,
     getSuggestedClerkRpcTimeoutFn: () => FiniteDuration,
     suggestedSliceletRpcTimeout: FiniteDuration,
-    handlerLocation: Location,
-    rejectRequestsOnFatalTargetMismatch: Boolean) {
+    handlerLocation: Location) {
 
   import SubscriberHandler.AssignmentDistributionLatencyTracker
 
@@ -159,23 +154,14 @@ class SubscriberHandler(
         // Implementation note: because of the way `SubscriberHandler` is used in the Assigner (a
         // `SubscriberHandler` is chosen to respond to a request based on a matching target), we do
         // not expect these errors to surface in the Assigner.
-        if (rejectRequestsOnFatalTargetMismatch) {
-          Future.failed(
-            new StatusException(
-              Status.NOT_FOUND.withDescription(
-                s"Request for target ${request.target} misrouted to handler for target $target. " +
-                s"See 'Configuration: Clients' in <internal link>."
-              )
+        Future.failed(
+          new StatusException(
+            Status.NOT_FOUND.withDescription(
+              s"Request for target ${request.target} misrouted to handler for target $target. " +
+              s"See 'Configuration: Clients' in <internal link>."
             )
           )
-        } else {
-          logger.error(
-            s"CRITICAL ERROR: request for target ${request.target} misrouted to handler for " +
-            s"target $target. ERRORS OF THIS KIND WILL CAUSE FAILED REQUESTS IN PRODUCTION " +
-            s"ENVIRONMENTS."
-          )
-          replyFromCell(startTime, request, cell, redirect)
-        }
+        )
       } else {
         replyFromCell(startTime, request, cell, redirect)
       }

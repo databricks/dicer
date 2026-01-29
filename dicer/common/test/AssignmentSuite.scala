@@ -6,6 +6,7 @@ import com.databricks.dicer.common.Assignment.DiffUnused
 import com.databricks.dicer.common.Assignment.DiffUnused.DiffUnused
 import com.databricks.dicer.common.TestSliceUtils._
 import com.databricks.dicer.external.SliceKey
+import com.databricks.dicer.friend.Squid
 import com.databricks.testing.DatabricksTest
 import com.databricks.dicer.common.test.AssignmentTestDataP
 import com.databricks.dicer.common.test.AssignmentTestDataP.DiffUnusedP.DIFF_UNUSED_P_UNSPECIFIED

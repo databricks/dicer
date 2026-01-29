@@ -6,6 +6,7 @@ import com.databricks.api.proto.dicer.common.DiffAssignmentP.{SliceAssignmentP, 
 import com.databricks.dicer.common.Assignment.ResourceMap
 import com.databricks.dicer.common.SliceHelper.RichSlice
 import com.databricks.dicer.external.{HighSliceKey, Slice}
+import com.databricks.dicer.friend.Squid
 
 /**
  * REQUIRES: `generation` is not empty, belongs to the same incarnation as the generation of the

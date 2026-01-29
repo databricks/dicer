@@ -1,0 +1,145 @@
+syntax = "proto2";
+
+package dicer.test;
+
+import "dicer/common/proto/common.proto";
+import "scalapb.proto";
+
+option java_package = "com.databricks.dicer.common";;
+option java_generate_equals_and_hash = true;
+option java_outer_classname = "ClerkTestDriverProto";
+option java_multiple_files = true;
+option (scalapb.options) = {
+  package_name: "com.databricks.dicer.common",
+  flat_package: true,
+};
+
+// Test driver service for Clerk operations.
+service ClerkTestDriver {
+  // Creates a Rust `Clerk` instance.
+  rpc CreateClerk(CreateClerkRequestP) returns (CreateClerkResponseP);
+
+  // Drops a previously created Rust `Clerk` instance.
+  rpc StopClerk(StopClerkRequestP) returns (StopClerkResponseP);
+
+  // Calls the `ready` method on a previously created Rust `Clerk` instance.
+  rpc ClerkReady(ClerkReadyRequestP) returns (ClerkReadyResponseP);
+
+  // Calls the `get_stub_for_key` method on a previously created Rust `Clerk` instance.
+  rpc ClerkGetStubForKey(ClerkGetStubForKeyRequestP) returns (ClerkGetStubForKeyResponseP);
+
+  // Samples `get_stub_for_key` multiple times and returns a histogram of results.
+  rpc ClerkSampleStubForKey(ClerkSampleStubForKeyRequestP) returns (ClerkSampleStubForKeyResponseP);
+
+  // Creates a Rust `CrossClusterClerk` instance.
+  rpc CreateCrossClusterClerk(CreateCrossClusterClerkRequestP)
+      returns (CreateCrossClusterClerkResponseP);
+
+  // Gets the debug name of a Rust `Clerk` instance.
+  rpc GetClerkDebugName(GetClerkDebugNameRequestP) returns (GetClerkDebugNameResponseP);
+}
+
+// A request to create a Rust `Clerk`.
+message CreateClerkRequestP {
+  optional TargetP target = 1;
+
+  // The Slicelet port for the Clerk to connect.
+  optional int32 slicelet_port = 2;
+}
+
+// The response to a `CreateClerk` request.
+message CreateClerkResponseP {
+  // The ID that can be passed to other RPCs to interact with the Clerk.
+  optional int64 clerk_id = 1;
+}
+
+// A request to drop a Rust `Clerk`.
+message StopClerkRequestP {
+  // The ID for the Clerk that was previously returned by a `CreateClerk` request.
+  optional int64 clerk_id = 1;
+}
+
+// The response to a `StopClerk` request.
+message StopClerkResponseP {}
+
+// A request to call `ready` on a Rust `Clerk`.
+message ClerkReadyRequestP {
+  // The ID for the Clerk that was previously returned by a `CreateClerk` request.
+  optional int64 clerk_id = 1;
+}
+
+// The response to a `ClerkReady` request.
+message ClerkReadyResponseP {}
+
+// A request to call `get_stub_for_key` on a Rust `Clerk`.
+message ClerkGetStubForKeyRequestP {
+  // The ID for the Clerk that was previously returned by a `CreateClerk` request.
+  optional int64 clerk_id = 1;
+
+  // The slice key to look up.
+  optional bytes slice_key = 2;
+}
+
+// The response to a `ClerkGetStubForKey` request.
+message ClerkGetStubForKeyResponseP {
+  // The resource address for the key, if one is assigned.
+  optional string resource_address = 1;
+}
+
+// A request to sample `get_stub_for_key` multiple times for statistical testing.
+message ClerkSampleStubForKeyRequestP {
+  // The ID for the Clerk that was previously returned by a `CreateClerk` request.
+  optional int64 clerk_id = 1;
+
+  // The slice key to look up.
+  optional bytes slice_key = 2;
+
+  // The number of times to sample `get_stub_for_key`.
+  optional int32 sample_count = 3;
+}
+
+// The response to a `ClerkSampleStubForKey` request.
+message ClerkSampleStubForKeyResponseP {
+  // A single entry representing a resource and how many times it was returned.
+  message ResultEntry {
+    // The resource address (URI).
+    optional string resource_address = 1;
+
+    // The number of times this resource was returned.
+    optional int32 count = 2;
+  }
+
+  // The aggregated results of the sampled calls.
+  repeated ResultEntry results = 1;
+}
+
+// A request to create a Rust `CrossClusterClerk` that can subscribe to assignments for targets
+// in remote clusters.
+message CreateCrossClusterClerkRequestP {
+  // The name of the Dicer target (must meet RFC 1123 label name requirements).
+  optional string target_name = 1;
+
+  // The Kubernetes cluster URI where the Slicelet is running.
+  optional string target_cluster_uri = 2;
+
+  // The Slicelet port for the Clerk to connect to.
+  optional int32 slicelet_port = 3;
+}
+
+// The response to a `CreateCrossClusterClerk` request.
+message CreateCrossClusterClerkResponseP {
+  // The ID that can be passed to other RPCs to interact with the Clerk.
+  optional int64 clerk_id = 1;
+}
+
+// A request to get the debug name of a Rust `Clerk`.
+message GetClerkDebugNameRequestP {
+  // The ID for the Clerk that was previously returned by a `CreateClerk` request.
+  optional int64 clerk_id = 1;
+}
+
+// The response to a `GetClerkDebugName` request.
+message GetClerkDebugNameResponseP {
+  // The debug name of the Clerk.
+  optional string debug_name = 1;
+}

@@ -1,7 +1,7 @@
-package com.databricks.dicer.common
+package com.databricks.dicer.friend
 
-import com.databricks.api.proto.dicer.common.SquidP
-import com.databricks.dicer.common.Squid.ORDERING
+import com.databricks.api.proto.dicer.friend.SquidP
+import com.databricks.dicer.friend.Squid.ORDERING
 import com.databricks.dicer.external.ResourceAddress
 import java.net.URI
 import java.time.Instant

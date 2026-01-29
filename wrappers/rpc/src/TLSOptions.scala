@@ -28,9 +28,9 @@ final class TLSOptions private (
    * Uses gRPC's transport-independent TLS API for client channel configuration.
    */
   def channelCredentials(): ChannelCredentials = {
-    val builder = TlsChannelCredentials.newBuilder()
+    val builder: TlsChannelCredentials.Builder = TlsChannelCredentials.newBuilder()
     // Add trust manager (which server certs are accepted).
-    trustManagerCertsOpt.foreach { certs =>
+    for (certs: File <- trustManagerCertsOpt) {
       builder.trustManager(certs)
     }
     // Add key manager for mTLS (client certificate authentication).
@@ -57,8 +57,9 @@ final class TLSOptions private (
             "Server TLS requires a key manager (certificate chain + private key)."
           )
       }
-    val builder = TlsServerCredentials.newBuilder().keyManager(certChain, privateKey)
-    trustManagerCertsOpt.foreach { certs =>
+    val builder: TlsServerCredentials.Builder =
+      TlsServerCredentials.newBuilder().keyManager(certChain, privateKey)
+    for (certs: File <- trustManagerCertsOpt) {
       // If a trust bundle is provided, require client certificates (mTLS).
       builder.trustManager(certs).clientAuth(TlsServerCredentials.ClientAuth.REQUIRE)
     }

@@ -1,13 +1,8 @@
 package com.databricks.threading
 
-import java.util.concurrent.{
-  Callable,
-  ScheduledExecutorService,
-  ScheduledFuture,
-  ScheduledThreadPoolExecutor,
-  ThreadFactory,
-  TimeUnit
-}
+import java.util.concurrent.{ScheduledExecutorService, ScheduledThreadPoolExecutor, ThreadFactory}
+
+import com.google.common.util.concurrent.ThreadFactoryBuilder
 
 /**
  * Minimal open-source implementation of AbstractInstrumentedScheduledThreadPoolExecutor. The
@@ -43,7 +38,7 @@ object InstrumentedScheduledThreadPoolExecutor {
     new AbstractInstrumentedScheduledThreadPoolExecutor(
       name,
       maxThreads,
-      java.util.concurrent.Executors.defaultThreadFactory(),
+      new ThreadFactoryBuilder().setNameFormat(s"$name-%d").build(),
       enableContextPropagation = true
     )
   }

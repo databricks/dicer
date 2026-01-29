@@ -357,6 +357,7 @@ object SequentialExecutionContext {
     pool.createExecutionContext(contextName = name)
   }
 
+
   /**
    * The production implementation of [[SequentialExecutionContext]]. Separate from the
    * [[SequentialExecutionContext]] trait to allow modified behavior in tests.

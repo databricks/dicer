@@ -13,10 +13,10 @@ import com.databricks.dicer.assigner.KeyOfDeathDetector.{
   State
 }
 import com.databricks.dicer.assigner.TargetMetrics.KeyOfDeathTransitionType
-import com.databricks.dicer.common.Squid
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.caching.util.{TickerTime, StateMachine, StateMachineOutput, PrefixLogger}
 import com.databricks.dicer.external.Target
+import com.databricks.dicer.friend.Squid
 
 /**
  * This detector is a state machine responsible for tracking and declaring the start and

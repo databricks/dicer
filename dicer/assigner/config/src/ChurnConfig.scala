@@ -1,13 +1,5 @@
 package com.databricks.dicer.assigner.config
 
-import java.time.Instant
-
-import scala.concurrent.duration._
-
-import com.databricks.caching.util.AssertMacros.iassert
-import com.databricks.dicer.common.{SliceAssignment, Squid, SubsliceAnnotation}
-import com.databricks.dicer.external.HighSliceKey
-
 /**
  * The churn config defines a [[maxPenaltyRatio]] that is applied to the load of a resource when it
  * is reassigned to a new Slice. By making keys more expensive to reassign, the churn penalty

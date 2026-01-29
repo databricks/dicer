@@ -42,7 +42,7 @@ message DiffAssignmentP {
   repeated SliceAssignmentP slice_assignments = 2;
 
   // The resource incarnations to which `slice_assignments` or `squid_leases` refer.
-  repeated SquidP resources = 3;
+  repeated dicer.friend.SquidP resources = 3;
 
   // OPTIONAL (absent means "not frozen"): whether the assignment is "frozen". When an assignment is
   // frozen, the Assigner's `AssignmentGenerator` will not update the assignment. Assignments can be
@@ -212,24 +212,6 @@ message DiffAssignmentP {
   }
 }
 
-// Globally unique identifier for a Slicelet incarnation. See `com.databricks.dicer.common.Squid`
-// for detailed documentation.
-// Note: If we change this proto, we need to change the corresponding proto in the logs package.
-// `LoggedSquidP` is present in `proto/logs/caching/caching_team_log.proto`.
-message SquidP {
-  // URI that is used to route requests to the Slicelet.
-  optional string resource_address = 1;
-
-  // Creation time for the SQUID.
-  optional int64 creation_time_millis = 2;
-
-  // Most significant bits of the resource UUID.
-  optional int64 resource_uuid_high = 3;
-
-  // Least significant bits of the resource UUID.
-  optional int64 resource_uuid_low = 4;
-}
-
 // The assignment state that is exchanged across all messages where the caller indicates either the
 // assignment generation that it is aware of or the actual assignment if it believes that the remote
 // side has an assignment with a lower generation number.
@@ -259,6 +241,58 @@ message RedirectP {
   optional string address = 1;
 }
 
+// Identify the sharded set of resources whose assignment is being watched. This is a logical name
+// that all the involved Slicelets and Clerks need to agree on.
+// Note: If we change this proto, we need to change the corresponding proto in the logs package.
+// `LoggedTargetP` is present in `proto/logs/caching/caching_team_log.proto`.
+message TargetP {
+  // The name of the Dicer-sharded service as defined in <internal link>, e.g.,
+  // "softstore-storelet".
+  //
+  // See `com.databricks.dicer.external.Target.name` for detailed documentation.
+  optional string name = 1;
+
+  // Types of a Target.
+  enum Type {
+    TYPE_UNSPECIFIED = 0;
+
+    // A Kubernetes target is a type of Dicer target where instances are distinguished by the
+    // Kubernetes cluster where they are running. A Kubernetes target is limited to a single
+    // instance per cluster, and the cluster must remain stable throughout the target's lifetime.
+    // This target type applied to all targets before `APP` targets were introduced, as it was
+    // then assumed that a target name and cluster URI fully qualified a unique instance of a
+    // Dicer-sharded service.
+    //
+    // See `com.databricks.dicer.external.KubernetesTarget` for detailed documentation.
+    KUBERNETES = 1;
+
+    // An App target is a type of Dicer target where instances are distinguished by a unique
+    // application instance identifier (see <internal link>).
+    //
+    // See `com.databricks.dicer.external.AppTarget` for detailed documentation.
+    APP = 2;
+  }
+
+  // The type of the Dicer-sharded service. If the field is not set, the behavior is equivalent to
+  // as if it is set to TYPE_UNSPECIFIED.
+  optional Type target_type = 3;
+
+  // OPTIONAL: The URI of the Kubernetes cluster where the Dicer-sharded service is running, e.g.,
+  // "kubernetes-cluster:test-env/cloud1/public/region8/clustertype2/01". This field must be set for KUBERNETES
+  // targets when connecting to Dicer deployments running in remote clusters (e.g. clients running
+  // in the dataplane connecting to Dicer running in the region's GENERAL clusters). For targets
+  // running in the same cluster as the Dicer service, this is optional, and if not supplied, is
+  // assumed by the Assigner to be in the local cluster.
+  //
+  // See `com.databricks.dicer.external.Target.clusterOpt` for detailed documentation.
+  optional string kubernetes_cluster_uri = 2;
+
+  // OPTIONAL: The instance identifier of the Dicer-sharded service. This distinguishes the target
+  // instance from other instances with the same target name. This field must be set by targets
+  // with type `APP`.
+  optional string instance_id = 4;
+}
+
 // Request sent by the Clerk or the Slicelet (Subscriber) to watch for changing assignments.
 message ClientRequestP {
   option (scalapb.message).extends = "com.databricks.rpc.RPC[ClientResponseP]";
@@ -266,58 +300,8 @@ message ClientRequestP {
   // Removed fields.
   reserved 7, 8, 10;
 
-  // Identify the sharded set of resources whose assignment is being watched. This is a logical name
-  // that all the involved Slicelets and Clerks need to agree on.
+  // The target identifying the sharded set of resources whose assignment is being watched.
   optional TargetP target = 1;
-  // Note: If we change this proto, we need to change the corresponding proto in the logs package.
-  // `LoggedTargetP` is present in `proto/logs/caching/caching_team_log.proto`.
-  message TargetP {
-    // The name of the Dicer-sharded service as defined in <internal link>, e.g.,
-    // "softstore-storelet".
-    //
-    // See `com.databricks.dicer.external.Target.name` for detailed documentation.
-    optional string name = 1;
-
-    // Types of a Target.
-    enum Type {
-      TYPE_UNSPECIFIED = 0;
-
-      // A Kubernetes target is a type of Dicer target where instances are distinguished by the
-      // Kubernetes cluster where they are running. A Kubernetes target is limited to a single
-      // instance per cluster, and the cluster must remain stable throughout the target's lifetime.
-      // This target type applied to all targets before `APP` targets were introduced, as it was
-      // then assumed that a target name and cluster URI fully qualified a unique instance of a
-      // Dicer-sharded service.
-      //
-      // See `com.databricks.dicer.external.KubernetesTarget` for detailed documentation.
-      KUBERNETES = 1;
-
-      // An App target is a type of Dicer target where instances are distinguished by a unique
-      // application instance identifier (see https://go/app-identifiers).
-      //
-      // See `com.databricks.dicer.external.AppTarget` for detailed documentation.
-      APP = 2;
-    }
-
-    // The type of the Dicer-sharded service. If the field is not set, the behavior is equivalent to
-    // as if it is set to TYPE_UNSPECIFIED.
-    optional Type target_type = 3;
-
-    // OPTIONAL: The URI of the Kubernetes cluster where the Dicer-sharded service is running, e.g.,
-    // "kubernetes-cluster:test-env/cloud1/public/region8/clustertype2/01". This field must be set for KUBERNETES
-    // targets when connecting to Dicer deployments running in remote clusters (e.g. clients running
-    // in the dataplane connecting to Dicer running in the region's GENERAL clusters). For targets
-    // running in the same cluster as the Dicer service, this is optional, and if not supplied, is
-    // assumed by the Assigner to be in the local cluster.
-    //
-    // See `com.databricks.dicer.external.Target.clusterOpt` for detailed documentation.
-    optional string kubernetes_cluster_uri = 2;
-
-    // OPTIONAL: The instance identifier of the Dicer-sharded service. This distinguishes the target
-    // instance from other instances with the same target name. This field must be set by targets
-    // with type `APP`.
-    optional string instance_id = 4;
-  }
 
   // The assignment state that the sender wants to sync with the receiver.
   optional SyncAssignmentStateP sync_assignment_state = 2;
@@ -379,7 +363,7 @@ message ClientRequestP {
     }
 
     // Globally unique identifier for the Slicelet incarnation for the current Slicelet.
-    optional SquidP squid = 4;
+    optional dicer.friend.SquidP squid = 4;
 
     // Aggregate load measurements over some time window on the Slice replica represented by
     // (`squid`, `SliceLoadP.slice`).
@@ -463,7 +447,7 @@ message ClientRequestP {
     // marked "recalled" in the assignment. The Slicelet may stop including a SQUID in this list
     // when the assignment indicates that the SQUID is "revoked" or when the SQUID no longer appears
     // in the assignment.
-    repeated SquidP released_squids = 9;
+    repeated dicer.friend.SquidP released_squids = 9;
 
     // Indicates to the Assigner that the resource from which a subslice assignment is transitioning
     // is being surrendered by the current owner.
@@ -533,7 +517,7 @@ message GetRecallStatusRequestP {
   optional string target_name = 1;
 
   // The SQUID for which lease status is requested.
-  optional SquidP squid = 2;
+  optional dicer.friend.SquidP squid = 2;
 
   // The latest assignment generation at which the Slicelet knows its SQUID lease had never been
   // recalled. This is generally the generation of the latest assignment in which the SQUID lease

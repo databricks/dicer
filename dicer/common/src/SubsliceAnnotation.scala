@@ -7,6 +7,7 @@ import com.databricks.dicer.common
 import com.databricks.dicer.common.Assignment.ResourceMap
 import com.databricks.dicer.common.SliceHelper.RichSlice
 import com.databricks.dicer.external.Slice
+import com.databricks.dicer.friend.Squid
 import com.databricks.caching.util.UnixTimeVersion
 
 /**

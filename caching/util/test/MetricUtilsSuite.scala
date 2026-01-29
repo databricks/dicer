@@ -324,6 +324,7 @@ class MetricUtilsSuite extends DatabricksTest with TestName {
     )
   }
 
+
   test("Change Tracker for Int") {
     // Test plan: Create a change tracker on top of an Int "counter". Verify that `change()`
     // returns the correct differences from the initial value as the counter changes.

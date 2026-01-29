@@ -14,7 +14,8 @@ import com.databricks.api.proto.dicer.common.{
   ClientRequestP,
   ClientResponseP,
   GenerationP,
-  SyncAssignmentStateP
+  SyncAssignmentStateP,
+  TargetP
 }
 import com.databricks.caching.util.TestUtils.{assertThrow, loadTestData}
 import com.google.protobuf.ByteString
@@ -104,7 +105,7 @@ class ClientRequestSuite extends DatabricksTest {
     // 1. client_feature_support is omitted entirely
     // 2. client_feature_support is present but empty (defaultInstance)
     val protoWithoutClientFeatureSupport = ClientRequestP(
-      target = Some(ClientRequestP.TargetP(name = Some("softstore"))),
+      target = Some(TargetP(name = Some("softstore"))),
       syncAssignmentState = Some(
         new SyncAssignmentStateP(
           state = SyncAssignmentStateP.State.KnownGeneration(

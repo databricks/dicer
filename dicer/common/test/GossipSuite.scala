@@ -10,7 +10,7 @@ import com.databricks.conf.Configs
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
 import com.databricks.dicer.common.TestSliceUtils._
 import com.databricks.dicer.external.{ResourceAddress, SliceKey, Slicelet, Target}
-import com.databricks.dicer.friend.SliceMap
+import com.databricks.dicer.friend.{SliceMap, Squid}
 import com.databricks.testing.DatabricksTest
 
 import com.databricks.dicer.assigner.config.InternalTargetConfig.{

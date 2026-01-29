@@ -168,34 +168,23 @@ class AssignerSuite extends DatabricksTest with TestName {
   private var stub: AssignmentServiceStub = _
   private val log = PrefixLogger.create(getClass, "")
 
+  /** A helper class for creating Watch stubs. */
+  private val watchStubHelper = new WatchStubHelper(
+    clientName = Project.DicerAssigner.name,
+    subscriberDebugName = "assigner-suite-test",
+    defaultWatchAddress = URI.create(s"http://localhost:${testEnv.getAssignerPort}"),
+    tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
+    watchFromDataPlane = false
+  )
   override def beforeAll(): Unit = {
     // Create a stub that can be used to communicate with the Assigner to get the assignment.
-    stub = WatchStubHelper.createWatchStub(
-      Project.DicerAssigner.name,
-      URI.create(s"http://localhost:${testEnv.getAssignerPort}"),
-      TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
-      watchFromDataPlane = false
-    )
+    stub = watchStubHelper.createWatchStub(redirectAddressOpt = None)
   }
 
   override def beforeEach(): Unit = {
     InternalTargetConfigMetrics.forTest.clearMetrics()
   }
 
-  /** Returns the metric value for the number of watch errors due to `target` being invalid. */
-  private def getNumTargetWatchErrorsForTarget(target: Target, error: WatchError.Value): Long = {
-    MetricUtils
-      .getMetricValue(
-        CollectorRegistry.defaultRegistry,
-        metric = "dicer_assigner_num_watch_errors_total",
-        labels = Map(
-          "targetCluster" -> target.getTargetClusterLabel,
-          "targetName" -> target.getTargetNameLabel,
-          "reason" -> error.toString
-        )
-      )
-      .toLong
-  }
 
   test("backend returns the correct test result") {
     // Test plan: call the watch RPC and verify that the returned assignment is the expected value.
@@ -228,11 +217,8 @@ class AssignerSuite extends DatabricksTest with TestName {
     // timeout so that the WatchCell is created at the Assigner due to this request - but no
     // assignment is returned since it has not been set yet.
     val shortTimeout = 1.second
-    val stub2 = WatchStubHelper.createWatchStub(
-      "test1",
-      URI.create(s"http://localhost:${testEnv.getAssignerPort}"),
-      TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
-      watchFromDataPlane = false
+    val stub2: AssignmentServiceStub = watchStubHelper.createWatchStub(
+      Some(URI.create(s"http://localhost:${testEnv.getAssignerPort}"))
     )
 
     // Send the request with a short timeout and let the assigner return an empty assignment.
@@ -340,11 +326,8 @@ class AssignerSuite extends DatabricksTest with TestName {
 
     // Create a local test environment with default target configs disabled.
     val localTestEnv = InternalDicerTestEnvironment.create(withDefaultTargetConfig = false)
-    val localStub: AssignmentServiceStub = WatchStubHelper.createWatchStub(
-      Project.DicerAssigner.name,
-      URI.create(s"http://localhost:${localTestEnv.getAssignerPort}"),
-      TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
-      watchFromDataPlane = false
+    val localStub: AssignmentServiceStub = watchStubHelper.createWatchStub(
+      Some(URI.create(s"http://localhost:${localTestEnv.getAssignerPort}"))
     )
 
     val target = targetFactory(getSafeName)

@@ -41,6 +41,11 @@ class EtcdPreferredAssignerDriver(
    */
   private val preferredAssignerConfigWatchCell = new WatchValueCell[PreferredAssignerConfig]()
 
+  /** A helper class for creating PreferredAssigner stubs. */
+  private val preferredAssignerServerHelper = new PreferredAssignerServerHelper(
+    assignerTlsOptionsOpt
+  )
+
   /**
    * Keeps track of the heartbeat address and its corresponding stub, which is updated when the
    * preferred Assigner changes.
@@ -180,8 +185,8 @@ class EtcdPreferredAssignerDriver(
     val stub: PreferredAssignerServiceStub =
       if (heartbeatAddressAndStubOpt.isEmpty || heartbeatAddressAndStubOpt.get.address != address) {
         logger.info(s"Creating a heartbeat stub for address: $address")
-        val heartbeatStub =
-          PreferredAssignerServerHelper.createStub(address, assignerTlsOptionsOpt)
+        val heartbeatStub: PreferredAssignerServiceStub =
+          preferredAssignerServerHelper.createStub(address)
         heartbeatAddressAndStubOpt = Some(HeartbeatAddressAndStub(address, heartbeatStub))
         heartbeatStub
       } else {

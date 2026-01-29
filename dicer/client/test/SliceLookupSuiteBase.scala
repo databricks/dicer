@@ -39,12 +39,11 @@ import com.databricks.dicer.common.{
   ProposedSliceAssignment,
   Redirect,
   SliceSetImpl,
-  Squid,
   SyncAssignmentState,
   TestAssigner
 }
 import com.databricks.dicer.external.Target
-import com.databricks.dicer.friend.SliceMap
+import com.databricks.dicer.friend.{SliceMap, Squid}
 import com.databricks.rpc.testing.TestTLSOptions
 import com.databricks.rpc.tls.TLSOptions
 import com.databricks.testing.DatabricksTest
@@ -156,11 +155,15 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
    * Creates and starts a [[SliceLookup]] connecting to `testAssigner`. Supplies the lookup and a
    * callback registered with the lookup to the given `func`. Cancels the callbacks and lookup after
    * the function returns. Other parameters are used for the lookup's [[InternalClientConfig]].
+   *
+   * @param protoLoggerConf the proto logger configuration. Defaults to a test conf with 0% sampling
+   *                        (logging disabled). Tests that want to verify logging should pass a
+   *                        [[TestableDicerClientProtoLoggerConf]] with the desired sample fraction.
    */
   protected def withLookup(
       testAssigner: TestAssigner,
       watchStubCacheTime: FiniteDuration = 20.seconds,
-      assignmentLatencySampleFraction: Double = 0)(
+      protoLoggerConf: DicerClientProtoLoggerConf = TestableDicerClientProtoLoggerConf.create())(
       func: (SliceLookupDriver, LoggingStreamCallback[Assignment]) => Unit): Unit
 
   /**
@@ -169,22 +172,18 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
    */
   protected def createInternalClientConfig(
       clientType: ClientType,
-      debugName: String,
       assignerPort: Int,
-      watchStubCacheTime: FiniteDuration,
-      assignmentLatencySampleFraction: Double = 0): InternalClientConfig = {
+      watchStubCacheTime: FiniteDuration): InternalClientConfig = {
     val scheme: String = if (useSsl) "https" else "http"
     InternalClientConfig(
       clientType,
-      debugName,
       watchAddress = new URI(s"$scheme://localhost:$assignerPort"),
       tlsOptionsOpt = if (useSsl) TestTLSOptions.clientTlsOptionsOpt else None,
       target,
       watchStubCacheTime,
       watchRpcTimeout = LOW_RPC_TIMEOUT,
       watchFromDataPlane = watchFromDataPlane,
-      rejectWatchRequestsOnFatalTargetMismatch = true,
-      assignmentLatencySampleFraction = assignmentLatencySampleFraction
+      enableRateLimiting = false
     )
   }
 
@@ -1027,5 +1026,4 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
         assert(finalSum > initialSum, "Histogram sum should increase")
     }
   }
-
 }

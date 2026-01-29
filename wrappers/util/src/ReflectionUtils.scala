@@ -1,7 +1,5 @@
 package com.databricks.backend.common.reflection
 
-import scala.util.control.NonFatal
-
 /** Provides a single utility method that safely extracts the simple name of a Scala/Java class. */
 object ReflectionUtils {
 

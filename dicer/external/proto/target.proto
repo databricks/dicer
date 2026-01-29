@@ -184,7 +184,7 @@ message LoadBalancingMetricConfigP {
     // Default, recommended configuration. A negligible reservation amounting to 1% of
     // `max_load_hint` per pod is used, purely to ensure that for sparsely loaded services (as is
     // typical during ramp-up of Dicer), Dicer has some means of distributing reserved load amongst
-    // pods. See go/<internal bug> for instance, in which the lack of reported load meant that Dicer
+    // pods. See <internal link> for instance, in which the lack of reported load meant that Dicer
     // assigned all Slices to 1 of 17 pods.
     // TODO(<internal bug>) rename MINIMAL_RESERVATION
     NO_RESERVATION = 0;

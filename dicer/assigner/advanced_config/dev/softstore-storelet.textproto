@@ -1,4 +1,4 @@
-# proto-file: dicer/common/proto/advanced_target_config.proto
+# proto-file: dicer/assigner/config/proto/advanced_target_config.proto
 # proto-message: AdvancedTargetConfigP
 
 default_config {

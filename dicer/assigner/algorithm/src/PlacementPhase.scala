@@ -4,17 +4,7 @@ import scala.collection.mutable
 import scala.concurrent.duration._
 
 import com.databricks.caching.util.PrefixLogger
-import com.databricks.dicer.assigner.algorithm.Algorithm.{
-  Config,
-  MAX_AVG_SLICE_REPLICAS,
-  MIN_AVG_SLICE_REPLICAS
-}
-import com.databricks.dicer.assigner.algorithm.PlacementPhase.{
-  EMPTY_RESOURCE_PENALTY_MULTIPLIER,
-  OVERSHOOT_PENALTY_COEFFICIENT,
-  PLACEMENT_TIMEOUT,
-  UNDERSHOOT_PENALTY_COEFFICIENT
-}
+import com.databricks.dicer.assigner.algorithm.Algorithm.{Config, MIN_AVG_SLICE_REPLICAS}
 import com.databricks.dicer.common.TargetHelper.TargetOps
 
 /**

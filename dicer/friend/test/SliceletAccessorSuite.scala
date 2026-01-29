@@ -13,7 +13,6 @@ import com.databricks.dicer.common.{
   InternalDicerTestEnvironment,
   ProposedSliceAssignment,
   SliceAssignment,
-  Squid,
   TestAssigner
 }
 import com.databricks.dicer.external.{ResourceAddress, Slice, Slicelet, Target}

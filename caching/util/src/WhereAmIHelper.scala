@@ -6,14 +6,15 @@ import scala.util.control.NonFatal
 import java.net.URI
 
 /**
- * Utility object that supplies information on where the current process is running.
+ * Utility object that supplies information on which Kubernetes cluster the current process is
+ * running in, to enable Dicer sharding of a target running in a different cluster from the
+ * Assigner.
  *
  * IMPORTANT NOTE: As of writing (2024/12/07) this relies on the presence of the `LOCATION`
  * environment variable which is still being rolled out everywhere, and currently only guaranteed to
  * be populated for services defined using standard frameworks (relying on k8sconfig and/or
  * servicecfg). For services that have a hard dependency on WhereAmI support, it is recommended to
- * add a lint check for your service configuration on the presence of `LOCATION` (see
- * `locationEnvVar` in kubernetes/linter/rules/core/rules.go).
+ * add a lint check for your service configuration on the presence of `LOCATION`.
  */
 object WhereAmIHelper {
 

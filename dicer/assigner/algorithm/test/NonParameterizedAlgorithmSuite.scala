@@ -27,13 +27,12 @@ import com.databricks.dicer.common.{
   ProposedSliceAssignment,
   SliceAssignment,
   SliceMapHelper,
-  Squid,
   SubsliceAnnotation
 }
 import com.databricks.dicer.common.SliceKeyHelper.RichSliceKey
 import com.databricks.dicer.common.TestSliceUtils._
 import com.databricks.dicer.external.{Slice, SliceKey, Target}
-import com.databricks.dicer.friend.{MutableSliceMap, SliceMap}
+import com.databricks.dicer.friend.{MutableSliceMap, SliceMap, Squid}
 
 /** Tests which are not parameterized over different key replication configs. */
 class NonParameterizedAlgorithmSuite extends AlgorithmSuiteBase {

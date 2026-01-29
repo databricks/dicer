@@ -9,7 +9,7 @@ import com.databricks.dicer.common.ProposedAssignment.{
 }
 import com.databricks.dicer.common.SliceHelper.RichSlice
 import com.databricks.dicer.external.Slice
-import com.databricks.dicer.friend.{MutableSliceMap, SliceMap}
+import com.databricks.dicer.friend.{MutableSliceMap, SliceMap, Squid}
 import com.databricks.caching.util.UnixTimeVersion
 
 /**

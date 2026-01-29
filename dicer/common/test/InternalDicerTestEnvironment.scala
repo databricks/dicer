@@ -4,12 +4,15 @@ import com.databricks.caching.util.TestUtils
 import com.databricks.caching.util.{
   ConfigScope,
   EtcdTestEnvironment,
+  SequentialExecutionContext,
   SequentialExecutionContextPool
 }
+import com.databricks.rpc.armeria.ReadinessProbeTracker
+import com.databricks.common.status.ProbeStatuses
 import java.util.concurrent.locks.ReentrantLock
 import javax.annotation.concurrent.GuardedBy
 
-import scala.collection.mutable
+import scala.collection.{Seq, mutable}
 import scala.collection.mutable.ArrayBuffer
 import scala.concurrent.Future
 
@@ -27,10 +30,21 @@ import com.databricks.dicer.assigner.{
 }
 import com.databricks.dicer.client.{TestClientUtils, TlsFilePaths}
 import com.databricks.dicer.common.InternalDicerTestEnvironment.initializeEtcdNamespaces
-import com.databricks.dicer.external.{Clerk, ClerkConf, ResourceAddress, Slicelet, Target}
-import com.databricks.dicer.friend.SliceMap
+import com.databricks.dicer.external.{
+  Clerk,
+  ClerkConf,
+  HighSliceKey,
+  ResourceAddress,
+  Slice,
+  SliceKey,
+  Slicelet,
+  Target
+}
+import com.databricks.dicer.friend.{SliceMap, Squid}
 import com.databricks.caching.util.Lock.withLock
 import java.net.URI
+import java.time.Instant
+import java.util.UUID
 
 import scala.concurrent.duration.Duration
 
@@ -399,6 +413,16 @@ class InternalDicerTestEnvironment private (
   }
 
   /**
+   * Creates a new [[SequentialExecutionContext]] from the test environment's pool.
+   *
+   * @param contextName The name for the execution context (for debugging).
+   * @return A new [[SequentialExecutionContext]] from the pool.
+   */
+  private[dicer] def createExecutionContext(contextName: String): SequentialExecutionContext = {
+    secPool.createExecutionContext(contextName)
+  }
+
+  /**
    * REQUIRES: There is exactly one test Assigner.
    *
    * Returns the sole test Assigner in the test environment.
@@ -553,6 +577,17 @@ object InternalDicerTestEnvironment {
       internalDicerTestEnvironment.addAssigner(config)
     }
 
+    // In tests, the only instance in which the [[ReadinessProbeTracker]] becomes ready is from an
+    // explicit call to [[ReadinessProbeTracker.updatePodStatusForTesting]]. We set the
+    // [[ReadinessProbeTracker]] to report ready by default to avoid test failures when Slicelets
+    // are configured to observe readiness status.
+    //
+    // Note: Tests using the external Slicelet factory method (like customer tests using
+    // [[DicerTestEnvironment]]) cannot set the readiness statuses for individual Slicelets, since
+    // [[ReadinessProbeTracker]] is a global singleton. Tests may update the reported status for all
+    // Slicelets if desired.
+    ReadinessProbeTracker.updatePodStatusForTesting(ProbeStatuses.OK_STATUS)
+
     internalDicerTestEnvironment
   }
 
@@ -560,5 +595,83 @@ object InternalDicerTestEnvironment {
   private def initializeEtcdNamespaces(etcd: EtcdTestEnvironment, conf: DicerAssignerConf): Unit = {
     etcd.initializeStore(Assigner.getAssignmentsEtcdNamespace(conf))
     etcd.initializeStore(Assigner.getPreferredAssignerEtcdNamespace(conf))
+  }
+
+  /** The address of the resource to which all unassigned keys are routed. */
+  private[dicer] val BLACKHOLE_RESOURCE: Squid = Squid(
+    ResourceAddress(URI.create("http://192.0.2.0:8080")),
+    creationTimeMillis = Instant.EPOCH.toEpochMilli,
+    new UUID(0, 0)
+  )
+
+  /**
+   * REQUIRES: No assignments can reference the same key or overlapping keys.
+   *
+   * Completes the input sorted [[ProposedSliceAssignment]]s. Any keys that have
+   * not been added will be assigned to http://192.0.2.0:8080, which is a black hole
+   * (documentation only) address.
+   *
+   * Unit tests in DicerTestEnvironmentSuite.
+   * Tested via DicerTestEnvironment.TestAssignment.build().
+   */
+  private[dicer] def sliceAssigmentsToSliceMap(
+      sliceAssignments: Seq[ProposedSliceAssignment]
+  ): SliceMap[ProposedSliceAssignment] = {
+    // Sort the slice assignments so that we can easily identify overlaps and fill gaps in the
+    // assignment.
+    val sorted: Seq[ProposedSliceAssignment] = sliceAssignments.sortBy {
+      sliceAssignment: ProposedSliceAssignment =>
+        sliceAssignment.slice
+    }
+    // Create slice assignments in a sorted array by iterating through the sorted slice
+    // assignments. All unassigned slices are mapped to BLACKHOLE_RESOURCE_ADDRESS.
+    //
+    // For example, given slice assignments:
+    //    [A,B)=>res0
+    //    [C,D)=>res1
+    //    [E,E\0)=>res0 # Singleton slice including just E
+    // The filled out assignment is:
+    //    ["",A)=>BLACKHOLE_RESOURCE
+    //    [A,B)=>res0
+    //    [B,C)=>BLACKHOLE_RESOURCE
+    //    [C,D)=>res1
+    //    [D,E)=>BLACKHOLE_RESOURCE
+    //    [E,E\0)=>res0
+    //    [E\0,∞)=>BLACKHOLE_RESOURCE
+    val completeSliceAssignments = Vector.newBuilder[ProposedSliceAssignment]
+    var previousHigh: HighSliceKey = SliceKey.MIN
+    for (sliceAssignment: ProposedSliceAssignment <- sorted) {
+      val low: SliceKey = sliceAssignment.slice.lowInclusive
+      previousHigh match {
+        case previousHigh: SliceKey if previousHigh < low =>
+          // Fill in gap between the previous Slice and the current Slice.
+          completeSliceAssignments += ProposedSliceAssignment(
+            Slice(previousHigh, low),
+            resources = Set(BLACKHOLE_RESOURCE),
+            primaryRateLoadOpt = None
+          )
+        case _ =>
+          if (previousHigh > low) {
+            throw new IllegalArgumentException(
+              s"Slices must not overlap: $previousHigh > $low"
+            )
+          }
+      }
+      completeSliceAssignments += sliceAssignment
+      previousHigh = sliceAssignment.slice.highExclusive
+    }
+    // Last slice high value must be ∞.
+    if (previousHigh.isFinite) {
+      val previousLow: SliceKey = previousHigh.asFinite
+      completeSliceAssignments += ProposedSliceAssignment(
+        Slice.atLeast(previousLow),
+        resources = Set(BLACKHOLE_RESOURCE),
+        primaryRateLoadOpt = None
+      )
+    }
+    val proposedAssignment: SliceMap[ProposedSliceAssignment] =
+      SliceMapHelper.ofProposedSliceAssignments(completeSliceAssignments.result())
+
+    proposedAssignment
   }
 }

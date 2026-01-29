@@ -8,7 +8,7 @@ import scala.util.Random
 import com.databricks.testing.DatabricksTest
 import com.databricks.dicer.common.TestSliceUtils._
 import com.databricks.dicer.external.{Slice, SliceKey}
-import com.databricks.dicer.friend.SliceMap
+import com.databricks.dicer.friend.{SliceMap, Squid}
 
 class AssignmentFormatterSuite extends DatabricksTest {
 

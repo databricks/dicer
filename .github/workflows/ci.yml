@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  # Run on all pull requests.
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6.0.1
+
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.18.0
+        with:
+          # Disable the cache to avoid any possibility of cache pollution, and since we don't expect
+          # very frequent commits.
+          cache-save: false
+
+      - name: Run tests
+        run: bazel test //...

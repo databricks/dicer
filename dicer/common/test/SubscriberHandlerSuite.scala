@@ -62,13 +62,10 @@ class SubscriberHandlerSuite extends DatabricksTest with TestName {
      * @param handlerTarget the [[Target]] for the handler, defaulted to [[target]].
      * @param handlerLocation the location of the handler, defaulted to Assigner. Tests that
      *                        care about the handler location should explicitly set this.
-     * @param rejectRequestsOnFatalTargetMismatch whether to reject requests with a fatal target
-     *                                            mismatch. Defaults to true.
      */
     def apply(
         handlerTarget: Target = target,
-        handlerLocation: Location = Location.Assigner,
-        rejectRequestsOnFatalTargetMismatch: Boolean = true
+        handlerLocation: Location = Location.Assigner
     ): TestState = {
       val sec = FakeSequentialExecutionContext.create(getSafeName)
       val cell = new AssignmentValueCell
@@ -77,8 +74,7 @@ class SubscriberHandlerSuite extends DatabricksTest with TestName {
         handlerTarget,
         getSuggestedClerkRpcTimeoutFn = () => TIMEOUT,
         suggestedSliceletRpcTimeout = TIMEOUT,
-        handlerLocation,
-        rejectRequestsOnFatalTargetMismatch
+        handlerLocation
       )
       TestState(sec, cell, handler)
     }
@@ -768,33 +764,6 @@ class SubscriberHandlerSuite extends DatabricksTest with TestName {
     }
 
     assert(exception.getStatus.getCode == Status.NOT_FOUND.getCode)
-  }
-
-  // TODO(<internal bug>): Move this test to ScalaSubscriberHandlerSuiteBase. This test is not exercised
-  //  by Rust subscriber handler since the Rust implementation has a more restrictive policy where
-  //  fatal target mismatches always result in errors.
-  test("Fatal target mismatch gets assignment when config allows it") {
-    // Test plan: verify that when configured to allow fatal target mismatches, a SubscriberHandler
-    // still returns a known assignment to a requester, even when the requester's target does
-    // not match that of the handler.
-    val state =
-      TestState(handlerLocation = Location.Slicelet, rejectRequestsOnFatalTargetMismatch = false)
-    val assignment = createRandomAssignment(9, Vector("pod0", "pod1"))
-    state.cell.setValue(assignment)
-    val otherTarget = Target("other-name")
-    val request = createClientRequest(Generation.EMPTY, ClerkData, "subscriber1")
-      .copy(target = otherTarget)
-
-    val responseP: Future[ClientResponseP] =
-      state.handler.handleWatch(createRPCContext(), request, state.cell)
-
-    val response = ClientResponse.fromProto(TestUtils.awaitResult(responseP, Duration.Inf))
-    response.syncState match {
-      case SyncAssignmentState.KnownAssignment(diffAssignment: DiffAssignment) =>
-        assertResult(assignment.toDiff(Generation.EMPTY))(diffAssignment)
-      case SyncAssignmentState.KnownGeneration(_: Generation) =>
-        fail()
-    }
   }
 
   // TODO(<internal bug>): Implement load shedding in Rust subscriber handler and move this test to

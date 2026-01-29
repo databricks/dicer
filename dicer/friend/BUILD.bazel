@@ -15,9 +15,9 @@ scala_library(
     srcs = ["src/SliceletAccessor.scala"],
     visibility = ["//visibility:public"],
     deps = [
+        ":squid",
         ":state_transfer_common",
         "//dicer/client:slicelet_impl",
-        "//dicer/common:squid",
         "//dicer/external:slicelet",
     ],
 )
@@ -54,5 +54,22 @@ scala_library(
     deps = [
         "//dicer/external:external_common",
         "@maven//:com_google_guava_guava",
+    ],
+)
+
+scala_library(
+    name = "squid",
+    srcs = ["src/Squid.scala"],
+    visibility = ["//dicer:internal"],
+    deps = [
+        "//caching/util:typed_clock",
+        "//dicer/common/proto:common_proto_scala_lib",
+        "//dicer/external:external_common",
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_guava_guava",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
     ],
 )

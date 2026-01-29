@@ -10,6 +10,7 @@ import scala.concurrent.duration._
 
 import org.apache.commons.text.StringEscapeUtils
 
+import com.databricks.caching.util.AssertionWaiter
 import com.databricks.caching.util.SequentialExecutionContext
 import com.databricks.caching.util.TestUtils
 import com.databricks.caching.util.TestUtils.TestName
@@ -26,7 +27,6 @@ import com.databricks.dicer.common.{
   TestSliceUtils
 }
 import com.databricks.dicer.external.{Slice, Target}
-import com.databricks.rpc.testing.TestTLSOptions
 import com.databricks.testing.DatabricksTest
 
 class ClientSlicezSuite extends DatabricksTest with TestName {
@@ -242,53 +242,56 @@ class ClientSlicezSuite extends DatabricksTest with TestName {
   test("ClientSlicez register and unregister") {
     // Test plan: Verify that ClientSlicez correctly handles exporter registration and
     // unregistration by checking that `ClientSlicez.getData` includes the subscriberDebugName when
-    // the exporter is registered, and excludes it after it is unregistered.
+    // the exporter is registered, and excludes it after it is unregistered. Note that the lookup
+    // will fail to connect to the non-existent server in the background, but this test only
+    // verifies the registration/unregistration behavior.
     val subscriberDebugName: String = getSafeName
 
     // Setup: Create an exporter (SliceLookup) with the `subscriberDebugName`.
     val config: InternalClientConfig =
       InternalClientConfig(
         ClientType.Clerk,
-        subscriberDebugName = subscriberDebugName,
-        // Don't start
         watchAddress = WATCH_ADDRESS,
-        tlsOptionsOpt = TestTLSOptions.clientTlsOptionsOpt,
+        tlsOptionsOpt = None,
         TARGET,
         watchStubCacheTime = 20.seconds,
         watchFromDataPlane = false,
-        rejectWatchRequestsOnFatalTargetMismatch = true,
-        assignmentLatencySampleFraction = 0
+        enableRateLimiting = false
       )
     val protoLogger: DicerClientProtoLogger = DicerClientProtoLogger.create(
+      conf = DicerClientProtoLoggerConf,
       ClientType.Clerk,
       subscriberDebugName,
-      keySampleFraction = 0.0,
       sec
     )
-    val exporter: ClientTargetSlicezDataExporter =
+    val exporter: SliceLookup =
       SliceLookup.createUnstarted(
         sec,
         config,
-        () => ClerkData,
+        subscriberDebugName,
         protoLogger,
         serviceBuilderOpt = None
       )
+    // Setup: Start the lookup and register it to the ClientSlicez.
+    exporter.start(() => ClerkData)
 
-    // Setup: Register the exported to the `ClientSlicez`.
-    ClientSlicez.register(exporter)
-    // Verify: Verify that the `ClientSlicez.getData` includes the `subscriberDebugName`.
-    val clientSlicezData1: Seq[ClientTargetSlicezData] =
-      TestUtils.awaitResult(ClientSlicez.forTest.getData, Duration.Inf)
-    assert(clientSlicezData1.exists { targetSlicezData: ClientTargetSlicezData =>
-      targetSlicezData.subscriberDebugName == subscriberDebugName
-    })
-    // Setup: Unregister the exported to the `ClientSlicez`.
-    ClientSlicez.unregister(exporter)
-    // Verify: Verify that the `ClientSlicez.getData` doesn't include the `subscriberDebugName`.
-    val clientSlicezData2: Seq[ClientTargetSlicezData] =
-      TestUtils.awaitResult(ClientSlicez.forTest.getData, Duration.Inf)
-    assert(!clientSlicezData2.exists { targetSlicezData: ClientTargetSlicezData =>
-      targetSlicezData.subscriberDebugName == subscriberDebugName
-    })
+    // Verify: Wait for the lookup to be registered in ClientSlicez.
+    AssertionWaiter("Wait for the lookup to be registered").await {
+      val clientSlicezData1: Seq[ClientTargetSlicezData] =
+        TestUtils.awaitResult(ClientSlicez.forTest.getData, Duration.Inf)
+      assert(clientSlicezData1.exists { targetSlicezData: ClientTargetSlicezData =>
+        targetSlicezData.subscriberDebugName == subscriberDebugName
+      })
+    }
+    // Setup: Cancel the lookup to stop it and unregister it from the ClientSlicez.
+    exporter.cancel()
+    // Verify: Wait for the lookup to be unregistered from ClientSlicez.
+    AssertionWaiter("Wait for the lookup to be unregistered").await {
+      val clientSlicezData2: Seq[ClientTargetSlicezData] =
+        TestUtils.awaitResult(ClientSlicez.forTest.getData, Duration.Inf)
+      assert(!clientSlicezData2.exists { targetSlicezData: ClientTargetSlicezData =>
+        targetSlicezData.subscriberDebugName == subscriberDebugName
+      })
+    }
   }
 }

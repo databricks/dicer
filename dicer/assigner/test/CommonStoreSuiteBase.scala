@@ -28,11 +28,10 @@ import com.databricks.dicer.common.{
   Incarnation,
   ProposedAssignment,
   ProposedSliceAssignment,
-  SliceMapHelper,
-  Squid
+  SliceMapHelper
 }
 import com.databricks.dicer.external.Target
-import com.databricks.dicer.friend.SliceMap
+import com.databricks.dicer.friend.{SliceMap, Squid}
 import com.databricks.testing.DatabricksTest
 
 /**

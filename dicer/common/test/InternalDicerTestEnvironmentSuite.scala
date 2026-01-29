@@ -27,7 +27,7 @@ import com.databricks.dicer.common.TestAssigner.AssignerReplyType
 import com.databricks.dicer.common.TestSliceUtils._
 import com.databricks.dicer.common.Version.LATEST_VERSION
 import com.databricks.dicer.external.{Clerk, ResourceAddress, SliceKey, Slicelet, Target}
-import com.databricks.dicer.friend.SliceMap
+import com.databricks.dicer.friend.{SliceMap, Squid}
 import com.databricks.testing.DatabricksTest
 import java.net.URI
 

@@ -1,6 +1,6 @@
 package com.databricks.dicer.common
 
-import com.databricks.api.proto.dicer.common.ClientRequestP.TargetP
+import com.databricks.api.proto.dicer.common.TargetP
 import com.databricks.caching.util.TestUtils
 import com.databricks.caching.util.TestUtils.{assertThrow, loadTestData}
 import com.databricks.dicer.common.TargetHelper.TargetOps

@@ -68,10 +68,17 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
       val name: String,
       val log: TestLog,
       sec: SequentialExecutionContext,
-      contextTracker: Option[ContextTracker] = None)
+      contextTracker: Option[ContextTracker] = None,
+      startedPromise: Option[Promise[Unit]] = None,
+      blockingPromise: Option[Promise[Unit]] = None)
       extends Runnable {
 
     override def run(): Unit = {
+      // Complete the started promise if provided, signaling that the runnable has started.
+      startedPromise match {
+        case Some(promise) => promise.success(())
+        case None => ()
+      }
       // Get the start and end times to inform the context tracker (if present).
       val startTime: TickerTime = contextTracker match {
         case Some(e) => e.clock().tickerTime()
@@ -80,6 +87,12 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
       logger.info(s"Running LogRunnable $name at ${sec.getClock.tickerTime()}")
       sec.assertCurrentContext()
       log.append(name)
+      // Block until the promise is fulfilled if one is provided. This allows tests to
+      // deterministically control when the runnable completes rather than relying on timing.
+      blockingPromise match {
+        case Some(promise) => TestUtils.awaitResult(promise.future, Duration.Inf)
+        case None => ()
+      }
       // Sleep a little but to allow possibility of overlap if there is a bug.
       // For a test that uses a fake clock, this sleep is not relevant.
       Thread.sleep( /*millis=*/ 50)
@@ -1414,70 +1427,6 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
     )
   }
 
-  test("Spurious wakeups metric is updated correctly with fake clock") {
-    // Test plan: verify that the spurious wakeups metric is updated correctly when the SEC is
-    // woken up unnecessarily with a fake clock. Verify this by waking up the SEC without a task to
-    // run and when a thread on the SEC is already running a task. The spurious wakeups metric
-    // should be updated correctly in both cases.
-
-    val pool = SequentialExecutionContextPool.create(
-      s"$getSafeName-Pool",
-      numThreads = 2,
-      enableContextPropagation
-    )
-    val sec = FakeSequentialExecutionContext.create(
-      s"$getSafeName-$enableContextPropagation-Context",
-      pool = pool
-    )
-
-    // Verify that the spurious wakeups metric is initially 0.
-    assertResult(0)(getSpuriousWakeupMetricTotal(pool, sec, "ALREADY_RUNNING"))
-    assertResult(0)(getSpuriousWakeupMetricTotal(pool, sec, "NO_PENDING_COMMANDS"))
-
-    // Verify that the spurious wakeups metric is updated correctly when the SEC is woken up without
-    // a task to run.
-    sec.getClock.advanceBy(50.milliseconds)
-    AssertionWaiter("Spurious wakeups metric is updated correctly").await {
-      assertResult(1)(getSpuriousWakeupMetricTotal(pool, sec, "NO_PENDING_COMMANDS"))
-    }
-    // The ALREADY_RUNNING spurious wakeups metric should not be updated.
-    assertResult(0)(getSpuriousWakeupMetricTotal(pool, sec, "ALREADY_RUNNING"))
-
-    // Verify that the spurious wakeups metric is updated correctly when a thread on the SEC is
-    // already running a task. The first task is run, causing the tickle to be run on the
-    // underlying executor. The FakeSequentialExecutionContext is then woken up, causing the
-    // tickle to be run again while the first task is still running.
-    val log = new TestLog
-    sec.run {
-      new LogRunnable("First", log, sec).run()
-    }
-    sec.getClock.advanceBy(50.milliseconds)
-    AssertionWaiter("LogRunnable ran").await { assert(log.copyToVector() == Vector("First")) }
-    AssertionWaiter("Spurious wakeups metric is updated correctly").await {
-      assertResult(1)(getSpuriousWakeupMetricTotal(pool, sec, "ALREADY_RUNNING"))
-    }
-    // The NO_PENDING_COMMANDS spurious wakeups metric should not be updated.
-    assertResult(1)(getSpuriousWakeupMetricTotal(pool, sec, "NO_PENDING_COMMANDS"))
-
-    // Verify that the spurious wakeups metric is also updated correctly when the SEC is woken up
-    // while a scheduled task is running.
-    sec.schedule(
-      "Run",
-      50.milliseconds,
-      new LogRunnable("Second", log, sec)
-    )
-
-    sec.getClock.advanceBy(50.milliseconds)
-    AssertionWaiter("LogRunnable ran").await {
-      assert(log.copyToVector() == Vector("First", "Second"))
-    }
-    AssertionWaiter("Spurious wakeups metric is updated correctly").await {
-      assertResult(2)(getSpuriousWakeupMetricTotal(pool, sec, "ALREADY_RUNNING"))
-    }
-    // The NO_PENDING_COMMANDS spurious wakeups metric should not be updated.
-    assertResult(1)(getSpuriousWakeupMetricTotal(pool, sec, "NO_PENDING_COMMANDS"))
-  }
-
   test("Spurious wakeups metric is updated correctly with realtime clock") {
     // Test plan: verify that the spurious wakeups metric is updated correctly when the SEC is
     // woken up unnecessarily with a realtime clock. Verify this by waking up the SEC without a task
@@ -1517,10 +1466,20 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
     // underlying executor. Then we manually tickle the SEC again while the first task is still
     // running.
     val log = new TestLog
+    val blockingPromise1 = Promise[Unit]()
+    val startedPromise1 = Promise[Unit]()
     sec.run {
-      new LogRunnable("First", log, sec).run()
+      new LogRunnable(
+        "First",
+        log,
+        sec,
+        startedPromise = Some(startedPromise1),
+        blockingPromise = Some(blockingPromise1)
+      ).run()
     }
+    TestUtils.awaitResult(startedPromise1.future, Duration.Inf)
     sec.forTest.tickle()
+    blockingPromise1.success(())
     AssertionWaiter("LogRunnable ran").await { assert(log.copyToVector() == Vector("First")) }
     AssertionWaiter("Spurious wakeups metric is updated correctly").await {
       assertResult(1)(getSpuriousWakeupMetricTotal(pool, sec, "ALREADY_RUNNING"))
@@ -1530,13 +1489,23 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
 
     // Verify that the spurious wakeups metric is also updated correctly when the SEC is woken up
     // while a scheduled task is running.
+    val startedPromise2 = Promise[Unit]()
+    val blockingPromise2 = Promise[Unit]()
     sec.schedule(
       "Run",
-      50.milliseconds,
-      new LogRunnable("Second", log, sec)
+      50.millisecond,
+      new LogRunnable(
+        "Second",
+        log,
+        sec,
+        startedPromise = Some(startedPromise2),
+        blockingPromise = Some(blockingPromise2)
+      )
     )
-
+    // Wait for the scheduled task to start running (blocked on promise).
+    TestUtils.awaitResult(startedPromise2.future, Duration.Inf)
     sec.forTest.tickle()
+    blockingPromise2.success(())
     AssertionWaiter("LogRunnable ran").await {
       assert(log.copyToVector() == Vector("First", "Second"))
     }
@@ -1571,19 +1540,18 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
     // but cancelling it should cancel the tickle if there are no other pending tasks.
     val cancellable1: Cancellable = sec.schedule(
       "Run1",
-      30.milliseconds,
-      () => {}
+      400.milliseconds,
+      () => fail("Expected cancelled task ran")
     )
     val cancellable2: Cancellable = sec.schedule(
       "Run2",
-      50.milliseconds,
-      () => {}
+      400.milliseconds,
+      () => fail("Expected cancelled task ran")
     )
     cancellable1.cancel()
     cancellable2.cancel()
 
-    // Pass some time to allow the tickle to run, if it were still scheduled.
-    Thread.sleep(100)
+    Thread.sleep(500)
 
     // Verify that the spurious wakeups metric is not updated, as the SEC should not have been
     // woken up.

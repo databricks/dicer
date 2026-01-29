@@ -373,8 +373,10 @@ abstract class BaseDicerTestEnvironmentSuite extends DatabricksTest with TestUti
       target,
       clerkConf = TestClientUtils.createTestDirectClerkConf(
         assignerPort = env.getAssignerPort,
-        clientTlsFilePathsOpt =
-          env.tlsFilePathsOpt.map(paths => TlsFilePaths(paths.keystorePath, paths.truststorePath))
+        clientTlsFilePathsOpt = env.tlsFilePathsConfigOpt.map(
+          config =>
+            TlsFilePaths(config.clientTlsPaths.keystorePath, config.clientTlsPaths.truststorePath)
+        )
       )
     )
 

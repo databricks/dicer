@@ -1,11 +1,11 @@
 package com.databricks.dicer.demo.client
 
-import scala.concurrent.{Await, ExecutionContext, Future}
+import scala.concurrent.{Await, Future}
 import scala.concurrent.duration._
 import scala.util.Random
 import scala.util.control.NonFatal
 
-import io.grpc.{Grpc, InsecureChannelCredentials, ManagedChannel, ManagedChannelBuilder}
+import io.grpc.{Grpc, InsecureChannelCredentials, ManagedChannelBuilder}
 
 import com.databricks.DatabricksMain
 import com.databricks.api.proto.dicer.demo.{
@@ -20,10 +20,9 @@ import com.databricks.api.proto.dicer.demo.{
 import com.databricks.backend.common.util.Project
 import com.databricks.caching.util.{PrefixLogger, ServerConf}
 import com.databricks.conf.Config
-import com.databricks.conf.trusted.{ProjectConf, RPCPortConf}
+import com.databricks.conf.trusted.ProjectConf
 import com.databricks.dicer.demo.common.DemoCommon
 import com.databricks.dicer.external.{Clerk, ClerkConf, ResourceAddress, SliceKey, Target}
-import com.databricks.rpc.SslArguments
 import com.databricks.rpc.tls.{TLSOptions, TLSOptionsMigration}
 
 /** Configuration for the demo client. */

@@ -330,8 +330,7 @@ object MetricUtils extends Assertions {
       !expectedBuckets.contains(Double.PositiveInfinity),
       "expectedBuckets must only have finite boundaries."
     )
-
-    val samples = getHistogramBucketSamples(registry, metric, labels)
+    val samples: Seq[Sample] = getHistogramBucketSamples(registry, metric, labels)
     if (samples.isEmpty) {
       assertResult(
         expected = 0,
@@ -343,7 +342,12 @@ object MetricUtils extends Assertions {
       assertResult(
         expectedBucketCounts,
         "Bucket counts in the histogram do not match the expected bucket counts."
-      )(bucketCounts)
+      )(
+        // HistogramGauge may not return samples in the bucket order. Sorting by value restores
+        // the bucket order because histogram bucket counts are cumulative (non-decreasing),
+        // so numerical order equals bucket order.
+        bucketCounts.sorted
+      )
 
       // Assert that the bucket boundaries are as expected.
       val bucketBoundaries = samples.map(sample => sample.getLabelValue("le")).toSet

@@ -28,11 +28,10 @@ import com.databricks.dicer.common.{
   SliceHelper,
   SliceWithResources,
   SliceletData,
-  Squid,
   TestSliceUtils
 }
 import com.databricks.dicer.external.{Slice, SliceKey, Target}
-import com.databricks.dicer.friend.SliceMap
+import com.databricks.dicer.friend.{SliceMap, Squid}
 import com.databricks.dicer.friend.SliceMap.GapEntry
 import com.databricks.dicer.client.SliceletLoadAccumulator.forTest.getSliceKeyLoadDistributionMetric
 import com.databricks.dicer.common.test.SimpleDiffAssignmentP.SimpleSliceAssignmentP

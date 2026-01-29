@@ -4,11 +4,6 @@ import scala.concurrent.duration._
 import com.databricks.caching.util.{SequentialExecutionContext, ValueStreamCallback}
 import com.databricks.conf.Configs
 import com.databricks.dicer.assigner.TestableDicerAssignerConf
-import com.databricks.dicer.assigner.config.{
-  InternalTargetConfig,
-  InternalTargetConfigMap,
-  TargetName
-}
 import com.databricks.testing.DatabricksTest
 
 import scala.util.Random

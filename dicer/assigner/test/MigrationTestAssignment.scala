@@ -8,6 +8,7 @@ import scala.language.implicitConversions
 import com.databricks.caching.util.RealtimeTypedClock
 import com.databricks.dicer.assigner.MigrationTestAssignment._
 import com.databricks.dicer.assigner.AssignmentStats.AssignmentLoadStats
+import com.databricks.dicer.assigner.algorithm.LoadMap
 import com.databricks.dicer.common.TestSliceUtils._
 import com.databricks.dicer.common.{
   Assignment,
@@ -15,12 +16,11 @@ import com.databricks.dicer.common.{
   Generation,
   SliceAssignment,
   SliceMapHelper,
-  Squid,
   SubsliceAnnotation,
   TestSliceUtils
 }
 import com.databricks.dicer.external.Slice
-import com.databricks.dicer.assigner.algorithm.LoadMap
+import com.databricks.dicer.friend.Squid
 import com.databricks.caching.util.UnixTimeVersion
 
 /*

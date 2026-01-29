@@ -164,7 +164,7 @@ object CachingErrorCode {
    *    versions.
    *
    * Please check the preferred assigner logs and the Etcd status for the exact cause, and follow
-   * go/disable-preferred-assigner to disable preferred assigner if necessary.
+   * <internal link> to disable preferred assigner if necessary.
    */
   case object PREFERRED_ASSIGNER_STORE_CORRUPTED extends CachingErrorCode {
     override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
@@ -262,6 +262,19 @@ object CachingErrorCode {
    */
   case object ASSIGNER_SLICE_AFTER_MERGE_TOO_HOT extends CachingErrorCode {
     override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
+  }
+
+  /**
+   * Indicates an internal invariant violation in
+   * [[com.databricks.dicer.client.AssignmentSyncStateMachine.ReadScheduler]]. This may cause watch
+   * requests to be sent more or less frequently than expected.
+   */
+  case object DICER_CLIENT_READ_SCHEDULER_ERROR extends CachingErrorCode {
+    // $COVERAGE-OFF$: This alert is used to indicate potential future invariant violation in
+    // `AssignmentSyncStateMachine.ReadScheduler`, and it cannot be triggered by the current code in
+    // tests.
+    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
+    // $COVERAGE-ON$
   }
 
 }

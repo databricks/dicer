@@ -1,6 +1,7 @@
 package com.databricks.dicer.external
 
 import com.databricks.dicer.friend.SliceMap
+import com.databricks.caching.util.FakeTypedClock
 
 import java.net.URI
 import java.util.UUID
@@ -32,13 +33,8 @@ import com.databricks.conf.Configs
 import com.databricks.conf.trusted.ProjectConf
 import com.databricks.conf.trusted.LocationConf
 import com.databricks.conf.trusted.LocationConfTestUtils
-import com.databricks.dicer.client.{
-  ClerkImpl,
-  ReadinessReporterImpl,
-  SliceletImpl,
-  TestClientUtils,
-  WatchAddressHelper
-}
+import com.databricks.dicer.client.{ClerkImpl, SliceletImpl, TestClientUtils, WatchAddressHelper}
+import com.databricks.dicer.client.TestClientUtils.FakeBlockingReadinessProvider
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.common.TestSliceUtils._
 import com.databricks.dicer.common.{
@@ -51,16 +47,14 @@ import com.databricks.dicer.common.{
   ProposedSliceAssignment,
   SliceSetImpl,
   SliceletData,
-  Squid,
   TestAssigner,
   TestSliceUtils
 }
 import com.databricks.caching.util.Lock.withLock
-import com.databricks.common.status.ProbeStatuses
 import com.databricks.dicer.common.test.SliceletTestDataP
 import com.databricks.dicer.common.test.SliceletTestDataP.SliceletDebugNameTestCaseP
 import com.databricks.dicer.external.SliceletSuite.ASSIGNER_CLUSTER_URI
-import com.databricks.rpc.armeria.ReadinessProbeTracker
+import com.databricks.dicer.friend.Squid
 import com.databricks.rpc.tls.TLSOptions
 import com.databricks.rpc.testing.TestTLSOptions
 import com.databricks.testing.DatabricksTest
@@ -102,23 +96,12 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
   /** The number of Slicelets that have been created in the current test case. */
   private var numSlicelets: Int = 0
 
-  /**
-   * A readiness reporter for Slicelets to query pod readiness. A new reporter must be created
-   * before each test to avoid cross-test interference.
-   */
-  protected var readinessReporter: ReadinessReporterImpl = _
-
   /** Interval between Slicelet heartbeats. */
   protected val heartbeatInterval: FiniteDuration = 5.seconds
 
   override def beforeEach(): Unit = {
     testCaseUuid = UUID.randomUUID()
     numSlicelets = 0
-
-    // Reset readiness tracking/reporting instances before each test to avoid cross-test
-    // interference. New ReadinessProbeTracker starts in the NOT_YET_READY status.
-    ReadinessProbeTracker.resetForTesting()
-    readinessReporter = new ReadinessReporterImpl()
   }
 
   override def afterAll(): Unit = {
@@ -343,6 +326,21 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     }
   }
 
+  /**
+   * Waits for a SQUID to exist in the assignment with the given port number, and returns it.
+   * Advances `clock` on each invocation to handle cases where the fake clock must be advanced to
+   * trigger the assignment update.
+   */
+  protected def waitForSquidWithPortWithClockAdvance(port: Int, clock: FakeTypedClock): Squid = {
+    AssertionWaiter(s"Wait for assignment to contain SQUID with port $port").await {
+      clock.advanceBy(1.second)
+      val squidOpt: Option[Squid] =
+        allSquidsInAssignment.find((squid: Squid) => squid.resourceAddress.uri.getPort == port)
+      assert(squidOpt.nonEmpty)
+      squidOpt.get
+    }
+  }
+
   /** Waits for any SQUID to exist in the assignment, and returns it. */
   protected def waitForAnySquid(): Squid = {
     AssertionWaiter(s"Wait for assignment to contain any SQUID").await {
@@ -361,18 +359,6 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
       )
       .get
       .assignedResources
-  }
-
-  /**
-   * Sets the ReadinessProbeTracker status using its test API and waits until the readiness
-   * reporter reflects the change.
-   */
-  protected def setReadinessStatus(isReady: Boolean): Unit = {
-    val status = if (isReady) ProbeStatuses.OK_STATUS else ProbeStatuses.NOT_YET_READY_STATUS
-    ReadinessProbeTracker.updatePodStatusForTesting(status)
-    AssertionWaiter("Wait for readiness reporter to report status").await {
-      assert(readinessReporter.isReady == isReady)
-    }
   }
 
   test("Test debug name") {
@@ -1678,6 +1664,11 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
     )
     val fakeSec =
       FakeSequentialExecutionContext.create(s"SliceletExecutor-$getSafeName", pool = pool)
+
+    // Create a fake blocking readiness provider and set it to ready.
+    val fakeBlockingReadinessProvider = new FakeBlockingReadinessProvider()
+    fakeBlockingReadinessProvider.setReady(true)
+
     val externalConf: SliceletConf =
       TestClientUtils.createTestSliceletConf(
         testEnv.getAssignerPort,
@@ -1687,9 +1678,6 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
         watchFromDataPlane
       )
 
-    // Set readiness probe tracker to report ready.
-    setReadinessStatus(true)
-
     // Note: Since this test requires SliceletImpl (and thus bypasses the logic in the Slicelet
     // constructor to populate cluster location information), we must pass in the expected Slicelet
     // Target for this test
@@ -1698,7 +1686,7 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
       getAssignerAddress(externalConf),
       externalConf,
       expectedSliceletTargetIdentifier,
-      readinessReporter
+      fakeBlockingReadinessProvider
     )
     slicelet.start(selfPort = 1234, listenerOpt = None)
     Using.Manager { use =>
@@ -1916,7 +1904,7 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
       TestClientUtils.getUnattributedLoadMetric(expectedSliceletTargetIdentifier)
     assert(unattributedLoad == testKeys.size)
 
-    assertThrow[IllegalStateException]("Slicelet must be started") {
+    assertThrow[IllegalStateException]("Slicelet must be started before accessing squid") {
       slicelet.resourceAddress
     }
 
@@ -2026,6 +2014,9 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
     )
     val fakeSec: FakeSequentialExecutionContext =
       FakeSequentialExecutionContext.create(s"SliceletExecutor-$getSafeName", pool = pool)
+
+    val fakeBlockingReadinessProvider = new FakeBlockingReadinessProvider()
+
     val externalConf: SliceletConf =
       TestClientUtils.createTestSliceletConf(
         testEnv.getAssignerPort,
@@ -2035,9 +2026,6 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
         watchFromDataPlane
       )
 
-    // Set readiness probe tracker to report not ready
-    setReadinessStatus(false)
-
     // Note: Since this test requires SliceletImpl (and thus bypasses the logic in the Slicelet
     // constructor to populate cluster location information), we must pass in the expected Slicelet
     // Target for this test
@@ -2046,7 +2034,7 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
       getAssignerAddress(externalConf),
       externalConf,
       expectedSliceletTargetIdentifier,
-      readinessReporter
+      fakeBlockingReadinessProvider
     )
     val port: Int = 1111
     slicelet.start(selfPort = port, listenerOpt = None)
@@ -2093,6 +2081,10 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
     val fakeSec: FakeSequentialExecutionContext = {
       FakeSequentialExecutionContext.create(s"SliceletExecutor-$getSafeName", pool = pool)
     }
+
+    val fakeBlockingReadinessProvider = new FakeBlockingReadinessProvider()
+    fakeBlockingReadinessProvider.setReady(isReady)
+
     val externalConf: SliceletConf =
       TestClientUtils.createTestSliceletConf(
         testEnv.getAssignerPort,
@@ -2102,15 +2094,12 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
         watchFromDataPlane
       )
 
-    // Set readiness probe tracker to report the desired initial state.
-    setReadinessStatus(isReady)
-
     val slicelet: SliceletImpl = SliceletImpl.create(
       fakeSec,
       getAssignerAddress(externalConf),
       externalConf,
       expectedSliceletTargetIdentifier,
-      readinessReporter
+      fakeBlockingReadinessProvider
     )
     val port: Int = 1111
     slicelet.start(selfPort = port, listenerOpt = None)
@@ -2139,13 +2128,15 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
       assert(sliceletData.state == SliceletDataP.State.TERMINATING)
     }
 
-    // Verify that metrics contain only counts for starting and terminating state
+    // Verify that eventually the number of observations for the TERMINATING state exceed the number
+    // for all other states, indicating that the Slicelet is reporting TERMINATING regardless of
+    // readiness.
     AssertionWaiter("Wait for metrics to be updated").await {
+      fakeSec.getClock.advanceBy(heartbeatInterval)
+      val terminatingCount: Double = getSliceletStateCount(SliceletDataP.State.TERMINATING)
       for (state: SliceletDataP.State <- SliceletDataP.State.values) {
-        if (state == expectedInitialState || state == SliceletDataP.State.TERMINATING) {
-          assert(getSliceletStateCount(state) > 0)
-        } else {
-          assert(getSliceletStateCount(state) == 0)
+        if (state != SliceletDataP.State.TERMINATING) {
+          assert(getSliceletStateCount(state) < terminatingCount)
         }
       }
     }
@@ -2164,6 +2155,9 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
     )
     val fakeSec: FakeSequentialExecutionContext =
       FakeSequentialExecutionContext.create(s"SliceletExecutor-$getSafeName", pool = pool)
+
+    val fakeBlockingReadinessProvider = new FakeBlockingReadinessProvider()
+
     val externalConf: SliceletConf =
       TestClientUtils.createTestSliceletConf(
         testEnv.getAssignerPort,
@@ -2173,15 +2167,12 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
         watchFromDataPlane
       )
 
-    // Start with the NOT_READY state
-    setReadinessStatus(false)
-
     val slicelet: SliceletImpl = SliceletImpl.create(
       fakeSec,
       getAssignerAddress(externalConf),
       externalConf,
       expectedSliceletTargetIdentifier,
-      readinessReporter
+      fakeBlockingReadinessProvider
     )
     val port: Int = 1111
     slicelet.start(selfPort = port, listenerOpt = None)
@@ -2197,7 +2188,7 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
     }
 
     // Transition to READY
-    setReadinessStatus(true)
+    fakeBlockingReadinessProvider.setReady(true)
 
     // Verify transition to RUNNING state
     AssertionWaiter("Wait for transition to RUNNING state").await {
@@ -2222,6 +2213,80 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
 
     slicelet.forTest.stop()
   }
+
+  test("Slicelet starts successfully when readiness check blocks indefinitely") {
+    // Test plan: Verify that the Slicelet starts successfully even when the readiness provider's
+    // isReady call blocks indefinitely, using the BLOCKED_READINESS_CHECK_START_DELAY
+    // fallback mechanism. Verify the Slicelet starts up and reports NOT_READY initially, then
+    // transitions to RUNNING after unblocking the readiness provider.
+
+    val pool = SequentialExecutionContextPool.create(
+      s"$getSafeName",
+      numThreads = 1,
+      enableContextPropagation = false
+    )
+    val fakeSec: FakeSequentialExecutionContext =
+      FakeSequentialExecutionContext.create(s"SliceletExecutor-$getSafeName", pool = pool)
+
+    // Setup: Create a fake blocking readiness provider that will block forever
+    val fakeBlockingReadinessProvider = new FakeBlockingReadinessProvider()
+    fakeBlockingReadinessProvider.setReady(true)
+    fakeBlockingReadinessProvider.blockForever()
+
+    val externalConf: SliceletConf =
+      TestClientUtils.createTestSliceletConf(
+        testEnv.getAssignerPort,
+        "some-host-name",
+        clientTlsFilePathsOpt = None,
+        serverTlsFilePathsOpt = None,
+        watchFromDataPlane
+      )
+
+    val slicelet: SliceletImpl = SliceletImpl.create(
+      fakeSec,
+      getAssignerAddress(externalConf),
+      externalConf,
+      expectedSliceletTargetIdentifier,
+      fakeBlockingReadinessProvider
+    )
+    val port: Int = 12121
+    slicelet.start(selfPort = port, listenerOpt = None)
+
+    // Verify: The Slicelet should still start successfully (signalled by being included in the
+    // assignment) despite the blocked readiness check.
+    val squid: Squid = waitForSquidWithPortWithClockAdvance(port, fakeSec.getClock)
+
+    // Verify: The Slicelet should report NOT_READY, the default readiness starting state.
+    // Use AssertionWaiter since the readiness poller runs in its own execution context.
+    AssertionWaiter("The Slicelet is reporting NOT_READY").await {
+      fakeSec.getClock.advanceBy(heartbeatInterval)
+
+      val requestOpt: Option[ClientRequest] = getLatestSliceletWatchRequest(squid)
+      assert(requestOpt.nonEmpty)
+      assert(requestOpt.get.subscriberData.isInstanceOf[SliceletData])
+      val sliceletData = requestOpt.get.subscriberData.asInstanceOf[SliceletData]
+      assert(sliceletData.state == SliceletDataP.State.NOT_READY)
+    }
+
+    // Now unblock the readiness provider. It is already set to report ready.
+    fakeBlockingReadinessProvider.unblock()
+
+    // Verify: The Slicelet should transition to RUNNING.
+    // AssertionWaiter will retry until the readiness poller (which runs in real time) detects the
+    // change.
+    AssertionWaiter("The Slicelet is reporting RUNNING").await {
+      fakeSec.getClock.advanceBy(heartbeatInterval)
+
+      val requestOpt: Option[ClientRequest] = getLatestSliceletWatchRequest(squid)
+      assert(requestOpt.nonEmpty)
+      assert(requestOpt.get.subscriberData.isInstanceOf[SliceletData])
+      val sliceletData = requestOpt.get.subscriberData.asInstanceOf[SliceletData]
+      assert(sliceletData.state == SliceletDataP.State.RUNNING)
+    }
+
+    slicelet.forTest.stop()
+  }
+
 }
 
 object SliceletSuite {

@@ -67,6 +67,17 @@ private[dicer] object ClientMetrics {
     .labelNames("targetCluster", "targetName", "targetInstanceId", "clientType")
     .register()
 
+  private val numSliceLookupCacheHits: Counter = Counter
+    .build()
+    .name("dicer_client_num_slice_lookup_cache_hits_total")
+    .help(
+      "SliceLookup cache lookup results when creating clients. " +
+      "configMatched=true means an existing lookup was reused (cache hit with same config), " +
+      "configMatched=false means a new lookup was created due to config mismatch."
+    )
+    .labelNames("targetCluster", "targetName", "targetInstanceId", "configMatched")
+    .register()
+
   /**
    * Histogram buckets for assignment propagation latency in milliseconds.
    * Uses a growth factor of 1.4 in the range [1ms, 1s) and a growth factor of 2 beyond that
@@ -296,6 +307,24 @@ private[dicer] object ClientMetrics {
         clientType.getMetricLabel,
         status,
         grpcStatus
+      )
+      .inc()
+  }
+
+  /**
+   * Records a SliceLookup cache lookup result.
+   *
+   * @param target the target for which the cache lookup was performed
+   * @param configMatched true if an existing SliceLookup was reused (cache hit with matching
+   *                      config), false if a new SliceLookup was created due to config mismatch
+   */
+  private[client] def recordSliceLookupCacheResult(target: Target, configMatched: Boolean): Unit = {
+    numSliceLookupCacheHits
+      .labels(
+        target.getTargetClusterLabel,
+        target.getTargetNameLabel,
+        target.getTargetInstanceIdLabel,
+        configMatched.toString
       )
       .inc()
   }

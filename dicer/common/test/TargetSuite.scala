@@ -11,7 +11,7 @@ import com.databricks.infra.lib.InfraDataModel
 import com.databricks.testing.DatabricksTest
 import java.net.URI
 
-import com.databricks.api.proto.dicer.common.ClientRequestP.TargetP
+import com.databricks.api.proto.dicer.common.TargetP
 
 class TargetSuite extends DatabricksTest {
 

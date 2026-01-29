@@ -2,10 +2,22 @@ package com.databricks.dicer.client
 
 import java.net.URI
 import java.time.Instant
+import java.util.Random
+
 import scala.concurrent.duration._
+
 import io.grpc.Status
-import com.databricks.caching.util.{ExponentialBackoff, PrefixLogger}
-import com.databricks.caching.util.{StateMachine, StateMachineOutput, TickerTime}
+
+import com.databricks.caching.util.{
+  CachingErrorCode,
+  ExponentialBackoff,
+  PrefixLogger,
+  Severity,
+  StateMachine,
+  StateMachineOutput,
+  TickerTime,
+  TokenBucket
+}
 import com.databricks.dicer.client.AssignmentSyncStateMachine.{
   DriverAction,
   Event,
@@ -22,8 +34,6 @@ import com.databricks.dicer.common.{
   SyncAssignmentState,
   TargetHelper
 }
-
-import java.util.Random
 
 /**
  * The passive state machine controlling assignment syncing.
@@ -45,9 +55,16 @@ import java.util.Random
  *
  * @param config The internal configuration parameters used by the Clerk/Slicelet.
  * @param random An rng to add jitter to exponential backoff.
+ * @param subscriberDebugName The debug name shown in the log and string representation of the
+ *                            Clerk/Slicelet.
  */
-class AssignmentSyncStateMachine(config: InternalClientConfig, random: Random)
+class AssignmentSyncStateMachine(
+    config: InternalClientConfig,
+    random: Random,
+    subscriberDebugName: String)
     extends StateMachine[Event, DriverAction] {
+
+  private val logger = PrefixLogger.create(this.getClass, subscriberDebugName)
 
   /**
    * Whether the state machine has been cancelled. In this state, the state machine is effectively
@@ -81,9 +98,6 @@ class AssignmentSyncStateMachine(config: InternalClientConfig, random: Random)
    */
   private var latestReadStateOpt: Option[ReadState] = None
 
-  /** The next time a read/watch should be executed by the driver to the remote server. */
-  private var nextReadScheduleTime = TickerTime.MIN
-
   /**
    * Timeout for the Watch RPC. Initialized from the client config and updated every time a response
    * is received from the remote server.
@@ -97,14 +111,18 @@ class AssignmentSyncStateMachine(config: InternalClientConfig, random: Random)
    */
   private var redirectAddressOpt: Option[URI] = None
 
-  /** For exponential backoff when the Read call returns an error. */
-  private val backoff = new ExponentialBackoff(
-    random,
-    config.minRetryDelay,
-    config.maxRetryDelay
-  )
-
-  private val logger = PrefixLogger.create(this.getClass, config.subscriberDebugName)
+  /**
+   * Scheduler that determines when the next read request can occur, considering both backoff delays
+   * and rate limiting.
+   */
+  private val readScheduler =
+    new AssignmentSyncStateMachine.ReadScheduler(
+      config.enableRateLimiting,
+      random,
+      config.minRetryDelay,
+      config.maxRetryDelay,
+      logger
+    )
 
   override def onAdvance(
       tickerTime: TickerTime,
@@ -180,12 +198,16 @@ class AssignmentSyncStateMachine(config: InternalClientConfig, random: Random)
         watchRpcTimeout = response.suggestedRpcTimeout
       }
     } else {
+      // The latest read succeeded, so clear the read state, reset the failure backoff, and update
+      // the suggested RPC timeout.
       latestReadStateOpt = None
-      nextReadScheduleTime = now
-      backoff.reset()
+      readScheduler.resetBackoff()
       watchRpcTimeout = response.suggestedRpcTimeout
-      // Keep track of the latest generation known to the remote server.
+      // Also keep track of the latest generation known to the remote server.
       remoteServerKnownGeneration = RemoteKnownGeneration(responseAddressOpt, responseGeneration)
+      // Trigger the next read immediately.
+      readScheduler.scheduleNextRead(now = now, useBackoff = false)
+
     }
   }
 
@@ -280,9 +302,9 @@ class AssignmentSyncStateMachine(config: InternalClientConfig, random: Random)
     if (redirectAddressOpt.isDefined) {
       redirectAddressOpt = None
       // We are (likely) changing the server that we talk to, don't backoff in this case.
-      nextReadScheduleTime = now
+      readScheduler.scheduleNextRead(now = now, useBackoff = false)
     } else {
-      nextReadScheduleTime = now + backoff.nextDelay()
+      readScheduler.scheduleNextRead(now = now, useBackoff = true)
     }
   }
 
@@ -327,8 +349,9 @@ class AssignmentSyncStateMachine(config: InternalClientConfig, random: Random)
       // at or past the deadline.)
       val deadline: TickerTime = latestReadStateOpt.get.deadline
       outputBuilder.ensureAdvanceBy(deadline)
-    } else if (now >= nextReadScheduleTime) {
-      // No read is outstanding and we're due to start one.
+    } else if (readScheduler.tryAcquireReadPermission(now)) {
+      // No read is outstanding, we've reached the scheduled read time, and a token is acquired.
+      // We're due to send a watch request.
       lastOpId += 1
       val opId: Long = lastOpId
       val deadline: TickerTime = now + watchRpcTimeout
@@ -361,8 +384,8 @@ class AssignmentSyncStateMachine(config: InternalClientConfig, random: Random)
       )
       outputBuilder.ensureAdvanceBy(deadline)
     } else {
-      // No request is outstanding. Too early to schedule. Call back at the next Read schedule time.
-      outputBuilder.ensureAdvanceBy(nextReadScheduleTime)
+      // No request is outstanding. Too early to schedule. Call back at the scheduled read time.
+      outputBuilder.ensureAdvanceBy(readScheduler.getScheduledTime)
     }
     outputBuilder.build()
   }
@@ -373,7 +396,7 @@ class AssignmentSyncStateMachine(config: InternalClientConfig, random: Random)
      * Returns whether the syncer has received some errors and hence is in exponential backoff mode
      * w.r.t. communicating with the remote server.
      */
-    private[client] def isInBackoff: Boolean = backoff.forTest.isInBackoff
+    private[client] def isInBackoff: Boolean = readScheduler.forTest.isInBackoff
   }
 }
 
@@ -448,6 +471,131 @@ object AssignmentSyncStateMachine {
         syncState: SyncAssignmentState,
         watchRpcTimeout: FiniteDuration)
         extends DriverAction
+  }
+
+  /**
+   * Manages the scheduling of watch requests, taking into account both backoff delays and rate
+   * limiting via the token bucket.
+   */
+  private class ReadScheduler(
+      enableRateLimiting: Boolean,
+      random: Random,
+      minRetryDelay: FiniteDuration,
+      maxRetryDelay: FiniteDuration,
+      logger: PrefixLogger) {
+
+    /**
+     * Token bucket for rate limiting watch requests. When rate limiting is enabled, the bucket is
+     * configured with a specific rate and capacity. When disabled, the bucket is configured with an
+     * unlimited rate (Long.MaxValue) so that `tryAcquire` always succeeds.
+     *
+     * Our intent in rate-limiting requests is to protect the server in case of unexpected issues
+     * (<internal bug>) but also the client; if we were to otherwise ensure an outstanding hanging get
+     * without any rate limiting, a malicious server could try to induce high load on a client by
+     * completing requests immediately.
+     */
+    private val tokenBucket: TokenBucket = if (enableRateLimiting) {
+      TokenBucket.create(
+        // We allow a burst of up to 2 requests because when the PA changes, a successful response
+        // containing a redirect address can trigger two requests within the same second. The bucket
+        // then refills at a rate of 1 token per second. Since watch requests are typically sent
+        // every 2.5 seconds, this allows the bucket to regain 2 tokens in that interval, ensuring
+        // it can always handle an immediate redirect response. In practice, PA changes rarely occur
+        // more than once per second, so this rate should be sufficient.
+        capacityInSecondsOfRate = 2,
+        rate = 1,
+        // `initTime` is used to set the initial refill time for the token bucket. It's safe to set
+        // it to TickerTime.MIN here because we always perform a refill before calling `tryAcquire`.
+        initTime = TickerTime.MIN
+      )
+    } else {
+      // When rate limiting is disabled, create a token bucket with an unlimited rate so that
+      // `tryAcquire` always succeeds.
+      TokenBucket.create(
+        capacityInSecondsOfRate = TokenBucket.MAX_CAPACITY_IN_SECONDS_OF_RATE,
+        rate = TokenBucket.MAX_RATE,
+        initTime = TickerTime.MIN
+      )
+    }
+
+    /** Exponential backoff for retrying watch requests on failures. */
+    private val backoff = new ExponentialBackoff(random, minRetryDelay, maxRetryDelay)
+
+    /** The next time a read/watch should be executed by the driver to the remote server. */
+    private var nextReadScheduleTime: TickerTime = TickerTime.MIN
+
+    /** Gets the scheduled time for the next read. */
+    def getScheduledTime: TickerTime = nextReadScheduleTime
+
+    /**
+     * Checks if a read is allowed and acquires a token if it is. Returns `false` if the caller is
+     * still in the backoff period or if no token is available in the token bucket. (i.e., returns
+     * false if `now` < [[getScheduledTime]]). Otherwise, refills the token bucket and acquires a
+     * token, allowing the read to proceed.
+     */
+    def tryAcquireReadPermission(now: TickerTime): Boolean = {
+      if (now < nextReadScheduleTime) {
+        // Either still in backoff period or token bucket not yet refilled — read is not allowed.
+        false
+      } else {
+        // Otherwise, we refill the bucket and acquire one token. Since `scheduleNextRead`
+        // guarantees that the token bucket has at least one token when `nextReadScheduleTime` is
+        // reached, `tryAcquire` should always succeed.
+        tokenBucket.refill(now)
+        if (!tokenBucket.tryAcquire(count = 1)) {
+          // $COVERAGE-OFF$: This alert is used to indicate potential future bugs in
+          // `scheduleNextRead`, and it cannot be triggered by the current code in tests.
+          logger.alert(
+            Severity.DEGRADED,
+            CachingErrorCode.DICER_CLIENT_READ_SCHEDULER_ERROR,
+            s"Token not available at $now (read scheduled time: $nextReadScheduleTime). " +
+            s"This indicates a bug in ReadScheduler.scheduleNextRead.",
+            every = 30.seconds
+          )
+          // $COVERAGE-ON$
+        }
+        // Even if `tryAcquire` fails (probably due to a bug), we still allow sending watch requests
+        // to ensure dicer clients don’t fall behind.
+        true
+      }
+    }
+
+    /**
+     * Schedules the next read request, taking into account both backoff delays (if requested) and
+     * token bucket rate limiting. This method ensures that `getScheduledTime` is always set to a
+     * time when a token will be available.
+     *
+     * @param now The current time, used as the base for computing the desired schedule time and for
+     *            refilling the token bucket.
+     * @param useBackoff Whether to apply exponential backoff delay, and increase the backoff for
+     *                   next time. Use [[resetBackoff]] to reset the backoff.
+     */
+    def scheduleNextRead(now: TickerTime, useBackoff: Boolean): Unit = {
+      val backoffDelay: FiniteDuration = if (useBackoff) {
+        backoff.nextDelay()
+      } else {
+        Duration.Zero
+      }
+      val desiredTime: TickerTime = now + backoffDelay
+      val tokenAvailableTime: TickerTime = tokenBucket.timeWhenRefilled(desired = 1)
+      // Schedule the next read no earlier than when a token is available.
+      nextReadScheduleTime = if (desiredTime >= tokenAvailableTime) {
+        desiredTime
+      } else {
+        tokenAvailableTime
+      }
+    }
+
+    /** Resets the exponential backoff state to its initial values. */
+    def resetBackoff(): Unit = {
+      backoff.reset()
+    }
+
+    object forTest {
+
+      /** Returns whether the scheduler is currently in exponential backoff mode. */
+      def isInBackoff: Boolean = backoff.forTest.isInBackoff
+    }
   }
 
   /**

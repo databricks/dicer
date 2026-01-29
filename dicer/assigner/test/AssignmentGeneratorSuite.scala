@@ -47,7 +47,7 @@ import com.databricks.dicer.common.WatchServerHelper.WATCH_RPC_TIMEOUT
 import com.databricks.dicer.common._
 
 import com.databricks.dicer.external.{InfinitySliceKey, Slice, SliceKey, Target}
-import com.databricks.dicer.friend.SliceMap
+import com.databricks.dicer.friend.{SliceMap, Squid}
 import com.databricks.testing.DatabricksTest
 import com.google.common.primitives.Longs
 import io.prometheus.client.CollectorRegistry

@@ -5,7 +5,7 @@ import com.databricks.api.proto.dicer.common.DiffAssignmentP
 import com.databricks.dicer.common.TestSliceUtils._
 import com.databricks.dicer.external.Slice
 import com.databricks.caching.util.TestUtils.{assertThrow, loadTestData}
-import com.databricks.dicer.friend.SliceMap
+import com.databricks.dicer.friend.{SliceMap, Squid}
 import com.databricks.dicer.friend.SliceMap.GapEntry
 import com.databricks.testing.DatabricksTest
 

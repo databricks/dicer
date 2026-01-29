@@ -5,7 +5,7 @@ import scala.util.Random
 import com.databricks.caching.util.TestUtils.assertThrow
 import com.databricks.dicer.common.TestSliceUtils._
 import com.databricks.dicer.external.Slice
-import com.databricks.dicer.friend.{MutableSliceMap, SliceMap}
+import com.databricks.dicer.friend.{MutableSliceMap, SliceMap, Squid}
 import com.databricks.dicer.friend.SliceMap.{IntersectionEntry, GapEntry}
 import com.databricks.caching.util.UnixTimeVersion
 import com.databricks.testing.DatabricksTest

@@ -53,9 +53,12 @@ scala_library(
 )
 
 scala_library(
-    name = "shared",
+    name = "scheduled_executor",
     srcs = [
         "src/InstrumentedScheduledThreadPoolExecutor.scala",
+    ],
+    deps = [
+        "@maven//:com_google_guava_guava",
     ],
 )
 
@@ -67,13 +70,14 @@ scala_library(
     ],
     exports = [
         # Export for compatibility with internal code patterns.
-        ":shared",
+        ":scheduled_executor",
         # Export to make logging available to consumers.
         "//wrappers/logging",
     ],
     deps = [
-        ":shared",
+        ":scheduled_executor",
         "//wrappers/logging",
+        "@maven//:com_google_guava_guava",
     ],
 )
 

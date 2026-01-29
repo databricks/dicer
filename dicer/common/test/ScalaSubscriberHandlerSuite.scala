@@ -59,8 +59,7 @@ class ScalaSubscriberHandlerSuite extends SubscriberHandlerSuiteBase {
       handlerTarget,
       getSuggestedClerkRpcTimeoutFn = () => TIMEOUT,
       suggestedSliceletRpcTimeout = TIMEOUT,
-      handlerLocation,
-      rejectRequestsOnFatalTargetMismatch = true
+      handlerLocation
     )
     new ScalaDriver(sec, handler, cell)
   }

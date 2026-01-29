@@ -26,6 +26,7 @@ import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.common.Version.{LATEST_VERSION, UNKNOWN_VERSION}
 import com.databricks.dicer.common.WatchServerHelper.validateWatchRpcTimeout
 import com.databricks.dicer.external.{Slice, SliceKey, Target}
+import com.databricks.dicer.friend.Squid
 
 // This file contains abstractions that wrap proto messages from/to Clerks/Slicelets and the
 // Assigner.

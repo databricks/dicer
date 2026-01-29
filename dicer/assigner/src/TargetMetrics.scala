@@ -15,11 +15,12 @@ import com.databricks.dicer.assigner.AssignmentStats.{
   AssignmentLoadStats,
   ReassignmentChurnAndLoadStats
 }
+import com.databricks.dicer.assigner.algorithm.{Algorithm, LoadMap, Resources}
 import com.databricks.dicer.common.Assignment.DiffUnused
-import com.databricks.dicer.common.{Assignment, Generation, SliceAssignment, Squid}
+import com.databricks.dicer.common.{Assignment, Generation, SliceAssignment}
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.external.{Slice, Target}
-import com.databricks.dicer.assigner.algorithm.{Algorithm, LoadMap, Resources}
+import com.databricks.dicer.friend.Squid
 
 /** Metrics for each sharded target/sharded resource name. */
 object TargetMetrics {

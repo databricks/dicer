@@ -1,9 +1,6 @@
 package com.databricks.dicer.external
 
 import java.io.File
-import java.net.URI
-import java.time.Instant
-import java.util.UUID
 
 import scala.collection.mutable
 import scala.concurrent.duration.Duration
@@ -26,18 +23,15 @@ import com.databricks.dicer.common.{
   Generation,
   InternalDicerTestEnvironment,
   ProposedSliceAssignment,
-  SliceMapHelper,
   SliceletData,
-  Squid,
   TestAssigner
 }
-import com.databricks.dicer.external.DicerTestEnvironment.TestAssignmentBuilder.BLACKHOLE_RESOURCE
 import com.databricks.dicer.external.DicerTestEnvironment.{
   AssignmentHandle,
   TestAssignment,
   TestAssignmentBuilder
 }
-import com.databricks.dicer.friend.SliceMap
+import com.databricks.dicer.friend.{SliceMap, Squid}
 import com.databricks.threading.NamedExecutor
 import com.databricks.rpc.tls.TLSOptions
 
@@ -48,6 +42,16 @@ import com.databricks.rpc.tls.TLSOptions
  * This is only used for testing purposes.
  */
 case class DicerTlsFilePaths(keystorePath: String, truststorePath: String)
+
+/**
+ * TLS file paths for both server and client in the Dicer test environment.
+ *
+ * @param serverTlsPaths TLS paths for servers (Slicelets, Assigners).
+ * @param clientTlsPaths TLS paths for clients (Clerks, connections to servers).
+ */
+case class DicerTlsFilePathsConfig(
+    serverTlsPaths: DicerTlsFilePaths,
+    clientTlsPaths: DicerTlsFilePaths)
 
 /**
  * This is a test environment for applications to test against `Dicer`. It is strongly recommended
@@ -135,9 +139,9 @@ case class DicerTlsFilePaths(keystorePath: String, truststorePath: String)
  * testing as the system would run in production and the latter allows controlled placement of keys
  * or ranges for specific tests. See [[DicerTestEnvironmentSuite]] for examples.
  *
- * @param tlsFilePathsOpt An option of the path to the keystore/truststore files for TLSOptions.
- *                        When not set, default test keystore/truststore paths defined in
- *                        [[com.databricks.rpc.testing.TestTLSOptions]] are used.
+ * @param tlsFilePathsConfigOpt An option containing separate TLS paths for servers and clients.
+ *                              When not set, default test keystore/truststore paths defined in
+ *                              [[com.databricks.rpc.testing.TestTLSOptions]] are used.
  * @param injectedAssignerPortOpt An option of function that returns an integer as an injected
  *                                assigner port. When set, `getConnectionConfigForNewSlicelet` and
  *                                `getAssignerPort` will use this port for the assigner's address.
@@ -148,13 +152,25 @@ case class DicerTlsFilePaths(keystorePath: String, truststorePath: String)
  */
 class DicerTestEnvironment private[dicer] (
     private[dicer] val internalTestEnv: InternalDicerTestEnvironment,
-    private[dicer] val tlsFilePathsOpt: Option[DicerTlsFilePaths] = None,
+    private[dicer] val tlsFilePathsConfigOpt: Option[DicerTlsFilePathsConfig] = None,
     injectedAssignerPortOpt: Option[() => Int] = None) {
 
   private val logger = PrefixLogger.create(this.getClass, "")
-  private val internalTlsFilePathsOpt = tlsFilePathsOpt.map(
-    tlsFilePaths => TlsFilePaths(tlsFilePaths.keystorePath, tlsFilePaths.truststorePath)
-  )
+
+  /**
+   * TLS file paths for client connections (Clerks connecting to Slicelets, Slicelets
+   * connecting to Assigners).
+   */
+  private val clientTlsFilePathsOpt: Option[TlsFilePaths] = tlsFilePathsConfigOpt.map {
+    tlsConfig: DicerTlsFilePathsConfig =>
+      TlsFilePaths(tlsConfig.clientTlsPaths.keystorePath, tlsConfig.clientTlsPaths.truststorePath)
+  }
+
+  /** TLS file paths for server connections (Slicelets/Assigners accepting connections). */
+  private val serverTlsFilePathsOpt: Option[TlsFilePaths] = tlsFilePathsConfigOpt.map {
+    tlsConfig: DicerTlsFilePathsConfig =>
+      TlsFilePaths(tlsConfig.serverTlsPaths.keystorePath, tlsConfig.serverTlsPaths.truststorePath)
+  }
 
   /**
    * Returns a new [[TestAssignmentBuilder]] that can be used to build assignments of keys to
@@ -263,7 +279,7 @@ class DicerTestEnvironment private[dicer] (
   def getConnectionConfigForNewClerk(slicelet: Slicelet): Config = {
     TestClientUtils.createClerkConfig(
       slicelet.impl.forTest.sliceletPort,
-      clientTlsFilePathsOpt = internalTlsFilePathsOpt
+      clientTlsFilePathsOpt = clientTlsFilePathsOpt
     )
   }
 
@@ -277,8 +293,8 @@ class DicerTestEnvironment private[dicer] (
     TestClientUtils.createSliceletConfig(
       getAssignerPort,
       sliceletHost = internalTestEnv.sliceletHostNameOpt.getOrElse("localhost"),
-      clientTlsFilePathsOpt = internalTlsFilePathsOpt,
-      serverTlsFilePathsOpt = internalTlsFilePathsOpt,
+      clientTlsFilePathsOpt = clientTlsFilePathsOpt,
+      serverTlsFilePathsOpt = serverTlsFilePathsOpt,
       watchFromDataPlane = false
     )
   }
@@ -304,35 +320,46 @@ object DicerTestEnvironment {
 
   /**
    * Returns an environment that can be used for testing with Dicer.
-   * @param tlsFilePathsOpt the keystore/truststore paths used by Clerks and Slicelets to connect
-   *                        to Slicelets and the Assigner respectively.
+   *
+   * @param tlsFilePathsConfigOpt the keystore/truststore paths for both servers and clients.
+   *                              Server paths are used when Assigners accept connections from
+   *                              Slicelets and when Slicelets accept connections from Clerks.
+   *                              Client paths are used when Slicelets connect to Assigners and
+   *                              when Clerks connect to Slicelets.
+   *                              If the same paths should be used for both server and client, pass
+   *                              DicerTlsFilePathsConfig(serverTlsPaths = paths, clientTlsPaths =
+   *                              paths).
    * @param sliceletHostNameOpt the host name for slicelets.
    */
   def create(
-      tlsFilePathsOpt: Option[DicerTlsFilePaths] = None,
+      tlsFilePathsConfigOpt: Option[DicerTlsFilePathsConfig] = None,
       sliceletHostNameOpt: Option[String] = None): DicerTestEnvironment = {
-    val tlsOptionsOpt = (tlsFilePathsOpt) match {
-      case (Some(DicerTlsFilePaths(keystorePath, truststorePath))) =>
-        Some(
-          TLSOptions.builder
-            .addKeyManager(new File(keystorePath), new File(keystorePath))
-            .addTrustManager(new File(truststorePath))
-            .build()
-        )
-      case _ => None
+    // Use server TLS paths for the assigner's TLS options (Assigners accepting connections).
+    val tlsOptionsOpt: Option[TLSOptions] = tlsFilePathsConfigOpt.map {
+      tlsConfig: DicerTlsFilePathsConfig =>
+        val serverPaths: DicerTlsFilePaths = tlsConfig.serverTlsPaths
+        TLSOptions.builder
+          .addKeyManager(new File(serverPaths.keystorePath), new File(serverPaths.keystorePath))
+          .addTrustManager(new File(serverPaths.truststorePath))
+          .build()
     }
-    val internalTestEnv =
+
+    // Convert server TLS paths for InternalDicerTestEnvironment (Slicelets accepting connections).
+    val internalServerTlsFilePathsOpt: Option[TlsFilePaths] = tlsFilePathsConfigOpt.map {
+      tlsConfig: DicerTlsFilePathsConfig =>
+        TlsFilePaths(tlsConfig.serverTlsPaths.keystorePath, tlsConfig.serverTlsPaths.truststorePath)
+    }
+
+    val internalTestEnv: InternalDicerTestEnvironment =
       InternalDicerTestEnvironment.create(
         config = TestAssigner.Config.create(tlsOptionsOpt = tlsOptionsOpt),
         targetConfigMap = TARGET_CONFIG_MAP,
-        tlsFilePathsOpt = tlsFilePathsOpt.map(
-          tlsFilePaths => TlsFilePaths(tlsFilePaths.keystorePath, tlsFilePaths.truststorePath)
-        ),
+        tlsFilePathsOpt = internalServerTlsFilePathsOpt,
         sliceletHostNameOpt = sliceletHostNameOpt
       )
     new DicerTestEnvironment(
       internalTestEnv,
-      tlsFilePathsOpt = tlsFilePathsOpt
+      tlsFilePathsConfigOpt = tlsFilePathsConfigOpt
     )
   }
 
@@ -389,71 +416,29 @@ object DicerTestEnvironment {
      * (documentation only) address.
      */
     def build(): TestAssignment = {
-      // Sort the slice assignments so that we can easily identify overlaps and fill gaps in the
-      // assignment.
-      val sorted: mutable.Seq[ProposedSliceAssignment] = sliceAssignments.sortBy {
-        sliceAssignment: ProposedSliceAssignment =>
-          sliceAssignment.slice
-      }
-      // Create slice assignments in a sorted array by iterating through the sorted slice
-      // assignments. All unassigned slices are mapped to BLACKHOLE_RESOURCE_ADDRESS.
-      //
-      // For example, given slice assignments:
-      //    [A,B)=>res0
-      //    [C,D)=>res1
-      //    [E,E\0)=>res0 # Singleton slice including just E
-      // The filled out assignment is:
-      //    ["",A)=>BLACKHOLE_RESOURCE
-      //    [A,B)=>res0
-      //    [B,C)=>BLACKHOLE_RESOURCE
-      //    [C,D)=>res1
-      //    [D,E)=>BLACKHOLE_RESOURCE
-      //    [E,E\0)=>res0
-      //    [E\0,∞)=>BLACKHOLE_RESOURCE
-      val completeSliceAssignments = Vector.newBuilder[ProposedSliceAssignment]
-      var previousHigh: HighSliceKey = SliceKey.MIN
-      for (sliceAssignment: ProposedSliceAssignment <- sorted) {
-        val low: SliceKey = sliceAssignment.slice.lowInclusive
-        previousHigh match {
-          case previousHigh: SliceKey if previousHigh < low =>
-            // Fill in gap between the previous Slice and the current Slice.
-            completeSliceAssignments += ProposedSliceAssignment(
-              Slice(previousHigh, low),
-              resources = Set(BLACKHOLE_RESOURCE),
-              primaryRateLoadOpt = None
-            )
-          case _ =>
-            if (previousHigh > low) {
-              throw new IllegalArgumentException(
-                s"Slices must not overlap: $previousHigh > $low"
-              )
-            }
-        }
-        completeSliceAssignments += sliceAssignment
-        previousHigh = sliceAssignment.slice.highExclusive
-      }
-      // Last slice high value must be ∞.
-      if (previousHigh.isFinite) {
-        val previousLow: SliceKey = previousHigh.asFinite
-        completeSliceAssignments += ProposedSliceAssignment(
-          Slice.atLeast(previousLow),
-          resources = Set(BLACKHOLE_RESOURCE),
-          primaryRateLoadOpt = None
-        )
-      }
-      val proposedAssignment =
-        SliceMapHelper.ofProposedSliceAssignments(completeSliceAssignments.result())
-      new TestAssignment(proposedAssignment)
+      new TestAssignment(
+        InternalDicerTestEnvironment.sliceAssigmentsToSliceMap(sliceAssignments.toSeq)
+      )
+    }
+
+    /** Assigns `slice` to a Slicelet represented by the `squid`. */
+    private[dicer] def add(slice: Slice, squid: Squid): this.type = {
+      sliceAssignments.append(
+        ProposedSliceAssignment(slice, resources = Set(squid), primaryRateLoadOpt = None)
+      )
+      this
+    }
+
+    /** Assigns a single `key` to a Slicelet represented by the `squid`. */
+    private[dicer] def add(key: SliceKey, squid: Squid): this.type = {
+      add(createSingleKeySlice(key), squid)
     }
   }
+
   object TestAssignmentBuilder {
 
     /** The address of the resource to which all unassigned keys are routed. */
-    private[dicer] val BLACKHOLE_RESOURCE: Squid = Squid(
-      ResourceAddress(URI.create("http://192.0.2.0:8080")),
-      creationTimeMillis = Instant.EPOCH.toEpochMilli,
-      new UUID(0, 0)
-    )
+    private[dicer] val BLACKHOLE_RESOURCE: Squid = InternalDicerTestEnvironment.BLACKHOLE_RESOURCE
   }
 
   /**
@@ -464,7 +449,7 @@ object DicerTestEnvironment {
       private[external] val proposedAssignment: SliceMap[ProposedSliceAssignment])
 
   /** Returns a Slice containing only the given `key`. */
-  private def createSingleKeySlice(key: SliceKey): Slice = {
+  private[dicer] def createSingleKeySlice(key: SliceKey): Slice = {
     val successorBytes = new Array[Byte](key.bytes.size + 1) // key bytes + trailing 0
     key.bytes.toByteArray.copyToArray(successorBytes)
     val successorKey = SliceKey(successorBytes, IdentitySliceKeyFunction)
