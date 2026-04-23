@@ -62,15 +62,15 @@ object DbConfImpl {
 }
 
 /**
- * Provides an implementation of DbConf with an empty base configuration (i.e. all values will be
- * their defaults). This is implemented as a class (rather than an object) because it needs to be
- * extended by other conf instantiations. Singleton is a bit of a misnomer but kept for backwards
- * compatibility of existing code.
+ * Provides an implementation of DbConf initialized with [[RawConfigSingleton.conf]]. This is
+ * implemented as a class (rather than an object) because it needs to be extended by other conf
+ * instantiations. Singleton is a bit of a misnomer but kept for backwards compatibility of existing
+ * code.
  */
 class DbConfSingletonImpl extends DbConf {
   override protected def doConfigure[T: Manifest](
       propertyName: String,
       parser: ConfigParser[T]): Option[T] = {
-    DbConfImpl.doConfigureWithConfig(propertyName, Configs.empty, parser)
+    DbConfImpl.doConfigureWithConfig(propertyName, RawConfigSingleton.conf, parser)
   }
 }

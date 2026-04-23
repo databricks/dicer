@@ -45,8 +45,9 @@ import com.databricks.dicer.common.{
  *  - Otherwise send a new request if the last request has been inflight for more than
  *    `watchRpcTimeout` (at the RPC layer we have an additional buffer during which we will receive
  *    and process responses).
- *  - On watch RPC errors or timeout, we retry with exponential backoff, except when there is a
- *    specific redirect (in which case we don't backoff since we are likely changing the server).
+ *  - On watch RPC errors or timeout, we retry with exponential backoff. On failure we clear any
+ *    redirect first, so the retry falls back to the default routing path (typically a random watch
+ *    server) and may go to a different server than the failed request.
  *  - Incorporate assignment state from any response as long as it has a higher generation than the
  *    one we already know about.
  *  - Apply the redirect to the next request if we receive one. This happens when the preferred
@@ -59,7 +60,7 @@ import com.databricks.dicer.common.{
  *                            Clerk/Slicelet.
  */
 class AssignmentSyncStateMachine(
-    config: InternalClientConfig,
+    config: SliceLookupConfig,
     random: Random,
     subscriberDebugName: String)
     extends StateMachine[Event, DriverAction] {
@@ -294,18 +295,20 @@ class AssignmentSyncStateMachine(
   }
 
   /**
-   * Updates internal state such that the state machine will retry the watch request. Backoff is
-   * added as appropriate.
+   * Updates internal state such that the state machine retries the watch request with
+   * exponential backoff.
+   *
+   * **Caveat**: backoff is reset after any latest successful read response (see [[onReadSuccess]]).
+   * So while failures always back off, intermittent success/failure cycles can return delay
+   * to the minimum retry delay (with jitter), rather than continuing to grow exponentially.
+   * This is intentional: we want fast recovery from transient issues while still enforcing
+   * a minimum delay to avoid overwhelming the server with retries.
    */
   private def setupRetry(now: TickerTime): Unit = {
     latestReadStateOpt = None
-    if (redirectAddressOpt.isDefined) {
-      redirectAddressOpt = None
-      // We are (likely) changing the server that we talk to, don't backoff in this case.
-      readScheduler.scheduleNextRead(now = now, useBackoff = false)
-    } else {
-      readScheduler.scheduleNextRead(now = now, useBackoff = true)
-    }
+    // We hit an error, clear the redirect to fall back to talking to a random watch server.
+    redirectAddressOpt = None
+    readScheduler.scheduleNextRead(now = now, useBackoff = true)
   }
 
   /** Handles failure of a watch request. */
@@ -395,6 +398,9 @@ class AssignmentSyncStateMachine(
     /**
      * Returns whether the syncer has received some errors and hence is in exponential backoff mode
      * w.r.t. communicating with the remote server.
+     *
+     * TODO(<internal bug>): Add dicer_slice_lookups_in_backoff counter for better monitoring (aligned
+     * with Rust implementation).
      */
     private[client] def isInBackoff: Boolean = readScheduler.forTest.isInBackoff
   }

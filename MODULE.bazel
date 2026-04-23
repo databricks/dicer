@@ -4,8 +4,10 @@
 # Core Build Rules
 # ========================================
 
+bazel_dep(name = "rules_java", version = "9.6.1")
 bazel_dep(name = "rules_scala", version = "7.0.0")
 bazel_dep(name = "rules_proto", version = "7.0.2")
+bazel_dep(name = "contrib_rules_jvm", version = "0.32.0")
 
 # Use precompiled protoc rather than building it from source, which saves about 30 seconds on a
 # new build. See
@@ -95,7 +97,7 @@ use_repo(etcd_extension, "etcd_release")
 # Maven Dependencies
 # ========================================
 
-bazel_dep(name = "rules_jvm_external", version = "6.3")
+bazel_dep(name = "rules_jvm_external", version = "6.7")
 
 maven = use_extension("@rules_jvm_external//:extensions.bzl", "maven")
 maven.install(
@@ -151,6 +153,9 @@ maven.install(
         "io.etcd:jetcd-core:0.8.2",
         "io.etcd:jetcd-grpc:0.8.2",
 
+        # Java test utilities
+        "org.assertj:assertj-core:3.24.2",
+
         # OpenCensus ZPages (used for observability and debugging)
         "com.lihaoyi:scalatags_2.12:0.13.1",
         "io.opencensus:opencensus-contrib-grpc-metrics:0.31.1",
@@ -164,5 +169,11 @@ maven.install(
     # the latest version, which can cause incompatibilities with components that depend on
     # specific library versions (e.g., Guava for Dicer).
     version_conflict_policy = "pinned",
+    # Pin artifact versions and hashes using a lockfile.
+    lock_file = "//bazel:maven_install.json",
+    # Fail to build if the artifacts list above is updated without updating the lockfile.
+    fail_if_repin_required = True,
 )
-use_repo(maven, "maven")
+# Reexport `contrib_rules_jvm_deps` from `contrib_rules_jvm`, so that we use the same version of
+# JUnit libraries.
+use_repo(maven, "contrib_rules_jvm_deps", "maven")

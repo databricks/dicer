@@ -103,8 +103,8 @@ class SlicezSuite extends DatabricksTest {
     )
 
     // Check the Slicez for the clients.
-    val clientSlicez = ClientSlicez.forTest.getClientSlicez
-    val noAssignmentHtml: String = TestUtils.awaitResult(clientSlicez.getHtmlFut, Duration.Inf)
+    val noAssignmentHtml: String =
+      TestUtils.awaitResult(ClientSlicez.forTest.getHtmlFut, Duration.Inf)
     // Log on two lines since the assignment overflows in the log.
     log.info(s"Clerk only ClientSlicez data")
     log.info(s"$noAssignmentHtml")
@@ -161,11 +161,11 @@ class SlicezSuite extends DatabricksTest {
     AssertionWaiter("Assignment to show up at clerks and slicelets").await {
       val slicezData = TestUtils.awaitResult(ClientSlicez.forTest.getData, Duration.Inf)
       val slicezHtml: String =
-        TestUtils.awaitResult(ClientSlicez.forTest.getClientSlicez.getHtmlFut, Duration.Inf)
+        TestUtils.awaitResult(ClientSlicez.forTest.getHtmlFut, Duration.Inf)
       assert(slicezData.length == 5 && !slicezHtml.contains("No assignment"))
     }
     val clientSlicezHtml: String =
-      TestUtils.awaitResult(ClientSlicez.forTest.getClientSlicez.getHtmlFut, Duration.Inf)
+      TestUtils.awaitResult(ClientSlicez.forTest.getHtmlFut, Duration.Inf)
     // Separate lines for logging so that the next line is at least printed. $slicezHtml is anyway
     // truncated since it is too big (the front is removed).
     log.info(s"Slicelets and Clerks ClientSlicez data:")
@@ -213,14 +213,14 @@ class SlicezSuite extends DatabricksTest {
     AssertionWaiter("Second target at client").await {
       val slicezData = TestUtils.awaitResult(ClientSlicez.forTest.getData, Duration.Inf)
       val slicezHtml: String =
-        TestUtils.awaitResult(ClientSlicez.forTest.getClientSlicez.getHtmlFut, Duration.Inf)
+        TestUtils.awaitResult(ClientSlicez.forTest.getHtmlFut, Duration.Inf)
       assert(slicezData.length == 6 && !slicezHtml.contains("No assignment"))
     }
     log.info("Checking for second target at Client")
 
     // Check the contents of the Client's slicez.
     val finalClientHtml: String =
-      TestUtils.awaitResult(ClientSlicez.forTest.getClientSlicez.getHtmlFut, Duration.Inf)
+      TestUtils.awaitResult(ClientSlicez.forTest.getHtmlFut, Duration.Inf)
     // Log on separate lines since finalClientHtml is too big and is truncated.
     log.info("Final Client Html:")
     log.info(s"$finalClientHtml")

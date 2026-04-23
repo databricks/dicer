@@ -60,8 +60,9 @@ class AssignerMainSuite extends DatabricksTest {
           "databricks.dicer.assigner.executionMode" -> "etcd_bootstrapper",
           "databricks.dicer.assigner.storeIncarnation" -> 43,
           "databricks.dicer.assigner.preferredAssigner.storeIncarnation" -> 42,
-          "databricks.dicer.assigner.store.etcd.sslEnabled" -> false,
-          "databricks.dicer.assigner.store.etcd.endpoints" -> DatabricksObjectMapper.toJson(
+          "databricks.dicer.assigner.preferredAssigner.etcd.sslEnabled" -> false,
+          "databricks.dicer.assigner.preferredAssigner.etcd.endpoints" ->
+          DatabricksObjectMapper.toJson(
             Seq(etcd.endpoint)
           )
         )
@@ -106,8 +107,9 @@ class AssignerMainSuite extends DatabricksTest {
       Configs.parseMap(
         Map(
           "databricks.dicer.assigner.executionMode" -> "etcd_bootstrapper",
-          "databricks.dicer.assigner.store.etcd.sslEnabled" -> false,
-          "databricks.dicer.assigner.store.etcd.endpoints" -> DatabricksObjectMapper.toJson(
+          "databricks.dicer.assigner.preferredAssigner.etcd.sslEnabled" -> false,
+          "databricks.dicer.assigner.preferredAssigner.etcd.endpoints" ->
+          DatabricksObjectMapper.toJson(
             Seq(address)
           )
         )
@@ -130,8 +132,9 @@ class AssignerMainSuite extends DatabricksTest {
         Map(
           "databricks.dicer.assigner.preferredAssigner.modeEnabled" -> true,
           "databricks.dicer.assigner.preferredAssigner.storeIncarnation" -> 42,
-          "databricks.dicer.assigner.store.etcd.sslEnabled" -> false,
-          "databricks.dicer.assigner.store.etcd.endpoints" -> DatabricksObjectMapper.toJson(
+          "databricks.dicer.assigner.preferredAssigner.etcd.sslEnabled" -> false,
+          "databricks.dicer.assigner.preferredAssigner.etcd.endpoints" ->
+          DatabricksObjectMapper.toJson(
             Seq(etcd.endpoint)
           ),
           "databricks.dicer.assigner.rpc.port" -> 0

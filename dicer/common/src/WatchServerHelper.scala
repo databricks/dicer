@@ -37,15 +37,15 @@ object WatchServerHelper {
   val MAX_WATCH_MESSAGE_CONTENT_LENGTH_BYTES: Int = 4 * 1024 * 1024
 
   /**
-   * REQUIRES: `watchRpcTimeout` is at least 1 second
+   * REQUIRES: `watchRpcTimeout` is at least 500 milliseconds
    *
    * Validates the timeout for a watch request. Exposed as separate method for the sake of the
    * `ClientResponse` and `InternalClientConfig` which both validate this timeout.
    */
   def validateWatchRpcTimeout(watchRpcTimeout: FiniteDuration): Unit = {
     require(
-      watchRpcTimeout >= 1.second,
-      s"Watch RPC timeout must be at least 1 second: $watchRpcTimeout"
+      watchRpcTimeout >= 500.milliseconds,
+      s"Watch RPC timeout must be at least 500 milliseconds: $watchRpcTimeout"
     )
   }
 

@@ -69,7 +69,7 @@ invalid_cases: [
   {
     case_name: "Low timeout"
     client_response: {
-      suggested_rpc_timeout_millis: 500  # Less than 1s
+      suggested_rpc_timeout_millis: 499  # Less than 500ms minimum
       sync_assignment_state: {
         known_generation: { incarnation: 123 number: 456 }
       }

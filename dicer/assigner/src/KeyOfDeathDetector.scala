@@ -4,7 +4,6 @@ import java.time.Instant
 import scala.concurrent.duration._
 import scala.collection.mutable
 
-import com.databricks.dicer.assigner.HealthWatcher.HealthStatus
 import com.databricks.dicer.assigner.KeyOfDeathDetector.{
   Config,
   CrashedResource,
@@ -16,7 +15,6 @@ import com.databricks.dicer.assigner.TargetMetrics.KeyOfDeathTransitionType
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.caching.util.{TickerTime, StateMachine, StateMachineOutput, PrefixLogger}
 import com.databricks.dicer.external.Target
-import com.databricks.dicer.friend.Squid
 
 /**
  * This detector is a state machine responsible for tracking and declaring the start and
@@ -94,11 +92,11 @@ import com.databricks.dicer.friend.Squid
  *
  * Note that this class only expires the records of crashed resources. It does not track the expiry
  * of healthy resources. As a result, the caller must inform the [[KeyOfDeathDetector]] of any
- * changes to the set of healthy resources in a timely manner using the latest health report
- * they have access to. In practice, the [[HealthWatcher]] is repsonsible for expiring healthy
- * resources and generating the subsequent health report, which is propagated to the
- * [[AssignmentGenerator]]. The [[AssignmentGenerator]] will then inform the [[KeyOfDeathDetector]]
- * of the latest health report.
+ * changes to the healthy count and newly crashed resources in a timely manner. In practice, the
+ * [[HealthWatcher]] is responsible for expiring healthy resources and generating the subsequent
+ * health report, which is propagated to the [[AssignmentGenerator]]. The
+ * [[AssignmentGenerator]] will then inform the [[KeyOfDeathDetector]] of the latest healthy
+ * count and crash events.
  *
  * Not thread-safe. In practice, access is protected by the [[AssignmentGeneratorDriver]]'s sec.
  *
@@ -117,15 +115,14 @@ class KeyOfDeathDetector(
     target.getLoggerPrefix
   )
 
-  /** The set of resources currently known by the key of death detector to be running, if any. */
-  private var healthyResources: Set[Squid] = Set.empty
+  /** The number of resources currently known by the key of death detector to be running. */
+  private var numHealthyResources: Int = 0
 
   /**
    * The priority queue of crashed resources, sorted by earliest expiry time.
    *
-   * Note that this queue may track multiple crashed resources with the same Squid. For example,
-   * if a resource crashes, restarts with the same pod IP and UUID (which occurs in the case of a
-   * container and not pod restart), and becomes healthy, and crashes again during the
+   * Note that this queue may track multiple crash records for the same resource. For example,
+   * if a resource crashes, restarts, becomes healthy, and crashes again during the
    * `crashRecordRetention` period, the queue will track both crashes as separate records.
    * This is desired, as repeated crashing of the same resource is a strong indicator
    * that the key of death scenario is ongoing, and this repeated crashing should be factored
@@ -147,8 +144,8 @@ class KeyOfDeathDetector(
 
   override def onEvent(tickerTime: TickerTime, instant: Instant, event: Event): Output = {
     event match {
-      case Event.ResourcesUpdated(newResources: Map[Squid, HealthStatus]) =>
-        handleResourcesUpdated(tickerTime, newResources)
+      case Event.ResourcesUpdated(healthyCount: Int, newlyCrashedCount: Int) =>
+        handleResourcesUpdated(tickerTime, healthyCount, newlyCrashedCount)
     }
     onAdvance(tickerTime, instant)
   }
@@ -161,53 +158,31 @@ class KeyOfDeathDetector(
 
   override def toString: String = {
     s"KeyOfDeathDetector(state=$state, numCrashed=${crashedResources.size}, " +
-    s"estimatedResourceWorkloadSize=${Math.max(frozenWorkloadSize, healthyResources.size)})"
+    s"estimatedResourceWorkloadSize=${Math.max(frozenWorkloadSize, numHealthyResources)})"
   }
 
   /**
-   * Handles the event indicating that a new health report has been generated.
+   * Handles the event indicating that resources have been updated.
    *
-   * If a previously healthy resource now has Unknown health status, whether it is not present
-   * in the new health report or explicitly reported as Unknown, it is considered crashed and
-   * added to the queue of crashed resources. No other resource health status changes impact
-   * the queue of crashed resources -- in particular, a previously Running resource becoming
-   * NotReady is not considered a crash relevant to the key of death detector, nor is a
-   * NotReady resource becoming Unknown.
-   *
-   * The health report is filtered to identify all currently healthy resources, defined as
-   * resources with Running health status, and these are tracked as the new set of healthy
-   * resources.
-   *
-   * @param tickerTime The current ticker time.
-   * @param newResources The new set of healthy resources.
+   * @param now               the current ticker time, used as the crash detection time for each
+   *                          newly crashed resource.
+   * @param healthyCount      the number of resources currently in the Running state.
+   * @param newlyCrashedCount the number of newly crashed resources.
    */
   private def handleResourcesUpdated(
-      tickerTime: TickerTime,
-      newResources: Map[Squid, HealthStatus]): Unit = {
-    // Check whether any previously healthy resources have crashed and add them to the heap of
-    // crashed resources.
-    var numNewlyCrashedResources: Int = 0
-    for (resource: Squid <- healthyResources) {
-      val newHealthStatus = newResources.get(resource).getOrElse(HealthStatus.Unknown)
-      if (newHealthStatus == HealthStatus.Unknown) {
-        crashedResources.enqueue(
-          CrashedResource(resource, tickerTime + config.crashRecordRetention)
-        )
-        numNewlyCrashedResources += 1
-      }
+      now: TickerTime,
+      healthyCount: Int,
+      newlyCrashedCount: Int): Unit = {
+    // Add a crash record for each newly crashed resource, using `now` as the crash time.
+    for (_ <- 0 until newlyCrashedCount) {
+      crashedResources.enqueue(CrashedResource(now + config.crashRecordRetention))
     }
 
     // Report to Prometheus the number of newly crashed resources.
-    TargetMetrics.incrementNumCrashedResourcesTotal(target, numNewlyCrashedResources)
+    TargetMetrics.incrementNumCrashedResourcesTotal(target, newlyCrashedCount)
 
-    // Update the set of healthy resources.
-    this.healthyResources = newResources
-      .filter {
-        case (_: Squid, healthStatus: HealthStatus) =>
-          healthStatus == HealthStatus.Running
-      }
-      .keys
-      .toSet
+    // Update the count of healthy resources.
+    this.numHealthyResources = healthyCount
   }
 
   /**
@@ -231,8 +206,8 @@ class KeyOfDeathDetector(
     // Remove any expired crashed resources.
     while (crashedResources.nonEmpty && crashedResources.head.expiryTime <= tickerTime) {
       logger.info(
-        s"Crash record for resource ${crashedResources.head.resource} " +
-        s"expired at time $tickerTime; ${crashedResources.size} crash records remaining"
+        s"A crash record expired at time $tickerTime; " +
+        s"${crashedResources.size} crash records remaining"
       )
       crashedResources.dequeue()
     }
@@ -242,8 +217,7 @@ class KeyOfDeathDetector(
     // value, which will surpass the configured `config.heuristicThreshold` if and only if any
     // exist.
     val numCrashedResources: Int = crashedResources.size
-    val numHealthyResources: Int = healthyResources.size
-    val estimatedResourceWorkloadSize: Int = Math.max(frozenWorkloadSize, healthyResources.size)
+    val estimatedResourceWorkloadSize: Int = Math.max(frozenWorkloadSize, numHealthyResources)
     val heuristicValue: Double = if (estimatedResourceWorkloadSize > 0) {
       numCrashedResources.toDouble / estimatedResourceWorkloadSize.toDouble
     } else {
@@ -394,10 +368,13 @@ object KeyOfDeathDetector {
   object Event {
 
     /**
-     * Informs the key of death detector that a new health report has been generated,
-     * potentially altering the set of healthy resources.
+     * Informs the key of death detector of the current resource health status.
+     *
+     * @param healthyCount      the number of resources currently in the Running state.
+     * @param newlyCrashedCount the number of newly crashed resources. A resource is considered
+     *                          crashed when its heartbeat expires and it is removed from tracking.
      */
-    case class ResourcesUpdated(newResources: Map[Squid, HealthStatus]) extends Event
+    case class ResourcesUpdated(healthyCount: Int, newlyCrashedCount: Int) extends Event
   }
 
   /**
@@ -445,13 +422,11 @@ object KeyOfDeathDetector {
   }
 
   /**
-   * An immutable object to keep track of previously crashed resources, as defined as a resource
-   * that has transitioned from the Running state to the Unknown state directly. `expiryTime` is
-   * the time at which the CrashedResource will be removed from the tracked set of crashed
-   * resources, having crashed more than the `crashRecordRetention` period ago.
+   * Tracks the expiry of a single crash record. `expiryTime` is the time at which the record will
+   * be removed from the tracked set of crashed resources, having crashed more than the
+   * `crashRecordRetention` period ago.
    */
-  private case class CrashedResource(resource: Squid, expiryTime: TickerTime)
-      extends Ordered[CrashedResource] {
+  private case class CrashedResource(expiryTime: TickerTime) extends Ordered[CrashedResource] {
 
     /**
      * Compares this CrashedResource with another CrashedResource based on their expiry times,

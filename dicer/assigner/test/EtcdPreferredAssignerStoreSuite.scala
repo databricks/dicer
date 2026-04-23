@@ -9,6 +9,7 @@ import scala.util.Random
 import io.grpc.{Status, StatusException}
 import com.databricks.caching.util.TestUtils.{TestName, assertThrow}
 import com.databricks.caching.util.{
+  AlertOwnerTeam,
   AssertionWaiter,
   CachingErrorCode,
   Cancellable,
@@ -294,7 +295,7 @@ class EtcdPreferredAssignerStoreSuite extends DatabricksTest with TestName {
 
     var currentStateMachineErrorCount: Int = MetricUtils.getPrefixLoggerErrorCount(
       Severity.CRITICAL,
-      CachingErrorCode.STATE_MACHINE_EXCEPTION,
+      CachingErrorCode.UNCAUGHT_STATE_MACHINE_ERROR(AlertOwnerTeam.CachingTeam),
       prefix = ""
     )
 
@@ -309,7 +310,7 @@ class EtcdPreferredAssignerStoreSuite extends DatabricksTest with TestName {
       AssertionWaiter("Wait for state machine error to be logged").await {
         val newErrorCount: Int = MetricUtils.getPrefixLoggerErrorCount(
           Severity.CRITICAL,
-          CachingErrorCode.STATE_MACHINE_EXCEPTION,
+          CachingErrorCode.UNCAUGHT_STATE_MACHINE_ERROR(AlertOwnerTeam.CachingTeam),
           prefix = ""
         )
         assert(newErrorCount == currentStateMachineErrorCount + 1)

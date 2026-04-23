@@ -1,0 +1,14 @@
+load("@protobuf//bazel:java_proto_library.bzl", "java_proto_library")
+load("@rules_proto//proto:defs.bzl", "proto_library")
+
+proto_library(
+    name = "test_message_proto",
+    srcs = ["test_message.proto"],
+    deps = ["//wrappers/rpc:scalapb_proto"],
+)
+
+java_proto_library(
+    name = "test_message_proto_java_lib",
+    visibility = ["//caching/util/javaapi:__subpackages__"],
+    deps = [":test_message_proto"],
+)

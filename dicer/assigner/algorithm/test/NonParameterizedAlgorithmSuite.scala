@@ -346,7 +346,7 @@ class NonParameterizedAlgorithmSuite extends AlgorithmSuiteBase {
         val (slice, expectedReplicasOrNum): (Slice, Either[Set[Squid], Int]) = sliceWithReplicas
         // Verify: Each slice in `this.expectedReplicas` should show up in the resulting
         // assignment with exactly matching boundaries and expected replicas / number of replicas.
-        val sliceAssignment = assignment.sliceMap.lookUp(slice.lowInclusive)
+        val sliceAssignment: SliceAssignment = assignment.sliceMap.lookUp(slice.lowInclusive)
         assert(
           sliceAssignment.slice == slice,
           s"Expect slice $slice to show up in the resulting assignment, but got " +
@@ -414,7 +414,7 @@ class NonParameterizedAlgorithmSuite extends AlgorithmSuiteBase {
 
     val targetConfig: InternalTargetConfig =
       createConfigForLoadBalancing(ChurnConfig.DEFAULT, maxLoadHint = 100)
-    val predecessor = createAssignment(
+    val predecessor: Assignment = createAssignment(
       generation = 42,
       consistencyMode = AssignmentConsistencyMode.Affinity,
       ("" -- 10) @@ 42 -> Seq("resource0"),
@@ -458,8 +458,8 @@ class NonParameterizedAlgorithmSuite extends AlgorithmSuiteBase {
     val target = Target(getSafeName)
     val targetConfig: InternalTargetConfig =
       createConfigForLoadBalancing(ChurnConfig.DEFAULT, maxLoadHint = 1.0)
-    val generation = createGeneration()
-    val predecessor = createAssignment(
+    val generation: Generation = createGeneration()
+    val predecessor: Assignment = createAssignment(
       generation,
       consistencyMode = AssignmentConsistencyMode.Affinity,
       ("" -- 10) @@ generation -> Seq("resource0"),
@@ -480,7 +480,7 @@ class NonParameterizedAlgorithmSuite extends AlgorithmSuiteBase {
       .build()
 
     // Run the algorithm and verify that the resulting assignment has the expected Slices.
-    val resources =
+    val resources: Resources =
       createResources("resource0", "resource1", "resource2", "resource3", "resource4")
     val assignment: Assignment =
       generateAssignment(target, targetConfig, resources, predecessor, loadMap)
@@ -520,7 +520,7 @@ class NonParameterizedAlgorithmSuite extends AlgorithmSuiteBase {
     // phase (which is not the focus of the current test).
     val wildcardResources: Seq[Squid] = Seq("wildcard-pod")
 
-    val testCases = Seq(
+    val testCases: Seq[TestCase] = Seq(
       // Initial assignment has 65 Slices and one resource. Expected the first two Slices (which
       // have less load than other Slices) to be merged to get down to 64 Slices.
       TestCase(
@@ -594,7 +594,6 @@ class NonParameterizedAlgorithmSuite extends AlgorithmSuiteBase {
           ((0x12000 -- ∞) -> Seq("pod-1")).subdivide(63, primaryRateLoadPerSlice = 10)
         )
       ),
-
       // Repeatedly merging Slices should not cause any problems.
       TestCase(
         description = "Repeatedly merging Slices",
@@ -712,7 +711,7 @@ class NonParameterizedAlgorithmSuite extends AlgorithmSuiteBase {
     // Algo allows up to 64 slices per resource. Creating 256 over 2 resources will cause it to
     // merge until there are 128 slices.
     for (index <- 0 until 256) {
-      val slice = (prevKey -- index)
+      val slice: Slice = (prevKey -- index)
       if (index % 2 == 0) {
         proposedAsnBuilder += ((prevKey -- index) -> Seq(resource1)).withPrimaryRateLoad(10.00001)
       } else {
@@ -747,8 +746,6 @@ class NonParameterizedAlgorithmSuite extends AlgorithmSuiteBase {
       generateAssignment(target, config, resources, predecessor, loadMap)
     assert(result.assignedResources == resources.availableResources)
   }
-
-
 
   test("Ramp up with no load reported and default load balancing configuration") {
     // Test plan: Verify that the algorithm produces valid assignments that are well-balanced and
@@ -927,8 +924,5 @@ class NonParameterizedAlgorithmSuite extends AlgorithmSuiteBase {
       )
     }
   }
-
-
-
 
 }

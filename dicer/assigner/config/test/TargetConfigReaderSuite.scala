@@ -10,6 +10,7 @@ import com.databricks.caching.util.{ConfigScope, TestUtils}
 import com.databricks.caching.util.TestUtils.assertThrow
 import com.databricks.dicer.assigner.config.ConfigTestUtil.{ConfigWriter, createConfig}
 import com.databricks.dicer.assigner.config.TargetConfigReader.TargetDefaultAndOverride
+import com.databricks.dicer.common.TargetName
 import com.databricks.testing.DatabricksTest
 
 class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {

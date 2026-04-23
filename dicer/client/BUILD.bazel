@@ -4,15 +4,12 @@ package(
     default_visibility = ["//dicer:internal"],
 )
 
-filegroup(
-    name = "all_files",
-    srcs = glob(["**"]),
-    visibility = ["//caching/oss:__pkg__"],
-)
-
 scala_library(
     name = "config",
-    srcs = ["src/InternalClientConfig.scala"],
+    srcs = [
+        "src/InternalClientConfig.scala",
+        "src/SliceLookupConfig.scala",
+    ],
     deps = [
         "//dicer/common:client_type",
         "//dicer/common:watch_server_helper",
@@ -43,20 +40,44 @@ scala_library(
 )
 
 scala_library(
+    name = "client_dpage",
+    srcs = ["src/ClientDPage.scala"],
+    visibility = ["//dicer:internal"],
+    deps = [
+        "//caching/util:prefix_logger",
+        "//dicer/client/proto:client_dpage_proto_scala_lib",
+        "//wrappers/util:jsonutil",
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_guava_guava",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
+    ],
+)
+
+scala_library(
     name = "slicez",
     srcs = ["src/ClientSlicez.scala"],
     exports = ["//dicer/common:zpage_helpers"],
     deps = [
+        ":client_dpage",
         "//caching/util:ascii_table",
         "//caching/util:sequential_execution_context",
+        "//dicer/client/proto:client_dpage_proto_scala_lib",
+        "//dicer/common/proto:dpage_proto_scala_lib",
         "//dicer/common:assignment_core",
+        "//dicer/common:dpage_view_helpers",
         "//dicer/common:generation",
         "//dicer/common:zpage_helpers",
         "//dicer/external:conf",
         "//dicer/external:external_common",
         "//dicer/friend:squid",
+        "//wrappers/deployment:infra_data_model_lib",
+        "//wrappers/deployment:kubernetes_cluster",
         "//wrappers/instrumentation",
         "//wrappers/logging",
+        "//wrappers/util:jsonutil",
         "@maven//:com_lihaoyi_geny_2_12",
         "@maven//:com_lihaoyi_scalatags_2_12",
     ],
@@ -97,13 +118,14 @@ scala_library(
 scala_library(
     name = "watch",
     srcs = [
-        "src/WatchStubHelper.scala",
+        "src/WatchStubManager.scala",
     ],
     deps = [
         ":config",
         "//caching/util:status_or",
         "//dicer/common:watch_server_helper",
         "//dicer/common/proto:common_proto_scala_lib",
+        "//dicer/external:conf",
         "//wrappers/rpc:rpc_tls",
         "//wrappers/util:scheduled_executor",
         "@maven//:com_github_ben_manes_caffeine_caffeine",
@@ -132,7 +154,15 @@ scala_library(
 scala_library(
     name = "dicer_client_proto_logger_conf",
     srcs = ["src/DicerClientProtoLoggerConf.scala"],
+    exports = [
+        "//wrappers/conf:raw_config_singleton",
+        "//wrappers/feature-flag",
+    ],
     visibility = ["//dicer:internal"],
+    deps = [
+        "//wrappers/conf:raw_config_singleton",
+        "//wrappers/feature-flag",
+    ],
 )
 
 scala_library(
@@ -167,6 +197,7 @@ scala_library(
         "//caching/util:state_machine",
         "//caching/util:status_utils",
         "//caching/util:watch_cell",
+        "//caching/util:where_am_i_helper",
         "//dicer/common/proto:common_proto_scala_lib",
         "//dicer/common:assignment_core",
         "//dicer/common:client_request",
@@ -223,6 +254,16 @@ scala_library(
 )
 
 scala_library(
+    name = "clerk_metrics",
+    srcs = ["src/ClerkMetrics.scala"],
+    deps = [
+        "//dicer/common:target_helper",
+        "//dicer/external:conf",
+        "@maven//:io_prometheus_simpleclient",
+    ],
+)
+
+scala_library(
     name = "clerk_impl",
     srcs = [
         "src/ClerkImpl.scala",
@@ -233,6 +274,7 @@ scala_library(
         "//wrappers/rpc:rpc_tls",
     ],
     deps = [
+        ":clerk_metrics",
         ":config",
         ":dicer_client_proto_logger",
         ":dicer_client_proto_logger_conf",
@@ -330,6 +372,7 @@ scala_library(
     srcs = ["test/TestClientUtils.scala"],
     testonly = True,
     deps = [
+        ":testable_dicer_client_proto_logger_conf",
         "//caching/util:assert_macros",
         "//caching/util:lock",
         "//caching/util:metric_utils",
@@ -347,6 +390,7 @@ scala_library(
         "//dicer/external:slicelet",
         "//dicer/friend:squid",
         "//wrappers/conf:core",
+        "//wrappers/conf:current_project",
         "//wrappers/conf:project",
         "//wrappers/conf:project-conf",
         "//wrappers/rpc:rpc_context",
@@ -367,6 +411,7 @@ scala_test(
     deps = [
         ":config",
         ":sync",
+        ":test_client",
         "//caching/util:fake_sequential_execution_context",
         "//caching/util:fake_typed_clock",
         "//caching/util:state_machine",
@@ -411,6 +456,7 @@ scala_test(
     timeout = "short",
     deps = [
         ":config",
+        ":test_client",
         "//caching/util:test_utils",
         "//dicer/common:client_type",
         "//dicer/external:conf",
@@ -428,6 +474,7 @@ scala_test(
         ":dicer_client_proto_logger",
         ":lookup",
         ":slicez",
+        ":test_client",
         ":testable_dicer_client_proto_logger_conf",
         "//caching/util:metric_utils",
         "//caching/util:sequential_execution_context",
@@ -447,7 +494,10 @@ scala_test(
     timeout = "short",
     deps = [
         ":clerk_impl",
+        ":metrics",
         ":slicez",
+        ":test_client",
+        ":testable_dicer_client_proto_logger_conf",
         "//caching/util:fake_sequential_execution_context",
         "//caching/util:fake_typed_clock",
         "//caching/util:metric_utils",
@@ -470,7 +520,9 @@ scala_test(
         "//dicer/friend:slice_map",
         "//dicer/friend:squid",
         "//wrappers/conf:core",
+        "//wrappers/conf:current_project",
         "//wrappers/conf:location",
+        "//wrappers/conf:project",
         "//wrappers/conf:project-conf",
         "//wrappers/rpc:rpc_ssl",
         "//wrappers/util:async_test_helpers",
@@ -487,12 +539,16 @@ scala_test(
 
 scala_test(
     name = "client_slicez_test",
-    srcs = ["test/ClientSlicezSuite.scala"],
+    srcs = [
+        "test/ClientSlicezSuite.scala",
+        "test/ClientSlicezTestHelper.scala",
+    ],
     timeout = "short",
     deps = [
         ":dicer_client_proto_logger",
         ":dicer_client_proto_logger_conf",
         ":slicez",
+        ":test_client",
         ":testable_dicer_client_proto_logger_conf",
         "//caching/util:fake_sequential_execution_context",
         "//caching/util:test_util",
@@ -555,8 +611,10 @@ scala_library(
         ":config",
         ":dicer_client_proto_logger_conf",
         ":slice_lookup_driver",
+        ":test_client",
         ":testable_dicer_client_proto_logger_conf",
-        "//caching/util:fake_s2s_proxy",
+        "//caching/util:fake_proxy",
+        "//caching/util:fake_s2s_proxy_metadata_handler",
         "//caching/util:fake_sequential_execution_context",
         "//caching/util:fake_typed_clock",
         "//caching/util:metric_utils",
@@ -585,10 +643,12 @@ scala_library(
         "//dicer/friend:slice_map",
         "//dicer/friend:squid",
         "//wrappers/conf:core",
+        "//wrappers/conf:current_project",
         "//wrappers/conf:project",
         "//wrappers/conf:project-conf",
         "//wrappers/logging",
         "//wrappers/rpc:client",
+        "//wrappers/rpc:headers",
         "//wrappers/rpc:rpc_context",
         "//wrappers/rpc:rpc_testing",
         "//wrappers/rpc:rpc_tls",
@@ -618,8 +678,9 @@ scala_test(
         ":dicer_client_proto_logger",
         ":slice_lookup_base",
         ":slice_lookup_driver",
+        ":test_client",
         ":testable_dicer_client_proto_logger_conf",
-        "//caching/util:fake_s2s_proxy",
+        "//caching/util:fake_proxy",
         "//caching/util:fake_sequential_execution_context",
         "//caching/util:fake_typed_clock",
         "//caching/util:metric_utils",
@@ -627,7 +688,6 @@ scala_test(
         "//caching/util:test_util",
         "//caching/util:watch_cell",
         "//dicer/assigner:assigner_slicez",
-        "//dicer/common/proto:common_proto_scala_lib",
         "//dicer/common:assignment_core",
         "//dicer/common:client_request",
         "//dicer/common:client_type",
@@ -718,6 +778,7 @@ scala_test(
         "//dicer/external:slicelet",
         "//dicer/friend:squid",
         "//wrappers/conf:core",
+        "//wrappers/conf:current_project",
         "//wrappers/conf:project",
         "//wrappers/conf:project-conf",
         "//wrappers/rpc:rpc_testing",
@@ -730,5 +791,21 @@ scala_test(
         "@scala_proto_rules_grpc_netty",
         "@scala_proto_rules_grpc_stub",
         "@scala_proto_rules_scalapb_runtime",
+    ],
+)
+
+scala_test(
+    name = "clerk_metrics_test",
+    srcs = ["test/ClerkMetricsSuite.scala"],
+    timeout = "short",
+    deps = [
+        ":clerk_metrics",
+        "//caching/util:metric_utils",
+        "//caching/util:test_util",
+        "//dicer/common:target_helper",
+        "//dicer/external:conf",
+        "//wrappers/util:async_test_helpers",
+        "//wrappers/util:databricks-test",
+        "@maven//:io_prometheus_simpleclient",
     ],
 )

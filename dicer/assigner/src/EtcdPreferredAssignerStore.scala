@@ -280,7 +280,11 @@ object EtcdPreferredAssignerStore {
           if (etcdWatchHandleOpt.isEmpty) {
             etcdWatchHandleOpt = Some(
               client.watch(
-                WatchArgs(EtcdPreferredAssignerStore.KEY, watchDuration = watchDuration),
+                WatchArgs(
+                  EtcdPreferredAssignerStore.KEY,
+                  backupPollingInterval = 1.second,
+                  watchDuration = watchDuration
+                ),
                 new StreamCallback[EtcdClient.WatchEvent](sec) {
                   override protected def onSuccess(value: EtcdClient.WatchEvent): Unit = {
                     baseDriver.handleEvent(Event.EtcdWatchEvent(value))

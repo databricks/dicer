@@ -6,24 +6,17 @@ import scala.collection.mutable
 import scala.concurrent.duration.Duration
 import scala.concurrent.Future
 
-import com.databricks.rpc.RequestHeaders
-
-import com.databricks.caching.util.AssertMacros.ifail
 import com.databricks.caching.util.PrefixLogger
 import com.databricks.caching.util.TestUtils
 import com.databricks.conf.Config
 import com.databricks.dicer.assigner.InterposingEtcdPreferredAssignerDriver
 import com.databricks.dicer.assigner.config.InternalTargetConfigMap
 import com.databricks.dicer.client.{Ports, TestClientUtils, TlsFilePaths}
-import com.databricks.dicer.common.SliceKeyHelper.IdentitySliceKeyFunction
-import com.databricks.dicer.common.SliceletData.SliceLoad
 import com.databricks.dicer.common.{
   Assignment,
-  ClientRequest,
   Generation,
   InternalDicerTestEnvironment,
   ProposedSliceAssignment,
-  SliceletData,
   TestAssigner
 }
 import com.databricks.dicer.external.DicerTestEnvironment.{
@@ -31,10 +24,9 @@ import com.databricks.dicer.external.DicerTestEnvironment.{
   TestAssignment,
   TestAssignmentBuilder
 }
-import com.databricks.dicer.friend.{SliceMap, Squid}
+import com.databricks.dicer.friend.{SliceAccessor, SliceMap, Squid}
 import com.databricks.threading.NamedExecutor
 import com.databricks.rpc.tls.TLSOptions
-
 
 /**
  * Keystore and Truststore paths for constructing a [[TLSOptions]]. The TLSOptions is used to
@@ -211,20 +203,7 @@ class DicerTestEnvironment private[dicer] (
    * or 0 if no attributed load has been reported.
    */
   def getTotalAttributedLoad(target: Target): Double = {
-    val requestOpt: Option[ClientRequest] =
-      internalTestEnv.testAssigner.getLatestSliceletWatchRequest(target).map {
-        case (_: RequestHeaders, req: ClientRequest) => req
-      }
-    if (requestOpt.isEmpty) { // No watch request received yet.
-      0
-    } else {
-      requestOpt.get.subscriberData match {
-        case sliceletData: SliceletData =>
-          sliceletData.attributedLoads.map((sliceLoad: SliceLoad) => sliceLoad.primaryRateLoad).sum
-        case _ => // No slicelet data in the request.
-          ifail("Found non-slicelet request in the latest sliecelet watch request.")
-      }
-    }
+    internalTestEnv.getTotalAttributedLoad(target)
   }
 
   /**
@@ -298,7 +277,6 @@ class DicerTestEnvironment private[dicer] (
       watchFromDataPlane = false
     )
   }
-
 
   /** Returns the port for the assigner chosen by the environment. For internal use only. */
   private[dicer] def getAssignerPort: Int = {
@@ -392,7 +370,7 @@ object DicerTestEnvironment {
     /** Assigns `key` to the given `slicelets`. */
     @throws[IllegalArgumentException]("If the assigned `slicelets` is empty.")
     def add(key: SliceKey, slicelets: Iterable[Slicelet]): this.type =
-      add(createSingleKeySlice(key), slicelets)
+      add(SliceAccessor.createSingleKeySlice(key), slicelets)
 
     /** Assigns `slice` to the given `slicelets`. */
     @throws[IllegalArgumentException]("If the assigned `slicelets` is empty.")
@@ -431,7 +409,7 @@ object DicerTestEnvironment {
 
     /** Assigns a single `key` to a Slicelet represented by the `squid`. */
     private[dicer] def add(key: SliceKey, squid: Squid): this.type = {
-      add(createSingleKeySlice(key), squid)
+      add(SliceAccessor.createSingleKeySlice(key), squid)
     }
   }
 
@@ -447,12 +425,4 @@ object DicerTestEnvironment {
    */
   class TestAssignment private[external] (
       private[external] val proposedAssignment: SliceMap[ProposedSliceAssignment])
-
-  /** Returns a Slice containing only the given `key`. */
-  private[dicer] def createSingleKeySlice(key: SliceKey): Slice = {
-    val successorBytes = new Array[Byte](key.bytes.size + 1) // key bytes + trailing 0
-    key.bytes.toByteArray.copyToArray(successorBytes)
-    val successorKey = SliceKey(successorBytes, IdentitySliceKeyFunction)
-    Slice(key, successorKey)
-  }
 }

@@ -6,9 +6,9 @@ import scala.util.Try
 import com.google.common.math.IntMath
 
 import io.grpc.Status.Code
-import io.prometheus.client.{Counter, Gauge}
+import io.prometheus.client.{Counter, Gauge, Histogram}
 
-import com.databricks.caching.util.CachingLatencyHistogram
+import com.databricks.caching.util.{CachingLatencyHistogram, TickerTime}
 import com.databricks.dicer.assigner.AssignmentGenerator.AssignmentGenerationDecision
 import com.databricks.dicer.assigner.AssignmentStats.{
   AssignmentChangeStats,
@@ -264,10 +264,10 @@ object TargetMetrics {
     .help("Number of resources for the target with the given healthStatus")
     .register()
 
-  /** Sets the counts of pods whose status was reported and computed as [[healthStatus]] */
+  /** Sets the counts of pods whose status was reported and computed as [[statusName]]. */
   def setPodSetSize(
       target: Target,
-      healthStatus: HealthWatcher.HealthStatus,
+      statusName: String,
       reportedCount: Int,
       computedCount: Int): Unit = {
 
@@ -276,7 +276,7 @@ object TargetMetrics {
         target.getTargetClusterLabel,
         target.getTargetNameLabel,
         target.getTargetInstanceIdLabel,
-        healthStatus.toString
+        statusName
       )
       .set(reportedCount)
 
@@ -285,7 +285,7 @@ object TargetMetrics {
         target.getTargetClusterLabel,
         target.getTargetNameLabel,
         target.getTargetInstanceIdLabel,
-        healthStatus.toString
+        statusName
       )
       .set(computedCount)
   }
@@ -305,16 +305,100 @@ object TargetMetrics {
 
   def incrementHealthStatusComputedDiffersFromReported(
       target: Target,
-      healthStatusReport: HealthWatcher.HealthStatusReport): Unit = {
+      reportedStatusName: String,
+      computedStatusName: String): Unit = {
     healthStatusComputedDiffersFromReported
       .labels(
         target.getTargetClusterLabel,
         target.getTargetNameLabel,
         target.getTargetInstanceIdLabel,
-        healthStatusReport.reportedBySlicelet.toString,
-        healthStatusReport.computed.toString
+        reportedStatusName,
+        computedStatusName
       )
       .inc()
+  }
+
+  /**
+   * Counter tracking the number of resources expired from the health watcher, broken down by target
+   * and the sources from which termination signals were received prior to expiration (if any).
+   */
+  private val healthWatcherResourceExpirations: Counter = Counter
+    .build()
+    .name("dicer_assigner_healthwatcher_resource_expirations_total")
+    .labelNames(
+      "targetCluster",
+      "targetName",
+      "targetInstanceId",
+      "receivedFromSlicelet",
+      "receivedFromKubernetes"
+    )
+    .help(
+      "Number of health watcher resource expirations recorded by target and the sources from " +
+      "which termination signals were received prior to expiration (if any). " +
+      "receivedFromSlicelet and receivedFromKubernetes are 'true' if a termination signal was " +
+      "received from that source before expiration, 'false' otherwise."
+    )
+    .register()
+
+  /**
+   * Histogram tracking the delay in receiving a termination signal from the Slicelet after
+   * receiving a termination signal from Kubernetes for a resource (when termination signals were
+   * received from both sources).  Positive values mean K8s arrived first (Slicelet slower than
+   * Kubernetes in delivering the signal); negative values mean Slicelet arrived first (K8s slower
+   * than the Slicelet in delivering the signal).
+   */
+  private val healthWatcherSliceletVsK8sTerminationSignalDelaySeconds: Histogram = Histogram
+    .build()
+    .name("dicer_assigner_healthwatcher_slicelet_vs_k8s_termination_signal_delay_seconds")
+    .labelNames("targetCluster", "targetName", "targetInstanceId")
+    .help(
+      "Delay in receiving a termination signal from the Slicelet after receiving a termination " +
+      "signal from Kubernetes for a resource (positive = received Slicelet signal after the " +
+      "Kubernetes signal, negative = received Kubernetes signal after the Slicelet signal)"
+    )
+    // Geometric ~4x factor centered on zero, covering sub-10ms to 10s in both directions.
+    // Negative buckets capture cases where Slicelet signals arrive before Kubernetes; positive
+    // buckets capture the reverse.
+    .buckets(-10.0, -2.56, -0.64, -0.16, -0.04, -0.01, 0.0, 0.01, 0.04, 0.16, 0.64, 2.56, 10.0)
+    .register()
+
+  /**
+   * Records stats for a resource that expired from the health watcher.  See
+   * [[healthWatcherResourceExpirations]] and
+   * [[healthWatcherSliceletVsK8sTerminationSignalDelaySeconds]] for more details.
+   *
+   * @param target The target for which the resource expired.
+   * @param learnedTerminatingFromSliceletTimeOpt The time at which the termination signal was
+   *                                              received from the Slicelet, if any.
+   * @param learnedTerminatingFromKubernetesTimeOpt The time at which the termination signal was
+   *                                                received from Kubernetes, if any.
+   */
+  def recordHealthWatcherResourceExpirationStats(
+      target: Target,
+      learnedTerminatingFromSliceletTimeOpt: Option[TickerTime],
+      learnedTerminatingFromKubernetesTimeOpt: Option[TickerTime]): Unit = {
+    healthWatcherResourceExpirations
+      .labels(
+        target.getTargetClusterLabel,
+        target.getTargetNameLabel,
+        target.getTargetInstanceIdLabel,
+        learnedTerminatingFromSliceletTimeOpt.nonEmpty.toString,
+        learnedTerminatingFromKubernetesTimeOpt.nonEmpty.toString
+      )
+      .inc()
+
+    (learnedTerminatingFromSliceletTimeOpt, learnedTerminatingFromKubernetesTimeOpt) match {
+      case (Some(sliceletTime: TickerTime), Some(k8sTime: TickerTime)) =>
+        val delaySecs: Double = (sliceletTime - k8sTime).toMillis / 1000.0
+        healthWatcherSliceletVsK8sTerminationSignalDelaySeconds
+          .labels(
+            target.getTargetClusterLabel,
+            target.getTargetNameLabel,
+            target.getTargetInstanceIdLabel
+          )
+          .observe(delaySecs)
+      case _ => ()
+    }
   }
 
   private val numActiveGenerators: Gauge = Gauge
@@ -1179,29 +1263,20 @@ object TargetMetrics {
 
     // Clear the metrics that are updated when an assignment is generated.
     numAssignmentSlices.remove(targetClusterLabel, targetNameLabel, targetInstanceIdLabel)
-    for (healthStatus <- HealthWatcher.HealthStatus.values) {
+    for (statusName <- HealthWatcher.ALL_STATUS_NAMES) {
       podSetSizeComputed.remove(
         targetClusterLabel,
         targetNameLabel,
         targetInstanceIdLabel,
-        healthStatus.toString
+        statusName
       )
       podSetSizeReported.remove(
         targetClusterLabel,
         targetNameLabel,
         targetInstanceIdLabel,
-        healthStatus.toString
+        statusName
       )
 
-      for (maskedStatus <- HealthWatcher.HealthStatus.values) {
-        healthStatusComputedDiffersFromReported.remove(
-          targetClusterLabel,
-          targetNameLabel,
-          targetInstanceIdLabel,
-          healthStatus.toString,
-          maskedStatus.toString
-        )
-      }
     }
 
     // Clean up the metrics that reflect the latest written assignment. Theoretically, we could

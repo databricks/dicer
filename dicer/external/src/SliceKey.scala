@@ -1,7 +1,5 @@
 package com.databricks.dicer.external
 
-import java.nio.charset.StandardCharsets
-
 import com.google.common.primitives.{Ints, Longs, UnsignedLongs}
 
 import com.google.protobuf.ByteString
@@ -9,9 +7,8 @@ import com.databricks.caching.util.Bytes
 
 /**
  * A Slice key is a representation of an immutable sequence of bytes. Dicer assigns ranges of Slice
- * keys, known as Slices, to resources, like pods. Created using a [[SliceKeyFunction]], they are
- * derived from the application keys routed by Dicer [[Clerk]]s, and affinitized to Dicer
- * [[Slicelet]]s.
+ * keys, known as Slices, to resources, like pods. They are derived from the application keys routed
+ * by Dicer [[Clerk]]s, and affinitized to Dicer [[Slicelet]]s.
  *
  * @param bytes immutable sequence of bytes
  */
@@ -34,6 +31,15 @@ final class SliceKey private (val bytes: ByteString) extends AnyRef with HighSli
     byteAt(0) << 56 | byteAt(1) << 48 | byteAt(2) << 40 | byteAt(3) << 32 |
     byteAt(4) << 24 | byteAt(5) << 16 | byteAt(6) << 8 | byteAt(7)
   }
+
+  /**
+   * Returns the raw bytes of this key. These bytes can be used as prefixes for storage keys
+   * to efficiently identify rows belonging to a given Slice.
+   *
+   * The returned bytes can be deserialized back to a [[SliceKey]] using
+   * `SliceKeyAccessor.fromRawBytes`.
+   */
+  def toRawBytes: ByteString = bytes
 
   override def compare(that: HighSliceKey): Int = that match {
     case that: SliceKey => this.compare(that)
@@ -71,8 +77,8 @@ final class SliceKey private (val bytes: ByteString) extends AnyRef with HighSli
    * A human-readable version of the bytes in a SliceKey where we print out printable characters
    * normally and the unprintable ones are printed with their hex code.
    *
-   * Keys of length 8 are assumed to be 64-bit fingerprints (which we recommend, see
-   * [[SliceKeyFunction]]) and are printed as fixed-width (leading zeroes), hex-encoded, and
+   * Keys of length 8 are assumed to be 64-bit fingerprints (which we recommend, created using
+   * [[newFingerprintBuilder]]) and are printed as fixed-width (leading zeroes), hex-encoded, and
    * unsigned 64-bit integers to make assignment debug strings easier to interpret. Keys of length 9
    * that end in a 0 byte are printed as 8-byte keys with the suffix "\0" - these can appear due to
    * the Assigner isolating hot keys.
@@ -109,33 +115,6 @@ final class SliceKey private (val bytes: ByteString) extends AnyRef with HighSli
        |  bytesPrefix (bytes): [${Longs.toByteArray(bytesPrefix).mkString(", ")}]
        |}""".stripMargin
   }
-}
-
-/**
- * A function transforming application keys to [[SliceKey]] instances.
- *
- * At present, customers must use a function that fingerprints all application keys such that the
- * corresponding [[SliceKey]]s are somewhat uniformly distributed in the key space. Here is a
- * sample function that uses FarmHash Fingerprint64, a high-quality (but not cryptographic)
- * fingerprint function:
- *
- * {{{
- * import com.google.common.hash.Hashing
- *
- * object Fingerprint extends SliceKeyFunction {
- *   override def apply(applicationKey: Array[Byte]): Array[Byte] = {
- *     Hashing.farmHashFingerprint64().hashBytes(applicationKey).asBytes
- *   }
- * }
- * }}}
- *
- * As Dicer's load-balancing support becomes more sophisticated, applications may want to leverage
- * natural keys in their assignments, at which point an identity function will become viable.
- */
-trait SliceKeyFunction {
-
-  /** Given an application key, returns the bytes for the corresponding [[SliceKey]]. */
-  def apply(applicationKey: Array[Byte]): Array[Byte]
 }
 
 /** Companion object for creating [[SliceKey]]s and for getting min keys. */
@@ -184,25 +163,70 @@ object SliceKey {
    */
   implicit val ORDERING: Ordering[SliceKey] = (x: SliceKey, y: SliceKey) => x.compare(y)
 
-  /** Creates a Slice key by applying `function` to the given `applicationKey`. */
-  def apply(applicationKey: Array[Byte], function: SliceKeyFunction): SliceKey = {
-    val sliceKeyBytes: Array[Byte] = function(applicationKey)
-    new SliceKey(ByteString.copyFrom(sliceKeyBytes))
-  }
-
-  /** Creates a Slice key by applying `function` to the UTF-8 representation of `applicationKey`. */
-  def apply(applicationKey: String, function: SliceKeyFunction): SliceKey = {
-    val applicationKeyBytes: Array[Byte] = applicationKey.getBytes(StandardCharsets.UTF_8)
-    val sliceKeyBytes: Array[Byte] = function(applicationKeyBytes)
-    new SliceKey(ByteString.copyFrom(sliceKeyBytes))
+  /**
+   * Creates a new builder for constructing a [[SliceKey]] using the Farmhash fingerprint64
+   * algorithm. The builder allows incrementally adding key parts (longs, strings, bytes) which are
+   * then hashed together to produce an 8-byte fingerprint.
+   *
+   * If no values are put in the builder, returns the fingerprint for the empty string, _not_ MIN.
+   *
+   * Example:
+   * {{{
+   *   val key = SliceKey.newFingerprintBuilder()
+   *     .putString("user-")
+   *     .putLong(12345L)
+   *     .build()
+   * }}}
+   */
+  def newFingerprintBuilder(): SliceKeyBuilder = {
+    import com.google.common.hash.Hashing
+    new HasherSliceKeyBuilder(Hashing.farmHashFingerprint64().newHasher())
   }
 
   /**
-   * [[SliceKey]] is not publicly constructible from a byte string because we want to ensure a
-   * [[SliceKeyFunction]] is explicitly indicated by callers. `bytes` should be something that
-   * already has [[SliceKeyFunction]] applied, e.g. something received in a proto.
+   * Creates a [[SliceKey]] from uniformly distributed bytes.
+   *
+   * IMPORTANT: This method is for ADVANCED USE ONLY. For most applications, use
+   * [[newFingerprintBuilder]] instead, which automatically ensures uniform
+   * distribution and proper key construction.
+   *
+   * This method is intended for applications that need to generate custom slice keys
+   * with specific distribution properties (e.g., range-based sharding schemes).
+   *
+   * REQUIREMENTS:
+   *  - The input bytes must be uniformly distributed across the keyspace
+   *  - Maximum length: 32 bytes
+   *  - Bytes should have sufficient entropy to avoid hotspots
+   *
+   * WHEN TO USE THIS METHOD:
+   * Use this method when you are creating NEW slice keys from scratch with custom
+   * byte sequences that you have verified to be uniformly distributed.
+   *
+   * WHEN TO USE fromRawBytes INSTEAD:
+   * If you need to deserialize a [[SliceKey]] that was previously serialized (e.g.,
+   * from storage, a protobuf, or returned from [[toRawBytes]]), you should use
+   * `fromRawBytes` from [[com.databricks.dicer.friend.external.SliceKeyAccessor]]
+   * instead. Contact the maintainers to get allowlisted for friend accessor access.
+   *
+   * @throws IllegalArgumentException if bytes exceeds 32 bytes
    */
-  private[dicer] def withIdentityFunction(bytes: ByteString): SliceKey = new SliceKey(bytes)
+  def fromTrustedFingerprint(bytes: ByteString): SliceKey = {
+    if (bytes.size() > 32) {
+      throw new IllegalArgumentException("must not exceed 32 bytes")
+    }
+    new SliceKey(bytes)
+  }
+
+  /**
+   * Creates a [[SliceKey]] from raw bytes. Used exclusively to unmarshal bytes returned from
+   * [[SliceKey.toRawBytes]].
+   *
+   * External applications may be allowlisted for this API via
+   * `com.databricks.dicer.friend.external.SliceKeyAccessor`.
+   */
+  private[dicer] def fromRawBytes(bytes: ByteString): SliceKey = {
+    new SliceKey(bytes)
+  }
 }
 
 /**

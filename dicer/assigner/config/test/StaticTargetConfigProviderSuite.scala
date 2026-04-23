@@ -4,6 +4,7 @@ import scala.concurrent.duration._
 import com.databricks.caching.util.{SequentialExecutionContext, ValueStreamCallback}
 import com.databricks.conf.Configs
 import com.databricks.dicer.assigner.TestableDicerAssignerConf
+import com.databricks.dicer.common.TargetName
 import com.databricks.testing.DatabricksTest
 
 import scala.util.Random
@@ -17,7 +18,7 @@ class StaticTargetConfigProviderSuite extends DatabricksTest {
   private val defaultAssignerConfig: TestableDicerAssignerConf =
     new TestableDicerAssignerConf(
       Configs.parseMap(
-        "databricks.dicer.forceDisableDynamicConfig" -> false,
+        "databricks.dicer.assigner.forceDisableDynamicConfig" -> false,
         "databricks.dicer.enableDynamicConfig" -> true
       )
     )

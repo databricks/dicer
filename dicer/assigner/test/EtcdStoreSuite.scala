@@ -8,6 +8,7 @@ import io.grpc.{Status, StatusException}
 import com.databricks.api.proto.dicer.common.DiffAssignmentP
 import com.databricks.caching.util.TestUtils.assertThrow
 import com.databricks.caching.util.{
+  AlertOwnerTeam,
   AssertionWaiter,
   CachingErrorCode,
   Cancellable,
@@ -2841,12 +2842,14 @@ class EtcdStoreSuite extends CommonStoreSuiteBase {
         testRandom
       )
 
+    val stateMachineErrorCode: String =
+      CachingErrorCode.UNCAUGHT_STATE_MACHINE_ERROR(AlertOwnerTeam.CachingTeam).toString
     val initialErrorCount: Double = MetricUtils.getMetricValue(
       CollectorRegistry.defaultRegistry,
       "caching_errors",
       Map(
         "severity" -> Severity.CRITICAL.toString,
-        "error_code" -> CachingErrorCode.STATE_MACHINE_EXCEPTION.toString
+        "error_code" -> stateMachineErrorCode
       )
     )
 
@@ -2873,7 +2876,7 @@ class EtcdStoreSuite extends CommonStoreSuiteBase {
           "caching_errors",
           Map(
             "severity" -> Severity.CRITICAL.toString,
-            "error_code" -> CachingErrorCode.STATE_MACHINE_EXCEPTION.toString
+            "error_code" -> stateMachineErrorCode
           )
         )
       }

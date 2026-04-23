@@ -134,7 +134,7 @@ object FakeSequentialExecutionContextPool {
       enableContextPropagation: Boolean): FakeSequentialExecutionContextPool = {
     val exceptionHandler: ExceptionHandler = exceptionInterceptorOpt match {
       case Some(exceptionInterceptor: UncaughtExceptionInterceptor) =>
-        new ExceptionHandler(name) {
+        new ExceptionHandler(name, AlertOwnerTeam.CachingTeam) {
           // If an uncaught exception interceptor is provided, we create a custom
           // ExceptionHandler overriding the handleUncaughtException method. The interceptor can
           // choose to handle the uncaught exception by returning true, or let the default
@@ -150,7 +150,7 @@ object FakeSequentialExecutionContextPool {
         }
       case None =>
         // No interceptor, so we use the default ExceptionHandler.
-        new ExceptionHandler(name)
+        new ExceptionHandler(name, AlertOwnerTeam.CachingTeam)
     }
     val pool = SequentialExecutionContextPool.forTest.create(
       name,

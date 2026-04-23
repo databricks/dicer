@@ -4,7 +4,6 @@ import java.time.Instant
 import java.util.UUID
 import scala.collection.mutable
 import scala.concurrent.duration._
-import com.databricks.api.proto.dicer.common.ClientRequestP.SliceletDataP
 import com.databricks.caching.util.AsciiTable.Header
 import com.databricks.caching.util.AssertMacros.iassert
 import com.databricks.caching.util.{
@@ -22,18 +21,12 @@ import com.databricks.dicer.assigner.HealthWatcher.Event.AssignmentSyncObserved.
   AssignmentObserved,
   GenerationObserved
 }
-import com.databricks.dicer.assigner.HealthWatcher.HealthStatus.{
-  NotReady,
-  Running,
-  Terminating,
-  Unknown
-}
 import com.databricks.dicer.assigner.HealthWatcher.{
   DriverAction,
   Event,
   HealthStatus,
-  HealthStatusReport,
   ResourceHealth,
+  HealthStatusSource,
   State,
   StaticConfig,
   isReliableSource
@@ -43,7 +36,7 @@ import com.databricks.dicer.assigner.TargetMetrics.AssignmentDistributionSource
 import com.databricks.dicer.assigner.TargetMetrics.AssignmentDistributionSource.AssignmentDistributionSource
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.assigner.conf.HealthConf
-import com.databricks.dicer.common.{Assignment, Generation}
+import com.databricks.dicer.common.{Assignment, Generation, SliceletState}
 import com.databricks.dicer.external.Target
 import com.databricks.dicer.friend.Squid
 
@@ -52,8 +45,8 @@ import com.databricks.dicer.friend.Squid
  * various environmental signals and informs the caller of the current set of healthy resources
  * whenever they change.
  *
- * Upon being supplied with an event or advancement, the health watcher will inform the caller
- * about a health report (see [[DriverAction]]) of currently tracked resources if there's any change
+ * Upon being supplied with an event or advancement, the health watcher will inform the caller about
+ * a health report (see [[DriverAction]]) of currently tracked resources if there's any change
  * (resource status transition, resource removed, resource added) caused by the event. The caller
  * will also be told the next time when there will be a change of resource status, and the caller is
  * expected to query the health watcher again no later than that time so it can promptly observe any
@@ -63,13 +56,13 @@ import com.databricks.dicer.friend.Squid
  * driver/state machine pattern.
  *
  * Initial health delay: Typically when the health watcher is informed about a resource in Running
- * state (by [[Event.HealthStatusObserved{ByUuid}]]), the resource will be incorporated in the
- * health report immediately. However during an initial delay of
- * [[HealthWatcher.StaticConfig.unhealthyTimeoutPeriod]] after the health watcher is started, it
- * will just silently track the resources without generating any health report. A health report
- * containing all resources tracked during this time will be generated upon the initial health delay
- * is passed. This is because in practice when an assigner has just started, we would like to
- * collect a sufficient set of resources before generating the first assignment.
+ * state (by [[Event.SliceletStateFromSlicelet]]), the resource will be incorporated in the health
+ * report immediately. However during an initial delay of
+ * [[HealthWatcher.StaticConfig.initialHealthReportDelayPeriod]] after the health watcher is
+ * started, it will just silently track the resources without generating any health report. A health
+ * report containing all resources tracked during this time will be generated upon the initial
+ * health delay period is passed. This is because in practice when an assigner has just started, we
+ * would like to collect a sufficient set of resources before generating the first assignment.
  *
  * Health bootstrap: Since the initial health delay introduces a period of unavailability for
  * generating new assignments, the delay can be short circuited by bootstrapping health information
@@ -82,9 +75,9 @@ import com.databricks.dicer.friend.Squid
  * generation is no older than the highest generation sync-ed from reliable sources, the health
  * delay will be immediately bypassed, and the resources assigned in the latest assignment will be
  * incorporated into the first health report (of course, among with other resources observed by
- * [[Event.HealthStatusObserved{ByUuid}]]). Here "reliable" means that we believe the source is
- * highly likely to know an assignment fresh enough such that it doesn't contain any dead resources,
- * so that the initial health report (and initial assignment) will not be polluted by the stale
+ * [[Event.SliceletStateFromSlicelet]]). Here "reliable" means that we believe the source is highly
+ * likely to know an assignment fresh enough such that it doesn't contain any dead resources, so
+ * that the initial health report (and initial assignment) will not be polluted by the stale
  * resources. Intuitively, if we know an assignment generation from a reliable source, we can safely
  * assume assignments with even higher generations are also reliable and fresh (or even fresher), so
  * the health watcher will actually incorporate the assigned resources with the highest generation
@@ -92,9 +85,9 @@ import com.databricks.dicer.friend.Squid
  *
  * Currently we only consider slicelets as reliable sources of assignment, as slicelets are
  * frequently synchronizing assignments with both clerks and assigners so there's a high chance that
- * they know assignments fresh enough. Other sources, e.g. assignments from an in-memory
- * store, are not always a reliable source. For example, when a preferred assigner using in-memory
- * store becomes a stand-by assigner, the assignment in its in-memory store will remain. And if this
+ * they know assignments fresh enough. Other sources, e.g. assignments from an in-memory store, are
+ * not always a reliable source. For example, when a preferred assigner using in-memory store
+ * becomes a stand-by assigner, the assignment in its in-memory store will remain. And if this
  * assigner becomes preferred again after a long time, the assignment from its in-memory store can
  * be rather stale.
  *
@@ -107,36 +100,50 @@ import com.databricks.dicer.friend.Squid
 object HealthWatcher {
 
   /**
+   * REQUIRES: `initialHealthReportDelayPeriod` is positive
    * REQUIRES: `unhealthyTimeoutPeriod` is positive
    * REQUIRES: `terminatingTimeoutPeriod` is positive
+   * REQUIRES: `notReadyTimeoutPeriod` is positive
    *
    * Static configuration (i.e., based on DbConf; does not vary per target) for the HealthWatcher.
    * Per-target configuration is in [[HealthWatcherTargetConfig]].
    *
+   * @param initialHealthReportDelayPeriod the delay before the first health report is emitted.
+   *                                       Note that in the absence of observing an initial set
+   *                                       of assigned resources with which to bootstrap health
+   *                                       status, this delay is used to ensure the watcher has
+   *                                       collected sufficient signals before emitting its first
+   *                                       health report.
+   *                                       TODO(<internal bug>): When Dicer has an authoritative
+   *                                       assignment store, this timer-based initial delay period
+   *                                       can be removed, since the watcher can always learn a
+   *                                       recent assignment state (at least no staler than its
+   *                                       start time), most importantly including the case of "no
+   *                                       assignment". Without an authoritative store, the initial
+   *                                       delay must be preserved, since the watcher cannot
+   *                                       distinguish between "no assignment" and "no assignment
+   *                                       yet observed".
    * @param unhealthyTimeoutPeriod   when a heartbeat is not received from a resource within this
-   *                                 period, it is assumed to be unhealthy. Note that in the absence
-   *                                 of observing an initial set of assigned resources with which to
-   *                                 bootstrap health status, this doubles as an initial health
-   *                                 report delay during startup to ensure the watcher has collected
-   *                                 sufficient signals before emitting its first health report.
-   *                                 TODO(<internal bug>): When Dicer has an authoritative assignment
-   *                                 store, this timer-based initial delay period can be removed,
-   *                                 since the watcher can always learn a recent assignment state
-   *                                 (at least no staler than its start time), most importantly
-   *                                 including the case of "no assignment". Without an authoritative
-   *                                 store, the initial delay must be preserved, since the watcher
-   *                                 cannot distinguish between "no assignment" and "no assignment
-   *                                 yet observed".
+   *                                 period, it is assumed to be unhealthy.
    * @param terminatingTimeoutPeriod we remove the HealthStatus for a pod in Terminating state after
    *                                 this period, since the pod is no longer active. See the
    *                                 documentation [[HealthConf.terminatingTimeoutPeriod]] for more
    *                                 details.
+   * @param notReadyTimeoutPeriod    flapping protection timeout for the NotReady state. A resource
+   *                                 in NotReady will not be allowed to transition to Running until
+   *                                 it has not received a NotReady heartbeat for at least this
+   *                                 duration; each NOT_READY heartbeat while in NotReady status
+   *                                 resets this timer.
    */
   case class StaticConfig(
+      initialHealthReportDelayPeriod: FiniteDuration,
       unhealthyTimeoutPeriod: FiniteDuration,
-      terminatingTimeoutPeriod: FiniteDuration) {
+      terminatingTimeoutPeriod: FiniteDuration,
+      notReadyTimeoutPeriod: FiniteDuration) {
+    require(initialHealthReportDelayPeriod > Duration.Zero)
     require(unhealthyTimeoutPeriod > Duration.Zero)
     require(terminatingTimeoutPeriod > Duration.Zero)
+    require(notReadyTimeoutPeriod > Duration.Zero)
   }
 
   /** Input events to the health watcher state machine. */
@@ -144,16 +151,17 @@ object HealthWatcher {
   object Event {
 
     /**
-     * Informs the health watcher that the given resource (fully identified by Squid) has the given
-     * health status.
+     * Informs the health watcher of a state update from a Slicelet. Slicelet state updates include
+     * the Slicelet's full Squid.
      */
-    case class HealthStatusObserved(resource: Squid, healthStatus: HealthStatus) extends Event
+    case class SliceletStateFromSlicelet(resource: Squid, sliceletState: SliceletState)
+        extends Event
 
     /**
-     * Informs the health watcher that the given resource (identified only by UUID, e.g. in the case
-     * we received this information from Kubernetes) has the given health status.
+     * Informs the health watcher of a Slicelet state update from Kubernetes. Kubernetes state
+     * updates only include the resource's UUID.
      */
-    case class HealthStatusObservedByUuid(resourceUUID: UUID, healthStatus: HealthStatus)
+    case class SliceletStateFromKubernetes(resourceUUID: UUID, sliceletState: SliceletState)
         extends Event
 
     /**
@@ -198,8 +206,21 @@ object HealthWatcher {
    */
   sealed trait DriverAction
   object DriverAction {
-    case class IncorporateHealthReport(healthReport: Map[Squid, HealthStatusReport])
-        extends DriverAction
+
+    /**
+     * Informs the driver of the current set of assignable resources and the number of resources
+     * that have crashed since the last report.
+     *
+     * Because health reports may be delayed or dropped, consumers of health reports cannot
+     * reliably compute [[newlyCrashedCount]] by diffing consecutive health reports. Thus we
+     * compute the number of crashed resources in the [[HealthWatcher]].
+     *
+     * @param healthy       the current set of [[Squid]]s with health status computed as `Running`,
+     *                      eligible for assignment.
+     * @param newlyCrashedCount the number of [[Squid]]s that were healthy in the previous report
+     *                          but whose heartbeat has since expired.
+     */
+    case class HealthReportReady(healthy: Set[Squid], newlyCrashedCount: Int) extends DriverAction
   }
 
   /** Factory methods for [[StaticConfig]]. */
@@ -208,48 +229,96 @@ object HealthWatcher {
     /** Creates a [[StaticConfig]] derived from [[HealthConf]]. */
     def fromConf(conf: HealthConf): StaticConfig = {
       StaticConfig(
+        conf.initialHealthReportDelayPeriod,
         conf.unhealthyTimeoutPeriod,
-        conf.terminatingTimeoutPeriod
+        conf.terminatingTimeoutPeriod,
+        conf.notReadyTimeoutPeriod
       )
     }
   }
 
-  /** The health status of a resource. */
-  sealed trait HealthStatus
-  object HealthStatus {
-    case object Unknown extends HealthStatus
-    case object NotReady extends HealthStatus
-    case object Running extends HealthStatus
-    case object Terminating extends HealthStatus
+  /**
+   * The health status of a resource, as computed by the [[HealthWatcher]].
+   *
+   * [[NotReady]] embeds the flapping-protection timeout; all other states are singletons.
+   */
+  private sealed trait HealthStatus {
 
-    /** All [[HealthStatus]]es. */
-    val values: Set[HealthStatus] = Set(Unknown, NotReady, Running, Terminating)
+    /** Canonical name used for metrics labels and logging. */
+    def statusName: String
 
-    def fromProto(state: SliceletDataP.State): HealthStatus = {
-      state match {
-        case SliceletDataP.State.UNKNOWN => Unknown
-        case SliceletDataP.State.NOT_READY => NotReady
-        case SliceletDataP.State.RUNNING => Running
-        case SliceletDataP.State.TERMINATING => Terminating
-      }
-    }
   }
 
-  /**
-   * The HealthStatuses to report to the AssignmentGenerator. The HealthWatcher may compute a
-   * different status for a Slicelet than what the Slicelet reported. E.g., a Slicelet that reported
-   * Terminating once should always be considered Terminating by the Assigner, since transitions
-   * from Terminating to any other state are not allowed in the Slicelet state machine. See
-   * [[updateHealthStatus]] for allowed transitions.
-   *
-   * We store the Slicelet's reported status only for visibility into the HealthWatcher's decisions.
-   * Callers should always use the computed health status.
-   *
-   * @param reportedBySlicelet the HealthStatus reported by the Slicelet
-   * @param computed           the HealthStatus computed by the HealthWatcher (may be the same as
-   *                           reported)
-   */
-  case class HealthStatusReport(reportedBySlicelet: HealthStatus, computed: HealthStatus)
+  private object HealthStatus {
+
+    /**
+     * Assigner-computed state for a brand-new resource whose first heartbeat was NOT_READY.
+     * Unlike [[NotReady]], Starting carries no flapping protection timer: a RUNNING heartbeat
+     * from a Starting resource transitions it immediately to Running.
+     */
+    case object Starting extends HealthStatus {
+      override def statusName: String = "Starting"
+    }
+
+    /**
+     * NotReady status, with flapping protection timeout.
+     *
+     * Two [[NotReady]] instances compare equal (via [[equals]]) regardless of their
+     * [[lastReportTime]] values. This makes it possible to test whether a status is [[NotReady]]
+     * using `==` without caring about the specific timeout value. All [[NotReady]] instances
+     * share the same [[hashCode]] for consistency with [[equals]].
+     *
+     * @param lastReportTime The time at which the resource last reported a NotReady heartbeat.
+     */
+    class NotReady(private[HealthWatcher] val lastReportTime: TickerTime) extends HealthStatus {
+      override def statusName: String = "NotReady"
+
+      /** Returns true if `other` is a [[NotReady]] instance, regardless of [[lastReportTime]]. */
+      override def equals(other: Any): Boolean = other match {
+        case _: NotReady => true
+        case _ => false
+      }
+
+      /** Hash on the class so all instances return the same hashCode. */
+      override def hashCode(): Int = classOf[NotReady].hashCode()
+
+      override def toString: String = s"NotReady(lastReportTime=$lastReportTime)"
+    }
+
+    case object Running extends HealthStatus {
+      override def statusName: String = "Running"
+    }
+
+    case object Terminating extends HealthStatus {
+      override def statusName: String = "Terminating"
+    }
+
+    /**
+     * Canonical instances of all [[HealthStatus]] kinds, used for metric label enumeration.
+     * A [[NotReady]] sentinel represents the NotReady status. Map lookups against this set work
+     * correctly because [[NotReady.equals]] ignores [[NotReady.lastReportTime]].
+     */
+    val values: Set[HealthStatus] =
+      Set(Starting, new NotReady(TickerTime.ofNanos(0)), Running, Terminating)
+
+  }
+
+  /** Canonical names of all [[HealthStatus]] variants, used for metric label enumeration. */
+  val ALL_STATUS_NAMES: Seq[String] = HealthStatus.values.toSeq.map(_.statusName)
+
+  /** The source of a health status signal. Used for metrics. */
+  sealed trait HealthStatusSource
+  object HealthStatusSource {
+
+    /** Health status bootstrapped from a previously observed assignment during startup. */
+    case object BootstrappingAssignment extends HealthStatusSource
+
+    /** Health status reported directly by a Slicelet via its heartbeat. */
+    case object Slicelet extends HealthStatusSource
+
+    /** Health status reported by the Kubernetes pod watcher. */
+    case object Kubernetes extends HealthStatusSource
+  }
 
   /**
    * Factory for [[HealthWatcher]]s. Used to do dependency injection of a health watcher in tests
@@ -291,29 +360,47 @@ object HealthWatcher {
     case object Started extends State
   }
 
-  // TODO(<internal bug>): support the Running -> NotReady transition.
   /**
-   * An object to keep track of health status related information for a resource.
-   * `healthStatus` is the health status of the resource, e.g., running. `expiryTime` is the time
-   * at which the HealthStatus will be removed.
+   * An object to keep track of health status related information for a resource. `expiryTime` is
+   * the time at which the HealthStatus will be removed.
    *
-   * We currently do not handle the Running -> NotReady transition.
+   * The [[HealthWatcher]] may compute a different health status than what the resource
+   * reported. For example, a resource that reported Terminating once should always be
+   * considered Terminating by the Assigner, since transitions from Terminating to any other
+   * state are not allowed in the Slicelet state machine. The resource's reported status is
+   * stored only for visibility into the [[HealthWatcher]]'s decisions. Callers should always
+   * use the computed health status.
    *
    * @param resource                 A SQUID or UUID identifying the resource.
    * @param observeSliceletReadiness whether to use the Slicelet's reported readiness state to set
    *                                 its status in health reports, or mask its reported state to
-   *                                 Running from the NOT_READY state. Note that even when observing
-   *                                 the Slicelet's state, certain status transitions are disallowed
-   *                                 (e.g., Running -> NotReady).
+   *                                 Running from the NOT_READY state.
+   * @param permitRunningToNotReady  whether to allow the Running -> NotReady transition when the
+   *                                 Slicelet reports NOT_READY. When false, NOT_READY reports from
+   *                                 Running resources are ignored.
+   * @param config                   static configuration for the HealthWatcher.
    */
   private class ResourceHealth(
       private var resource: Either[Squid, UUID],
-      observeSliceletReadiness: Boolean)
+      observeSliceletReadiness: Boolean,
+      permitRunningToNotReady: Boolean,
+      config: StaticConfig)
       extends IntrusiveMinHeapElement[TickerTime] {
 
-    // See [[HealthStatusReport]].
-    private var sliceletReportedHealthStatus: HealthStatus = HealthStatus.Unknown
-    private var computedHealthStatus: HealthStatus = HealthStatus.Unknown
+    // The HealthWatcher may compute a different status than what the Slicelet reported. E.g., a
+    // Slicelet that reported Terminating once should always be considered Terminating by the
+    // Assigner, since transitions from Terminating to any other state are not allowed in the
+    // Slicelet state machine. See [[updateHealthStatus]] for allowed transitions. We store the
+    // Slicelet's reported status only for visibility into the HealthWatcher's decisions. Callers
+    // should always use the computed health status.
+    private var sliceletReportedHealthStatus: HealthStatus = HealthStatus.Starting
+    private var computedStatus: HealthStatus = HealthStatus.Starting
+
+    /** The first time we learned this resource is terminating from a Slicelet. */
+    private var learnedTerminatingFromSliceletTimeOpt: Option[TickerTime] = None
+
+    /** The first time we learned this resource is terminating from Kubernetes. */
+    private var learnedTerminatingFromKubernetesTimeOpt: Option[TickerTime] = None
 
     /** Return SQUID for the resource. */
     def getResourceSquidOpt: Option[Squid] = resource match {
@@ -328,14 +415,41 @@ object HealthWatcher {
     }
 
     /**
-     * Update the resource with new health status and expiry.
+     * Update the resource with a potentially new health status. This method also updates the
+     * resource's expiry time.
      *
-     * Returns true if there is a change in health status of the resource.
+     * @param now          the current time.
+     * @param newResource  the SQUID or UUID identifying the resource in this update.
+     * @param sliceletState the health state reported by the source.
+     * @param source       where this health status update originated from.
+     * @return true if there is a change in health status of the resource.
      */
     def update(
-        expiryTime: TickerTime,
+        now: TickerTime,
         newResource: Either[Squid, UUID],
-        informedHealthStatus: HealthStatus): Boolean = {
+        sliceletState: SliceletState,
+        source: HealthStatusSource): Boolean = {
+      // Record the first time we learn this resource is terminating from either Slicelet or
+      // Kubernetes (we don't expect to hear a terminating signal due to a health bootstrapping
+      // assignment, but in any case we just ignore it).
+      //
+      // Note that health signals (including termination signals) apply to resources by UUID in the
+      // HealthWatcher, and thus, updates to the SQUID for a resource identified by UUID does not
+      // affect termination signal tracking.
+      if (sliceletState == SliceletState.Terminating) {
+        source match {
+          case HealthStatusSource.Slicelet =>
+            if (learnedTerminatingFromSliceletTimeOpt.isEmpty) {
+              learnedTerminatingFromSliceletTimeOpt = Some(now)
+            }
+          case HealthStatusSource.Kubernetes =>
+            if (learnedTerminatingFromKubernetesTimeOpt.isEmpty) {
+              learnedTerminatingFromKubernetesTimeOpt = Some(now)
+            }
+          case HealthStatusSource.BootstrappingAssignment => ()
+        }
+      }
+
       (resource, newResource) match {
         case (Left(oldSquid), Left(newSquid)) =>
           // We already have a SQUID, we should only update the health status if the SQUID is the
@@ -344,7 +458,7 @@ object HealthWatcher {
             resource = Left(newSquid)
             // If the SQUID has changed, even if health status has not, we should report change in
             // health.
-            updateHealthStatus(informedHealthStatus, expiryTime) || newSquid != oldSquid
+            updateHealthStatus(sliceletState, now) || newSquid != oldSquid
           } else {
             false
           }
@@ -352,92 +466,128 @@ object HealthWatcher {
         case (Left(_), Right(_)) =>
           // We already have a SQUID, the new update does not have a SQUID, so the resource remains
           // the same.
-          updateHealthStatus(informedHealthStatus, expiryTime)
+          updateHealthStatus(sliceletState, now)
 
         case (Right(_), Left(squid)) =>
           // The HealthStatus now has a SQUID, we assume the SQUID represents the most recent
           // incarnation of the resource.
           resource = Left(squid)
-          updateHealthStatus(informedHealthStatus, expiryTime)
+          updateHealthStatus(sliceletState, now)
 
           // We unconditionally report a change here, since we have a new SQUID.
           true
         case (Right(_), Right(_)) =>
           // The HealthStatus still does not have a SQUID. The resource remains same.
-          updateHealthStatus(informedHealthStatus, expiryTime)
+          updateHealthStatus(sliceletState, now)
       }
     }
 
-    def getComputedHealthStatus: HealthStatus = computedHealthStatus
+    /**
+     * Returns the [[HealthWatcher]]-computed health status. See class doc for why the computed
+     * health status may differ from the Slicelet's reported state.
+     */
+    def getComputedHealthStatus: HealthStatus = computedStatus
 
-    def getReportedHealthStatus: HealthStatus = sliceletReportedHealthStatus
+    def getReportedSliceletHealthStatus: HealthStatus = sliceletReportedHealthStatus
+
+    /** Returns the first time we learned this resource is terminating from a Slicelet, if any. */
+    def getLearnedTerminatingFromSliceletTimeOpt: Option[TickerTime] =
+      learnedTerminatingFromSliceletTimeOpt
+
+    /** Returns the first time we learned this resource is terminating from Kubernetes, if any. */
+    def getLearnedTerminatingFromKubernetesTimeOpt: Option[TickerTime] =
+      learnedTerminatingFromKubernetesTimeOpt
 
     def expiryTime: TickerTime = getPriority
 
-    override def toString: String = s"$resource => $computedHealthStatus, expiryTime=$expiryTime"
+    override def toString: String =
+      s"$resource => ${computedStatus.statusName}, expiryTime=$expiryTime"
 
     /**
-     * Update the HealthStatus of the resource with expiry after being informed that the state is
-     * `informedHealthStatus`. Updates to a Terminating resource are ignored.
+     * Update the HealthStatus of the resource after being informed that the Slicelet is in
+     * `sliceletState`. Updates to a Terminating resource are ignored.
      *
      * Return true if the status has been changed.
      */
-    private def updateHealthStatus(
-        informedHealthStatus: HealthStatus,
-        expiryTime: TickerTime): Boolean = {
-      sliceletReportedHealthStatus = informedHealthStatus
+    private def updateHealthStatus(sliceletState: SliceletState, now: TickerTime): Boolean = {
+      sliceletReportedHealthStatus = sliceletState match {
+        case SliceletState.NotReady => new HealthStatus.NotReady(now)
+        case SliceletState.Running => HealthStatus.Running
+        case SliceletState.Terminating => HealthStatus.Terminating
+      }
+
+      val expiryTime: TickerTime = sliceletState match {
+        // We set the expiry to more than default termination grace period in Kubernetes, i.e., 30
+        // seconds. The expiry here is set so that we do not keep terminated pods forever in
+        // HealthWatcher.
+        case SliceletState.Terminating => now + config.terminatingTimeoutPeriod
+        case _ => now + config.unhealthyTimeoutPeriod
+      }
 
       // If the current status is terminating, we don't need to update the expiry.
-      if (computedHealthStatus != Terminating) {
+      if (computedStatus != HealthStatus.Terminating) {
         setPriority(expiryTime)
       }
 
-      // We don't expect well-behaved clients to ever explicitly report `Unknown`, though
-      // the proto deserializer will normalize enum values not contained in the Assigner's
-      // compiled proto definition to Unknown. For robustness, we should consider treating
-      // `Unknown` reports as no-ops rather than updating their state here.
-      val newHealthStatus: HealthStatus = (computedHealthStatus, informedHealthStatus) match {
-        case (Unknown, other: HealthStatus) => other
+      val newComputedStatus: HealthStatus =
+        (computedStatus, sliceletState) match {
+          // Starting is the initial state for every new resource. NOT_READY keeps the resource in
+          // Starting (no flapping protection timer), so a subsequent RUNNING heartbeat transitions
+          // immediately to Running.
+          case (HealthStatus.Starting, SliceletState.NotReady) => HealthStatus.Starting
+          case (HealthStatus.Starting, SliceletState.Running) => HealthStatus.Running
+          case (HealthStatus.Starting, SliceletState.Terminating) => HealthStatus.Terminating
 
-        case (NotReady, NotReady) => NotReady
-        case (NotReady, Running) => Running
-        case (NotReady, Terminating) => Terminating
-        case (NotReady, Unknown) => Unknown
+          case (_: HealthStatus.NotReady, SliceletState.NotReady) =>
+            // Heartbeat while in NotReady: extend the flapping protection timeout.
+            new HealthStatus.NotReady(now)
+          case (notReadyStatus: HealthStatus.NotReady, SliceletState.Running) =>
+            // Only allow transition to Running if the NotReady flapping protection period has
+            // elapsed. This prevents rapid Running <-> NotReady flapping when
+            // permitRunningToNotReady is enabled.
+            if (now >= notReadyStatus.lastReportTime + config.notReadyTimeoutPeriod) {
+              HealthStatus.Running
+            } else {
+              computedStatus
+            }
+          case (_: HealthStatus.NotReady, SliceletState.Terminating) => HealthStatus.Terminating
 
-        case (Running, NotReady) =>
-          // For simplicity, disallow transitions from `Running` to `NotReady`. Eventually, we may
-          // consider supporting this transition (with some hysteresis) to handle resources that are
-          // temporarily unable to serve. We wouldn't often expect to get `NotReady` messages for a
-          // resource in the `Running` state (e.g., it could conceivably happen due to messages
-          // being reordered by the network).
-          Running
+          case (HealthStatus.Running, SliceletState.NotReady) =>
+            // Allow transition to NotReady only when `permitRunningToNotReady` is enabled.
+            // When disabled, keep the existing behavior of ignoring NOT_READY reports for Running
+            // resources.
+            if (permitRunningToNotReady) {
+              new HealthStatus.NotReady(now)
+            } else {
+              HealthStatus.Running
+            }
+          case (HealthStatus.Running, SliceletState.Running) => HealthStatus.Running
+          case (HealthStatus.Running, SliceletState.Terminating) => HealthStatus.Terminating
 
-        case (Running, Running) => Running
-        case (Running, Terminating) => Terminating
-        case (Running, Unknown) => Unknown
+          case (HealthStatus.Terminating, _) =>
+            // No transitions out of `Terminating`.
+            HealthStatus.Terminating
 
-        case (Terminating, NotReady) | (Terminating, Running) | (Terminating, Terminating) |
-            (Terminating, Unknown) =>
-          // No transitions out of `Terminating`.
-          Terminating
+        }
+
+      // If configured, the HealthWatcher will mask the health status outcome of the state machine
+      // with a different status. Namely, a NotReady or Starting outcome from the state machine is
+      // masked to Running. This masking can be enabled for targets where the Slicelet readiness
+      // probe may be unreliable (e.g., where a Slicelet never transitions out of NotReady). When
+      // masking is active, the NotReady flapping protection is a no-op because
+      // maskedNewComputedStatus is never NotReady or Starting.
+      val maskedNewComputedStatus: HealthStatus = newComputedStatus match {
+        case (_: HealthStatus.NotReady) | HealthStatus.Starting if !observeSliceletReadiness =>
+          HealthStatus.Running
+        case _ =>
+          newComputedStatus
       }
 
-      // If configured, the HealthWatcher may mask the Slicelet's reported health status with a
-      // different status, namely, NotReady gets masked to Running. Whereas the (Running, NotReady)
-      // branch above prevents an as-yet-unhandled state transition, this masking can be enabled for
-      // targets where the Slicelet readiness probe may be unreliable (e.g., where a Slicelet never
-      // transitions out of NotReady). It is meant to be applied at the Slicelet's first status
-      // report.
-      val maskedNewHealthStatus =
-        if (!observeSliceletReadiness && newHealthStatus == NotReady) {
-          Running
-        } else {
-          newHealthStatus
-        }
-      val changed: Boolean = maskedNewHealthStatus != computedHealthStatus
-      computedHealthStatus = maskedNewHealthStatus
+      val changed: Boolean = maskedNewComputedStatus != computedStatus
+      computedStatus = maskedNewComputedStatus
       changed
     }
+
   }
 
   /**
@@ -463,8 +613,11 @@ class HealthWatcher(
     s"${target.getLoggerPrefix}"
   )
 
-  private val observeSliceletReadiness =
+  private val observeSliceletReadiness: Boolean =
     healthWatcherTargetConfig.observeSliceletReadiness
+
+  private val permitRunningToNotReady: Boolean =
+    healthWatcherTargetConfig.permitRunningToNotReady
 
   /** The health status of each resource, keyed by resource. */
   private val healthByUuid = new mutable.HashMap[UUID, ResourceHealth]
@@ -490,14 +643,19 @@ class HealthWatcher(
   private var state: State = State.Init
 
   /** Whether the health watcher is aware of unreported health status changes. */
-  private var dirty = false
+  private var dirty: Boolean = false
 
   override def onEvent(tickerTime: TickerTime, instant: Instant, event: Event): Output = {
     event match {
-      case Event.HealthStatusObserved(resource, healthStatus) =>
-        informHealthStatus(tickerTime, Left(resource), healthStatus)
-      case Event.HealthStatusObservedByUuid(resourceUuid, healthStatus) =>
-        informHealthStatus(tickerTime, Right(resourceUuid), healthStatus)
+      case Event.SliceletStateFromSlicelet(resource, sliceletState) =>
+        informHealthStatus(tickerTime, Left(resource), sliceletState, HealthStatusSource.Slicelet)
+      case Event.SliceletStateFromKubernetes(resourceUuid, sliceletState) =>
+        informHealthStatus(
+          tickerTime,
+          Right(resourceUuid),
+          sliceletState,
+          HealthStatusSource.Kubernetes
+        )
       case assignmentSyncObserved: Event.AssignmentSyncObserved =>
         handleAssignmentSyncObserved(assignmentSyncObserved)
     }
@@ -505,13 +663,33 @@ class HealthWatcher(
   }
 
   override def onAdvance(tickerTime: TickerTime, instant: Instant): Output = {
-    // Remove any expired resources from the health map.
+    // Count Running resources whose heartbeats expired in this round. Reset each call since
+    // crashes are consumed in the same onAdvance invocation that detects them.
+    var newlyCrashedCount: Int = 0
+
+    // Remove any expired resources from the health map. Note: onAdvance is the only place
+    // where resources are expired, by design, so that expiry events are reliably turned into
+    // crash events without races with status updates.
     while (healthByExpiry.peek.exists { health: ResourceHealth =>
         health.expiryTime <= tickerTime
       }) {
       dirty = true
       val resourceHealth: ResourceHealth = healthByExpiry.pop()
       healthByUuid.remove(resourceHealth.getResourceUuid)
+      // A Running resource whose heartbeat expired is considered crashed (i.e. the last thing we
+      // knew about this resource was that it was running, but we haven't received any heartbeats
+      // in so long that it is now considered expired). A resource that expires from the NotReady
+      // state is not considered crashed: such a resource has already been removed from the
+      // assignment and is no longer manipulating keys, so its expiry is unlikely to be caused by
+      // a key of death.
+      if (resourceHealth.getComputedHealthStatus == HealthStatus.Running) {
+        newlyCrashedCount += 1
+      }
+      TargetMetrics.recordHealthWatcherResourceExpirationStats(
+        target,
+        resourceHealth.getLearnedTerminatingFromSliceletTimeOpt,
+        resourceHealth.getLearnedTerminatingFromKubernetesTimeOpt
+      )
       logger.info(s"Removed expired resource: $resourceHealth")
     }
     logger.trace(makeHealthSummary(Some(tickerTime)))
@@ -526,11 +704,12 @@ class HealthWatcher(
         this.state = State.Starting(startTime = tickerTime)
         onAdvance(tickerTime, instant)
       case State.Starting(startTime: TickerTime) =>
-        val initialHealthReportDelay: TickerTime = startTime + config.unhealthyTimeoutPeriod
+        val initialHealthReportDelay: TickerTime =
+          startTime + config.initialHealthReportDelayPeriod
         if (tickerTime >= initialHealthReportDelay) {
-          // We've waited out one unhealthy timeout period without learning a set of assigned
-          // resources. By this point we've collected sufficient signals anyway to be reasonably
-          // confident in a comprehensive health report to emit.
+          // We've waited out the initial health report delay period without learning a set of
+          // assigned resources. By this point we've collected sufficient signals anyway to be
+          // reasonably confident in a comprehensive health report to emit.
           this.state = State.Started
           onAdvance(tickerTime, instant)
         } else {
@@ -570,22 +749,28 @@ class HealthWatcher(
               // We've learned a set of reliably fresh assigned resources. Any explicit health
               // signals we've received are treated as authoritative, and the rest of the assigned
               // resources are considered last known healthy as of the watcher start time.
-              val expiryTime: TickerTime = startTime + config.unhealthyTimeoutPeriod
               for (entry <- assignedResourcesByUuid) {
                 val (uuid, squid): (UUID, Squid) = entry
                 if (!healthByUuid.contains(uuid)) {
                   val resourceHealth =
                     new ResourceHealth(
                       Left(squid),
-                      observeSliceletReadiness
+                      observeSliceletReadiness,
+                      permitRunningToNotReady,
+                      config
                     )
-                  resourceHealth.update(expiryTime, Left(squid), Running)
+                  resourceHealth.update(
+                    startTime,
+                    Left(squid),
+                    SliceletState.Running,
+                    HealthStatusSource.BootstrappingAssignment
+                  )
                   healthByUuid.put(uuid, resourceHealth)
                   healthByExpiry.push(resourceHealth)
                   dirty = true
                   logger.info(
-                    s"Health status for '$squid' bootstrapped to $Running, " +
-                    s"status expires at: $expiryTime"
+                    s"Health status for '$squid' bootstrapped to Running, " +
+                    s"status expires at: ${resourceHealth.expiryTime}"
                   )
                   logger.debug(makeHealthSummary(Some(tickerTime)))
                 }
@@ -607,24 +792,14 @@ class HealthWatcher(
         if (dirty) {
           dirty = false
 
-          // Build a report with SQUID and HealthStatus. We expect all Health resources to have
-          // SQUID so we filter out entries without SQUID.
-          val healthReport: Map[Squid, HealthStatusReport] = healthByUuid
-            .filter {
-              case (_, resourceHealth: ResourceHealth) =>
-                resourceHealth.getResourceSquidOpt.nonEmpty
-            }
-            .map {
-              case (_, resourceHealth: ResourceHealth) =>
-                resourceHealth.getResourceSquidOpt.get -> HealthStatusReport(
-                  reportedBySlicelet = resourceHealth.getReportedHealthStatus,
-                  computed = resourceHealth.getComputedHealthStatus
-                )
-            }
-            .toMap
+          val healthy: Set[Squid] = computeHealthySet()
+
           StateMachineOutput(
             nextExpiryTime,
-            Seq(DriverAction.IncorporateHealthReport(healthReport))
+            Seq(
+              DriverAction
+                .HealthReportReady(healthy = healthy, newlyCrashedCount = newlyCrashedCount)
+            )
           )
         } else {
           StateMachineOutput(nextExpiryTime, Seq.empty)
@@ -633,6 +808,67 @@ class HealthWatcher(
   }
 
   override def toString: String = makeHealthSummary(nowOpt = None)
+
+  /**
+   * Iterates over all tracked resources, records per-status metrics, and computes the set of
+   * [[Squid]]s that are currently healthy (Running).
+   *
+   * We expect all [[ResourceHealth]] entries to have a [[Squid]], so entries without one are
+   * excluded from the returned set (but still counted in metrics).
+   */
+  private def computeHealthySet(): Set[Squid] = {
+    val resourcesPerStatusReported: mutable.Map[HealthStatus, Int] = mutable.Map.empty
+    val resourcesPerStatusComputed: mutable.Map[HealthStatus, Int] = mutable.Map.empty
+    val healthy: mutable.Set[Squid] = mutable.Set.empty
+
+    for (entry <- healthByUuid) {
+      val (_, resourceHealth): (UUID, ResourceHealth) = entry
+      val reportedStatus: HealthStatus =
+        resourceHealth.getReportedSliceletHealthStatus
+      val computedStatus: HealthStatus = resourceHealth.getComputedHealthStatus
+
+      // Count health statuses reported by Slicelets and HealthWatcher-computed statuses.
+      resourcesPerStatusReported(reportedStatus) =
+        resourcesPerStatusReported.getOrElse(reportedStatus, 0) + 1
+      resourcesPerStatusComputed(computedStatus) =
+        resourcesPerStatusComputed.getOrElse(computedStatus, 0) + 1
+
+      // Record if the unmasked health status reported by Slicelet differs from the computed
+      // status. Note: a resource with Starting status will always appear here, since Starting
+      // is a HealthWatcher-assigned status with no corresponding SliceletState.
+      if (reportedStatus != computedStatus) {
+        TargetMetrics.incrementHealthStatusComputedDiffersFromReported(
+          target,
+          reportedStatusName = reportedStatus.statusName,
+          computedStatusName = computedStatus.statusName
+        )
+        logger.info(
+          s"HealthStatus mask applied: reported ${reportedStatus.statusName}, " +
+          s"computed as ${computedStatus.statusName}",
+          every = 10.seconds
+        )
+      }
+
+      for (squid: Squid <- resourceHealth.getResourceSquidOpt) {
+        if (computedStatus == HealthStatus.Running) {
+          healthy += squid
+        }
+      }
+    }
+
+    // Iterate through all HealthStatus instances and report the podset size metrics, so that
+    // any HealthStatus not present in a report will be set to 0.
+    for (status: HealthStatus <- HealthStatus.values) {
+      TargetMetrics.setPodSetSize(
+        target,
+        statusName = status.statusName,
+        reportedCount = resourcesPerStatusReported.getOrElse(status, 0),
+        computedCount = resourcesPerStatusComputed.getOrElse(status, 0)
+      )
+    }
+
+    healthy.toSet
+  }
 
   /**
    * Maintains `highestReliableGenerationOpt` and `latestAssignmentObservedOpt` based on the new
@@ -674,40 +910,40 @@ class HealthWatcher(
   }
 
   /**
-   * Informs the watcher that the health status of `resource` is `healthStatus`. Caller should
-   * subsequently call `onAdvance` to determine if any action is required.
+   * Informs the watcher that `resource` is in `sliceletState`. Caller should subsequently call
+   * `onAdvance` to determine if any action is required.
+   *
+   * @param now           the current time.
+   * @param resource      the SQUID or UUID identifying the resource.
+   * @param sliceletState the reported state of the resource.
+   * @param source        where this health status update originated from.
    */
   private def informHealthStatus(
       now: TickerTime,
       resource: Either[Squid, UUID],
-      healthStatus: HealthStatus): Unit = {
+      sliceletState: SliceletState,
+      source: HealthStatusSource): Unit = {
     val resourceUuid = resource match {
       case Left(squid: Squid) => squid.resourceUuid
       case Right(uuid: UUID) => uuid
     }
 
-    val expiryTime = healthStatus match {
-      case Terminating =>
-        // We set the expiry to more than default termination grace period in Kubernetes ie.
-        // 30 seconds. The expiry here is set so that we do not keep terminated pods forever in
-        // HealthWatcher.
-        now + config.terminatingTimeoutPeriod
-      case _ => now + config.unhealthyTimeoutPeriod
-    }
-
     val existingHealthStatusOpt: Option[ResourceHealth] = healthByUuid.get(resourceUuid)
     logger.info(
-      s"Informed of health status for '$resourceUuid': " +
-      s"$healthStatus (existing $existingHealthStatusOpt)",
+      s"Informed of Slicelet state for '$resourceUuid': " +
+      s"$sliceletState (existing $existingHealthStatusOpt)",
       30.seconds
     )
 
     // Determine whether the status has changed for `resource`.
     dirty |= (existingHealthStatusOpt match {
       case Some(existingHealthStatus: ResourceHealth) =>
-        if (existingHealthStatus.update(expiryTime, resource, healthStatus)) {
+        val previousStatus: HealthStatus =
+          existingHealthStatus.getComputedHealthStatus
+        if (existingHealthStatus.update(now, resource, sliceletState, source)) {
           logger.info(
-            s"Health status changed for '$resourceUuid' from $existingHealthStatus to $healthStatus"
+            s"Health status changed for '$resourceUuid' from ${previousStatus.statusName} to " +
+            s"${existingHealthStatus.getComputedHealthStatus.statusName}"
           )
           logger.debug(makeHealthSummary(Some(now)))
           true
@@ -716,11 +952,19 @@ class HealthWatcher(
         }
       case None =>
         val resourceHealth =
-          new ResourceHealth(resource, observeSliceletReadiness)
-        resourceHealth.update(expiryTime, resource, healthStatus)
+          new ResourceHealth(
+            resource,
+            observeSliceletReadiness,
+            permitRunningToNotReady,
+            config
+          )
+        resourceHealth.update(now, resource, sliceletState, source)
         healthByUuid.put(resourceUuid, resourceHealth)
         healthByExpiry.push(resourceHealth)
-        logger.info(s"Health status for '$resourceUuid' initialized to $healthStatus")
+        logger.info(
+          s"Health status for '$resourceUuid' initialized to " +
+          s"${resourceHealth.getComputedHealthStatus.statusName}"
+        )
         logger.debug(makeHealthSummary(Some(now)))
         true
     })
@@ -757,8 +1001,8 @@ class HealthWatcher(
       }
       table.appendRow(
         uuid.toString,
-        healthStatus.toString,
-        s"$expiryTime $formattedOffset)"
+        healthStatus.statusName,
+        s"$expiryTime $formattedOffset"
       )
     }
     table.appendTo(builder)

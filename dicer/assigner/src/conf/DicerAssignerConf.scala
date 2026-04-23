@@ -13,11 +13,8 @@ import com.databricks.caching.util.{
   ServerConf,
   Severity
 }
-import com.databricks.conf.trusted.LocationConf
-import com.databricks.conf.trusted.ProjectConf
-import com.databricks.conf.Config
-import com.databricks.conf.ConfigParser
-import com.databricks.conf.DbConf
+import com.databricks.conf.trusted.{LocationConf, ProjectConf}
+import com.databricks.conf.{Config, ConfigParser, DbConf}
 import com.databricks.dicer.assigner.conf.DicerAssignerConf.ExecutionMode
 import com.databricks.dicer.assigner.conf.StoreConf.StoreEnum
 import com.databricks.dicer.common.{CommonSslConf, Incarnation, WatchServerConf}
@@ -41,10 +38,16 @@ trait GeneratorConf extends DbConf {
 trait HealthConf extends DbConf {
 
   /**
+   * The delay before the first health report is emitted. Note that in the absence of observing an
+   * initial set of assigned resources with which to bootstrap health status, this delay is used to
+   * ensure the watcher has collected sufficient signals before emitting its first health report.
+   */
+  val initialHealthReportDelayPeriod: FiniteDuration =
+    configure[Long]("databricks.dicer.assigner.initialHealthReportDelayPeriodSeconds", 30).seconds
+
+  /**
    * If a heartbeat is not received from a resource in this period, the health watcher declares that
-   * resource as unhealthy. Note that the health watcher also waits out this period at startup
-   * before emitting the first health report (to avoid omitting otherwise healthy resources from the
-   * report).
+   * resource as unhealthy.
    */
   val unhealthyTimeoutPeriod: FiniteDuration =
     configure[Long]("databricks.dicer.assigner.unhealthyTimeoutPeriodSeconds", 30).seconds
@@ -61,6 +64,19 @@ trait HealthConf extends DbConf {
    */
   val terminatingTimeoutPeriod: FiniteDuration =
     configure[Long]("databricks.dicer.assigner.terminatingTimeoutPeriod", 300).seconds
+
+  /**
+   * Flapping protection timeout for the NotReady state in HealthWatcher. A Slicelet in the NotReady
+   * state will not be allowed to transition to Running until this duration has elapsed since the
+   * last NOT_READY heartbeat (each NOT_READY heartbeat resets the timer). The default of 10s
+   * corresponds to roughly 3 heartbeat intervals: if we have not heard NOT_READY in that time, the
+   * Slicelet is likely healthy again and safe to transition to Running when the Slicelet's next
+   * reported state is `RUNNING`. If the Slicelet is unresponsive rather than recovered, the
+   * `unhealthyTimeoutPeriod` will expire and the Slicelet will be removed from the Assignment
+   * regardless.
+   */
+  val notReadyTimeoutPeriod: FiniteDuration =
+    configure[Long]("databricks.dicer.assigner.notReadyTimeoutPeriod", 10).seconds
 }
 
 /** Configuration parameters for the LoadWatcher. */
@@ -90,9 +106,8 @@ trait StoreConf extends DbConf {
   /**
    * The type of store the Assigner uses to store assignments. [[StoreEnum]] defines the types.
    */
-  // Note: If this value is changed to `StoreEnum.ETCD` or any type that uses a non-loose
-  // incarnation, consider revisiting `SubscriberHandler` to optimize syncing and caching of partial
-  // assignments while handling watch requests.
+  // Note: If this value is changed to `StoreEnum.ETCD`, consider revisiting `SubscriberHandler` to
+  // optimize syncing and caching of partial assignments while handling watch requests.
   val store: StoreEnum.Value =
     configure[StoreEnum.Value](
       "databricks.dicer.assigner.store.type",
@@ -100,31 +115,6 @@ trait StoreConf extends DbConf {
       new StoreEnumParser
     )
 
-  /**
-   * The service endpoints of the etcd instance that the Assigner uses for
-   * [[com.databricks.dicer.assigner.EtcdStore]] and
-   * [[com.databricks.dicer.assigner.ShadowEtcdStore]].
-   */
-  val etcdEndpoints: Seq[String] =
-    configure("databricks.dicer.assigner.store.etcd.endpoints", Seq.empty[String])
-
-  /**
-   * Store incarnation used by [[com.databricks.dicer.assigner.ShadowEtcdStore]] for assignments
-   * stored in etcd.
-   */
-  def shadowStoreStoreIncarnation: Incarnation = Incarnation(shadowStoreStoreIncarnationFlag)
-
-  /** Internal flag for [[shadowStoreStoreIncarnation]]. */
-  private val shadowStoreStoreIncarnationFlag: Long =
-    configure[Long]("databricks.dicer.assigner.store.shadow.storeIncarnation", 2)
-
-  /**
-   * Configures the etcd client within the Assigner to use SSL to establish a connection to etcd.
-   *
-   * TODO(<internal bug>): Merge `etcdSslEnabled` and the ssl arguments into one single unified field,
-   * e.g. `etcdSslArgsOpt`.
-   */
-  val etcdSslEnabled: Boolean = configure("databricks.dicer.assigner.store.etcd.sslEnabled", true)
 }
 
 object StoreConf {
@@ -138,11 +128,6 @@ object StoreConf {
      * Corresponds to [[com.databricks.dicer.assigner.InMemoryStore]].
      */
     val IN_MEMORY: StoreEnum.Value = Value("in_memory")
-
-    /**
-     * Corresponds to [[com.databricks.dicer.assigner.ShadowEtcdStore]].
-     */
-    val SHADOW: StoreEnum.Value = Value("shadow")
 
     /**
      * Corresponds to [[com.databricks.dicer.assigner.EtcdStore]].
@@ -175,6 +160,21 @@ trait PreferredAssignerConf extends DbConf {
    */
   val preferredAssignerStoreIncarnation: Long =
     configure("databricks.dicer.assigner.preferredAssigner.storeIncarnation", 1L)
+
+  /**
+   * The service endpoints of the etcd instance that the Assigner uses for the preferred assigner.
+   */
+  val preferredAssignerEtcdEndpoints: Seq[String] =
+    configure("databricks.dicer.assigner.preferredAssigner.etcd.endpoints", Seq.empty[String])
+
+  /**
+   * Configures the etcd client within the Assigner to use SSL to establish a connection to etcd.
+   *
+   * TODO(<internal bug>): Merge `preferredAssignerEtcdSslEnabled` and the ssl arguments into one single
+   * unified field, e.g. `preferredAssignerEtcdSslArgsOpt`.
+   */
+  val preferredAssignerEtcdSslEnabled: Boolean =
+    configure("databricks.dicer.assigner.preferredAssigner.etcd.sslEnabled", true)
 }
 
 /**
@@ -191,7 +191,8 @@ trait PreferredAssignerConf extends DbConf {
  *  - `GeneratorConf`: Configuration for Assignment Generator.
  *  - `WatchServerConf`: Configuration for the Assignment Watch server.
  *  - `CommonSslConf`: SSL configuration for Assigner servers.
- *  - `StoreConf`: Configuration for the Assigner store.
+ *  - `StoreConf`: Configuration for the Assigner store type.
+ *  - `PreferredAssignerConf`: Configuration for the preferred assigner, including etcd settings.
  *  - `DynamicConf`: Support dynamic configuration of Dicer targets using SAFE.
  */
 class DicerAssignerConf(config: Config)
@@ -296,11 +297,12 @@ class DicerAssignerConf(config: Config)
     configure[FiniteDuration]("databricks.dicer.assigner.dynamicConfigPollInterval", 120.seconds)
 
   /**
-   * Determines whether to enforce the use of static configuration. If set to true, all dynamic
-   * configurations will be ignored (even if `enableDynamicConfig` might be true).
+   * Determines whether to enforce the use of static configuration for dicer-assigner service.
+   * If set to true, dynamic configuration for ALL targets will be ignored (regardless of whether
+   * `enableDynamicConfig` is true).
    */
   private val forceDisableDynamicConfig: Boolean =
-    configure("databricks.dicer.forceDisableDynamicConfig", false)
+    configure("databricks.dicer.assigner.forceDisableDynamicConfig", false)
 
   /** The watch RPC timeout that the Assigner suggests to Clerks that directly connect to it. */
   @FeatureFlagDefinition(
@@ -309,6 +311,15 @@ class DicerAssignerConf(config: Config)
   )
   private val assignerSuggestedClerkWatchTimeout: FeatureFlag[Int] =
     FeatureFlag("databricks.dicer.assigner.assignerSuggestedClerkWatchTimeoutSeconds", 5)
+
+  /**
+   * Whether the Assigner should use [[InternalTargetConfig.DEFAULT_FOR_EXPERIMENTAL_TARGETS]] for
+   * targets that do not have a checked-in config. When enabled, watch requests for unconfigured
+   * targets will use this default config instead of being rejected. This is intended for allowing
+   * experimentation with Dicer in dev environments without needing to check in target configs.
+   */
+  val allowDefaultTargetConfigForExperimentalTargets: Boolean =
+    configure("databricks.dicer.assigner.allowDefaultTargetConfigForExperimentalTargets", false)
 
   /** Whether the Assigner should forward events for Dicer Tee. */
   val enableDicerTeeForwarding: Boolean =

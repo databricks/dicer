@@ -75,6 +75,7 @@ scala_library(
     deps = [
         ":core",
         ":parser",
+        ":raw_config_singleton",
         "//wrappers/logging",
         "//wrappers/util:jsonutil",
         "@maven//:com_typesafe_config",
@@ -95,6 +96,26 @@ scala_library(
 scala_library(
     name = "project",
     srcs = ["src/Project.scala"],
+)
+
+scala_library(
+    name = "current_project",
+    srcs = ["src/CurrentProject.scala"],
+    deps = [
+        ":project",
+        "//wrappers/util:lock",
+    ],
+)
+
+scala_library(
+    name = "raw_config_singleton",
+    srcs = ["src/RawConfigSingleton.scala"],
+    deps = [
+        ":core",
+        "//wrappers/logging",
+        "//wrappers/util:jsonutil",
+        "//wrappers/util:lock",
+    ],
 )
 
 scala_library(

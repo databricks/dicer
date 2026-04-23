@@ -58,6 +58,15 @@ object CachingErrorCode {
   }
 
   /**
+   * A Slicelet reported a proto state value that the Assigner does not recognize. This may arise
+   * when a Slicelet binary is newer than the Assigner (forward compatibility). The unrecognized
+   * state is normalized to [[com.databricks.dicer.common.SliceletState.Running]] on ingestion.
+   */
+  case object SLICELET_UNKNOWN_PROTO_STATE extends CachingErrorCode {
+    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
+  }
+
+  /**
    * The Dicer Assigner produced an assignment with too many Slices given the number of available
    * resources in the sharded service.
    */
@@ -84,6 +93,14 @@ object CachingErrorCode {
    * which is unexpected.
    */
   case object ASSIGNER_ASSIGNED_SQUIDS_WITH_SAME_UUID extends CachingErrorCode {
+    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
+  }
+
+  /**
+   * The Dicer Assigner produced a homomorphic assignment that fails the validation check, either
+   * due to slice boundaries or replica groups changing.
+   */
+  case object ASSIGNER_INVALID_HOMOMORPHIC_ASSIGNMENT extends CachingErrorCode {
     override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
   }
 
@@ -174,17 +191,29 @@ object CachingErrorCode {
    * An instance of [[StateMachine]] or [[StateMachineDriver]] threw an exception. This will likely
    * cause it to behave unexpectedly and e.g. miss running some actions. It should be investigated
    * and fixed, and may need some immediate mitigation (e.g. restarting the affected service).
+   *
+   * @param ownerTeam the team that owns the state machine and should receive the alert.
    */
-  case object STATE_MACHINE_EXCEPTION extends CachingErrorCode {
-    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
+  case class UNCAUGHT_STATE_MACHINE_ERROR(ownerTeam: AlertOwnerTeam) extends CachingErrorCode {
+    override val alertOwnerTeam: AlertOwnerTeam = ownerTeam
+    // Override toString to return a clean name without the ownerTeam parameter, since the
+    // error code string is used as an alert label and a parameterized name (e.g.
+    // "UNCAUGHT_STATE_MACHINE_ERROR(platform-team)") would break alert queries.
+    override def toString: String = "UNCAUGHT_STATE_MACHINE_ERROR"
   }
 
   /**
    * An uncaught exception was thrown in a [[SequentialExecutionContextPool]]. Check the logs for
    * more details of the exception and whether any mitigation is required.
+   *
+   * @param ownerTeam the team that owns the pool and should receive the alert.
    */
-  case object UNCAUGHT_SEC_POOL_EXCEPTION extends CachingErrorCode {
-    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
+  case class UNCAUGHT_SEC_POOL_ERROR(ownerTeam: AlertOwnerTeam) extends CachingErrorCode {
+    override val alertOwnerTeam: AlertOwnerTeam = ownerTeam
+    // Override toString to return a clean name without the ownerTeam parameter, since the
+    // error code string is used as an alert label and a parameterized name (e.g.
+    // "UNCAUGHT_SEC_POOL_ERROR(platform-team)") would break alert queries.
+    override def toString: String = "UNCAUGHT_SEC_POOL_ERROR"
   }
 
   /**
@@ -207,7 +236,6 @@ object CachingErrorCode {
   case object MISSING_TARGETS_IN_DYNAMIC_CONFIG extends CachingErrorCode {
     override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
   }
-
 
   /**
    * In the context of state transfer, the state provider is requested to start providing
@@ -245,6 +273,14 @@ object CachingErrorCode {
     override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
   }
 
+  /**
+   * Indicates that CoreCache metrics are inconsistent with the cache state. For example, an
+   * attempt was made to unobserve an entry size for a map that has no recorded estimated total
+   * bytes. This is an invariant violation and should be investigated.
+   */
+  case object CORE_CACHE_METRICS_INCONSISTENT_WITH_CACHE_STATE extends CachingErrorCode {
+    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
+  }
 
   /**
    * Indicates that [[SubscriberHandler]] received an assignment that is older than its cached
@@ -288,5 +324,22 @@ sealed trait AlertOwnerTeam
 object AlertOwnerTeam {
   case object CachingTeam extends AlertOwnerTeam {
     override def toString: String = "platform-team"
+  }
+
+  /**
+   * An [[AlertOwnerTeam]] for teams not represented by a named case object.
+   * Pass the team's alert routing name directly (e.g. "eng-my-team").
+   */
+  case class Custom(teamName: String) extends AlertOwnerTeam {
+    override def toString: String = teamName
+  }
+
+  /**
+   * Returns the [[AlertOwnerTeam]] for the given team name. Returns the named case object
+   * if the name matches a known team (e.g. [[CachingTeam]]), otherwise returns [[Custom]].
+   */
+  def createFromString(teamName: String): AlertOwnerTeam = teamName match {
+    case t if t == CachingTeam.toString => CachingTeam
+    case _ => Custom(teamName)
   }
 }

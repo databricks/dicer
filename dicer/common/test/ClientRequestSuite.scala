@@ -18,6 +18,7 @@ import com.databricks.api.proto.dicer.common.{
   TargetP
 }
 import com.databricks.caching.util.TestUtils.{assertThrow, loadTestData}
+import com.databricks.caching.util.{CachingErrorCode, MetricUtils, Severity}
 import com.google.protobuf.ByteString
 import com.databricks.dicer.common.SliceletData.{KeyLoad, SliceLoad}
 import com.databricks.dicer.common.TestSliceUtils._
@@ -134,36 +135,6 @@ class ClientRequestSuite extends DatabricksTest {
     assert(!request2.supportsSerializedAssignment)
   }
 
-  test("ClientRequest supportsSerializedAssignment roundtrips correctly") {
-    // Test plan: Verify that supportsSerializedAssignment roundtrips correctly for both true and
-    // false values.
-    //
-    // Note: This test is separate from the "ClientRequest roundtripping" test because
-    // supportsSerializedAssignment is only implemented in Scala (Rust ignores this field),
-    // whereas the "ClientRequest roundtripping" test covers behavior that is identical
-    // in both Scala and Rust.
-    val target = Target("test-target")
-    val syncAssignmentState = SyncAssignmentState.KnownGeneration(Generation.EMPTY)
-    val timeout: FiniteDuration = 600.seconds
-
-    for (supportsSerializedAssignment: Boolean <- Seq(true, false)) {
-      val request = ClientRequest(
-        target = target,
-        syncAssignmentState = syncAssignmentState,
-        subscriberDebugName = "test-subscriber",
-        timeout = timeout,
-        subscriberData = ClerkData,
-        supportsSerializedAssignment = supportsSerializedAssignment
-      )
-
-      // Convert to proto and back.
-      val proto: ClientRequestP = request.toProto
-      val roundtrippedRequest: ClientRequest =
-        ClientRequest.fromProto(TargetUnmarshaller.CLIENT_UNMARSHALLER, proto)
-      assertResult(request)(roundtrippedRequest)
-    }
-  }
-
   test("SliceletData roundtripping") {
     val testData: Seq[SliceletDataP] =
       loadTestData[SliceletDataTestDataP](
@@ -172,7 +143,7 @@ class ClientRequestSuite extends DatabricksTest {
 
     // Test plan: Ensure that the SliceletData class and the proto roundtrip for a valid object.
     for (data <- testData) {
-      assert(SliceletData.fromProto(data).toProto == data)
+      assert(SliceletData.fromProto(data, Target("test-target")).toProto == data)
     }
   }
 
@@ -327,8 +298,8 @@ class ClientRequestSuite extends DatabricksTest {
       entries = Vector(sliceAssignment)
     )
     val diffAssignment: DiffAssignment = assignment.toDiff(Generation.EMPTY)
-    val syncAssignmentStateP: SyncAssignmentStateP =
-      SyncAssignmentState.createWithDiffAssignmentSerialized(diffAssignment)
+    val (_, syncAssignmentStateP): (SyncAssignmentStateP, SyncAssignmentStateP) =
+      SyncAssignmentState.KnownAssignment.toCachedProtos(diffAssignment)
     val responseP: ClientResponseP =
       ClientResponse.createProtoWithSyncStateP(syncAssignmentStateP, 10.seconds, Redirect.EMPTY)
 
@@ -374,7 +345,7 @@ class ClientRequestSuite extends DatabricksTest {
 
     val sliceletData = SliceletData(
       squid = createTestSquid(CLUSTER_URI1.toString),
-      state = SliceletDataP.State.RUNNING,
+      state = SliceletState.Running,
       kubernetesNamespace = "test-namespace",
       attributedLoads = Vector.empty,
       unattributedLoadOpt = None
@@ -389,5 +360,33 @@ class ClientRequestSuite extends DatabricksTest {
     )
 
     assert(sliceletRequest.getClientType == ClientType.Slicelet)
+  }
+
+  test("SliceletState.fromProto normalizes UNKNOWN to Running and fires a DEGRADED alert") {
+    // Test plan: Verify that SliceletState.fromProto normalizes SliceletDataP.State.UNKNOWN to
+    // SliceletState.Running and increments the PrefixLogger error count metric with
+    // Severity.DEGRADED and CachingErrorCode.SLICELET_UNKNOWN_PROTO_STATE. This state arises when
+    // a Slicelet binary is newer than the Assigner (forward compatibility). Do this by capturing
+    // the initial metric value, calling fromProto with UNKNOWN, and asserting that the returned
+    // state is Running and the metric was incremented by 1.
+    // Setup: Capture the initial metric value before invoking fromProto.
+    val initialErrorCount: Int =
+      MetricUtils.getPrefixLoggerErrorCount(
+        Severity.DEGRADED,
+        CachingErrorCode.SLICELET_UNKNOWN_PROTO_STATE,
+        ""
+      )
+
+    // Verify: UNKNOWN is normalized to Running and the DEGRADED alert metric is incremented.
+    val result: SliceletState =
+      SliceletState.fromProto(SliceletDataP.State.UNKNOWN, Target("test-target"))
+    assert(result == SliceletState.Running)
+    assert(
+      MetricUtils.getPrefixLoggerErrorCount(
+        Severity.DEGRADED,
+        CachingErrorCode.SLICELET_UNKNOWN_PROTO_STATE,
+        ""
+      ) == initialErrorCount + 1
+    )
   }
 }

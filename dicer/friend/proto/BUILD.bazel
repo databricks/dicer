@@ -1,12 +1,6 @@
 load("@rules_proto//proto:defs.bzl", "proto_library")
 load("@rules_scala//scala_proto:scala_proto.bzl", "scala_proto_library")
 
-filegroup(
-    name = "all_files",
-    srcs = glob(["**"]),
-    visibility = ["//caching/oss:__pkg__"],
-)
-
 proto_library(
     name = "friend_proto_library",
     srcs = ["friend.proto"],

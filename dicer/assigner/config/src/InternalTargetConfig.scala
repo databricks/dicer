@@ -8,7 +8,8 @@ import com.databricks.api.proto.dicer.assigner.config.{
   AdvancedTargetConfigFieldsP,
   InternalDicerTargetConfigP,
   LoadWatcherConfigP,
-  HealthWatcherConfigP
+  HealthWatcherConfigP,
+  TargetWatchRequestRateLimitConfigP
 }
 import com.databricks.api.proto.dicer.external.LoadBalancingMetricConfigP.{
   ImbalanceToleranceHintP,
@@ -17,11 +18,14 @@ import com.databricks.api.proto.dicer.external.LoadBalancingMetricConfigP.{
 import com.databricks.api.proto.dicer.external.KeyReplicationConfigP
 import com.databricks.api.proto.dicer.external.{LoadBalancingMetricConfigP, TargetConfigFieldsP}
 import com.databricks.caching.util.JsonSerializableConfig
+import com.databricks.dicer.common.TargetName
 import com.databricks.dicer.assigner.config.InternalTargetConfig.{
+  KeyOfDeathProtectionConfig,
   LoadBalancingConfig,
   LoadWatcherTargetConfig,
   KeyReplicationConfig,
   HealthWatcherTargetConfig,
+  TargetWatchRequestRateLimitConfig,
   fromProtos
 }
 import com.databricks.rpc.DatabricksObjectMapper
@@ -29,16 +33,19 @@ import com.databricks.rpc.DatabricksObjectMapper
 /**
  * Stores the config for the given `target`.
  *
- * @param loadWatcherConfig    The configuration for the load watcher.
- * @param loadBalancingConfig  the configuration to use for load balancing in the Dicer assigner.
- * @param keyReplicationConfig Asymmetric key replication configuration for the target.
- * @param healthWatcherConfig  The configuration for the health watcher.
+ * @param loadWatcherConfig      The configuration for the load watcher.
+ * @param loadBalancingConfig    the configuration to use for load balancing in the Dicer assigner.
+ * @param keyReplicationConfig   Asymmetric key replication configuration for the target.
+ * @param healthWatcherConfig    The configuration for the health watcher.
+ * @param targetRateLimitConfig  The configuration for per-target rate limiting.
  */
 case class InternalTargetConfig(
     loadWatcherConfig: LoadWatcherTargetConfig,
     loadBalancingConfig: LoadBalancingConfig,
     keyReplicationConfig: KeyReplicationConfig,
-    healthWatcherConfig: HealthWatcherTargetConfig) {
+    healthWatcherConfig: HealthWatcherTargetConfig,
+    keyOfDeathProtectionConfig: KeyOfDeathProtectionConfig,
+    targetRateLimitConfig: TargetWatchRequestRateLimitConfig) {
 
   override def toString: String = {
     // Format non-default configuration parameters.
@@ -53,6 +60,12 @@ case class InternalTargetConfig(
     }
     if (healthWatcherConfig != HealthWatcherTargetConfig.DEFAULT) {
       builder.append(s", $healthWatcherConfig")
+    }
+    if (keyOfDeathProtectionConfig != KeyOfDeathProtectionConfig.DEFAULT) {
+      builder.append(s", $keyOfDeathProtectionConfig")
+    }
+    if (targetRateLimitConfig != TargetWatchRequestRateLimitConfig.DEFAULT) {
+      builder.append(s", $targetRateLimitConfig")
     }
     builder.append(")").toString()
   }
@@ -106,6 +119,13 @@ object InternalTargetConfig {
         .map(HealthWatcherTargetConfig.fromProto)
         .getOrElse(HealthWatcherTargetConfig.DEFAULT)
 
+    // TargetWatchRequestRateLimitConfig is an optional field in AdvancedTargetConfigFields. When
+    // not defined, uses the DEFAULT configuration.
+    val targetRateLimitConfig: TargetWatchRequestRateLimitConfig =
+      advancedProto.targetWatchRequestRateLimitConfig
+        .map(TargetWatchRequestRateLimitConfig.fromProto)
+        .getOrElse(TargetWatchRequestRateLimitConfig.DEFAULT)
+
     // TODO(<internal bug>): populate load balancing interval from advanced config proto.
     val loadBalancingConfig =
       LoadBalancingConfig(
@@ -113,11 +133,18 @@ object InternalTargetConfig {
         ChurnConfig.DEFAULT,
         primaryRateMetric
       )
+
+    // TODO(<internal bug>): Populate the key of death protection config from advanced config proto
+    // once that is enabled.
+    val keyOfDeathProtectionConfig = KeyOfDeathProtectionConfig.DEFAULT
+
     InternalTargetConfig(
       loadWatcherConfig,
       loadBalancingConfig,
       replicationConfig,
-      healthWatcherConfig
+      healthWatcherConfig,
+      keyOfDeathProtectionConfig,
+      targetRateLimitConfig
     )
   }
 
@@ -359,18 +386,36 @@ object InternalTargetConfig {
   /**
    * Health watcher configuration for a target.
    *
+   * REQUIRES: if `permitRunningToNotReady` is true, `observeSliceletReadiness` must also be true.
+   *
    * @param observeSliceletReadiness whether the Assigner should use a Slicelet's reported readiness
    *                                 state to decide its status on startup, or whether the Assigner
-   *                                 should mask that state to Running from the NOT_READY state.
-   *                                 Note that even when observing the Slicelet's state, certain
-   *                                 status transitions are disallowed (e.g., Running -> NotReady).
+   *                                 should mask that state to Running from the NotReady state.
+   * @param permitRunningToNotReady  whether to allow transitions from Running to NotReady. When
+   *                                 true, Slicelets reporting NOT_READY will immediately transition
+   *                                 to NotReady. When false, NOT_READY reports from Slicelets
+   *                                 labeled Running by the Assigner are ignored. This setting only
+   *                                 applies when observeSliceletReadiness is true.
+   * @throws[IllegalArgumentException] if permitRunningToNotReady is true but
+   *                                   observeSliceletReadiness is false.
    */
   case class HealthWatcherTargetConfig(
-      observeSliceletReadiness: Boolean
+      observeSliceletReadiness: Boolean,
+      permitRunningToNotReady: Boolean
   ) {
+    // The HealthWatcher only computes the NotReady status for Slicelets when it is faithfully
+    // reporting the Slicelet's readiness state.  As such, `permitRunningToNotReady` only has an
+    // effect if `observeSliceletReadiness` is true. Setting `permitRunningToNotReady` to true when
+    // `observeSliceletReadiness` is false is likely a misconfiguration.
+    require(
+      !permitRunningToNotReady || observeSliceletReadiness,
+      "permitRunningToNotReady can only be true if observeSliceletReadiness is also true"
+    )
+
     override def toString: String =
       "HealthWatcherConfig(" +
-      s"observeSliceletReadiness=$observeSliceletReadiness)"
+      s"observeSliceletReadiness=$observeSliceletReadiness, " +
+      s"permitRunningToNotReady=$permitRunningToNotReady)"
 
     def toProto: HealthWatcherConfigP = {
       // Only set the field in the proto if it differs from the default. This is to avoid updating
@@ -382,13 +427,21 @@ object InternalTargetConfig {
         } else {
           None
         }
-      HealthWatcherConfigP.of(observeSliceletReadinessOpt)
+      val permitRunningToNotReadyOpt: Option[Boolean] =
+        if (permitRunningToNotReady !=
+          HealthWatcherTargetConfig.DEFAULT.permitRunningToNotReady) {
+          Some(permitRunningToNotReady)
+        } else {
+          None
+        }
+      HealthWatcherConfigP.of(observeSliceletReadinessOpt, permitRunningToNotReadyOpt)
     }
   }
 
   object HealthWatcherTargetConfig {
     val DEFAULT: HealthWatcherTargetConfig = HealthWatcherTargetConfig(
-      observeSliceletReadiness = false
+      observeSliceletReadiness = false,
+      permitRunningToNotReady = false
     )
 
     def fromProto(proto: HealthWatcherConfigP): HealthWatcherTargetConfig = {
@@ -398,9 +451,140 @@ object InternalTargetConfig {
             observeSliceletReadiness
           case None => DEFAULT.observeSliceletReadiness
         }
-      HealthWatcherTargetConfig(observeSliceletReadiness)
+      val permitRunningToNotReady: Boolean =
+        proto.permitRunningToNotReady match {
+          case Some(permitRunningToNotReady: Boolean) =>
+            permitRunningToNotReady
+          case None => DEFAULT.permitRunningToNotReady
+        }
+      HealthWatcherTargetConfig(observeSliceletReadiness, permitRunningToNotReady)
     }
   }
+
+  /**
+   * Configuration for the key of death protection for a target.
+   *
+   * @param homomorphicGenerationEnabled Whether to generate homomorphic assignments when a key of
+   *                                     scenarios is detected. See
+   *                                     [[Algorithm.generateHomomorphicAssignment]] for more
+   *                                     details. When disabled, Dicer will continue to generate
+   *                                     regular assignments for the target during key of death
+   *                                     scenarios.
+   */
+  case class KeyOfDeathProtectionConfig(
+      homomorphicGenerationEnabled: Boolean
+  ) {
+    override def toString: String =
+      "KeyOfDeathProtectionConfig" +
+      s"(homomorphicGenerationEnabled=$homomorphicGenerationEnabled)"
+  }
+
+  object KeyOfDeathProtectionConfig {
+    // TODO(<internal bug>): Allow this config to be created from proto after the configuration for
+    // key of death protection is exposed to customers.
+    val DEFAULT: KeyOfDeathProtectionConfig = KeyOfDeathProtectionConfig(
+      homomorphicGenerationEnabled = false
+    )
+  }
+
+  /**
+   * Watch request rate limiting configuration for a target instance.
+   *
+   * @param clientRequestsPerSecond Maximum watch requests per second per client. Must be >= 0.
+   *                                Use 0 to disable traffic for this target.
+   * @throws IllegalArgumentException If clientRequestsPerSecond < 0.
+   */
+  case class TargetWatchRequestRateLimitConfig(clientRequestsPerSecond: Long) {
+    require(
+      clientRequestsPerSecond >= 0,
+      s"clientRequestsPerSecond must be >= 0, got $clientRequestsPerSecond"
+    )
+
+    /** The maximum number of requests that can be made in a burst. Capped at `Long.MAX_VALUE`. */
+    val burstCapacity: Long = try {
+      Math.multiplyExact(
+        clientRequestsPerSecond,
+        TargetWatchRequestRateLimitConfig.BURST_CAPACITY_IN_SECONDS
+      )
+    } catch {
+      case _: ArithmeticException => Long.MaxValue
+    }
+
+    override def toString: String =
+      s"TargetWatchRequestRateLimitConfig(clientRequestsPerSecond=$clientRequestsPerSecond, " +
+      s"burstCapacity=$burstCapacity)"
+
+    /**
+     * Converts this instance to a [[TargetWatchRequestRateLimitConfigP]] proto object.
+     */
+    def toProto: TargetWatchRequestRateLimitConfigP = {
+      TargetWatchRequestRateLimitConfigP.of(Some(clientRequestsPerSecond))
+    }
+  }
+
+  object TargetWatchRequestRateLimitConfig {
+
+    /**
+     * Burst capacity in seconds of request throughput. Must be >= 1. E.g., if
+     * clientRequestsPerSecond=2, burst capacity is 2 * 10 = 20 requests.
+     *
+     * This means each client can burst up to BURST_CAPACITY_IN_SECONDS * clientRequestsPerSecond
+     * requests before being rate limited. We do not expect clients to require much burst headroom,
+     * but allow for it to accomodate clients that may send additional watch requests in close
+     * proximity, e.g. due to a new assignment generation that causes reestablishment of watches.
+     */
+    private[dicer] val BURST_CAPACITY_IN_SECONDS: Long = 10L
+
+    /**
+     * Default per-target rate limiting configuration for Watch requests.
+     *
+     * Used when a config exists for the target name, but the target doesn't specify a rate limit
+     * override in the configuration proto.
+     *
+     * `clientRequestsPerSecond`: 2 request per second per client. Well-behaved clients (Slicelets,
+     * Clerks) send Watch requests at ~0.4 req/s (every 2.5 seconds), so 2 req/s is ~5x the
+     * normal expected rate.
+     *
+     * With BURST_CAPACITY_IN_SECONDS = 10, each client can burst up to 20 requests before
+     * being rate limited.
+     */
+    val DEFAULT: TargetWatchRequestRateLimitConfig =
+      TargetWatchRequestRateLimitConfig(clientRequestsPerSecond = 2L)
+
+    /**
+     * Parses and validates the proto representation of [[TargetWatchRequestRateLimitConfig]].
+     */
+    def fromProto(proto: TargetWatchRequestRateLimitConfigP): TargetWatchRequestRateLimitConfig = {
+      val clientRequestsPerSecond: Long = proto.clientRequestsPerSecond match {
+        case Some(rate: Long) => rate
+        case None => DEFAULT.clientRequestsPerSecond
+      }
+      TargetWatchRequestRateLimitConfig(clientRequestsPerSecond)
+    }
+  }
+
+  /**
+   * The default [[InternalTargetConfig]] used for targets that do not have a checked-in config.
+   * This is only used when `allowDefaultTargetConfigForExperimentalTargets` is enabled on the Dicer
+   * Assigner.
+   *
+   * The `maxLoadHint` is set to 100,000. For targets which report 1000 load per request (a typical
+   * recommendation), this corresponds to 100 QPS of traffic serving capacity per pod. The goal is
+   * that this default is high enough to avoid unnecessary churn for experimental targets, but not
+   * so high as to effectively disable Dicer's load balancing.
+   */
+  val DEFAULT_FOR_EXPERIMENTAL_TARGETS: InternalTargetConfig = InternalTargetConfig(
+    LoadWatcherTargetConfig.DEFAULT,
+    loadBalancingConfig = LoadBalancingConfig(
+      LoadBalancingConfig.DEFAULT_LOAD_BALANCING_INTERVAL,
+      ChurnConfig.DEFAULT,
+      LoadBalancingMetricConfig(maxLoadHint = 100000)
+    ),
+    KeyReplicationConfig.DEFAULT_SINGLE_REPLICA,
+    HealthWatcherTargetConfig.DEFAULT,
+    KeyOfDeathProtectionConfig.DEFAULT,
+    TargetWatchRequestRateLimitConfig.DEFAULT
+  )
 
   object forTest {
 
@@ -417,7 +601,9 @@ object InternalTargetConfig {
         LoadBalancingMetricConfig(maxLoadHint = 1.0)
       ),
       KeyReplicationConfig.DEFAULT_SINGLE_REPLICA,
-      HealthWatcherTargetConfig.DEFAULT
+      HealthWatcherTargetConfig.DEFAULT,
+      KeyOfDeathProtectionConfig.DEFAULT,
+      TargetWatchRequestRateLimitConfig.DEFAULT
     )
   }
 }
@@ -436,6 +622,8 @@ case class NamedInternalTargetConfig(targetName: TargetName, config: InternalTar
   }
 
   /** Converts this instance to a [[InternalDicerTargetConfigP]] proto object. */
+  // TODO(<internal bug>): Modify this function once key of death protection config is added to advanced
+  // config.
   def toProto: InternalDicerTargetConfigP = {
 
     // If the current key replication config equals the default config, we output an empty
@@ -457,6 +645,15 @@ case class NamedInternalTargetConfig(targetName: TargetName, config: InternalTar
         Some(config.healthWatcherConfig.toProto)
       }
 
+    // Only set the target rate limit config in the proto if it differs from the default to avoid
+    // updating the dynamic config for customers who don't specify this field.
+    val targetRateLimitConfigProtoOpt: Option[TargetWatchRequestRateLimitConfigP] =
+      if (config.targetRateLimitConfig == TargetWatchRequestRateLimitConfig.DEFAULT) {
+        None
+      } else {
+        Some(config.targetRateLimitConfig.toProto)
+      }
+
     val targetConfigProto: TargetConfigFieldsP = TargetConfigFieldsP.of(
       Some(config.loadBalancingConfig.primaryRateMetric.toProto),
       keyReplicationConfigProtoOpt
@@ -468,7 +665,8 @@ case class NamedInternalTargetConfig(targetName: TargetName, config: InternalTar
       // config so the generated dynamic config can be recognized by possible stale assigner binary
       // in production.
       keyReplicationConfig = keyReplicationConfigProtoOpt,
-      healthWatcherConfig = healthWatcherConfigProtoOpt
+      healthWatcherConfig = healthWatcherConfigProtoOpt,
+      targetWatchRequestRateLimitConfig = targetRateLimitConfigProtoOpt
     )
     InternalDicerTargetConfigP(
       target = Some(targetName.value),

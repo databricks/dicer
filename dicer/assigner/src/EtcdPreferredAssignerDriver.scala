@@ -5,6 +5,7 @@ import javax.annotation.concurrent.GuardedBy
 import scala.concurrent.duration._
 import scala.concurrent.{Future, Promise}
 import scala.util.{Failure, Success, Try}
+import scala.util.control.NonFatal
 import io.grpc.Deadline
 import com.databricks.api.proto.dicer.assigner.HeartbeatResponseP
 import com.databricks.api.proto.dicer.assigner.PreferredAssignerServiceGrpc.PreferredAssignerServiceStub
@@ -29,7 +30,8 @@ class EtcdPreferredAssignerDriver(
     sec: SequentialExecutionContext,
     assignerTlsOptionsOpt: Option[TLSOptions],
     store: EtcdPreferredAssignerStore,
-    config: EtcdPreferredAssignerDriver.Config
+    config: EtcdPreferredAssignerDriver.Config,
+    membershipCheckerFactory: KubernetesMembershipChecker.Factory
 ) extends PreferredAssignerDriver {
 
   /** The timeout for the heartbeat RPC call. */
@@ -98,6 +100,22 @@ class EtcdPreferredAssignerDriver(
       )
       baseDriver.start()
       watchPreferredAssignerValueChanges()
+
+      // Start the Kubernetes membership checker, recording a metric on both success and
+      // failure so oncall can monitor rollout health.
+      try {
+        membershipCheckerFactory.create(assignerInfo, assignerProtoLogger) match {
+          case Some(checker) =>
+            checker.start()
+            KubernetesMembershipChecker.recordInitSuccess()
+          case None =>
+          // Checker intentionally disabled by the factory.
+        }
+      } catch {
+        case NonFatal(ex) =>
+          KubernetesMembershipChecker.recordInitFailure()
+          logger.warn(s"Failed to create KubernetesMembershipChecker: $ex")
+      }
     }
 
   /**

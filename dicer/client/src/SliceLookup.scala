@@ -21,12 +21,13 @@ import com.databricks.caching.util.{
   PrefixLogger,
   SequentialExecutionContext,
   StateMachineDriver,
-  StatusUtils
+  StatusUtils,
+  WhereAmIHelper
 }
 import com.databricks.common.instrumentation.SCaffeineCacheInfoExporter
 import com.databricks.context.Ctx
 import com.databricks.dicer.client.AssignmentSyncStateMachine.{DriverAction, Event}
-import com.databricks.dicer.client.InternalClientConfig.DEADLINE_BUFFER
+import com.databricks.dicer.client.SliceLookupConfig.DEADLINE_BUFFER
 import com.databricks.dicer.common.Assignment.{AssignmentValueCell, AssignmentValueCellConsumer}
 import com.databricks.dicer.common.{
   Assignment,
@@ -61,32 +62,45 @@ import javax.annotation.concurrent.{GuardedBy, ThreadSafe}
  * For details on the other fields, see [[SliceLookup.createUnstarted()]].
  *
  * The caller MUST call [[start]] before calling any of the methods in this class.
+ *
+ * Note: This class makes no assumptions about the caller's concurrency domain. Despite taking
+ * a [[SequentialExecutionContext]], it is independently thread-safe, as each external call is
+ * queued on the [[SequentialExecutionContext]]. Since SliceLookup can be cached and reused by
+ * multiple Clerks in different SECs, it must be usable from callers in different domains.
  */
 @ThreadSafe
 class SliceLookup private (
     sec: SequentialExecutionContext,
-    config: InternalClientConfig,
+    config: SliceLookupConfig,
     subscriberDebugName: String,
     protoLogger: DicerClientProtoLogger)
     extends ClientTargetSlicezDataExporter {
 
   private val logger = PrefixLogger.create(this.getClass, subscriberDebugName)
 
+  /**
+   * The Kubernetes cluster URI of the pod running this client, captured once at construction time.
+   * Used to determine cross-cluster/region indicators on the slicez page.
+   */
+  private val clientClusterOpt: Option[URI] = WhereAmIHelper.getClusterUri
+
   /** The cell used for communicating a new `Assignment` to various parts of the Clerk/Slicelet. */
   private val cell = new AssignmentValueCell
 
   /**
-   * A helper class that creates watch stubs for the SliceLookup.
+   * Manages the creation of watch stubs for the SliceLookup.
    *
    * Note: If this is a data plane client, `config.watchAddress` is the address of the s2sproxy
    * which forwards our watch requests.
    */
-  private val watchStubHelper = new WatchStubHelper(
+  private val watchStubManager = new WatchStubManager(
     clientName = config.clientName,
     subscriberDebugName = subscriberDebugName,
     defaultWatchAddress = config.watchAddress,
     tlsOptionsOpt = config.tlsOptionsOpt,
-    watchFromDataPlane = config.watchFromDataPlane
+    watchFromDataPlane = config.watchFromDataPlane,
+    target = config.target,
+    clientIdOpt = config.clientIdOpt
   )
 
   /**
@@ -105,7 +119,7 @@ class SliceLookup private (
    * Cache of address to its stub. Used when we are asked to redirect a request to a specific
    * address.
    *
-   * TODO(<internal bug>): Now that we will be using dynamicGrpcChannel in [[WatchStubHelper]],
+   * TODO(<internal bug>): Now that we will be using dynamicGrpcChannel in [[WatchStubManager]],
    * creating watch stubs to preferred assigner targets is a very lightweight operation.
    * Therefore, this cache is no longer necessary and should be removed.
    */
@@ -257,7 +271,8 @@ class SliceLookup private (
               subscriberDebugName,
               watchAddress,
               lastWatchAddressUsedSince,
-              lastSuccessfulHeartbeat
+              lastSuccessfulHeartbeat,
+              clientClusterOpt = this.clientClusterOpt
             )
           case ClerkData =>
             // No assignment stats is maintained in Clerks, so all assignment-related statistics
@@ -275,7 +290,8 @@ class SliceLookup private (
               subscriberDebugName,
               watchAddress,
               lastWatchAddressUsedSince,
-              lastSuccessfulHeartbeat
+              lastSuccessfulHeartbeat,
+              clientClusterOpt = this.clientClusterOpt
             )
         }
     }(sec)
@@ -295,7 +311,8 @@ class SliceLookup private (
         // Log assignment propagation latency via structured logging
         protoLogger.logAssignmentPropagationLatency(
           generation = assignment.generation,
-          currentTime = sec.getClock.instant()
+          currentTime = sec.getClock.instant(),
+          subscriberDebugName = subscriberDebugName
         )
         cell.setValue(assignment)
       case DriverAction.SendRequest(
@@ -339,7 +356,7 @@ class SliceLookup private (
             }
             watchStubsCache.get(
               address,
-              _ => watchStubHelper.createWatchStub(Some(address))
+              _ => watchStubManager.createWatchStub(Some(address))
             )
           case None =>
             if (lastWatchAddress.isDefined) {
@@ -347,8 +364,8 @@ class SliceLookup private (
               lastWatchAddressUsedSince = sec.getClock.instant()
             }
             // Creates a stub to the default watch address (config.watchAddress) that was provided
-            // when the WatchStubHelper was instantiated.
-            watchStubHelper.createWatchStub(redirectAddressOpt = None)
+            // when the WatchStubManager was instantiated.
+            watchStubManager.createWatchStub(redirectAddressOpt = None)
         }
         val responseFuture: Future[ClientResponse] = performWatchCall(stub, request)
         // Handle the read success/failure and call the corresponding syncer method.
@@ -489,7 +506,7 @@ object SliceLookup {
    */
   def createUnstarted(
       sec: SequentialExecutionContext,
-      config: InternalClientConfig,
+      config: SliceLookupConfig,
       subscriberDebugName: String,
       protoLogger: DicerClientProtoLogger,
       serviceBuilderOpt: Option[GenericRpcServiceBuilder]

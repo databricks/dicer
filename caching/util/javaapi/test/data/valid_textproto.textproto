@@ -1,0 +1,8 @@
+# proto-file: caching/util/javaapi/test/proto/test_message.proto
+# proto-message: StringTestMessageP
+
+strings: [
+  "foo",
+  "bar",
+  "baz"
+]

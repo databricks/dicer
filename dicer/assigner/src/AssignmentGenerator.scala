@@ -39,7 +39,6 @@ import com.databricks.dicer.assigner.AssignmentStats.{
   AssignmentLoadStats,
   ReassignmentChurnAndLoadStats
 }
-import com.databricks.dicer.assigner.HealthWatcher.{HealthStatus, HealthStatusReport}
 import com.databricks.dicer.assigner.algorithm.{Algorithm, LoadMap, Resources}
 import com.databricks.dicer.assigner.algorithm.LoadMap.KeyLoadMap
 import com.databricks.dicer.assigner.Store.WriteAssignmentResult
@@ -60,13 +59,12 @@ import com.databricks.dicer.common.{
   ProposedAssignment,
   ProposedSliceAssignment,
   SliceletData,
+  SliceletState,
   SyncAssignmentState
 }
 import com.databricks.dicer.external.{AppTarget, KubernetesTarget, Slice, SliceKey, Target}
 import com.databricks.dicer.friend.{SliceMap, Squid}
 import java.net.URI
-
-import scala.collection.mutable
 
 /**
  * Generates assignments for a target based on incoming signals, e.g. for resource health.
@@ -171,8 +169,8 @@ class AssignmentGenerator(
     }
 
     event match {
-      case Event.TerminationSignal(resourceUuid) =>
-        handleTerminationSignal(tickerTime, instant, outputBuilder, resourceUuid)
+      case Event.TerminationSignalFromKubernetes(resourceUuid) =>
+        handleTerminationSignalFromKubernetes(tickerTime, instant, outputBuilder, resourceUuid)
       case Event.WatchRequest(request) =>
         handleWatchRequest(tickerTime, instant, outputBuilder, request)
       case Event.AssignmentWriteComplete(result, contextOpt) =>
@@ -333,6 +331,12 @@ class AssignmentGenerator(
             if (latestKnownIncarnation > config.storeIncarnation) {
               // We can only generate assignments in our configured incarnation and thus have no
               // hope of generating an assignment which can supersede the latest known.
+              logger.warn(
+                s"Skipping assignment generation because latest known incarnation" +
+                s" $latestKnownIncarnation is higher than store incarnation" +
+                s" ${config.storeIncarnation}",
+                every = 1.minute
+              )
               AssignmentGenerationDecision.Skip(
                 ensureAdvanceByTimeOpt = None,
                 skipReason = SkipReason.KnownHigherIncarnationAssignment
@@ -498,80 +502,24 @@ class AssignmentGenerator(
     for (action <- healthWatcherOutput.actions) {
       action match {
         case HealthWatcher.DriverAction
-              .IncorporateHealthReport(healthReport: Map[Squid, HealthStatusReport]) =>
-          // Record the HealthStatuses reported by the Slicelet and the computed statuses chosen by
-          // the HealthWatcher
-          val resourcesPerStatusReported: mutable.Map[HealthStatus, Int] = mutable.Map.empty
-          val resourcesPerStatusComputed: mutable.Map[HealthStatus, Int] = mutable.Map.empty
-
-          val healthyResources: mutable.ArrayBuffer[Squid] = mutable.ArrayBuffer.empty
-
-          for (entry <- healthReport) {
-            val (squid, healthStatusReport): (Squid, HealthStatusReport) = entry
-            val reportedStatus: HealthStatus = healthStatusReport.reportedBySlicelet
-            val computedStatus: HealthStatus = healthStatusReport.computed
-
-            // Count health statuses reported by Slicelets and HealthWatcher-computed statuses.
-            resourcesPerStatusReported(reportedStatus) =
-              resourcesPerStatusReported.getOrElse(reportedStatus, 0) + 1
-            resourcesPerStatusComputed(computedStatus) =
-              resourcesPerStatusComputed.getOrElse(computedStatus, 0) + 1
-
-            // Record if the health status reported by Slicelet differs from the computed status.
-            if (reportedStatus != computedStatus) {
-              TargetMetrics.incrementHealthStatusComputedDiffersFromReported(
-                target,
-                healthStatusReport
-              )
-              logger.info(
-                s"HealthStatus mask applied for squid $squid: " +
-                s"reported ${reportedStatus}, computed as " +
-                s"${computedStatus}",
-                every = 10.seconds
-              )
-            }
-
-            computedStatus match {
-              case HealthStatus.Running =>
-                // Running resources are eligible for assignment.
-                healthyResources += squid
-
-              case HealthStatus.NotReady | HealthStatus.Unknown | HealthStatus.Terminating =>
-              // Resources reported to be in other HealthStatuses are excluded from the assignment.
-            }
-          }
-
-          // Iterate through all HealthStatus values and report the podset size metrics, so that any
-          // HealthStatus not present in a report will be set to 0.
-          for (status: HealthStatus <- HealthWatcher.HealthStatus.values) {
-            val computedCount: Int = resourcesPerStatusComputed.getOrElse(status, 0)
-            val reportedCount: Int = resourcesPerStatusReported.getOrElse(status, 0)
-            TargetMetrics.setPodSetSize(
-              target,
-              status,
-              reportedCount = reportedCount,
-              computedCount = computedCount
-            )
-          }
-
-          // Inform the key of death detector of the latest computed health report to have it
-          // track any newly crashed resources.
-          val computedHealthReport: Map[Squid, HealthStatus] = healthReport.mapValues {
-            (healthStatusReport: HealthStatusReport) =>
-              healthStatusReport.computed
-          }.toMap
+              .HealthReportReady(healthy: Set[Squid], newlyCrashedCount: Int) =>
+          // Inform the key of death detector of the current healthy count and any newly crashed
+          // resources so it can track the key of death heuristic.
           handleKeyOfDeathDetectorOutput(
             outputBuilder,
             keyOfDeathDetector.onEvent(
               tickerTime,
               instant,
-              KeyOfDeathDetector.Event.ResourcesUpdated(computedHealthReport)
+              KeyOfDeathDetector.Event.ResourcesUpdated(
+                healthyCount = healthy.size,
+                newlyCrashedCount = newlyCrashedCount
+              )
             )
           )
 
           // Remember the latest health report so that we can use it to decide whether we need to
           // generate a new assignment.
-          this.resources = Resources.create(healthyResources)
+          this.resources = Resources.create(healthy)
       }
     }
   }
@@ -595,15 +543,15 @@ class AssignmentGenerator(
   }
 
   /** Handles termination signal from Kubernetes. */
-  private def handleTerminationSignal(
+  private def handleTerminationSignalFromKubernetes(
       tickerTime: TickerTime,
       instant: Instant,
       outputBuilder: StateMachineOutput.Builder[DriverAction],
       resourceUuid: UUID): Unit = {
     val event = HealthWatcher.Event
-      .HealthStatusObservedByUuid(
+      .SliceletStateFromKubernetes(
         resourceUuid,
-        HealthWatcher.HealthStatus.Terminating
+        SliceletState.Terminating
       )
     handleHealthWatcherOutput(
       tickerTime,
@@ -632,9 +580,9 @@ class AssignmentGenerator(
           // Slicelet watch requests are also heartbeats. Tell the health watcher about the
           // heartbeat and incorporate any actions requested by the health watcher.
           val event = HealthWatcher.Event
-            .HealthStatusObserved(
+            .SliceletStateFromSlicelet(
               resource,
-              HealthWatcher.HealthStatus.fromProto(sliceletData.state)
+              sliceletData.state
             )
           handleHealthWatcherOutput(
             tickerTime,
@@ -900,8 +848,7 @@ class AssignmentGenerator(
   /**
    * Informs the generator that an assignment sync was received from a trusted source. This syncs
    * the in-memory knowledge of the latest assignment using the latest message; in particular, if
-   * the assignment belongs to [[config.storeIncarnation]] and is newer than the known latest
-   * assignment, distribution is requested.
+   * the assignment is newer than the known latest assignment, distribution is requested.
    */
   private def handleAssignmentSync(
       tickerTime: TickerTime,
@@ -913,11 +860,12 @@ class AssignmentGenerator(
       case SyncAssignmentState.KnownAssignment(diffAssignment: DiffAssignment) =>
         val diffIncarnation: Incarnation = diffAssignment.generation.incarnation
         if (diffIncarnation != config.storeIncarnation) {
-          logger.info(s"Got assignment from different incarnation $diffIncarnation")
           val mismatchType: IncarnationMismatchType.Value =
             if (diffIncarnation < config.storeIncarnation) {
+              logger.info(s"Got assignment from lower incarnation $diffIncarnation")
               IncarnationMismatchType.ASSIGNMENT_LOWER
             } else {
+              logger.warn(s"Got assignment from higher incarnation $diffIncarnation")
               IncarnationMismatchType.ASSIGNMENT_HIGHER
             }
           TargetMetrics.incrementNumAssignmentStoreIncarnationMismatch(
@@ -1228,8 +1176,11 @@ object AssignmentGenerator {
     /** Informs the generator of an assignment that was received from some trusted source. */
     case class AssignmentReceived(assignment: Assignment) extends Event
 
-    /** Informs the generator that a termination signal was received for a given resourceUuid. */
-    case class TerminationSignal(resourceUuid: UUID) extends Event
+    /**
+     * Informs the generator that a termination signal was received from Kubernetes for a given
+     * resourceUuid.
+     */
+    case class TerminationSignalFromKubernetes(resourceUuid: UUID) extends Event
 
     /** Informs the generator that it should stop generating assignments. */
     case class Shutdown() extends Event

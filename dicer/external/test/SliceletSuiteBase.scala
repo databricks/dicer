@@ -1,12 +1,13 @@
 package com.databricks.dicer.external
 
 import com.databricks.dicer.friend.SliceMap
-import com.databricks.caching.util.FakeTypedClock
 
 import java.net.URI
 import java.util.UUID
 import java.util.concurrent.CompletionException
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
+
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 import scala.concurrent.duration._
@@ -29,6 +30,7 @@ import com.databricks.conf.Config
 import com.databricks.dicer.common.ClientType
 import com.databricks.rpc.RequestHeaders
 import com.databricks.api.proto.dicer.common.ClientRequestP.SliceletDataP
+import com.databricks.common.web.InfoService
 import com.databricks.conf.Configs
 import com.databricks.conf.trusted.ProjectConf
 import com.databricks.conf.trusted.LocationConf
@@ -47,14 +49,21 @@ import com.databricks.dicer.common.{
   ProposedSliceAssignment,
   SliceSetImpl,
   SliceletData,
+  SliceletState,
   TestAssigner,
   TestSliceUtils
 }
 import com.databricks.caching.util.Lock.withLock
+import com.databricks.common.status.{ProbeStatus, ProbeStatusSource, ProbeStatuses}
+import com.databricks.dicer.assigner.conf.DicerAssignerConf
+import com.databricks.dicer.assigner.config.InternalTargetConfig.HealthWatcherTargetConfig
+import com.databricks.dicer.assigner.config.{InternalTargetConfig, InternalTargetConfigMap}
+import com.databricks.dicer.common.TargetName
 import com.databricks.dicer.common.test.SliceletTestDataP
 import com.databricks.dicer.common.test.SliceletTestDataP.SliceletDebugNameTestCaseP
 import com.databricks.dicer.external.SliceletSuite.ASSIGNER_CLUSTER_URI
 import com.databricks.dicer.friend.Squid
+import com.databricks.web.SimpleWebClient
 import com.databricks.rpc.tls.TLSOptions
 import com.databricks.rpc.testing.TestTLSOptions
 import com.databricks.testing.DatabricksTest
@@ -88,16 +97,20 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
 
   /** The test environment used for all the tests. */
   protected val testEnv: InternalDicerTestEnvironment =
-    InternalDicerTestEnvironment.create(assignerClusterUri = ASSIGNER_CLUSTER_URI)
-
-  /** The Assigner used for all the tests. */
-  private val testAssigner: TestAssigner = testEnv.testAssigner
+    InternalDicerTestEnvironment.create(
+      config = TestAssigner.Config.create(
+        assignerConf = new DicerAssignerConf(
+          Configs.parseMap(
+            // Short watch timeout to more quickly observe Slicelet changes.
+            "databricks.dicer.internal.cachingteamonly.watchServerSuggestedRpcTimeoutMillis" -> 500
+          )
+        )
+      ),
+      assignerClusterUri = ASSIGNER_CLUSTER_URI
+    )
 
   /** The number of Slicelets that have been created in the current test case. */
   private var numSlicelets: Int = 0
-
-  /** Interval between Slicelet heartbeats. */
-  protected val heartbeatInterval: FiniteDuration = 5.seconds
 
   override def beforeEach(): Unit = {
     testCaseUuid = UUID.randomUUID()
@@ -125,17 +138,24 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     getSuffixedSafeName(s"${testCaseUuid.toString.take(5)}")
   }
 
-  /** Creates and returns a Slicelet with the given configuration parameters. */
-  protected def createSlicelet(
+  /**
+   * Creates and returns a Slicelet in the given `internalTestEnv` with the given configuration
+   * parameters.
+   */
+  // The test environment is in a separate parameter list so that default values in the second
+  // list (e.g. extraDbConfFlags) can reference it. Scala does not allow default expressions of
+  // an abstract method to reference earlier parameters in the same parameter list.
+  protected def createSlicelet(internalTestEnv: InternalDicerTestEnvironment)(
       sliceletHostname: Option[String] = Some(generateSliceletHostname()),
       sliceletUuid: Option[String] = Some(UUID.randomUUID().toString),
       sliceletKubernetesNamespace: Option[String] = Some("localhost-namespace"),
       branch: Option[String] = None,
       extraDbConfFlags: Map[String, Any] = Map(
         "databricks.dicer.assigner.host" -> "localhost",
-        "databricks.dicer.assigner.rpc.port" -> testEnv.getAssignerPort
+        "databricks.dicer.assigner.rpc.port" -> internalTestEnv.getAssignerPort
       ),
-      extraEnvVars: Map[String, String] = defaultExtraEnvVars): SliceletDriver
+      extraEnvVars: Map[String, String] = defaultExtraEnvVars,
+      useFakeReadinessProvider: Boolean = false): SliceletDriver
 
   /** Generates a unique hostname to use for a Slicelet. */
   private def generateSliceletHostname(): String = {
@@ -189,24 +209,43 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
   protected def expectedAssignerCanonicalizedTargetIdentifier: Target
 
   /**
-   * Helper to set and freeze the assignment in the Assigner for the [[defaultTarget]] which uses
-   * the correct Assigner canonicalized Target identifier.
+   * Sets the readiness status reported by the probe status source and triggers a readiness
+   * endpoint update so the [[ReadinessProbeTracker]] picks up the change.
+   */
+  protected def setReadinessProbeStatusSource(status: ProbeStatus): Unit
+
+  /**
+   * Helper to set and freeze the assignment at the Assigner in the given `internalTestEnv` for the
+   * [[defaultTarget]] which uses the correct Assigner canonicalized Target identifier.
    */
   protected def setAndFreezeAssignment(
+      internalTestEnv: InternalDicerTestEnvironment,
       proposal: SliceMap[ProposedSliceAssignment]): Future[Assignment] = {
-    testAssigner.setAndFreezeAssignment(expectedAssignerCanonicalizedTargetIdentifier, proposal)
+    internalTestEnv.testAssigner
+      .setAndFreezeAssignment(expectedAssignerCanonicalizedTargetIdentifier, proposal)
   }
 
-  /** Helper to get the latest slicelet watch request for the [[defaultTarget]]. */
-  protected def getLatestSliceletWatchRequest: Option[ClientRequest] = {
-    testAssigner.getLatestSliceletWatchRequest(expectedAssignerCanonicalizedTargetIdentifier).map {
-      case (_: RequestHeaders, req: ClientRequest) => req
-    }
+  /**
+   * Helper to get the latest slicelet watch request of the Assigner in the given `internalTestEnv`
+   * for the [[defaultTarget]].
+   */
+  protected def getLatestSliceletWatchRequest(
+      internalTestEnv: InternalDicerTestEnvironment): Option[ClientRequest] = {
+    internalTestEnv.testAssigner
+      .getLatestSliceletWatchRequest(expectedAssignerCanonicalizedTargetIdentifier)
+      .map {
+        case (_: RequestHeaders, req: ClientRequest) => req
+      }
   }
 
-  /** Helper to get the latest slicelet watch request for the [[defaultTarget]] and `squid`. */
-  protected def getLatestSliceletWatchRequest(squid: Squid): Option[ClientRequest] = {
-    testAssigner
+  /**
+   * Helper to get the latest slicelet watch request of the Assigner in the given `internalTestEnv`
+   * for the [[defaultTarget]] and `squid`.
+   */
+  protected def getLatestSliceletWatchRequest(
+      internalTestEnv: InternalDicerTestEnvironment,
+      squid: Squid): Option[ClientRequest] = {
+    internalTestEnv.testAssigner
       .getLatestSliceletWatchRequest(expectedAssignerCanonicalizedTargetIdentifier, squid)
       .map {
         case (_: RequestHeaders, req: ClientRequest) => req
@@ -316,49 +355,105 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     }
   }
 
-  /** Waits for a SQUID to exist in the assignment with the given port number, and returns it. */
-  protected def waitForSquidWithPort(port: Int): Squid = {
+  /**
+   * Gets the [[Squid]] with the given port if one exists in the assignment for the
+   * [[defaultTarget]] generated by the Assigner in the given `internalTestEnv`.
+   */
+  private def getSquidWithPort(internalTestEnv: InternalDicerTestEnvironment, port: Int): Squid = {
+    val squids: Set[Squid] = TestUtils
+      .awaitResult(
+        internalTestEnv.testAssigner
+          .getAssignment(expectedAssignerCanonicalizedTargetIdentifier),
+        Duration.Inf
+      )
+      .get
+      .assignedResources
+    val squidOpt = squids.find(_.resourceAddress.uri.getPort == port)
+    assert(squidOpt.nonEmpty, s"Could not find Squid with port $port")
+    squidOpt.get
+  }
+
+  /**
+   * Waits for a SQUID with the given port number to exist in the assignment for the
+   * [[defaultTarget]] generated by the Assigner in the given `internalTestEnv`, and returns it.
+   */
+  protected def waitForSquidWithPort(
+      internalTestEnv: InternalDicerTestEnvironment,
+      port: Int): Squid = {
     AssertionWaiter(s"Wait for assignment to contain SQUID with port $port").await {
-      val squidOpt: Option[Squid] =
-        allSquidsInAssignment.find((squid: Squid) => squid.resourceAddress.uri.getPort == port)
+      getSquidWithPort(internalTestEnv, port)
+    }
+  }
+
+  /**
+   * Waits for any SQUID to exist in the assignment for the [[defaultTarget]] generated by the
+   * Assigner in the given `internalTestEnv`, and returns it.
+   */
+  protected def waitForAnySquid(internalTestEnv: InternalDicerTestEnvironment): Squid = {
+    AssertionWaiter(s"Wait for assignment to contain any SQUID").await {
+      val squidOpt: Option[Squid] = allSquidsInAssignment(internalTestEnv).headOption
       assert(squidOpt.nonEmpty)
       squidOpt.get
     }
   }
 
   /**
-   * Waits for a SQUID to exist in the assignment with the given port number, and returns it.
-   * Advances `clock` on each invocation to handle cases where the fake clock must be advanced to
-   * trigger the assignment update.
+   * Returns all SQUIDs in the current assignment for the [[defaultTarget]] generated by the
+   * Assigner in the given `internalTestEnv`.
    */
-  protected def waitForSquidWithPortWithClockAdvance(port: Int, clock: FakeTypedClock): Squid = {
-    AssertionWaiter(s"Wait for assignment to contain SQUID with port $port").await {
-      clock.advanceBy(1.second)
-      val squidOpt: Option[Squid] =
-        allSquidsInAssignment.find((squid: Squid) => squid.resourceAddress.uri.getPort == port)
-      assert(squidOpt.nonEmpty)
-      squidOpt.get
-    }
-  }
-
-  /** Waits for any SQUID to exist in the assignment, and returns it. */
-  protected def waitForAnySquid(): Squid = {
-    AssertionWaiter(s"Wait for assignment to contain any SQUID").await {
-      val squidOpt: Option[Squid] = allSquidsInAssignment.headOption
-      assert(squidOpt.nonEmpty)
-      squidOpt.get
-    }
-  }
-
-  /** Returns all SQUIDs in the current assignment. */
-  private def allSquidsInAssignment: Set[Squid] = {
+  private def allSquidsInAssignment(internalTestEnv: InternalDicerTestEnvironment): Set[Squid] = {
     TestUtils
       .awaitResult(
-        testAssigner.getAssignment(expectedAssignerCanonicalizedTargetIdentifier),
+        internalTestEnv.testAssigner
+          .getAssignment(expectedAssignerCanonicalizedTargetIdentifier),
         Duration.Inf
       )
       .get
       .assignedResources
+  }
+
+  /**
+   * Waits for the Slicelet with the given [[Squid]] in the given `internalTestEnv` to report the
+   * expected state.
+   */
+  private def awaitSliceletReported(
+      internalTestEnv: InternalDicerTestEnvironment,
+      squid: Squid,
+      expectedState: SliceletState): Unit = {
+    AssertionWaiter(s"Wait for $squid to report $expectedState state").await {
+      val requestOpt: Option[ClientRequest] =
+        getLatestSliceletWatchRequest(internalTestEnv, squid)
+      assert(requestOpt.nonEmpty)
+      requestOpt.get.subscriberData match {
+        case sliceletData: SliceletData =>
+          assert(sliceletData.state == expectedState)
+        case other =>
+          fail(s"Expected SliceletData but got ${other.getClass.getSimpleName}")
+      }
+    }
+  }
+
+  /**
+   * Waits for the Slicelets identified by the given `squids` in the given `internalTestEnv` to be
+   * part of an assignment.
+   */
+  private def assertAndWaitForSliceletsToBeAssigned(
+      internalTestEnv: InternalDicerTestEnvironment,
+      squids: Set[Squid]): Unit = {
+    AssertionWaiter(s"Wait for Slicelets in $squids to be assigned").await {
+      val assignmentOpt: Option[Assignment] =
+        TestUtils.awaitResult(
+          internalTestEnv.testAssigner
+            .getAssignment(expectedAssignerCanonicalizedTargetIdentifier),
+          Duration.Inf
+        )
+      assert(assignmentOpt.nonEmpty)
+      assert(
+        assignmentOpt.get.assignedResources == squids,
+        s"Expected all Slicelets in $squids to be assigned, but got " +
+        s"${assignmentOpt.get.assignedResources}"
+      )
+    }
   }
 
   test("Test debug name") {
@@ -386,7 +481,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     // Test plan: Verify that an IllegalArgumentException is thrown when attempting to create a
     // Slicelet using a configuration without a host name.
     assertThrow[IllegalArgumentException]("Unable to determine Slicelet host name.") {
-      createSlicelet(sliceletHostname = None)
+      createSlicelet(testEnv)(sliceletHostname = None)
     }
   }
 
@@ -396,7 +491,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
 
     // Create Slicelet without UID.
     assertThrow[IllegalArgumentException]("Unable to determine Slicelet UUID") {
-      createSlicelet(sliceletUuid = None)
+      createSlicelet(testEnv)(sliceletUuid = None)
     }
   }
 
@@ -408,20 +503,20 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     assertThrow[IllegalArgumentException](
       "Unable to determine Kubernetes namespace"
     ) {
-      createSlicelet(sliceletKubernetesNamespace = None)
+      createSlicelet(testEnv)(sliceletKubernetesNamespace = None)
     }
   }
 
   test("SliceletConf with hostname from POD_IP environment variable") {
     // Test plan: Verify that the hostname is taken from the POD_IP environment variable if not
     // explicitly specified.
-    val slicelet: SliceletDriver = createSlicelet(
+    val slicelet: SliceletDriver = createSlicelet(testEnv)(
       sliceletHostname = None,
       extraEnvVars = defaultExtraEnvVars ++ Map("POD_IP" -> "12.34.56.78")
     )
     slicelet.start(selfPort = 1234, listenerOpt = None)
 
-    val squid: Squid = waitForAnySquid()
+    val squid: Squid = waitForAnySquid(testEnv)
     assert(squid.resourceAddress.uri.getHost == "12.34.56.78")
 
     slicelet.stop()
@@ -431,13 +526,13 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     // Test plan: Verify that the UUID is taken from the POD_UID environment variable if not
     // explicitly specified.
     val uuid: UUID = UUID.randomUUID()
-    val slicelet: SliceletDriver = createSlicelet(
+    val slicelet: SliceletDriver = createSlicelet(testEnv)(
       sliceletUuid = None,
       extraEnvVars = defaultExtraEnvVars ++ Map("POD_UID" -> uuid.toString)
     )
     slicelet.start(selfPort = 1234, listenerOpt = None)
 
-    val squid: Squid = waitForAnySquid()
+    val squid: Squid = waitForAnySquid(testEnv)
     assert(squid.resourceUuid == uuid)
 
     slicelet.stop()
@@ -446,15 +541,15 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
   test("SliceletConf with Kubernetes namespace from NAMESPACE environment variable") {
     // Test plan: Verify that the Kubernetes namespace is taken from the NAMESPACE environment
     // variable if not explicitly specified.
-    val slicelet: SliceletDriver = createSlicelet(
+    val slicelet: SliceletDriver = createSlicelet(testEnv)(
       sliceletKubernetesNamespace = None,
       extraEnvVars = defaultExtraEnvVars ++ Map("NAMESPACE" -> "namespace-from-env-var")
     )
     slicelet.start(selfPort = 1234, listenerOpt = None)
 
-    waitForAnySquid()
+    waitForAnySquid(testEnv)
     assert(
-      getLatestSliceletWatchRequest.get.subscriberData
+      getLatestSliceletWatchRequest(testEnv).get.subscriberData
         .asInstanceOf[SliceletData]
         .kubernetesNamespace ==
       "namespace-from-env-var"
@@ -495,14 +590,14 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     // the Slicelet receives the assignment. Simulate a shutdown trigger ie. set TERMINATING state
     // in slicelet1 and verify eventually slicelet2 has the assignment for a key previously assigned
     // to slicelet1.
-    val slicelet1: SliceletDriver = createSlicelet()
+    val slicelet1: SliceletDriver = createSlicelet(testEnv)()
     slicelet1.start(selfPort = 1111, listenerOpt = None)
-    val slicelet2: SliceletDriver = createSlicelet()
+    val slicelet2: SliceletDriver = createSlicelet(testEnv)()
     slicelet2.start(selfPort = 2222, listenerOpt = None)
 
     // Look up the SQUIDs for the two Slicelets.
-    val squid1: Squid = waitForSquidWithPort(1111)
-    val squid2: Squid = waitForSquidWithPort(2222)
+    val squid1: Squid = waitForSquidWithPort(testEnv, 1111)
+    val squid2: Squid = waitForSquidWithPort(testEnv, 2222)
 
     // Wait for both slicelets to receive an assignment.
     AssertionWaiter("Wait for both slicelets to receive an assignment").await {
@@ -516,20 +611,20 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
 
     // Eventually the status reported in slicelet1 should be TERMINATING.
     AssertionWaiter("Wait for the termination of slicelet1").await {
-      val requestOpt: Option[ClientRequest] = getLatestSliceletWatchRequest(squid1)
+      val requestOpt: Option[ClientRequest] = getLatestSliceletWatchRequest(testEnv, squid1)
       assert(requestOpt.nonEmpty)
       assert(requestOpt.get.subscriberData.isInstanceOf[SliceletData])
       val sliceletData = requestOpt.get.subscriberData.asInstanceOf[SliceletData]
 
       assert(sliceletData.squid == squid1)
-      assert(sliceletData.state.isTerminating)
+      assert(sliceletData.state == SliceletState.Terminating)
     }
 
     // slicelet2 should now own all the assignments.
     AssertionWaiter("Wait for slicelet2 to be assigned all Slices").await {
       val assignmentOpt1: Option[Assignment] =
         TestUtils.awaitResult(
-          testAssigner.getAssignment(expectedAssignerCanonicalizedTargetIdentifier),
+          testEnv.testAssigner.getAssignment(expectedAssignerCanonicalizedTargetIdentifier),
           Duration.Inf
         )
       assert(assignmentOpt1.nonEmpty)
@@ -554,9 +649,9 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     // race with any subsequent assignment freeze).
     val initialProposal = createProposal(("" -- ∞) -> Seq("other_pod"))
     val initialAssignment =
-      TestUtils.awaitResult(setAndFreezeAssignment(initialProposal), Duration.Inf)
+      TestUtils.awaitResult(setAndFreezeAssignment(testEnv, initialProposal), Duration.Inf)
 
-    val slicelet: SliceletDriver = createSlicelet()
+    val slicelet: SliceletDriver = createSlicelet(testEnv)()
     slicelet.start(selfPort = 1234, listenerOpt = None)
 
     AssertionWaiter("Slicelet has recorded generation of initial assignment").await {
@@ -587,7 +682,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     }
 
     // Look up the SQUID for the Slicelet.
-    val squid: Squid = waitForAnySquid()
+    val squid: Squid = waitForAnySquid(testEnv)
 
     // Create a second proposal to ensure the metrics are updated correctly.
     val secondProposal = createProposal(
@@ -598,7 +693,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
       ("Ori" -- ∞) -> Seq("Pod3")
     )
     val waitForAssignment =
-      TestUtils.awaitResult(setAndFreezeAssignment(secondProposal), Duration.Inf)
+      TestUtils.awaitResult(setAndFreezeAssignment(testEnv, secondProposal), Duration.Inf)
 
     AssertionWaiter("Slicelet has recorded generation of new assignment").await {
       assert(
@@ -621,7 +716,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
 
   test("Calling start multiple times fails") {
     // Test plan: Verify that the Slicelet can only be started once.
-    val slicelet: SliceletDriver = createSlicelet()
+    val slicelet: SliceletDriver = createSlicelet(testEnv)()
     slicelet.start(selfPort = 1234, listenerOpt = None)
     assertThrow[IllegalStateException]("must be stopped to start") {
       try {
@@ -636,11 +731,11 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     // Test plan: Create a Slicelet and assigner. Provide the assigner with a single assignment
     // and ensure that the Slicelet receives the assignment. Check a key with isAffinitizedKey.
     // Also, check that onChangedSlices was correctly called.
-    val slicelet: SliceletDriver = createSlicelet()
+    val slicelet: SliceletDriver = createSlicelet(testEnv)()
 
     val listener = new LoggingListener(slicelet)
     slicelet.start(selfPort = 1234, Some(listener))
-    val address: Squid = waitForSquidWithPort(1234)
+    val address: Squid = waitForSquidWithPort(testEnv, 1234)
     val proposal = createProposal(
       ("" -- fp("Dori")) -> Seq("Pod2"),
       (fp("Dori") -- fp("Fili")) -> Seq("Pod0"),
@@ -649,7 +744,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
       (fp("Nori") -- ∞) -> Seq("Pod3")
     )
     val assignment: Assignment = TestUtils.awaitResult(
-      setAndFreezeAssignment(proposal),
+      setAndFreezeAssignment(testEnv, proposal),
       Duration.Inf
     )
 
@@ -729,7 +824,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     // and ensure that the Slicelet receives the assignment. Check a key with isAffinitizedKey.
     // Also, check that onChangedSlices was correctly called. Then change the assignment and check
     // again.
-    val slicelet: SliceletDriver = createSlicelet()
+    val slicelet: SliceletDriver = createSlicelet(testEnv)()
     val listener = new LoggingListener(slicelet)
     slicelet.start(selfPort = 1234, Some(listener))
     val squid: Squid = slicelet.squid
@@ -741,7 +836,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
       (fp("Ori") -- ∞) -> Seq("Pod3")
     )
     val assignment1: Assignment =
-      TestUtils.awaitResult(setAndFreezeAssignment(proposal1), Duration.Inf)
+      TestUtils.awaitResult(setAndFreezeAssignment(testEnv, proposal1), Duration.Inf)
 
     // Wait for the assignment to show up.
     waitForGenerationAtLeast(slicelet, assignment1.generation)
@@ -763,7 +858,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
       (fp("Nori") -- ∞) -> Seq("Pod3")
     )
     val assignment2: Assignment = TestUtils.awaitResult(
-      setAndFreezeAssignment(proposal2),
+      setAndFreezeAssignment(testEnv, proposal2),
       Duration.Inf
     )
 
@@ -790,9 +885,9 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     // addition, verify this with 2 different multi-replica assignments.
 
     // Setup: 3 Slicelets to involve in the test.
-    val slicelet0: SliceletDriver = createSlicelet()
-    val slicelet1: SliceletDriver = createSlicelet()
-    val slicelet2: SliceletDriver = createSlicelet()
+    val slicelet0: SliceletDriver = createSlicelet(testEnv)()
+    val slicelet1: SliceletDriver = createSlicelet(testEnv)()
+    val slicelet2: SliceletDriver = createSlicelet(testEnv)()
 
     // Setup: 3 LoggingListeners for the 3 Slicelets respectively.
     val listener0 = new LoggingListener(slicelet0)
@@ -803,9 +898,9 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     slicelet1.start(selfPort = 1234, Some(listener1))
     slicelet2.start(selfPort = 3456, Some(listener2))
 
-    val squid0: Squid = waitForSquidWithPort(2345)
-    val otherSquid: Squid = waitForSquidWithPort(1234)
-    val squid2: Squid = waitForSquidWithPort(3456)
+    val squid0: Squid = waitForSquidWithPort(testEnv, 2345)
+    val otherSquid: Squid = waitForSquidWithPort(testEnv, 1234)
+    val squid2: Squid = waitForSquidWithPort(testEnv, 3456)
 
     // Setup: Create and freeze an assignment that contains Slices with multiple replicas.
     val proposal1 = createProposal(
@@ -815,7 +910,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
       (fp("Nori") -- fp("Ori")) -> Seq(squid2, squid0),
       (fp("Ori") -- ∞) -> Seq(squid0)
     )
-    setAndFreezeAssignment(proposal1)
+    setAndFreezeAssignment(testEnv, proposal1)
 
     // Verify: Wait for all the Slicelets to receive the assignment with replicas. Check whether the
     // Slicelets received the assignments by checking `isAssigned()` for individual keys.
@@ -850,7 +945,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     val proposal2 = createProposal(
       ("" -- ∞) -> Seq(squid0, otherSquid, squid2)
     )
-    setAndFreezeAssignment(proposal2)
+    setAndFreezeAssignment(testEnv, proposal2)
 
     // Verify: Check the new log.
     listener0.waitForEntry(SliceSetImpl("" -- ∞))
@@ -868,7 +963,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     // assignment and ensure that the Slicelet receives it. Verify that isAssignedContinuously
     // returns true for a key that is assigned to Slicelet, and false for a key that isn't. This
     // test doesn't really exercise the "continuously" check.
-    val slicelet: SliceletDriver = createSlicelet()
+    val slicelet: SliceletDriver = createSlicelet(testEnv)()
 
     // Create an initial proposal to freeze the assignment before starting the Slicelet (otherwise
     // starting the Slicelet first would trigger initial assignment generation, which would then
@@ -877,7 +972,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     // to the slicelet. This assignment will pass all `waitForAssignment(slicelet, key)` calls and
     // fail any `!handle.isAssignedContinuously` check before the next assignment arrives.
     val initialProposal = createProposal(("" -- ∞) -> Seq("other_pod"))
-    TestUtils.awaitResult(setAndFreezeAssignment(initialProposal), Duration.Inf)
+    TestUtils.awaitResult(setAndFreezeAssignment(testEnv, initialProposal), Duration.Inf)
 
     slicelet.start(selfPort = 1234, listenerOpt = None)
     Using.resource(slicelet.createHandle(fp("Nori"))) { handle =>
@@ -892,7 +987,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
       (fp("Nori") -- fp("Ori")) -> Seq(squid),
       (fp("Ori") -- ∞) -> Seq("Pod3")
     )
-    setAndFreezeAssignment(proposal1)
+    setAndFreezeAssignment(testEnv, proposal1)
     waitForAssignment(slicelet, fp("Kili"))
     Using.resource(slicelet.createHandle(fp("Nori"))) { handle =>
       assert(handle.isAssignedContinuously)
@@ -917,9 +1012,9 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     // starting the Slicelet first would trigger initial assignment generation, which would then
     // race with any subsequent assignment freeze).
     val initialProposal = createProposal(("" -- ∞) -> Seq("other_pod"))
-    TestUtils.awaitResult(setAndFreezeAssignment(initialProposal), Duration.Inf)
+    TestUtils.awaitResult(setAndFreezeAssignment(testEnv, initialProposal), Duration.Inf)
 
-    val slicelet: SliceletDriver = createSlicelet()
+    val slicelet: SliceletDriver = createSlicelet(testEnv)()
     slicelet.start(selfPort = 1234, listenerOpt = None)
 
     val squid: Squid = slicelet.squid
@@ -930,7 +1025,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
       (fp("Nori") -- fp("Ori")) -> Seq(squid),
       (fp("Ori") -- ∞) -> Seq("Pod3")
     )
-    setAndFreezeAssignment(proposal1)
+    setAndFreezeAssignment(testEnv, proposal1)
     waitForAssignment(slicelet, fp("Kili"))
     Using.resource(slicelet.createHandle(fp("Kili"))) { handle =>
       assert(handle.isAssignedContinuously)
@@ -943,7 +1038,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
         (fp("Nori") -- fp("Ori")) -> Seq("Pod0"),
         (fp("Ori") -- ∞) -> Seq("Pod3")
       )
-      setAndFreezeAssignment(proposal2)
+      setAndFreezeAssignment(testEnv, proposal2)
       waitForAssignment(slicelet, fp("Dori"))
       assert(handle.isAssignedContinuously)
 
@@ -956,7 +1051,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
         (fp("Nori") -- fp("Ori")) -> Seq(squid),
         (fp("Ori") -- ∞) -> Seq("Pod3")
       )
-      setAndFreezeAssignment(proposal3)
+      setAndFreezeAssignment(testEnv, proposal3)
       waitForAssignment(slicelet, fp("Nori"))
       assert(!handle.isAssignedContinuously)
     }
@@ -973,9 +1068,9 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     // starting the Slicelet first would trigger initial assignment generation, which would then
     // race with any subsequent assignment freeze).
     val initialProposal = createProposal(("" -- ∞) -> Seq("other_pod"))
-    TestUtils.awaitResult(setAndFreezeAssignment(initialProposal), Duration.Inf)
+    TestUtils.awaitResult(setAndFreezeAssignment(testEnv, initialProposal), Duration.Inf)
 
-    val slicelet: SliceletDriver = createSlicelet()
+    val slicelet: SliceletDriver = createSlicelet(testEnv)()
     slicelet.start(selfPort = 1234, listenerOpt = None)
     val squid: Squid = slicelet.squid
     val proposal1 = createProposal(
@@ -985,7 +1080,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
       (fp("Nori") -- fp("Ori")) -> Seq(squid),
       (fp("Ori") -- ∞) -> Seq("Pod3")
     )
-    setAndFreezeAssignment(proposal1)
+    setAndFreezeAssignment(testEnv, proposal1)
     waitForAssignment(slicelet, fp("Kili"))
     Using.resource(slicelet.createHandle(fp("Nori"))) { handle =>
       assert(handle.isAssignedContinuously)
@@ -998,7 +1093,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
         (fp("Nori") -- fp("Ori")) -> Seq("Pod0"),
         (fp("Ori") -- ∞) -> Seq("Pod3")
       )
-      setAndFreezeAssignment(proposal2)
+      setAndFreezeAssignment(testEnv, proposal2)
       // Nori-Ori assigned back to resource, Dori-Kili reassigned to resource (the latter is just so
       // that we can use it in `waitForAssignment`).
       val proposal3 = createProposal(
@@ -1008,7 +1103,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
         (fp("Nori") -- fp("Ori")) -> Seq(squid),
         (fp("Ori") -- ∞) -> Seq("Pod3")
       )
-      setAndFreezeAssignment(proposal3)
+      setAndFreezeAssignment(testEnv, proposal3)
       waitForAssignment(slicelet, "Dori")
       assert(!handle.isAssignedContinuously)
     }
@@ -1021,15 +1116,15 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     // Slicelet. Split the assignment, with one of the keys kept on the same Slicelet, and another
     // moved to a different one. Verify that `isAssignedContinuously` returns true for the former
     // and false for the latter.
-    val slicelet: SliceletDriver = createSlicelet()
+    val slicelet: SliceletDriver = createSlicelet(testEnv)()
     slicelet.start(selfPort = 1234, listenerOpt = None)
-    val squid: Squid = waitForSquidWithPort(1234)
+    val squid: Squid = waitForSquidWithPort(testEnv, 1234)
     val proposal1 = createProposal(
       ("" -- fp("Dori")) -> Seq("Pod2"),
       (fp("Dori") -- fp("Kili")) -> Seq("Pod0"),
       (fp("Kili") -- ∞) -> Seq(squid)
     )
-    setAndFreezeAssignment(proposal1)
+    setAndFreezeAssignment(testEnv, proposal1)
     waitForAssignment(slicelet, fp("Kili"))
     Using.Manager { use =>
       val noriHandle = use(slicelet.createHandle(fp("Nori")))
@@ -1045,7 +1140,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
         (fp("Kili") -- fp("Ori")) -> Seq(squid),
         (fp("Ori") -- ∞) -> Seq("Pod0")
       )
-      setAndFreezeAssignment(proposal2)
+      setAndFreezeAssignment(testEnv, proposal2)
       waitForUnassigned(slicelet, fp("Ori"))
       assert(noriHandle.isAssignedContinuously)
       assert(!oriHandle.isAssignedContinuously)
@@ -1058,7 +1153,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     // that map each Slice to multiple resources.
 
     // Setup: Create the Slicelet being tested.
-    val slicelet: SliceletDriver = createSlicelet()
+    val slicelet: SliceletDriver = createSlicelet(testEnv)()
     slicelet.start(selfPort = 1234, listenerOpt = None)
     val squid: Squid = slicelet.squid
 
@@ -1069,7 +1164,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
       (fp("Nori") -- ∞) -> Seq(squid, "OtherPod0") // Assigned.
     )
     val assignment1: Assignment =
-      TestUtils.awaitResult(setAndFreezeAssignment(proposal1), Duration.Inf)
+      TestUtils.awaitResult(setAndFreezeAssignment(testEnv, proposal1), Duration.Inf)
     waitForGenerationAtLeast(slicelet, assignment1.generation)
 
     Using.Manager { use =>
@@ -1091,7 +1186,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
         (fp("Fili") -- fp("Nori")) -> Seq(squid, "OtherPod3"), // Continuously Assigned.
         (fp("Nori") -- ∞) -> Seq("OtherPod0", "OtherPod1") // Become unassigned.
       )
-      setAndFreezeAssignment(proposal2)
+      setAndFreezeAssignment(testEnv, proposal2)
       waitForUnassigned(slicelet, fp("Nori"))
 
       assert(!doriHandle.isAssignedContinuously) // Continuously unassigned.
@@ -1104,7 +1199,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
         (fp("Fili") -- fp("Nori")) -> Seq(squid), // Continuously Assigned.
         (fp("Nori") -- ∞) -> Seq(squid, "OtherPod1") // Assigned back.
       )
-      setAndFreezeAssignment(proposal3)
+      setAndFreezeAssignment(testEnv, proposal3)
       waitForAssignment(slicelet, fp("Nori"))
 
       assert(!doriHandle.isAssignedContinuously) // Continuously unassigned.
@@ -1119,8 +1214,8 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     // Test plan: Verify that the Slicelet maintains handle metrics correctly. Verify this by
     // creating two slicelets with the same target name, creating and closing SliceKeyHandles, and
     // verifying the counts.
-    val slicelet1: SliceletDriver = createSlicelet()
-    val slicelet2: SliceletDriver = createSlicelet()
+    val slicelet1: SliceletDriver = createSlicelet(testEnv)()
+    val slicelet2: SliceletDriver = createSlicelet(testEnv)()
     slicelet1.start(selfPort = 1234, listenerOpt = None)
     slicelet2.start(selfPort = 1234, listenerOpt = None)
     val initialCreatedCount: Double = getSliceKeyHandlesCreatedMetric
@@ -1157,9 +1252,9 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     // starting the Slicelet first would trigger initial assignment generation, which would then
     // race with any subsequent assignment freeze).
     val initialProposal = createProposal(("" -- ∞) -> Seq("other_pod"))
-    TestUtils.awaitResult(setAndFreezeAssignment(initialProposal), Duration.Inf)
+    TestUtils.awaitResult(setAndFreezeAssignment(testEnv, initialProposal), Duration.Inf)
 
-    val slicelet = createSlicelet()
+    val slicelet = createSlicelet(testEnv)()
     slicelet.start(selfPort = 1234, listenerOpt = None)
     val squid: Squid = slicelet.squid
     val proposal1 = createProposal(
@@ -1167,7 +1262,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
       ("Kili" -- "Nori") -> Seq("Pod0"),
       ("Nori" -- ∞) -> Seq(squid)
     )
-    setAndFreezeAssignment(proposal1)
+    setAndFreezeAssignment(testEnv, proposal1)
     waitForAssignment(slicelet, "")
     Using.Manager { use =>
       // Create handles for two assigned keys (Fili and Ori) and one unassigned key (Kili).
@@ -1191,7 +1286,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     // Wait for a load report containing non-zero load for both the assigned slices and unassigned
     // load.
     AssertionWaiter("Wait for load report").await {
-      val requestOpt: Option[ClientRequest] = getLatestSliceletWatchRequest
+      val requestOpt: Option[ClientRequest] = getLatestSliceletWatchRequest(testEnv)
       assert(requestOpt.isDefined)
       val request: ClientRequest = requestOpt.get
       assert(request.subscriberData.isInstanceOf[SliceletData])
@@ -1225,9 +1320,9 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     // would then race with any subsequent assignment freeze).
     val otherSquid: Squid = createTestSquid(11451)
     val initialProposal = createProposal(("" -- ∞) -> Seq(otherSquid))
-    TestUtils.awaitResult(setAndFreezeAssignment(initialProposal), Duration.Inf)
+    TestUtils.awaitResult(setAndFreezeAssignment(testEnv, initialProposal), Duration.Inf)
 
-    val slicelet = createSlicelet()
+    val slicelet = createSlicelet(testEnv)()
     slicelet.start(selfPort = 1234, listenerOpt = None)
     val squid: Squid = slicelet.squid
 
@@ -1238,7 +1333,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
       (("Kili" -- "Nori") -> Seq(otherSquid)).copy(primaryRateLoadOpt = Some(100.0)),
       (("Nori" -- ∞) -> Seq(squid, otherSquid)).copy(primaryRateLoadOpt = Some(200.0))
     )
-    setAndFreezeAssignment(proposal)
+    setAndFreezeAssignment(testEnv, proposal)
     waitForAssignment(slicelet, "")
 
     Using.Manager { use =>
@@ -1263,7 +1358,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     }.get
 
     AssertionWaiter("Wait for expected load report").await {
-      val requestOpt: Option[ClientRequest] = getLatestSliceletWatchRequest
+      val requestOpt: Option[ClientRequest] = getLatestSliceletWatchRequest(testEnv)
       assert(requestOpt.isDefined)
       val request: ClientRequest = requestOpt.get
       assert(request.subscriberData.isInstanceOf[SliceletData])
@@ -1307,7 +1402,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
   test("SliceKeyHandle: increment non-positive load") {
     // Test plan: supply non-positive incremental load to SliceKeyHandle and verify that the
     // operation doesn't fail, and has no effect on the attributed / unattributed load.
-    val slicelet: SliceletDriver = createSlicelet()
+    val slicelet: SliceletDriver = createSlicelet(testEnv)()
     slicelet.start(selfPort = 1234, listenerOpt = None)
 
     Using.resource(slicelet.createHandle(fp("Nori"))) { handle =>
@@ -1318,7 +1413,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
 
     // Verify that the both attributed loads and unattributed load are 0.
     AssertionWaiter("Wait for expected load report").await {
-      val requestOpt: Option[ClientRequest] = getLatestSliceletWatchRequest
+      val requestOpt: Option[ClientRequest] = getLatestSliceletWatchRequest(testEnv)
       assert(requestOpt.isDefined)
       val request: ClientRequest = requestOpt.get
       assert(request.subscriberData.isInstanceOf[SliceletData])
@@ -1347,7 +1442,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
 
     // Create the Slicelet and start it. When the Slicelet connects to the Assigner, it will
     // automatically be assigned all slices.
-    val slicelet: SliceletDriver = createSlicelet()
+    val slicelet: SliceletDriver = createSlicelet(testEnv)()
     slicelet.start(selfPort = 1234, None)
 
     // Wait for the Slicelet to receive the automatic assignment.
@@ -1372,9 +1467,9 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     // with the Slicelet - make sure that the assignment is received from the Slicelet.
 
     // Create the Slicelet and start a server on that Slicelet.
-    val slicelet: SliceletDriver = createSlicelet()
+    val slicelet: SliceletDriver = createSlicelet(testEnv)()
     slicelet.start(selfPort = 1234, None)
-    val squid: Squid = waitForSquidWithPort(1234)
+    val squid: Squid = waitForSquidWithPort(testEnv, 1234)
 
     // Set up the assignment at the Assigner.
     val proposal = createProposal(
@@ -1385,7 +1480,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
       (fp("Nori") -- ∞) -> Seq("Pod3")
     )
     val assignment: Assignment = TestUtils.awaitResult(
-      setAndFreezeAssignment(proposal),
+      setAndFreezeAssignment(testEnv, proposal),
       Duration.Inf
     )
 
@@ -1419,6 +1514,462 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     slicelet.stop()
     clerk.stop()
   }
+
+  test("Assigner sees a NOT_READY Slicelet when Slicelet's server reports it is not ready") {
+    // Test plan: Verify that the Assigner sees a NOT_READY Slicelet when the Slicelet's server is
+    // not ready. Verify this by setting the readiness provider of the Slicelet to report
+    // that the server is not ready, waiting for the Assigner to get a watch request for that
+    // Slicelet, and checking that the Slicelet's status is NOT_READY.
+
+    val slicelet: SliceletDriver = createSlicelet(testEnv)(useFakeReadinessProvider = true)
+    // Set readiness provider to report not ready.
+    slicelet.setReadinessStatus(isReady = false)
+
+    val port: Int = 1111
+    slicelet.start(selfPort = port, listenerOpt = None)
+    val squid: Squid = waitForSquidWithPort(testEnv, port)
+
+    // Check that the Assigner got a NOT_READY status from the Slicelet
+    AssertionWaiter("Wait for Assigner to receive SliceletData from this Slicelet").await {
+      val requestOpt: Option[ClientRequest] = getLatestSliceletWatchRequest(testEnv, squid)
+      assert(requestOpt.nonEmpty)
+      assert(requestOpt.get.subscriberData.isInstanceOf[SliceletData])
+      val sliceletData = requestOpt.get.subscriberData.asInstanceOf[SliceletData]
+      assert(sliceletData.state == SliceletState.NotReady)
+    }
+
+    // TODO(<internal bug>): verify this Squid is NOT in the assignment when Dicer stops routing traffic
+    //  to pods with Slicelets in NOT_READY state
+    // NOT_READY Slicelet is still in assignment.
+    assert(waitForSquidWithPort(testEnv, port) == squid)
+
+    // Verify that eventually the number of observations for the NOT_READY state exceed the number
+    // for all other states.
+    AssertionWaiter("Wait for metrics to be updated").await {
+      val notReadyCount: Double = getSliceletStateCount(SliceletDataP.State.NOT_READY)
+      for (state: SliceletDataP.State <- SliceletDataP.State.values) {
+        if (state != SliceletDataP.State.NOT_READY) {
+          assert(getSliceletStateCount(state) < notReadyCount)
+        }
+      }
+    }
+
+    slicelet.stop()
+  }
+
+  gridTest("Slicelet always reports TERMINATING when terminating regardless of readiness")(
+    // Test plan: Create a Slicelet that is ready, then set it to terminating state and verify
+    // it reports TERMINATING. Also test with a not-ready Slicelet to ensure TERMINATING
+    // takes precedence over readiness state.
+    Seq(true, false)
+  ) { isReady: Boolean =>
+    val slicelet: SliceletDriver = createSlicelet(testEnv)(useFakeReadinessProvider = true)
+    // Set readiness provider to report the desired initial state.
+    slicelet.setReadinessStatus(isReady)
+    val port: Int = 1111
+    slicelet.start(selfPort = port, listenerOpt = None)
+    val squid: Squid = waitForSquidWithPort(testEnv, port)
+
+    val expectedInitialState: SliceletState =
+      if (isReady) SliceletState.Running else SliceletState.NotReady
+    AssertionWaiter(s"Wait for initial state $expectedInitialState").await {
+      val requestOpt: Option[ClientRequest] = getLatestSliceletWatchRequest(testEnv, squid)
+      assert(requestOpt.nonEmpty)
+      assert(requestOpt.get.subscriberData.isInstanceOf[SliceletData])
+      val sliceletData = requestOpt.get.subscriberData.asInstanceOf[SliceletData]
+      assert(sliceletData.state == expectedInitialState)
+    }
+
+    // Set terminating state
+    slicelet.setTerminatingState()
+
+    // Should now report TERMINATING regardless of readiness
+    AssertionWaiter("Wait for TERMINATING state").await {
+      val requestOpt: Option[ClientRequest] = getLatestSliceletWatchRequest(testEnv, squid)
+      assert(requestOpt.nonEmpty)
+      assert(requestOpt.get.subscriberData.isInstanceOf[SliceletData])
+      val sliceletData = requestOpt.get.subscriberData.asInstanceOf[SliceletData]
+      assert(sliceletData.state == SliceletState.Terminating)
+    }
+
+    // Verify that eventually the number of observations for the TERMINATING state exceed the number
+    // for all other states, indicating that the Slicelet is reporting TERMINATING regardless of
+    // readiness.
+    AssertionWaiter("Wait for metrics to be updated").await {
+      val terminatingCount: Double = getSliceletStateCount(SliceletDataP.State.TERMINATING)
+      for (state: SliceletDataP.State <- SliceletDataP.State.values) {
+        if (state != SliceletDataP.State.TERMINATING) {
+          assert(getSliceletStateCount(state) < terminatingCount)
+        }
+      }
+    }
+
+    slicelet.stop()
+  }
+
+  test("Slicelet transitions from NOT_READY to RUNNING when readiness changes") {
+    // Test plan: Create a Slicelet that starts in NOT_READY state, verify the Assigner sees
+    // NOT_READY, then transition to ready, and verify the Assigner sees RUNNING.
+
+    val slicelet: SliceletDriver = createSlicelet(testEnv)(useFakeReadinessProvider = true)
+    val port: Int = 1111
+    slicelet.start(selfPort = port, listenerOpt = None)
+    val squid: Squid = waitForSquidWithPort(testEnv, port)
+
+    // Verify initial NOT_READY state
+    AssertionWaiter("Wait for initial NOT_READY state").await {
+      val requestOpt: Option[ClientRequest] = getLatestSliceletWatchRequest(testEnv, squid)
+      assert(requestOpt.nonEmpty)
+      assert(requestOpt.get.subscriberData.isInstanceOf[SliceletData])
+      val sliceletData = requestOpt.get.subscriberData.asInstanceOf[SliceletData]
+      assert(sliceletData.state == SliceletState.NotReady)
+    }
+
+    // Transition to READY
+    slicelet.setReadinessStatus(true)
+
+    // Verify transition to RUNNING state
+    AssertionWaiter("Wait for transition to RUNNING state").await {
+      val requestOpt: Option[ClientRequest] = getLatestSliceletWatchRequest(testEnv, squid)
+      assert(requestOpt.nonEmpty)
+      assert(requestOpt.get.subscriberData.isInstanceOf[SliceletData])
+      val sliceletData = requestOpt.get.subscriberData.asInstanceOf[SliceletData]
+      assert(sliceletData.state == SliceletState.Running)
+    }
+
+    // Verify that metrics contain counts for both NOT_READY and RUNNING states
+    AssertionWaiter("Wait for metrics to be updated").await {
+      for (state: SliceletDataP.State <- SliceletDataP.State.values) {
+        if (state == SliceletDataP.State.NOT_READY || state == SliceletDataP.State.RUNNING) {
+          assert(getSliceletStateCount(state) > 0)
+        } else {
+          assert(getSliceletStateCount(state) == 0)
+        }
+      }
+    }
+
+    slicelet.stop()
+  }
+
+  test("Slicelet starts successfully when readiness check blocks indefinitely") {
+    // Test plan: Verify that the Slicelet starts successfully even when the readiness provider's
+    // isReady call blocks indefinitely, using the BLOCKED_READINESS_CHECK_START_DELAY
+    // fallback mechanism. Verify the Slicelet starts up and reports NOT_READY initially, then
+    // transitions to RUNNING after unblocking the readiness provider.
+
+    val slicelet: SliceletDriver = createSlicelet(testEnv)(useFakeReadinessProvider = true)
+    // Setup: Block the readiness provider.
+    slicelet.setReadinessProviderBlocked(true)
+    slicelet.setReadinessStatus(true)
+    val port: Int = 12121
+    slicelet.start(selfPort = port, listenerOpt = None)
+
+    // Verify: The Slicelet should still start successfully (signalled by being included in the
+    // assignment) despite the blocked readiness check.
+    val squid: Squid = waitForSquidWithPort(testEnv, port)
+
+    // Verify: The Slicelet should report NOT_READY, the default readiness starting state.
+    // Use AssertionWaiter since the readiness poller runs in its own execution context.
+    AssertionWaiter("The Slicelet is reporting NOT_READY").await {
+      val requestOpt: Option[ClientRequest] = getLatestSliceletWatchRequest(testEnv, squid)
+      assert(requestOpt.nonEmpty)
+      assert(requestOpt.get.subscriberData.isInstanceOf[SliceletData])
+      val sliceletData = requestOpt.get.subscriberData.asInstanceOf[SliceletData]
+      assert(sliceletData.state == SliceletState.NotReady)
+    }
+
+    // Now unblock the readiness provider. It is already set to report ready.
+    slicelet.setReadinessProviderBlocked(false)
+
+    // Verify: The Slicelet should transition to RUNNING.
+    // AssertionWaiter will retry until the readiness poller (which runs in real time) detects the
+    // change.
+    AssertionWaiter("The Slicelet is reporting RUNNING").await {
+      val requestOpt: Option[ClientRequest] = getLatestSliceletWatchRequest(testEnv, squid)
+      assert(requestOpt.nonEmpty)
+      assert(requestOpt.get.subscriberData.isInstanceOf[SliceletData])
+      val sliceletData = requestOpt.get.subscriberData.asInstanceOf[SliceletData]
+      assert(sliceletData.state == SliceletState.Running)
+    }
+
+    slicelet.stop()
+  }
+
+  test("Assigner observes Slicelet readiness state transitions via full probe stack") {
+    // Test plan: Verify that the Assigner correctly observes Slicelet state transitions (NOT_READY
+    // -> RUNNING -> NOT_READY -> TERMINATING) using the full readiness probe stack
+    // (InfoService with HTTP probes). This validates end-to-end behavior from the Assigner's
+    // perspective, ensuring that readiness changes propagate correctly and that TERMINATING state
+    // takes precedence over readiness.
+
+    // Set readiness source to report `notYetReady`.
+    setReadinessProbeStatusSource(ProbeStatuses.notYetReady("test"))
+
+    val slicelet: SliceletDriver = createSlicelet(testEnv)()
+    val port: Int = 1111
+    slicelet.start(selfPort = port, listenerOpt = None)
+    val squid: Squid = waitForSquidWithPort(testEnv, port)
+
+    // Check that the Assigner got a NOT_READY status from the Slicelet.
+    awaitSliceletReported(testEnv, squid, SliceletState.NotReady)
+
+    // Slicelet transitions to RUNNING from NOT_READY when readiness source reports readiness.
+    setReadinessProbeStatusSource(ProbeStatuses.ok("test"))
+    awaitSliceletReported(testEnv, squid, SliceletState.Running)
+
+    // Slicelet transitions back if readiness status changes.
+    setReadinessProbeStatusSource(ProbeStatuses.notYetReady("test"))
+    awaitSliceletReported(testEnv, squid, SliceletState.NotReady)
+
+    // Test that Slicelet reports TERMINATING after transitioning to the terminating state
+    // regardless of what the readiness source reports.
+    slicelet.setTerminatingState()
+
+    // Slicelet should now report TERMINATING.
+    awaitSliceletReported(testEnv, squid, SliceletState.Terminating)
+
+    slicelet.stop()
+  }
+
+  test(
+    "Assigner handles multiple Slicelets with different readiness states " +
+    "(observeSliceletReadiness=false)"
+  ) {
+    // Test plan: Validate that distinct Slicelets are independently assigned by the Assigner.
+    // Verify this by creating two Slicelets with independently-controllable readiness states. Set
+    // one to NOT_READY and the other to RUNNING.  This test sets observeSliceletReadiness= false;
+    // verify that the Assigner assigns slices to both Slicelets regardless of readiness state. Then
+    // swap their states and verify that the previously-assigned Slicelet is still assigned and the
+    // newly-RUNNING Slicelet is assigned.
+
+    // Create slicelets: slicelet1 starts NOT_READY, slicelet2 starts RUNNING.
+    val slicelet1: SliceletDriver = createSlicelet(testEnv)(useFakeReadinessProvider = true)
+    val port1: Int = 1111
+    slicelet1.start(selfPort = port1, listenerOpt = None)
+    val slicelet2: SliceletDriver = createSlicelet(testEnv)(useFakeReadinessProvider = true)
+    slicelet2.setReadinessStatus(true)
+    val port2: Int = 1112
+    slicelet2.start(selfPort = port2, listenerOpt = None)
+
+    // Get Squids for Slicelets that should be assigned.
+    val squid1: Squid = waitForSquidWithPort(testEnv, port1)
+    val squid2: Squid = waitForSquidWithPort(testEnv, port2)
+
+    // Wait for Slicelets to report their states.
+    awaitSliceletReported(testEnv, squid1, SliceletState.NotReady)
+    awaitSliceletReported(testEnv, squid2, SliceletState.Running)
+
+    assertAndWaitForSliceletsToBeAssigned(testEnv, squids = Set(squid1, squid2))
+
+    // Now swap the readiness states: slicelet1 becomes RUNNING, slicelet2 becomes NOT_READY.
+    slicelet1.setReadinessStatus(true)
+    slicelet2.setReadinessStatus(false)
+
+    // Wait for state changes to be reported.
+    awaitSliceletReported(testEnv, squid1, SliceletState.Running)
+    awaitSliceletReported(testEnv, squid2, SliceletState.NotReady)
+
+    // When not observing readiness, both Slicelets should still be assigned.
+    assertAndWaitForSliceletsToBeAssigned(testEnv, squids = Set(squid1, squid2))
+
+    slicelet1.stop()
+    slicelet2.stop()
+  }
+
+  test(
+    "Assigner handles multiple Slicelets with different readiness states " +
+    "(observeSliceletReadiness=true)"
+  ) {
+    // Test plan: Same as previous test, but with observeSliceletReadiness=true. Since the Assigner
+    // respects the NOT_READY -> RUNNING transition, verify that only the RUNNING Slicelet is
+    // assigned at first. Then, swap the readiness states and verify that both Slicelets are
+    // assigned.
+
+    val testEnvObserveSliceletReadiness = InternalDicerTestEnvironment.create(
+      targetConfigMap = InternalTargetConfigMap.create(
+        configScopeOpt = None,
+        targetConfigMap = Map(
+          TargetName(expectedAssignerCanonicalizedTargetIdentifier.name) ->
+          InternalTargetConfig.forTest.DEFAULT
+            .copy(
+              healthWatcherConfig = HealthWatcherTargetConfig(
+                observeSliceletReadiness = true,
+                permitRunningToNotReady = false
+              )
+            )
+        )
+      ),
+      assignerClusterUri = ASSIGNER_CLUSTER_URI
+    )
+
+    try {
+      val slicelet1: SliceletDriver =
+        createSlicelet(testEnvObserveSliceletReadiness)(useFakeReadinessProvider = true)
+      val port1: Int = 1111
+      slicelet1.start(selfPort = port1, listenerOpt = None)
+      val slicelet2: SliceletDriver =
+        createSlicelet(testEnvObserveSliceletReadiness)(useFakeReadinessProvider = true)
+      slicelet2.setReadinessStatus(true)
+      val port2: Int = 1112
+      slicelet2.start(selfPort = port2, listenerOpt = None)
+
+      // Get Squid for Slicelet that should be assigned.
+      val squid2: Squid = waitForSquidWithPort(testEnvObserveSliceletReadiness, port2)
+
+      awaitSliceletReported(testEnvObserveSliceletReadiness, squid2, SliceletState.Running)
+
+      // Check assignment contains only slicelet2.
+      assertAndWaitForSliceletsToBeAssigned(testEnvObserveSliceletReadiness, squids = Set(squid2))
+
+      // Now swap the readiness states: slicelet1 becomes RUNNING, slicelet2 becomes NOT_READY.
+      slicelet1.setReadinessStatus(true)
+      slicelet2.setReadinessStatus(false)
+
+      // Now we can get squid1 because the Slicelet is RUNNING.
+      val squid1: Squid = AssertionWaiter("Wait for slicelet1 to be part of Assignment").await {
+        getSquidWithPort(testEnvObserveSliceletReadiness, port1)
+      }
+
+      // Wait for state changes to be reported.
+      awaitSliceletReported(testEnvObserveSliceletReadiness, squid1, SliceletState.Running)
+      awaitSliceletReported(testEnvObserveSliceletReadiness, squid2, SliceletState.NotReady)
+
+      // Even when observing readiness, both Slicelets should still be assigned, since the Assigner
+      // only respects the NOT_READY -> RUNNING transition.
+      assertAndWaitForSliceletsToBeAssigned(
+        testEnvObserveSliceletReadiness,
+        squids = Set(squid1, squid2)
+      )
+
+      slicelet1.stop()
+      slicelet2.stop()
+    } finally {
+      testEnvObserveSliceletReadiness.stop()
+    }
+  }
+
+  test(
+    "Assigner handles multiple Slicelets with different readiness states " +
+    "(observeSliceletReadiness=true, permitRunningToNotReady=true)"
+  ) {
+    // Test plan: Same as the observeSliceletReadiness=true test, but with
+    // permitRunningToNotReady=true. Since the Assigner now respects both the NOT_READY -> RUNNING
+    // and RUNNING -> NOT_READY transitions, verify that only the RUNNING Slicelet is assigned at
+    // first. Then swap the readiness states and verify that only the newly-RUNNING Slicelet is
+    // assigned: the formerly-RUNNING Slicelet is de-assigned upon transitioning to NOT_READY.
+    val testEnvPermitRunningToNotReady = InternalDicerTestEnvironment.create(
+      targetConfigMap = InternalTargetConfigMap.create(
+        configScopeOpt = None,
+        targetConfigMap = Map(
+          TargetName(expectedAssignerCanonicalizedTargetIdentifier.name) ->
+          InternalTargetConfig.forTest.DEFAULT
+            .copy(
+              healthWatcherConfig = HealthWatcherTargetConfig(
+                observeSliceletReadiness = true,
+                permitRunningToNotReady = true
+              )
+            )
+        )
+      ),
+      assignerClusterUri = ASSIGNER_CLUSTER_URI
+    )
+
+    try {
+      val slicelet1: SliceletDriver =
+        createSlicelet(testEnvPermitRunningToNotReady)(useFakeReadinessProvider = true)
+      val port1: Int = 1113
+      slicelet1.start(selfPort = port1, listenerOpt = None)
+      val slicelet2: SliceletDriver =
+        createSlicelet(testEnvPermitRunningToNotReady)(useFakeReadinessProvider = true)
+      slicelet2.setReadinessStatus(true)
+      val port2: Int = 1114
+      slicelet2.start(selfPort = port2, listenerOpt = None)
+
+      // Get Squid for the RUNNING Slicelet.
+      val squid2: Squid = waitForSquidWithPort(testEnvPermitRunningToNotReady, port2)
+
+      // Check assignment contains only slicelet2.
+      assertAndWaitForSliceletsToBeAssigned(testEnvPermitRunningToNotReady, squids = Set(squid2))
+
+      // Now swap the readiness states: slicelet1 becomes RUNNING, slicelet2 becomes NOT_READY.
+      slicelet1.setReadinessStatus(true)
+      slicelet2.setReadinessStatus(false)
+
+      // Now we can get squid1 because the Slicelet is RUNNING.
+      val squid1: Squid = AssertionWaiter("Wait for slicelet1 to be part of Assignment").await {
+        getSquidWithPort(testEnvPermitRunningToNotReady, port1)
+      }
+
+      // When permitRunningToNotReady=true, slicelet2 (now NOT_READY) should be de-assigned.
+      // Only slicelet1 (now RUNNING) should remain assigned.
+      assertAndWaitForSliceletsToBeAssigned(testEnvPermitRunningToNotReady, squids = Set(squid1))
+
+      slicelet1.stop()
+      slicelet2.stop()
+    } finally {
+      testEnvPermitRunningToNotReady.stop()
+    }
+  }
+
+  test(
+    "Assigner de-assigns and re-assigns a Slicelet that transitions" +
+    " NOT_READY then back to RUNNING (observeSliceletReadiness=true, permitRunningToNotReady=true)"
+  ) {
+    // Test plan: Verify that with permitRunningToNotReady=true, the Assigner de-assigns a Slicelet
+    // that transitions from RUNNING to NOT_READY and re-assigns it when it returns to RUNNING.
+    // Schedule:
+    // 1. Both slicelets start RUNNING — both assigned.
+    // 2. Set slicelet1 NOT_READY — slicelet1 de-assigned; slicelet2 remains.
+    // 3. Set slicelet1 RUNNING again — slicelet1 re-assigned.
+    val testEnv = InternalDicerTestEnvironment.create(
+      targetConfigMap = InternalTargetConfigMap.create(
+        configScopeOpt = None,
+        targetConfigMap = Map(
+          TargetName(expectedAssignerCanonicalizedTargetIdentifier.name) ->
+          InternalTargetConfig.forTest.DEFAULT
+            .copy(
+              healthWatcherConfig = HealthWatcherTargetConfig(
+                observeSliceletReadiness = true,
+                permitRunningToNotReady = true
+              )
+            )
+        )
+      ),
+      assignerClusterUri = ASSIGNER_CLUSTER_URI
+    )
+
+    try {
+      val slicelet1: SliceletDriver =
+        createSlicelet(testEnv)(useFakeReadinessProvider = true)
+      slicelet1.setReadinessStatus(true)
+      val port1: Int = 1115
+      slicelet1.start(selfPort = port1, listenerOpt = None)
+      val slicelet2: SliceletDriver =
+        createSlicelet(testEnv)(useFakeReadinessProvider = true)
+      slicelet2.setReadinessStatus(true)
+      val port2: Int = 1116
+      slicelet2.start(selfPort = port2, listenerOpt = None)
+
+      // Step 1: both slicelets are RUNNING — both should be assigned.
+      val squid1: Squid = waitForSquidWithPort(testEnv, port1)
+      val squid2: Squid = waitForSquidWithPort(testEnv, port2)
+      assertAndWaitForSliceletsToBeAssigned(testEnv, squids = Set(squid1, squid2))
+
+      // Step 2: set slicelet1 NOT_READY. With permitRunningToNotReady=true, slicelet1 should be
+      // de-assigned. Only slicelet2 (still RUNNING) should remain assigned.
+      slicelet1.setReadinessStatus(false)
+      assertAndWaitForSliceletsToBeAssigned(testEnv, squids = Set(squid2))
+
+      // Step 3: set slicelet1 RUNNING again. slicelet1 should be re-assigned.
+      slicelet1.setReadinessStatus(true)
+      assertAndWaitForSliceletsToBeAssigned(testEnv, squids = Set(squid1, squid2))
+
+      slicelet1.stop()
+      slicelet2.stop()
+    } finally {
+      testEnv.stop()
+    }
+  }
 }
 
 /**
@@ -1427,9 +1978,50 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
  */
 abstract class ScalaSliceletSuite extends SliceletSuiteBase {
 
+  /**
+   * The custom [[ProbeStatusSource]] used by the [[InfoService]] to get the pod's readiness.
+   */
+  private val readinessSource = new TestProbeStatusSource()
+
+  /**
+   * A [[ProbeStatusSource]] for testing that allows dynamically changing the readiness status. It
+   * is queried by the [[InfoService]] to update the [[ReadinessProbeTracker]] underlying the
+   * [[ReadinessReporter]].
+   */
+  private class TestProbeStatusSource extends ProbeStatusSource {
+    private val status: AtomicReference[ProbeStatus] =
+      new AtomicReference[ProbeStatus](ProbeStatuses.notYetReady("test"))
+
+    override def getStatus: ProbeStatus = status.get()
+
+    /** Set the status reported by this probe source to `isReady`. */
+    def setReady(isReady: Boolean): Unit = {
+      val newStatus: ProbeStatus =
+        if (isReady) ProbeStatuses.ok("test") else ProbeStatuses.notYetReady("test")
+      status.set(newStatus)
+    }
+  }
+
   /** Gets the assigner address for sending watch requests from the slicelet conf. */
   private def getAssignerAddress(sliceletConf: SliceletConf): URI = {
     WatchAddressHelper.getAssignerURI(sliceletConf.assignerHost, sliceletConf.dicerAssignerRpcPort)
+  }
+
+  override def beforeAll(): Unit = {
+    super.beforeAll()
+    // Set up the InfoService to be used by the ReadinessReporter.
+    InfoService.start(
+      port = 0,
+      startupStatusSourceOpt = None,
+      livenessStatusSourceOpt = None,
+      readinessStatusSourceOpt = Some(readinessSource),
+      branchOpt = None
+    )
+  }
+
+  override def afterAll(): Unit = {
+    InfoService.stop()
+    super.afterAll()
   }
 
   override def beforeEach(): Unit = {
@@ -1441,13 +2033,14 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
     super.afterEach()
   }
 
-  override protected def createSlicelet(
+  override protected def createSlicelet(internalTestEnv: InternalDicerTestEnvironment)(
       sliceletHostname: Option[String],
       sliceletUuid: Option[String],
       sliceletKubernetesNamespace: Option[String],
       branch: Option[String],
       extraDbConfFlags: Map[String, Any],
-      extraEnvVars: Map[String, String]): ScalaSliceletDriver = {
+      extraEnvVars: Map[String, String],
+      useFakeReadinessProvider: Boolean): ScalaSliceletDriver = {
     // Configure the location information.
     val locationConf: LocationConf = LocationConfTestUtils.newTestLocationConfig(
       envMap = extraEnvVars
@@ -1456,11 +2049,11 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
 
     var rawConf = Map[String, Any](
       "databricks.dicer.slicelet.rpc.port" -> 0,
-      "databricks.dicer.assigner.rpc.port" -> testEnv.getAssignerPort,
+      "databricks.dicer.assigner.rpc.port" -> internalTestEnv.getAssignerPort,
       "databricks.dicer.assigner.host" -> "localhost",
       "databricks.dicer.slicelet.statetransfer.port" -> 0,
       "databricks.dicer.client.watchFromDataPlane" -> watchFromDataPlane,
-      "databricks.dicer.internal.cachingteamonly.allowMultipleClientInstances" -> true
+      "databricks.dicer.internal.cachingteamonly.allowMultipleSliceletInstances" -> true
     )
     for (sliceletHostname: String <- sliceletHostname) {
       rawConf += "databricks.dicer.slicelet.hostname" -> sliceletHostname
@@ -1483,13 +2076,43 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
         TestTLSOptions.serverTlsOptionsOpt
       override def envVars: Map[String, String] = super.envVars ++ extraEnvVars
     }
-    new ScalaSliceletDriver(Slicelet(conf, defaultTarget))
+
+    if (useFakeReadinessProvider) {
+      val fakeReadinessProvider = new FakeBlockingReadinessProvider()
+      new ScalaSliceletDriver(
+        Slicelet.forTestStatic.createFromImpl(
+          SliceletImpl
+            .createForExternalWithReadinessProvider(conf, defaultTarget, fakeReadinessProvider)
+        ),
+        fakeReadinessProviderOpt = Some(fakeReadinessProvider)
+      )
+    } else {
+      new ScalaSliceletDriver(Slicelet(conf, defaultTarget), fakeReadinessProviderOpt = None)
+    }
   }
 
   override protected def readPrometheusMetric(
       metricName: String,
       labels: Vector[(String, String)]): Double = {
     MetricUtils.getMetricValue(CollectorRegistry.defaultRegistry, metricName, labels.toMap)
+  }
+
+  override protected def setReadinessProbeStatusSource(status: ProbeStatus): Unit = {
+    readinessSource.setReady(status.code == ProbeStatuses.OK_STATUS)
+    pokeReadinessSource()
+  }
+
+  /**
+   * Sends an HTTP request to the [[InfoService]] to trigger a status update. Used with the
+   * [[TestProbeStatusSource]] to update the readiness status of the pod.
+   */
+  private def pokeReadinessSource(): Unit = {
+    val port = InfoService.getActivePort()
+    assert(port != 0) // Ensure the server is started.
+
+    // Make HTTP request to the readiness endpoint. We don't care about the response, since we check
+    // that the readiness source is updated by way of verifying the Slicelet state later.
+    val _ = SimpleWebClient.webClient().get(s"http://localhost:$port/ready").aggregate()
   }
 
   // This test case only makes sense for Scala, because the Rust Slicelet notifies the application
@@ -1507,9 +2130,9 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
     // starting the Slicelet first would trigger initial assignment generation, which would then
     // race with any subsequent assignment freeze).
     val initialProposal = createProposal(("" -- ∞) -> Seq("other_pod"))
-    TestUtils.awaitResult(setAndFreezeAssignment(initialProposal), Duration.Inf)
+    TestUtils.awaitResult(setAndFreezeAssignment(testEnv, initialProposal), Duration.Inf)
 
-    val slicelet: SliceletDriver = createSlicelet()
+    val slicelet: SliceletDriver = createSlicelet(testEnv)()
     val listener = new SliceletListener {
       override def onAssignmentUpdated(): Unit = {
         // Get the latest assignment from the Slicelet before acquiring the lock so that we can
@@ -1553,7 +2176,7 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
         ("Nori" -- "Ori") -> Seq(squid),
         ("Ori" -- ∞) -> Seq("Pod3")
       )
-      setAndFreezeAssignment(proposal1)
+      setAndFreezeAssignment(testEnv, proposal1)
       AssertionWaiter("Wait for proposal1").await {
         assert(isAssigned(slicelet, "Kili"))
         // Ensure the Slicelet has already tried to execute the listener for the assignment
@@ -1569,7 +2192,7 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
         ("Nori" -- "Ori") -> Seq(squid),
         ("Ori" -- ∞) -> Seq("Pod3")
       )
-      setAndFreezeAssignment(proposal2)
+      setAndFreezeAssignment(testEnv, proposal2)
       AssertionWaiter("Wait for proposal2").await {
         assert(isAssigned(slicelet, "Fili"))
       }
@@ -1582,7 +2205,7 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
         ("Nori" -- "Ori") -> Seq("Pod0"),
         ("Ori" -- ∞) -> Seq("Pod3")
       )
-      setAndFreezeAssignment(proposal3)
+      setAndFreezeAssignment(testEnv, proposal3)
       AssertionWaiter("Wait for proposal3").await {
         assert(!isAssigned(slicelet, identityKey("Nori")))
       }
@@ -1606,9 +2229,9 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
   test("No assignment for mismatched target") {
     // Test plan: verify that a Slicelet receiving assignment watch requests for a target which it
     // does not own does not distribute an assignment to the requester.
-    val slicelet: ScalaSliceletDriver = createSlicelet()
+    val slicelet: ScalaSliceletDriver = createSlicelet(testEnv)()
     slicelet.start(selfPort = 1234, None)
-    val squid: Squid = waitForSquidWithPort(1234)
+    val squid: Squid = waitForSquidWithPort(testEnv, 1234)
 
     // Set up the assignment at the Assigner.
     val proposal = createProposal(
@@ -1751,11 +2374,12 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
     // is blocked. Finally, verify that the listener code observes only the latest assignment in
     // each callback: in this test case, the listener observes only the first assignment (after
     // which it blocks) and the last assignment (which it observes after unblocking).
-    val slicelet: SliceletDriver = createSlicelet()
+    val slicelet: SliceletDriver = createSlicelet(testEnv)()
 
     // Before starting the Slicelet, set an assignment excluding the Slicelet.
     val assignment1: Assignment = TestUtils.awaitResult(
       setAndFreezeAssignment(
+        testEnv,
         createProposal(("" -- ∞) -> Seq("other_pod"))
       ),
       Duration.Inf
@@ -1790,6 +2414,7 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
     // learn about these assignments even though the listener is blocked.
     val assignment2: Assignment = TestUtils.awaitResult(
       setAndFreezeAssignment(
+        testEnv,
         createProposal(("" -- ∞) -> Seq(squid))
       ),
       Duration.Inf
@@ -1799,6 +2424,7 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
     }
     val assignment3: Assignment = TestUtils.awaitResult(
       setAndFreezeAssignment(
+        testEnv,
         createProposal(
           ("" -- "m") -> Seq("other_pod"),
           ("m" -- ∞) -> Seq(squid)
@@ -1826,11 +2452,12 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
   test("Listener exceptions don't prevent future assignment notifications") {
     // Test plan: verify that exceptions thrown by a buggy listener are caught and do not prevent
     // notification of future assignments.
-    val slicelet: SliceletDriver = createSlicelet()
+    val slicelet: SliceletDriver = createSlicelet(testEnv)()
 
     // Before starting the Slicelet, bootstrap an assignment.
     val assignment1: Assignment = TestUtils.awaitResult(
       setAndFreezeAssignment(
+        testEnv,
         createProposal(("" -- ∞) -> Seq("other_pod"))
       ),
       Duration.Inf
@@ -1866,6 +2493,7 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
     // Supply a second assignment and verify that the listener observes it.
     val assignment2: Assignment = TestUtils.awaitResult(
       setAndFreezeAssignment(
+        testEnv,
         createProposal(("" -- ∞) -> Seq(squid))
       ),
       Duration.Inf
@@ -1886,7 +2514,7 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
     // anything based on `createHandle` and `assignedSlices`. We also verify that `resourceAddress`
     // throws. Then we start the Slicelet, assign the full Slice to it, and verify its ownership
     // with the same methods.
-    val slicelet: SliceletDriver = createSlicelet()
+    val slicelet: SliceletDriver = createSlicelet(testEnv)()
     val testKeys: Seq[SliceKey] = Seq("", fp("Dori"))
 
     assert(slicelet.assignedSlices.isEmpty)
@@ -1911,8 +2539,8 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
     slicelet.start(selfPort = 1234, listenerOpt = None)
 
     // Assign all keys to the Slicelet, and then verify ownership.
-    val proposal = createProposal(("" -- ∞) -> Seq(waitForSquidWithPort(1234)))
-    setAndFreezeAssignment(proposal)
+    val proposal = createProposal(("" -- ∞) -> Seq(waitForSquidWithPort(testEnv, 1234)))
+    setAndFreezeAssignment(testEnv, proposal)
     waitForAssignment(slicelet, "")
 
     assert(slicelet.assignedSlices == Seq("" -- ∞))
@@ -1943,7 +2571,7 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
     // Test plan: Verify that the client versions are reported for a Slicelet.
 
     // Setup: create a Slicelet with a conf that has a valid branch.
-    createSlicelet(
+    createSlicelet(testEnv)(
       branch = Some(
         "test_client_version_customer_2024-09-13_17.05.12Z_test-branch-name_ffff9654_1957847387"
       )
@@ -1965,7 +2593,7 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
     // Test plan: Verify that the client versions are reported for a Slicelet.
 
     // Setup: create a Slicelet with a conf that has an invalid branch.
-    createSlicelet(
+    createSlicelet(testEnv)(
       branch = Some("test_client_version_invalid_customer_2024-09-13_ff^f9654_1957847387")
     )
 
@@ -1985,7 +2613,7 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
     // Verify this by creating a Slicelet (intentionally do not start it, to check that the metric
     // is recorded at construction time), and checking that the metric is set to 1 for the expected
     // labels values.
-    createSlicelet()
+    createSlicelet(testEnv)()
     assertResult(1)(
       MetricUtils
         .getMetricValue(
@@ -2000,293 +2628,6 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
         .toInt
     )
   }
-
-  test("Assigner sees a NOT_READY Slicelet when Slicelet's server reports it is not ready") {
-    // Test plan: Verify that the Assigner sees a NOT_READY Slicelet when the Slicelet's server is
-    // not ready. Verify this by creating a Slicelet with a readiness reporter that always reports
-    // that the server is not ready, waiting for the Assigner to get a watch request for that
-    // Slicelet, and checking that the Slicelet's status is NOT_READY.
-
-    val pool = SequentialExecutionContextPool.create(
-      "FakePool",
-      numThreads = 1,
-      enableContextPropagation = false
-    )
-    val fakeSec: FakeSequentialExecutionContext =
-      FakeSequentialExecutionContext.create(s"SliceletExecutor-$getSafeName", pool = pool)
-
-    val fakeBlockingReadinessProvider = new FakeBlockingReadinessProvider()
-
-    val externalConf: SliceletConf =
-      TestClientUtils.createTestSliceletConf(
-        testEnv.getAssignerPort,
-        "some-host-name",
-        clientTlsFilePathsOpt = None,
-        serverTlsFilePathsOpt = None,
-        watchFromDataPlane
-      )
-
-    // Note: Since this test requires SliceletImpl (and thus bypasses the logic in the Slicelet
-    // constructor to populate cluster location information), we must pass in the expected Slicelet
-    // Target for this test
-    val slicelet: SliceletImpl = SliceletImpl.create(
-      fakeSec,
-      getAssignerAddress(externalConf),
-      externalConf,
-      expectedSliceletTargetIdentifier,
-      fakeBlockingReadinessProvider
-    )
-    val port: Int = 1111
-    slicelet.start(selfPort = port, listenerOpt = None)
-    val squid: Squid = waitForSquidWithPort(port)
-
-    // Check that the Assigner got a NOT_READY status from the Slicelet
-    AssertionWaiter("Wait for Assigner to receive SliceletData from this Slicelet").await {
-      val requestOpt: Option[ClientRequest] = getLatestSliceletWatchRequest(squid)
-      assert(requestOpt.nonEmpty)
-      assert(requestOpt.get.subscriberData.isInstanceOf[SliceletData])
-      val sliceletData = requestOpt.get.subscriberData.asInstanceOf[SliceletData]
-      assert(sliceletData.state == SliceletDataP.State.NOT_READY)
-    }
-
-    // TODO(<internal bug>): verify this Squid is NOT in the assignment when Dicer stops routing traffic
-    //  to pods with Slicelets in NOT_READY state
-    assert(waitForSquidWithPort(port) == squid) // NOT_READY Slicelet is still in assignment
-
-    // Make sure state metric is updated correctly: there should only be counts for NOT_READY
-    AssertionWaiter("Wait for metrics to be updated").await {
-      for (state: SliceletDataP.State <- SliceletDataP.State.values) {
-        if (state == SliceletDataP.State.NOT_READY) {
-          assert(getSliceletStateCount(state) > 0)
-        } else {
-          assert(getSliceletStateCount(state) == 0)
-        }
-      }
-    }
-
-    slicelet.forTest.stop()
-  }
-
-  gridTest("Slicelet always reports TERMINATING when terminating regardless of readiness")(
-    // Test plan: Create a Slicelet that is ready, then set it to terminating state and verify
-    // it reports TERMINATING. Also test with a not-ready Slicelet to ensure TERMINATING
-    // takes precedence over readiness state.
-    Seq(true, false)
-  ) { isReady: Boolean =>
-    val pool = SequentialExecutionContextPool.create(
-      "FakePool",
-      numThreads = 1,
-      enableContextPropagation = false
-    )
-    val fakeSec: FakeSequentialExecutionContext = {
-      FakeSequentialExecutionContext.create(s"SliceletExecutor-$getSafeName", pool = pool)
-    }
-
-    val fakeBlockingReadinessProvider = new FakeBlockingReadinessProvider()
-    fakeBlockingReadinessProvider.setReady(isReady)
-
-    val externalConf: SliceletConf =
-      TestClientUtils.createTestSliceletConf(
-        testEnv.getAssignerPort,
-        "some-host-name",
-        clientTlsFilePathsOpt = None,
-        serverTlsFilePathsOpt = None,
-        watchFromDataPlane
-      )
-
-    val slicelet: SliceletImpl = SliceletImpl.create(
-      fakeSec,
-      getAssignerAddress(externalConf),
-      externalConf,
-      expectedSliceletTargetIdentifier,
-      fakeBlockingReadinessProvider
-    )
-    val port: Int = 1111
-    slicelet.start(selfPort = port, listenerOpt = None)
-    val squid: Squid = waitForSquidWithPort(port)
-
-    val expectedInitialState =
-      if (isReady) SliceletDataP.State.RUNNING else SliceletDataP.State.NOT_READY
-    AssertionWaiter(s"Wait for initial state $expectedInitialState").await {
-      val requestOpt: Option[ClientRequest] = getLatestSliceletWatchRequest(squid)
-      assert(requestOpt.nonEmpty)
-      assert(requestOpt.get.subscriberData.isInstanceOf[SliceletData])
-      val sliceletData = requestOpt.get.subscriberData.asInstanceOf[SliceletData]
-      assert(sliceletData.state == expectedInitialState)
-    }
-
-    // Set terminating state
-    slicelet.forTest.setTerminatingState()
-
-    // Should now report TERMINATING regardless of readiness
-    AssertionWaiter("Wait for TERMINATING state").await {
-      fakeSec.getClock.advanceBy(heartbeatInterval)
-      val requestOpt: Option[ClientRequest] = getLatestSliceletWatchRequest(squid)
-      assert(requestOpt.nonEmpty)
-      assert(requestOpt.get.subscriberData.isInstanceOf[SliceletData])
-      val sliceletData = requestOpt.get.subscriberData.asInstanceOf[SliceletData]
-      assert(sliceletData.state == SliceletDataP.State.TERMINATING)
-    }
-
-    // Verify that eventually the number of observations for the TERMINATING state exceed the number
-    // for all other states, indicating that the Slicelet is reporting TERMINATING regardless of
-    // readiness.
-    AssertionWaiter("Wait for metrics to be updated").await {
-      fakeSec.getClock.advanceBy(heartbeatInterval)
-      val terminatingCount: Double = getSliceletStateCount(SliceletDataP.State.TERMINATING)
-      for (state: SliceletDataP.State <- SliceletDataP.State.values) {
-        if (state != SliceletDataP.State.TERMINATING) {
-          assert(getSliceletStateCount(state) < terminatingCount)
-        }
-      }
-    }
-
-    slicelet.forTest.stop()
-  }
-
-  test("Slicelet transitions from NOT_READY to RUNNING when readiness changes") {
-    // Test plan: Create a Slicelet that starts in NOT_READY state, verify the Assigner sees
-    // NOT_READY, then transition to ready, and verify the Assigner sees RUNNING.
-
-    val pool = SequentialExecutionContextPool.create(
-      "FakePool",
-      numThreads = 1,
-      enableContextPropagation = false
-    )
-    val fakeSec: FakeSequentialExecutionContext =
-      FakeSequentialExecutionContext.create(s"SliceletExecutor-$getSafeName", pool = pool)
-
-    val fakeBlockingReadinessProvider = new FakeBlockingReadinessProvider()
-
-    val externalConf: SliceletConf =
-      TestClientUtils.createTestSliceletConf(
-        testEnv.getAssignerPort,
-        "some-host-name",
-        clientTlsFilePathsOpt = None,
-        serverTlsFilePathsOpt = None,
-        watchFromDataPlane
-      )
-
-    val slicelet: SliceletImpl = SliceletImpl.create(
-      fakeSec,
-      getAssignerAddress(externalConf),
-      externalConf,
-      expectedSliceletTargetIdentifier,
-      fakeBlockingReadinessProvider
-    )
-    val port: Int = 1111
-    slicelet.start(selfPort = port, listenerOpt = None)
-    val squid: Squid = waitForSquidWithPort(port)
-
-    // Verify initial NOT_READY state
-    AssertionWaiter("Wait for initial NOT_READY state").await {
-      val requestOpt: Option[ClientRequest] = getLatestSliceletWatchRequest(squid)
-      assert(requestOpt.nonEmpty)
-      assert(requestOpt.get.subscriberData.isInstanceOf[SliceletData])
-      val sliceletData = requestOpt.get.subscriberData.asInstanceOf[SliceletData]
-      assert(sliceletData.state == SliceletDataP.State.NOT_READY)
-    }
-
-    // Transition to READY
-    fakeBlockingReadinessProvider.setReady(true)
-
-    // Verify transition to RUNNING state
-    AssertionWaiter("Wait for transition to RUNNING state").await {
-      fakeSec.getClock.advanceBy(heartbeatInterval)
-      val requestOpt: Option[ClientRequest] = getLatestSliceletWatchRequest(squid)
-      assert(requestOpt.nonEmpty)
-      assert(requestOpt.get.subscriberData.isInstanceOf[SliceletData])
-      val sliceletData = requestOpt.get.subscriberData.asInstanceOf[SliceletData]
-      assert(sliceletData.state == SliceletDataP.State.RUNNING)
-    }
-
-    // Verify that metrics contain counts for both NOT_READY and RUNNING states
-    AssertionWaiter("Wait for metrics to be updated").await {
-      for (state: SliceletDataP.State <- SliceletDataP.State.values) {
-        if (state == SliceletDataP.State.NOT_READY || state == SliceletDataP.State.RUNNING) {
-          assert(getSliceletStateCount(state) > 0)
-        } else {
-          assert(getSliceletStateCount(state) == 0)
-        }
-      }
-    }
-
-    slicelet.forTest.stop()
-  }
-
-  test("Slicelet starts successfully when readiness check blocks indefinitely") {
-    // Test plan: Verify that the Slicelet starts successfully even when the readiness provider's
-    // isReady call blocks indefinitely, using the BLOCKED_READINESS_CHECK_START_DELAY
-    // fallback mechanism. Verify the Slicelet starts up and reports NOT_READY initially, then
-    // transitions to RUNNING after unblocking the readiness provider.
-
-    val pool = SequentialExecutionContextPool.create(
-      s"$getSafeName",
-      numThreads = 1,
-      enableContextPropagation = false
-    )
-    val fakeSec: FakeSequentialExecutionContext =
-      FakeSequentialExecutionContext.create(s"SliceletExecutor-$getSafeName", pool = pool)
-
-    // Setup: Create a fake blocking readiness provider that will block forever
-    val fakeBlockingReadinessProvider = new FakeBlockingReadinessProvider()
-    fakeBlockingReadinessProvider.setReady(true)
-    fakeBlockingReadinessProvider.blockForever()
-
-    val externalConf: SliceletConf =
-      TestClientUtils.createTestSliceletConf(
-        testEnv.getAssignerPort,
-        "some-host-name",
-        clientTlsFilePathsOpt = None,
-        serverTlsFilePathsOpt = None,
-        watchFromDataPlane
-      )
-
-    val slicelet: SliceletImpl = SliceletImpl.create(
-      fakeSec,
-      getAssignerAddress(externalConf),
-      externalConf,
-      expectedSliceletTargetIdentifier,
-      fakeBlockingReadinessProvider
-    )
-    val port: Int = 12121
-    slicelet.start(selfPort = port, listenerOpt = None)
-
-    // Verify: The Slicelet should still start successfully (signalled by being included in the
-    // assignment) despite the blocked readiness check.
-    val squid: Squid = waitForSquidWithPortWithClockAdvance(port, fakeSec.getClock)
-
-    // Verify: The Slicelet should report NOT_READY, the default readiness starting state.
-    // Use AssertionWaiter since the readiness poller runs in its own execution context.
-    AssertionWaiter("The Slicelet is reporting NOT_READY").await {
-      fakeSec.getClock.advanceBy(heartbeatInterval)
-
-      val requestOpt: Option[ClientRequest] = getLatestSliceletWatchRequest(squid)
-      assert(requestOpt.nonEmpty)
-      assert(requestOpt.get.subscriberData.isInstanceOf[SliceletData])
-      val sliceletData = requestOpt.get.subscriberData.asInstanceOf[SliceletData]
-      assert(sliceletData.state == SliceletDataP.State.NOT_READY)
-    }
-
-    // Now unblock the readiness provider. It is already set to report ready.
-    fakeBlockingReadinessProvider.unblock()
-
-    // Verify: The Slicelet should transition to RUNNING.
-    // AssertionWaiter will retry until the readiness poller (which runs in real time) detects the
-    // change.
-    AssertionWaiter("The Slicelet is reporting RUNNING").await {
-      fakeSec.getClock.advanceBy(heartbeatInterval)
-
-      val requestOpt: Option[ClientRequest] = getLatestSliceletWatchRequest(squid)
-      assert(requestOpt.nonEmpty)
-      assert(requestOpt.get.subscriberData.isInstanceOf[SliceletData])
-      val sliceletData = requestOpt.get.subscriberData.asInstanceOf[SliceletData]
-      assert(sliceletData.state == SliceletDataP.State.RUNNING)
-    }
-
-    slicelet.forTest.stop()
-  }
-
 }
 
 object SliceletSuite {

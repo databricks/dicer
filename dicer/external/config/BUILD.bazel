@@ -4,12 +4,6 @@ package(
 )
 
 filegroup(
-    name = "all_files",
-    srcs = glob(["**"]),
-    visibility = ["//caching/oss:__pkg__"],
-)
-
-filegroup(
     name = "target_config",
     srcs = glob(["**/*.textproto"]),
     visibility = ["//dicer:internal"],

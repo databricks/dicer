@@ -6,7 +6,6 @@ package com.databricks.caching.util
  */
 object SafeConfigUtil {
 
-
   /** The common prefix of SAFE flag names for Softstore. */
   val SOFTSTORE_CONFIG_FLAGS_NAME_PREFIX: String = "databricks.softstore.config."
 

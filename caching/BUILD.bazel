@@ -3,12 +3,6 @@ package(
     default_visibility = ["//caching:all_caching"],
 )
 
-filegroup(
-    name = "all_files",
-    srcs = glob(["**"]),
-    visibility = ["//caching/oss:__pkg__"],
-)
-
 package_group(
     name = "all_caching",
     packages = [

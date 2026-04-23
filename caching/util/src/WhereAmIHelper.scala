@@ -36,6 +36,18 @@ object WhereAmIHelper {
   }
 
   /**
+   * Gets the region URI of the Kubernetes cluster where the current process is running, if
+   * available.
+   */
+  def getRegionUri: Option[String] = {
+    LocationConf.singleton.location.getRegionUri match {
+      case "" | null => None
+      case uri: String =>
+        Some(uri)
+    }
+  }
+
+  /**
    * Validates that the given Kubernetes cluster URI matches the spec at <internal link>, e.g.,
    * "kubernetes-cluster:prod/cloud1/public/region1/clustertype2/01".
    */

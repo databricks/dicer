@@ -12,23 +12,6 @@ object SubscriberHandlerMetricUtils {
   /** The default metrics collector registry. */
   private val registry = CollectorRegistry.defaultRegistry
 
-  /** Gets the number of Clerks for the given target at the given version. */
-  def getNumClerks(target: Target, version: Long): Long = {
-    MetricUtils
-      .getMetricValue(
-        registry,
-        metric = "dicer_subscriber_num_subscribers",
-        Map(
-          "targetCluster" -> target.getTargetClusterLabel,
-          "targetName" -> target.getTargetNameLabel,
-          "targetInstanceId" -> target.getTargetInstanceIdLabel,
-          "type" -> "Clerk",
-          "version" -> version.toString
-        )
-      )
-      .toLong
-  }
-
   /** Gets the number of Clerks for the `target` handled by `location` at `version`. */
   def getNumClerksByHandler(location: Location, target: Target, version: Long): Long = {
     MetricUtils
@@ -42,23 +25,6 @@ object SubscriberHandlerMetricUtils {
           "type" -> "Clerk",
           "version" -> version.toString,
           "handlerLocation" -> location.toString
-        )
-      )
-      .toLong
-  }
-
-  /** Gets the number of Slicelets for the given target at the given version. */
-  def getNumSlicelets(target: Target, version: Long): Long = {
-    MetricUtils
-      .getMetricValue(
-        registry,
-        metric = "dicer_subscriber_num_subscribers",
-        Map(
-          "targetCluster" -> target.getTargetClusterLabel,
-          "targetName" -> target.getTargetNameLabel,
-          "targetInstanceId" -> target.getTargetInstanceIdLabel,
-          "type" -> "Slicelet",
-          "version" -> version.toString
         )
       )
       .toLong

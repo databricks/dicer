@@ -866,7 +866,7 @@ object EtcdClient {
       backupPollingInterval: FiniteDuration = 30.seconds,
       watchDuration: Duration = Duration.Inf) {
     require(pageLimit > 0, "pageLimit must be positive")
-    require(backupPollingInterval >= 5.seconds, "Backup polling interval too short")
+    require(backupPollingInterval >= 1.second, "Backup polling interval too short")
     require(watchDuration >= 15.seconds, "Watch duration too short")
   }
 

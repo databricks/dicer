@@ -328,4 +328,47 @@ private[dicer] object ClientMetrics {
       )
       .inc()
   }
+
+  /** Status of client UUID resolution at client creation time. */
+  sealed trait ClientUuidStatus
+
+  object ClientUuidStatus {
+
+    /** UUID was successfully resolved. */
+    case object Valid extends ClientUuidStatus { override def toString: String = "valid" }
+
+    /** UUID was not configured (absent config key and no POD_UID env var). */
+    case object Missing extends ClientUuidStatus { override def toString: String = "missing" }
+
+    /** UUID string was present but could not be parsed as a valid UUID. */
+    case object Malformed extends ClientUuidStatus { override def toString: String = "malformed" }
+  }
+
+  /**
+   * Counter tracking client UUID resolution status at Dicer client creation time.
+   * Labels: targetName, clientType, clientUuidStatus (valid/missing/malformed).
+   *
+   * TODO(<internal bug>): Once all Dicer client deployments are confirmed to set POD_UID, this metric can
+   * be retired.
+   */
+  private val clientUuidStatus: Counter = Counter
+    .build()
+    .name("dicer_client_uuid_status_total")
+    .help(
+      "Count of Dicer client instances created, labeled by target, client type, and UUID " +
+      "resolution status (valid, missing, or malformed). Targets with missing client UUIDs " +
+      "need their deployments updated to set POD_UID. Malformed UUIDs should be fixed."
+    )
+    .labelNames("targetName", "clientType", "clientUuidStatus")
+    .register()
+
+  /** Records client UUID resolution status at client creation time. */
+  private[client] def recordClientUuidStatus(
+      target: Target,
+      clientType: ClientType,
+      status: ClientUuidStatus): Unit = {
+    clientUuidStatus
+      .labels(target.getTargetNameLabel, clientType.toString, status.toString)
+      .inc()
+  }
 }

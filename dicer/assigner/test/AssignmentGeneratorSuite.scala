@@ -41,6 +41,7 @@ import com.databricks.dicer.assigner.conf.{DicerAssignerConf, LoadWatcherConf}
 import com.databricks.dicer.common.Assignment.DiffUnused.DiffUnused
 import com.databricks.dicer.common.Assignment.{AssignmentValueCellConsumer, DiffUnused}
 import com.databricks.dicer.common.SliceletData.SliceLoad
+import com.databricks.dicer.common.SliceletState
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.common.TestSliceUtils._
 import com.databricks.dicer.common.WatchServerHelper.WATCH_RPC_TIMEOUT
@@ -59,11 +60,14 @@ import io.prometheus.client.CollectorRegistry
  * There should be very few tests here; new tests should always be added to
  * [[CommonAssignmentGeneratorSuite]] when possible.
  */
-abstract class InMemoryStoreAssignmentGeneratorSuite(observeSliceletReadiness: Boolean)
-    extends CommonAssignmentGeneratorSuite(observeSliceletReadiness) {
+abstract class InMemoryStoreAssignmentGeneratorSuite(
+    observeSliceletReadiness: Boolean,
+    permitRunningToNotReady: Boolean)
+    extends CommonAssignmentGeneratorSuite(observeSliceletReadiness, permitRunningToNotReady) {
 
   override def paramsForDebug: Map[String, Any] = Map(
-    "observeSliceletReadiness" -> observeSliceletReadiness
+    "observeSliceletReadiness" -> observeSliceletReadiness,
+    "permitRunningToNotReady" -> permitRunningToNotReady
   )
 
   override def createStore(sec: SequentialExecutionContext, incarnation: Incarnation): Store =
@@ -421,15 +425,18 @@ abstract class InMemoryStoreAssignmentGeneratorSuite(observeSliceletReadiness: B
  * As stated above, new tests should be added to [[CommonAssignmentGeneratorSuite]] whenever
  * possible.
  */
-abstract class EtcdStoreAssignmentGeneratorSuite(observeSliceletReadiness: Boolean)
-    extends CommonAssignmentGeneratorSuite(observeSliceletReadiness) {
+abstract class EtcdStoreAssignmentGeneratorSuite(
+    observeSliceletReadiness: Boolean,
+    permitRunningToNotReady: Boolean)
+    extends CommonAssignmentGeneratorSuite(observeSliceletReadiness, permitRunningToNotReady) {
 
   private val ETCD_NAMESPACE = EtcdClient.KeyNamespace("test-namespace")
 
   private val etcd = EtcdTestEnvironment.create()
 
   override def paramsForDebug: Map[String, Any] = Map(
-    "observeSliceletReadiness" -> observeSliceletReadiness
+    "observeSliceletReadiness" -> observeSliceletReadiness,
+    "permitRunningToNotReady" -> permitRunningToNotReady
   )
 
   override def beforeEach(): Unit = {
@@ -566,8 +573,13 @@ abstract class EtcdStoreAssignmentGeneratorSuite(observeSliceletReadiness: Boole
  * @param observeSliceletReadiness if true, the HealthWatcher faithfully reports the
  *                                 Slicelet-reported health status for a pod. If false, masks the
  *                                 health status so that NotReady is masked to Running.
+ * @param permitRunningToNotReady  if true, a pod that reports NotReady while Running is
+ *                                 transitioned to NotReady by the HealthWatcher. Only valid when
+ *                                 observeSliceletReadiness is also true.
  */
-abstract class CommonAssignmentGeneratorSuite(observeSliceletReadiness: Boolean)
+abstract class CommonAssignmentGeneratorSuite(
+    observeSliceletReadiness: Boolean,
+    permitRunningToNotReady: Boolean)
     extends DatabricksTest
     with TestName
     with ParameterizedTestNameDecorator {
@@ -585,8 +597,10 @@ abstract class CommonAssignmentGeneratorSuite(observeSliceletReadiness: Boolean)
   /** Random number generator used by the test suite, with seed logged for debugging. */
   protected val random: Random = TestUtils.newRandomWithLoggedSeed()
 
+  private val INITIAL_HEALTH_REPORT_DELAY_PERIOD: FiniteDuration = 30.seconds
   private val TERMINATING_TIMEOUT_PERIOD: FiniteDuration = 60.seconds
   private val UNHEALTHY_TIMEOUT_PERIOD: FiniteDuration = 30.seconds
+  private val NOT_READY_TIMEOUT_PERIOD: FiniteDuration = 10.seconds
 
   /** The generator's cluster location. */
   private val GENERATOR_CLUSTER_URI: URI =
@@ -631,7 +645,8 @@ abstract class CommonAssignmentGeneratorSuite(observeSliceletReadiness: Boolean)
   protected def defaultTargetConfig: InternalTargetConfig = {
     InternalTargetConfig.forTest.DEFAULT.copy(
       healthWatcherConfig = HealthWatcherTargetConfig(
-        observeSliceletReadiness = observeSliceletReadiness
+        observeSliceletReadiness = observeSliceletReadiness,
+        permitRunningToNotReady = permitRunningToNotReady
       )
     )
   }
@@ -738,8 +753,10 @@ abstract class CommonAssignmentGeneratorSuite(observeSliceletReadiness: Boolean)
       HealthWatcher.DefaultFactory.create(
         target,
         HealthWatcher.StaticConfig(
+          initialHealthReportDelayPeriod = INITIAL_HEALTH_REPORT_DELAY_PERIOD,
           unhealthyTimeoutPeriod = UNHEALTHY_TIMEOUT_PERIOD,
-          terminatingTimeoutPeriod = TERMINATING_TIMEOUT_PERIOD
+          terminatingTimeoutPeriod = TERMINATING_TIMEOUT_PERIOD,
+          notReadyTimeoutPeriod = NOT_READY_TIMEOUT_PERIOD
         ),
         targetConfig.healthWatcherConfig
       ),
@@ -865,7 +882,7 @@ abstract class CommonAssignmentGeneratorSuite(observeSliceletReadiness: Boolean)
       WATCH_RPC_TIMEOUT,
       SliceletData(
         resource(id),
-        state,
+        SliceletState.fromProto(state, target),
         DEFAULT_K8S_NAMESPACE,
         attributedLoads = attributedLoads,
         unattributedLoadOpt = None
@@ -1025,48 +1042,6 @@ abstract class CommonAssignmentGeneratorSuite(observeSliceletReadiness: Boolean)
     }
   }
 
-  /**
-   * Returns the count of resources the HealthWatcher would compute as NotReady, given
-   * [[reportedCount]] reported NotReady resources and the configuration.
-   */
-  private def getExpectedNotReadyCount(reportedCount: Int): Int = {
-    if (observeSliceletReadiness) reportedCount else 0
-  }
-
-  /**
-   * Returns the count of resources the HealthWatcher would compute as Running, given
-   * [[reportedRunningCount]] reported Running resources, [[reportedNotReadyCount]] reported
-   * NotReady resources, and the configuration.
-   */
-  private def getExpectedRunningCount(
-      reportedRunningCount: Int,
-      reportedNotReadyCount: Int): Int = {
-    if (observeSliceletReadiness) {
-      reportedRunningCount
-    } else {
-      reportedRunningCount + reportedNotReadyCount
-    }
-  }
-
-  /**
-   * Verify difference between reported and computed statuses for NotReady pods is correctly
-   * recorded; there should only be a difference if we are not observing Slicelet's reports, which
-   * will equal the number of NotReady reports.
-   */
-  private def diffCountRespectsHealthStatusConfig(notReadyReportCount: Int): Unit = {
-    val diffCount: Long = TargetMetricsUtils.getComputedStatusDiffers(
-      defaultTarget,
-      reportedStatus = "NotReady",
-      computedStatus = "Running"
-    )
-
-    // If the config is set to mask health status, the diff count should be the number of NotReady
-    // reports. Otherwise it should be 0.
-    val expectedDiffCount: Int =
-      if (observeSliceletReadiness) 0 else notReadyReportCount
-    assert(diffCount == expectedDiffCount)
-  }
-
   /** Verifies the key of death detector metrics matches expectations for the given target. */
   private def verifyKodDetectorMetrics(
       target: Target,
@@ -1176,11 +1151,17 @@ abstract class CommonAssignmentGeneratorSuite(observeSliceletReadiness: Boolean)
     assertDesirableAssignmentProperties(targetConfig, assignment, expectedResources)
   }
 
-  test("Slicelet flapping between NOT_READY and RUNNING stays in assignment") {
+  test("Slicelet flapping between NOT_READY and RUNNING") {
     // Test plan: verify that a Slicelet whose health reports flap between NOT_READY and RUNNING
-    // is considered healthy and assigned slices. While we expect the transition from NOT_READY to
-    // RUNNING to be one way, the Assigner may receive messages out of order and thus get a
-    // NOT_READY message after a RUNNING message.
+    // handles each transition correctly. When permitRunningToNotReady=false (the default), the
+    // NOT_READY reports while Running are ignored and the Slicelet stays in the assignment
+    // throughout. When permitRunningToNotReady=true, the Slicelet is de-assigned when it reports
+    // NOT_READY and re-assigned when it reports RUNNING again (after the flapping protection
+    // window elapses). With loadBalancingInterval=25s and notReadyTimeoutPeriod=10s, the
+    // protection expires before each RUNNING iteration so the transitions are always clean.
+    // resource(1) always reports RUNNING to ensure availableResources is never empty.
+    // AssignmentGenerator skips generating an assignment when there are no available resources,
+    // so we'd never see resource(0) get removed without resource(1) in the RUNNING state.
 
     // Set the load balancing interval to less than the unhealthy timeout period so we don't have to
     // do extra heartbeats to keep the Slicelet alive between assignment generation attempts.
@@ -1206,14 +1187,28 @@ abstract class CommonAssignmentGeneratorSuite(observeSliceletReadiness: Boolean)
         state = reportedState
       )
       driver.onWatchRequest(request)
+      driver.onWatchRequest(
+        createSliceletRequest(
+          1,
+          SyncAssignmentState.KnownGeneration(lastGeneration),
+          state = SliceletDataP.State.RUNNING
+        )
+      )
 
       waitForWriteToComplete(driver, "waiting for write to complete")
       val assignment: Assignment = awaitNewerAssignment(driver, lastGeneration)
-      assertDesirableAssignmentProperties(
-        targetConfig,
-        assignment,
-        Resources.create(Seq(resource(0)))
-      )
+
+      // When permitRunningToNotReady=true and observeSliceletReadiness=true, resource(0) is
+      // de-assigned when it reports NOT_READY, leaving only resource(1). Otherwise both stay.
+      val expectedResources: Resources =
+        if (permitRunningToNotReady && observeSliceletReadiness &&
+          reportedState == SliceletDataP.State.NOT_READY) {
+          Resources.create(Seq(resource(1)))
+        } else {
+          Resources.create(Seq(resource(0), resource(1)))
+        }
+
+      assertDesirableAssignmentProperties(targetConfig, assignment, expectedResources)
 
       lastGeneration = assignment.generation
       if (reportedState == SliceletDataP.State.RUNNING) {
@@ -1509,7 +1504,6 @@ abstract class CommonAssignmentGeneratorSuite(observeSliceletReadiness: Boolean)
     }
 
     // Verify the expected metrics were incremented as part of this workload.
-    assert(TargetMetricsUtils.getPodSetSize(defaultTarget, "Running") == 2)
     assert(
       TargetMetricsUtils.getAssignmentGenerationGenerateDecisions(
         defaultTarget,
@@ -1590,7 +1584,6 @@ abstract class CommonAssignmentGeneratorSuite(observeSliceletReadiness: Boolean)
     }
 
     // Verify the expected metrics were incremented as part of this workload.
-    assert(TargetMetricsUtils.getPodSetSize(defaultTarget, "Running") == 1)
     assert(
       TargetMetricsUtils.getAssignmentGenerationGenerateDecisions(
         defaultTarget,
@@ -1683,7 +1676,6 @@ abstract class CommonAssignmentGeneratorSuite(observeSliceletReadiness: Boolean)
     }
 
     // Verify the expected metrics were incremented as part of this workload.
-    assert(TargetMetricsUtils.getPodSetSize(defaultTarget, "Running") == 2)
     assert(
       TargetMetricsUtils.getAssignmentGenerationGenerateDecisions(
         defaultTarget,
@@ -2981,7 +2973,6 @@ abstract class CommonAssignmentGeneratorSuite(observeSliceletReadiness: Boolean)
     AssertionWaiter("gauge metrics are updated for target1").await {
       assert(TargetMetricsUtils.getNumActiveGenerators(target1) == 1)
       assert(TargetMetricsUtils.getPodSetSize(target1, "Running") > 0)
-      assert(TargetMetricsUtils.getPodSetSize(target1, "Unknown") == 0)
       assert(TargetMetricsUtils.getPodSetSize(target1, "Terminating") > 0)
       assert(TargetMetricsUtils.getNumAssignmentSlices(target1) > 0)
       assert(
@@ -3000,7 +2991,6 @@ abstract class CommonAssignmentGeneratorSuite(observeSliceletReadiness: Boolean)
       assert(TargetMetricsUtils.getNumActiveGenerators(target1) == 0)
       assert(TargetMetricsUtils.getNumAssignmentSlices(target1) == 0)
       assert(TargetMetricsUtils.getPodSetSize(target1, "Running") == 0)
-      assert(TargetMetricsUtils.getPodSetSize(target1, "Unknown") == 0)
       assert(TargetMetricsUtils.getPodSetSize(target1, "Terminating") == 0)
       assert(getLatestKnownGenerationMetric(target1) == 0)
       assert(
@@ -3502,116 +3492,6 @@ abstract class CommonAssignmentGeneratorSuite(observeSliceletReadiness: Boolean)
         == i + 2
       )
     }
-  }
-
-  test("Podset metrics and termination timeout") {
-    // Test plan: Verify that podset metrics are updated when a termination signal is received, and
-    // that after the termination timeout period the "Terminating" metric resets to 0. Do this by
-    // creating one resource in each of NOT_READY, RUNNING, and TERMINATING, and then waiting for
-    // termination timeout while heartbeating the other ones. At each step, we verify podset size
-    // metrics are as expected.
-    val targetConfig: InternalTargetConfig = defaultTargetConfig
-    val driver: AssignmentGeneratorDriver = createDriver(targetConfig)
-
-    // Deliver heartbeats and advance past initial health report delay to allow the initial
-    // assignment to be generated for the resources.
-    sec.advanceBySync(20.seconds)
-    val request1 = createSliceletRequest(0, Generation.EMPTY)
-    val request2 = createSliceletRequest(1, Generation.EMPTY)
-    val request3 = createSliceletRequest(
-      2,
-      SyncAssignmentState.KnownGeneration(Generation.EMPTY),
-      state = SliceletDataP.State.NOT_READY
-    )
-    driver.onWatchRequest(request1)
-    driver.onWatchRequest(request2)
-    driver.onWatchRequest(request3)
-    // Do this on the sec to ensure the clock advancement doesn't race with the heartbeats.
-    sec.advanceBySync(10.seconds)
-
-    // Verify the podset size metrics for each of the different HealthStatus.
-    val assignment1: Assignment = awaitNewerAssignment(driver, Generation.EMPTY)
-    // Pod set sizes for computed health statuses. NotReady and Running will differ depending on the
-    // HealthWatcher configuration.
-    assert(
-      TargetMetricsUtils.getPodSetSize(defaultTarget, "NotReady") == getExpectedNotReadyCount(1)
-    )
-    assert(
-      TargetMetricsUtils.getPodSetSize(defaultTarget, "Running") == getExpectedRunningCount(2, 1)
-    )
-    assert(TargetMetricsUtils.getPodSetSize(defaultTarget, "Unknown") == 0)
-    assert(TargetMetricsUtils.getPodSetSize(defaultTarget, "Terminating") == 0)
-
-    // Pod set sizes for Slicelet-reported health statuses
-    assert(TargetMetricsUtils.getReportedPodSetSize(defaultTarget, "NotReady") == 1)
-    assert(TargetMetricsUtils.getReportedPodSetSize(defaultTarget, "Running") == 2)
-    assert(TargetMetricsUtils.getReportedPodSetSize(defaultTarget, "Unknown") == 0)
-    assert(TargetMetricsUtils.getReportedPodSetSize(defaultTarget, "Terminating") == 0)
-
-    // Verify the health status difference metric is correctly recorded
-    diffCountRespectsHealthStatusConfig(1)
-
-    // Now deliver a termination signal for resource 0.
-    sec.advanceBySync(1.second)
-    fakeKubernetesTargetWatcherFactory.simulateTerminationSignal(
-      kubernetesWatchTarget,
-      resource(0).resourceUuid
-    )
-
-    // Verify podset size metrics are as expected.
-    val assignment2: Assignment = awaitNewerAssignment(driver, assignment1.generation)
-
-    assert(
-      TargetMetricsUtils.getPodSetSize(defaultTarget, "NotReady") == getExpectedNotReadyCount(1)
-    )
-    assert(
-      TargetMetricsUtils.getPodSetSize(defaultTarget, "Running") == getExpectedRunningCount(1, 1)
-    )
-    assert(TargetMetricsUtils.getPodSetSize(defaultTarget, "Unknown") == 0)
-    assert(TargetMetricsUtils.getPodSetSize(defaultTarget, "Terminating") == 1)
-    assert(TargetMetricsUtils.getReportedPodSetSize(defaultTarget, "NotReady") == 1)
-    assert(TargetMetricsUtils.getReportedPodSetSize(defaultTarget, "Running") == 1)
-    assert(TargetMetricsUtils.getReportedPodSetSize(defaultTarget, "Unknown") == 0)
-    assert(TargetMetricsUtils.getReportedPodSetSize(defaultTarget, "Terminating") == 1)
-
-    // Verify the health status difference counter records two diverging reports
-    diffCountRespectsHealthStatusConfig(2)
-
-    // Advance beyond `TERMINATING_TIMEOUT_PERIOD` (10 seconds at a time) so that resource 0 is
-    // removed and no longer considered Terminating. We need to submit health signals for resource 1
-    // so it is not considered unhealthy.
-    for (_ <- 0 until TERMINATING_TIMEOUT_PERIOD.toSeconds.toInt by 10) {
-      sec.advanceBySync(10.second)
-      driver.onWatchRequest(createSliceletRequest(1, assignment2.generation))
-      driver.onWatchRequest(
-        createSliceletRequest(
-          2,
-          SyncAssignmentState.KnownGeneration(assignment2.generation),
-          state = SliceletDataP.State.NOT_READY
-        )
-      )
-    }
-
-    // Must execute on `sec` to ensure above calls have been processed by the state machine.
-    val assertFuture = sec.call {
-      // Verify computed and Slicelet-reported metrics - Terminating should get reset to 0.
-      assert(
-        TargetMetricsUtils.getPodSetSize(defaultTarget, "NotReady") == getExpectedNotReadyCount(1)
-      )
-      assert(
-        TargetMetricsUtils.getPodSetSize(defaultTarget, "Running") == getExpectedRunningCount(1, 1)
-      )
-      assert(TargetMetricsUtils.getPodSetSize(defaultTarget, "Unknown") == 0)
-      assert(TargetMetricsUtils.getPodSetSize(defaultTarget, "Terminating") == 0)
-      assert(TargetMetricsUtils.getReportedPodSetSize(defaultTarget, "NotReady") == 1)
-      assert(TargetMetricsUtils.getReportedPodSetSize(defaultTarget, "Running") == 1)
-      assert(TargetMetricsUtils.getReportedPodSetSize(defaultTarget, "Unknown") == 0)
-      assert(TargetMetricsUtils.getReportedPodSetSize(defaultTarget, "Terminating") == 0)
-
-      // Verify the health status difference counter counts three diverging reports
-      diffCountRespectsHealthStatusConfig(3)
-    }
-    TestUtils.awaitResult(assertFuture, Duration.Inf)
   }
 
   test("State transfer information is generated") {
@@ -4230,20 +4110,20 @@ abstract class CommonAssignmentGeneratorSuite(observeSliceletReadiness: Boolean)
     val slices: Seq[Slice] = Seq(
       Slice(
         SliceKey.MIN,
-        SliceKey.withIdentityFunction(
+        SliceKey.fromRawBytes(
           protobuf.ByteString.copyFrom(Longs.toByteArray(0X5000000000000000L))
         )
       ),
       Slice(
-        SliceKey.withIdentityFunction(
+        SliceKey.fromRawBytes(
           protobuf.ByteString.copyFrom(Longs.toByteArray(0X5000000000000000L))
         ),
-        SliceKey.withIdentityFunction(
+        SliceKey.fromRawBytes(
           protobuf.ByteString.copyFrom(Longs.toByteArray(0XA000000000000000L))
         )
       ),
       Slice(
-        SliceKey.withIdentityFunction(
+        SliceKey.fromRawBytes(
           protobuf.ByteString.copyFrom(Longs.toByteArray(0XA000000000000000L))
         ),
         InfinitySliceKey
@@ -4445,10 +4325,11 @@ abstract class CommonAssignmentGeneratorSuite(observeSliceletReadiness: Boolean)
     assert(Math.abs(asn2TotalLoad - 1000.0 * newAssignment1.sliceAssignments.size) < 1e-10)
   }
 
-  test("Unknown slicelet state") {
+  test("Slicelet with UNKNOWN proto state") {
     // Test plan: Create a generator and have 2 client requests be delivered to it, one of which has
-    // an unknown slicelet state. Verify that the generated assignment ignores the slicelet with the
-    // unknown state.
+    // an UNKNOWN proto state. Verify that the UNKNOWN Slicelet's state is normalised to Running at
+    // the proto boundary, and both Slicelets are included in the generated assignment regardless of
+    // `observeSliceletReadiness`.
 
     val targetConfig: InternalTargetConfig = defaultTargetConfig
     val driver: AssignmentGeneratorDriver = createDriver(targetConfig)
@@ -4470,11 +4351,12 @@ abstract class CommonAssignmentGeneratorSuite(observeSliceletReadiness: Boolean)
     // Setup: Watch the generator's cell to get the initial assignment.
     val assignment: Assignment = awaitNewerAssignment(driver, Generation.EMPTY)
 
-    // Verify: Check that the expected resources were used and validate the assignment.
+    // Verify: resource(1)'s UNKNOWN state is normalised to Running at the proto boundary, so both
+    // resources appear in the assignment regardless of observeSliceletReadiness.
     assertDesirableAssignmentProperties(
       targetConfig,
       assignment,
-      Resources.create(Seq(resource(0)))
+      Resources.create(Seq(resource(0), resource(1)))
     )
   }
 
@@ -5602,14 +5484,40 @@ object CommonAssignmentGeneratorSuite {
 
 }
 
+// Note: (observeSliceletReadiness = false, permitRunningToNotReady = true) is not a valid
+// configuration. See [[InternalTargetConfig.HealthWatcherTargetConfig]] for details.
 class InMemoryStoreAssignmentGeneratorWithStatusMaskingSuite
-    extends InMemoryStoreAssignmentGeneratorSuite(observeSliceletReadiness = false)
+    extends InMemoryStoreAssignmentGeneratorSuite(
+      observeSliceletReadiness = false,
+      permitRunningToNotReady = false
+    )
 
 class InMemoryStoreAssignmentGeneratorWithoutStatusMaskingSuite
-    extends InMemoryStoreAssignmentGeneratorSuite(observeSliceletReadiness = true)
+    extends InMemoryStoreAssignmentGeneratorSuite(
+      observeSliceletReadiness = true,
+      permitRunningToNotReady = false
+    )
+
+class InMemoryStoreAssignmentGeneratorWithPermitRunningToNotReadySuite
+    extends InMemoryStoreAssignmentGeneratorSuite(
+      observeSliceletReadiness = true,
+      permitRunningToNotReady = true
+    )
 
 class EtcdStoreAssignmentGeneratorWithStatusMaskingSuite
-    extends EtcdStoreAssignmentGeneratorSuite(observeSliceletReadiness = false)
+    extends EtcdStoreAssignmentGeneratorSuite(
+      observeSliceletReadiness = false,
+      permitRunningToNotReady = false
+    )
 
 class EtcdStoreAssignmentGeneratorWithoutStatusMaskingSuite
-    extends EtcdStoreAssignmentGeneratorSuite(observeSliceletReadiness = true)
+    extends EtcdStoreAssignmentGeneratorSuite(
+      observeSliceletReadiness = true,
+      permitRunningToNotReady = false
+    )
+
+class EtcdStoreAssignmentGeneratorWithPermitRunningToNotReadySuite
+    extends EtcdStoreAssignmentGeneratorSuite(
+      observeSliceletReadiness = true,
+      permitRunningToNotReady = true
+    )

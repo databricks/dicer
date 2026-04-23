@@ -10,13 +10,13 @@ scala_library(
         "src/DatabricksMain.scala",
     ],
     deps = [
-        ":jsonutil",
         "//wrappers/conf:constants",
         "//wrappers/conf:core",
+        "//wrappers/conf:current_project",
         "//wrappers/conf:project",
+        "//wrappers/conf:raw_config_singleton",
         "//wrappers/instrumentation:info-service",
         "//wrappers/logging",
-        "@maven//:com_typesafe_config",
     ],
 )
 

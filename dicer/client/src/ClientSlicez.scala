@@ -12,9 +12,17 @@ import scalatags.Text.TypedTag
 import scalatags.Text.all._
 
 import com.databricks.HasDebugString
+import com.databricks.api.proto.dicer.client.{
+  ClientInfoViewP,
+  ClientSliceViewP,
+  ClientTargetViewP,
+  UnattributedLoadEntryViewP
+}
+import com.databricks.api.proto.dicer.dpage.{ClerkViewP, SliceletViewP}
 import com.databricks.caching.util.{AsciiTable, SequentialExecutionContext}
 import com.databricks.caching.util.AsciiTable.Header
 import com.databricks.dicer.client.ClientSlicez.clientSlicez
+import com.databricks.dicer.common.DPageViewHelpers
 import com.databricks.dicer.common.ZPageHelpers.{COLLAPSE_SCRIPT, HEAD, createCollapseButton}
 import com.databricks.dicer.common.{
   Assignment,
@@ -25,9 +33,11 @@ import com.databricks.dicer.common.{
   SlicezAssignmentKeyTracker,
   TargetSlicezData
 }
-import com.databricks.dicer.external.{Slice, SliceKey, Target}
+import com.databricks.dicer.external.{AppTarget, KubernetesTarget, Slice, SliceKey, Target}
 import com.databricks.dicer.friend.Squid
+import com.databricks.infra.lib.InfraDataModel
 import com.databricks.instrumentation.DebugStringServletRegistry
+import com.databricks.rpc.DatabricksObjectMapper
 
 /** The class that manages the Slicez data for all clients that register with it. */
 private[client] class ClientSlicez {
@@ -103,6 +113,29 @@ private[client] class ClientSlicez {
           })(sec)
     )(sec)
   }
+
+  /** Returns the Slicez information for all clients in structured form rather than HTML. */
+  def getData: Future[Seq[ClientTargetSlicezData]] = sec.flatCall {
+    getDataInternal
+  }
+
+  /**
+   * Returns a [[Future]] containing the JSON representation of all registered clients,
+   * serialized via [[ClientSliceViewP]] view protos for the DBInspect DView frontend.
+   */
+  def getJsonFut: Future[String] =
+    sec
+      .flatCall {
+        getDataInternal
+      }
+      .map { clientsData: Seq[ClientTargetSlicezData] =>
+        val viewProto: ClientSliceViewP = ClientSliceViewP(
+          clients = clientsData.map { td: ClientTargetSlicezData =>
+            td.toViewProto
+          }
+        )
+        DatabricksObjectMapper.toJson(viewProto)
+      }(sec)
 
   /**
    * Creates a table containing subscriber info associated each client registered to this page:
@@ -235,8 +268,10 @@ private[client] class ClientSlicez {
     )
   }
 
-  /** Returns the Slicez information for all clients in structured form rather than HTML. */
-  private def getData: Future[Seq[ClientTargetSlicezData]] = sec.flatCall {
+  private def getDataInternal: Future[Seq[ClientTargetSlicezData]] = {
+    // This private helper ensures a simple code structure with an out sec.flatCall in all of the
+    // the public methods need to get the data.
+    sec.assertCurrentContext()
     val data: Seq[Future[ClientTargetSlicezData]] =
       clients.map((client: ClientTargetSlicezDataExporter) => client.getSlicezData).toSeq
     Future.sequence(data)(implicitly, sec)
@@ -288,6 +323,14 @@ private[dicer] object ClientSlicez {
     }
   )
 
+  // Register the DPage for the DBInspect React frontend. This registration is global and
+  // permanent: the DAction name "get-dicer-client-slicez" is fixed at class-load time, matching
+  // the existing DebugStringServletRegistry pattern above.
+  ClientDPage.setup(
+    getSlicezJsonFut = () => clientSlicez.getJsonFut,
+    dpageNamespace = "dicer"
+  )
+
   /** Sets up the Zpage so that Dicer information is displayed on admin/debug */
   def register(slicezExporter: ClientTargetSlicezDataExporter): Unit = {
     clientSlicez.register(slicezExporter)
@@ -309,8 +352,10 @@ private[dicer] object ClientSlicez {
      */
     def getClientDebugStringComponentName: String = CLIENT_COMPONENT_NAME
 
-    /** Returns the ClientSlicez object being used for displaying the Zpage data. */
-    def getClientSlicez: ClientSlicez = clientSlicez
+    /** Returns the HTML rendered by the ClientSlicez object being used for displaying the Zpage
+     * data.
+     */
+    def getHtmlFut: Future[String] = clientSlicez.getHtmlFut
 
     /** Returns the ClientSlicez's data in a structured form rather than just an HTML String. */
     def getData: Future[Seq[ClientTargetSlicezData]] = clientSlicez.getData
@@ -358,6 +403,9 @@ private[client] trait ClientTargetSlicezDataExporter {
  * @param watchAddressUsedSince the time since which the current watch address has been used.
  * @param lastSuccessfulHeartbeat the time of the last successful heartbeat received from the
  *                                assignment distributor for this client.
+ * @param clientClusterOpt the Kubernetes cluster URI of the pod running this client, used to
+ *                         determine cross-cluster/region indicators in the target column. `None`
+ *                         when the cluster URI is unavailable.
  */
 private[client] case class ClientTargetSlicezData(
     target: Target,
@@ -372,7 +420,8 @@ private[client] case class ClientTargetSlicezData(
     subscriberDebugName: String,
     watchAddress: URI,
     watchAddressUsedSince: Instant,
-    lastSuccessfulHeartbeat: Instant)
+    lastSuccessfulHeartbeat: Instant,
+    clientClusterOpt: Option[URI])
     extends TargetSlicezData(
       target,
       sliceletsData,
@@ -419,9 +468,18 @@ private[client] case class ClientTargetSlicezData(
         div(`class` := "content", pre(unattributedLoadTable.toString))
       )
 
+    val connectionTypeIndicatorOpt: Option[TypedTag[String]] = createConnectionTypeIndicator
+
+    val targetCell: TypedTag[String] = connectionTypeIndicatorOpt match {
+      case Some(indicator: TypedTag[String]) =>
+        td(target.toParseableDescription, " ", indicator)
+      case None =>
+        td(target.toParseableDescription)
+    }
+
     tr(
       backgroundColor := TARGET_DATA_BACKGROUND_COLOR,
-      td(target.toParseableDescription),
+      targetCell,
       td(subscriberDebugName),
       td(watchAddress.toString),
       td(watchAddressUsedSince.toString),
@@ -454,6 +512,105 @@ private[client] case class ClientTargetSlicezData(
       asnHtml
     )
   }
+
+  /**
+   * Converts this [[ClientTargetSlicezData]] to a [[ClientTargetViewP]] view proto for
+   * this client, including subscriber info, assignment, client connection details,
+   * and unattributed load.
+   */
+  private[client] def toViewProto: ClientTargetViewP = {
+    // Sort by low key for deterministic DPage display ordering.
+    val unattributedLoadEntries: Seq[UnattributedLoadEntryViewP] =
+      unattributedLoadBySliceOpt
+        .getOrElse(Map.empty)
+        .toSeq
+        .sortBy { entry: (Slice, Double) =>
+          val (slice, _): (Slice, Double) = entry
+          slice
+        }
+        .map { entry: (Slice, Double) =>
+          val (slice, load): (Slice, Double) = entry
+          UnattributedLoadEntryViewP(
+            lowKey = Some(slice.lowInclusive.toString),
+            highKey = Some(slice.highExclusive.toString),
+            load = Some(load)
+          )
+        }
+
+    ClientTargetViewP(
+      target = Some(target.toParseableDescription),
+      slicelets = sliceletsData.map { s: SliceletSubscriberSlicezData =>
+        SliceletViewP(debugName = Some(s.debugName), watchAddress = Some(s.address))
+      },
+      clerks = clerksData.map { c: ClerkSubscriberSlicezData =>
+        ClerkViewP(debugName = Some(c.debugName))
+      },
+      // Absent (not empty proto) when no assignment has been computed, so the
+      // frontend can distinguish "no assignment yet" from "empty assignment."
+      assignment = assignmentOpt.map { assignment: Assignment =>
+        DPageViewHelpers.getAssignmentViewProto(
+          Some(assignment),
+          reportedLoadPerResourceOpt,
+          reportedLoadPerSliceOpt,
+          topKeysOpt
+        )
+      },
+      clientInfo = Some(
+        ClientInfoViewP(
+          subscriberDebugName = Some(subscriberDebugName),
+          watchAddress = Some(watchAddress.toString),
+          watchAddressUsedSince = Some(watchAddressUsedSince.toString),
+          lastSuccessfulHeartbeat = Some(lastSuccessfulHeartbeat.toString),
+          squidAddress = squidOpt.map { squid: Squid =>
+            squid.resourceAddress.toString
+          },
+          squidUuid = squidOpt.map { squid: Squid =>
+            squid.resourceUuid.toString
+          }
+        )
+      ),
+      unattributedLoad = unattributedLoadEntries
+    )
+  }
+
+  /**
+   * Returns a bolded HTML indicator for the target column if `target` is in a different cluster
+   * or region than the client indicated by `clientClusterOpt`.
+   *
+   * Returns `[Cross-region]` (bolded) if the target is in a different region than the client,
+   * `[Cross-cluster]` (bolded) if in a different cluster but the region cannot be confirmed as
+   * different (same region, or region extraction fails), or `None` if the comparison cannot be
+   * made at all (e.g., the target or client cluster URI is unavailable, or the target is an
+   * [[AppTarget]]).
+   */
+  private def createConnectionTypeIndicator: Option[TypedTag[String]] = {
+    target match {
+      case kubernetesTarget: KubernetesTarget =>
+        // Only KubernetesTargets with a cluster URI can be compared against the client's cluster.
+        for {
+          targetCluster: URI <- kubernetesTarget.clusterOpt
+          clientCluster: URI <- clientClusterOpt
+          // No indicator needed when the target and client are in the same cluster.
+          if targetCluster != clientCluster
+        } yield {
+          // If either region cannot be determined, conservatively indicate cross-cluster only.
+          (
+            ClientTargetSlicezData.getRegion(targetCluster),
+            ClientTargetSlicezData.getRegion(clientCluster)
+          ) match {
+            case (Some(targetRegion: String), Some(clientRegion: String))
+                if targetRegion != clientRegion =>
+              strong("[Cross-region]")
+            case _ =>
+              strong("[Cross-cluster]")
+          }
+        }
+      case _: AppTarget =>
+        // AppTargets do not encode cluster information, so cross-cluster/region status cannot
+        // be determined.
+        None
+    }
+  }
 }
 
 private[client] object ClientTargetSlicezData {
@@ -466,4 +623,15 @@ private[client] object ClientTargetSlicezData {
    * holding client-specific target information.
    */
   private val TARGET_DATA_BACKGROUND_COLOR = "PaleTurquoise"
+
+  /**
+   * Returns the region for the given Kubernetes cluster URI using the embedded IDM.
+   * Returns `None` on failure.
+   */
+  private def getRegion(clusterUri: URI): Option[String] = {
+    InfraDataModel.fromEmbedded
+      .getKubernetesClusterByUri(clusterUri.toString)
+      .map(_.getRelation.getRegionUri)
+      .filter(_.nonEmpty)
+  }
 }

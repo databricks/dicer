@@ -21,6 +21,7 @@ import com.databricks.api.proto.dicer.common.{
   RedirectP,
   SyncAssignmentStateP
 }
+import com.databricks.caching.util.{CachingErrorCode, PrefixLogger, Severity}
 import com.google.protobuf.ByteString
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.common.Version.{LATEST_VERSION, UNKNOWN_VERSION}
@@ -39,10 +40,76 @@ case object ClerkData extends SubscriberData {
   override def toString: String = "Clerk"
 }
 
+/**
+ * The state reported by a Slicelet in its heartbeat watch request.
+ *
+ * Derived from [[SliceletDataP.State]] at the proto boundary. [[SliceletDataP.State.UNKNOWN]] is
+ * not a valid Slicelet heartbeat state; it is normalized to [[SliceletState.Running]] on ingestion
+ * (see [[SliceletState.fromProto]]).
+ */
+sealed trait SliceletState
+
+object SliceletState {
+
+  private val logger: PrefixLogger = PrefixLogger.create(classOf[SliceletState], "")
+
+  /** The Slicelet is not yet healthy and should not receive slice assignments. */
+  case object NotReady extends SliceletState
+
+  /** The Slicelet is healthy and may be assigned slices. */
+  case object Running extends SliceletState
+
+  /** The Slicelet is shutting down and should be removed from the assignment. */
+  case object Terminating extends SliceletState
+
+  /**
+   * Converts a [[SliceletDataP.State]] to a [[SliceletState]].
+   *
+   * [[SliceletDataP.State.UNKNOWN]] is not a valid Slicelet heartbeat state. It arises when a
+   * Slicelet binary is newer than the Assigner and reports a proto state value the Assigner does
+   * not recognize (forward compatibility). It is normalized to [[Running]] on ingestion.
+   *
+   * @param targetForErrorLogging
+   *   The target associated with the Slicelet, included in any alert messages to aid diagnostics.
+   */
+  def fromProto(state: SliceletDataP.State, targetForErrorLogging: Target): SliceletState = {
+    state match {
+      case SliceletDataP.State.UNKNOWN =>
+        // Fire a DEGRADED alert so operators can detect the binary version skew. Rate-limit to
+        // avoid flooding logs when a Slicelet keeps sending UNKNOWN state on every heartbeat.
+        logger.alert(
+          Severity.DEGRADED,
+          CachingErrorCode.SLICELET_UNKNOWN_PROTO_STATE,
+          s"Received unknown proto state from Slicelet for target $targetForErrorLogging; " +
+          "binary version skew suspected. Normalizing to Running.",
+          every = 30.seconds
+        )
+        Running
+      case SliceletDataP.State.NOT_READY => NotReady
+      case SliceletDataP.State.RUNNING => Running
+      case SliceletDataP.State.TERMINATING => Terminating
+    }
+  }
+
+  /**
+   * Converts a [[SliceletState]] back to its [[SliceletDataP.State]] proto representation.
+   *
+   * Note: there is no [[SliceletState]] value corresponding to [[SliceletDataP.State.UNKNOWN]];
+   * that proto value is normalized to [[Running]] on ingestion (see [[fromProto]]).
+   */
+  def toProto(state: SliceletState): SliceletDataP.State = {
+    state match {
+      case NotReady => SliceletDataP.State.NOT_READY
+      case Running => SliceletDataP.State.RUNNING
+      case Terminating => SliceletDataP.State.TERMINATING
+    }
+  }
+}
+
 /** Extra Slicelet data sent in a client request. */
 case class SliceletData(
     squid: Squid,
-    state: SliceletDataP.State,
+    state: SliceletState,
     kubernetesNamespace: String,
     attributedLoads: Vector[SliceletData.SliceLoad],
     unattributedLoadOpt: Option[SliceletData.SliceLoad])
@@ -66,7 +133,7 @@ case class SliceletData(
   /** Converts to corresponding proto representation. */
   def toProto: SliceletDataP = {
     new SliceletDataP(
-      state = Some(state),
+      state = Some(SliceletState.toProto(state)),
       squid = Some(squid.toProto),
       attributedLoads = attributedLoads.map { load: SliceletData.SliceLoad =>
         load.toProto
@@ -80,8 +147,13 @@ case class SliceletData(
 }
 object SliceletData {
 
-  /** Parses and validates the given proto representation of [[SliceletData]]. */
-  def fromProto(proto: SliceletDataP): SliceletData = {
+  /**
+   * Parses and validates the given proto representation of [[SliceletData]].
+   *
+   * @param targetForErrorLogging
+   *   The target associated with the Slicelet, included in any alert messages to aid diagnostics.
+   */
+  def fromProto(proto: SliceletDataP, targetForErrorLogging: Target): SliceletData = {
     val squid = Squid.fromProto(proto.getSquid)
     val attributedLoads: Vector[SliceletData.SliceLoad] =
       proto.attributedLoads.map(SliceletData.SliceLoad.fromProto).toVector
@@ -89,7 +161,7 @@ object SliceletData {
       proto.unattributedLoad.map(SliceletData.SliceLoad.fromProto)
     SliceletData(
       squid,
-      proto.getState,
+      SliceletState.fromProto(proto.getState, targetForErrorLogging),
       proto.getKubernetesNamespace,
       attributedLoads,
       unattributedLoadOpt
@@ -213,7 +285,7 @@ object SliceletData {
     def fromProto(proto: SliceletDataP.KeyLoadP): KeyLoad = {
       require(proto.sliceKey.isDefined, "KeyLoadP must have a slice key")
       KeyLoad(
-        key = SliceKey.withIdentityFunction(proto.getSliceKey),
+        key = SliceKey.fromRawBytes(proto.getSliceKey),
         underestimatedPrimaryRateLoad = proto.getUnderestimatedPrimaryRateLoad
       )
     }
@@ -265,6 +337,25 @@ object SyncAssignmentState {
     def apply(assignment: Assignment): KnownAssignment = {
       KnownAssignment(assignment.toDiff(Generation.EMPTY))
     }
+
+    /**
+     * Returns both the structured ([[SyncAssignmentStateP.State.KnownAssignment]]) and serialized
+     * ([[SyncAssignmentStateP.State.KnownSerializedAssignment]]) [[SyncAssignmentStateP]] proto
+     * representations of the given [[DiffAssignment]], so that they can be cached and reused for
+     * multiple clients.
+     */
+    def toCachedProtos(
+        diffAssignment: DiffAssignment
+    ): (SyncAssignmentStateP, SyncAssignmentStateP) = {
+      val diffProto: DiffAssignmentP = diffAssignment.toProto
+      val structured = new SyncAssignmentStateP(
+        state = SyncAssignmentStateP.State.KnownAssignment(diffProto)
+      )
+      val serialized = new SyncAssignmentStateP(
+        state = SyncAssignmentStateP.State.KnownSerializedAssignment(diffProto.toByteString)
+      )
+      (structured, serialized)
+    }
   }
 
   /** Creates sync state with full assignment (no diff). */
@@ -283,14 +374,6 @@ object SyncAssignmentState {
       case SyncAssignmentStateP.State.Empty =>
         throw new IllegalArgumentException("SyncAssignmentStateP state must not be empty.")
     }
-  }
-
-  /** Creates [[SyncAssignmentStateP]] with the given [[DiffAssignment]] serialized. */
-  def createWithDiffAssignmentSerialized(diffAssignment: DiffAssignment): SyncAssignmentStateP = {
-    val serializedAssignment: ByteString = diffAssignment.toProto.toByteString
-    new SyncAssignmentStateP(
-      state = SyncAssignmentStateP.State.KnownSerializedAssignment(serializedAssignment)
-    )
   }
 }
 
@@ -393,22 +476,25 @@ object ClientRequest {
    * @throws IllegalArgumentException if `proto` is invalid.
    */
   def fromProto(targetUnmarshaller: TargetUnmarshaller, proto: ClientRequestP): ClientRequest = {
-    // Create the subscriber data depending on whether it is a Clerk or a Slicelet request.
-    val subscriberData: SubscriberData =
-      proto.subscriberDataP match {
-        case ClerkFields(_) => ClerkData
-        case SliceletFields(sliceletDataProto: SliceletDataP) =>
-          SliceletData.fromProto(sliceletDataProto)
-        case _ =>
-          throw new IllegalArgumentException(
-            s"One of ClerkDataP or SliceletDataP must be defined: $proto"
-          )
-      }
+    // Parse Target first so it can be included in any error alerts emitted during SliceletData
+    // parsing (e.g., when a Slicelet reports an UNKNOWN proto state due to version skew).
     val target: Target = targetUnmarshaller.fromProto(
       proto.target.getOrElse(
         throw new IllegalArgumentException("Target must be defined in ClientRequestP")
       )
     )
+
+    // Create the subscriber data depending on whether it is a Clerk or a Slicelet request.
+    val subscriberData: SubscriberData =
+      proto.subscriberDataP match {
+        case ClerkFields(_) => ClerkData
+        case SliceletFields(sliceletDataProto: SliceletDataP) =>
+          SliceletData.fromProto(sliceletDataProto, target)
+        case _ =>
+          throw new IllegalArgumentException(
+            s"One of ClerkDataP or SliceletDataP must be defined: $proto"
+          )
+      }
 
     val chosenRpcTimeout: FiniteDuration = try {
       proto.getChosenRpcTimeoutMillis.milliseconds

@@ -1,5 +1,6 @@
 package com.databricks.dicer.common
 
+import com.databricks.caching.util.AssertMacros.ifail
 import com.databricks.caching.util.TestUtils
 import com.databricks.caching.util.{
   ConfigScope,
@@ -16,11 +17,12 @@ import scala.collection.{Seq, mutable}
 import scala.collection.mutable.ArrayBuffer
 import scala.concurrent.Future
 
+import com.databricks.rpc.RequestHeaders
+
 import com.databricks.dicer.assigner.config.{
   StaticTargetConfigProvider,
   InternalTargetConfig,
-  InternalTargetConfigMap,
-  TargetName
+  InternalTargetConfigMap
 }
 import com.databricks.dicer.assigner.config.TargetConfigProvider.DEFAULT_INITIAL_POLL_TIMEOUT
 import com.databricks.dicer.assigner.{
@@ -30,6 +32,7 @@ import com.databricks.dicer.assigner.{
 }
 import com.databricks.dicer.client.{TestClientUtils, TlsFilePaths}
 import com.databricks.dicer.common.InternalDicerTestEnvironment.initializeEtcdNamespaces
+import com.databricks.dicer.common.SliceletData.SliceLoad
 import com.databricks.dicer.external.{
   Clerk,
   ClerkConf,
@@ -64,7 +67,8 @@ class InternalDicerTestEnvironment private (
     val sliceletHostNameOpt: Option[String],
     dynamicConfigProvider: StaticTargetConfigProvider,
     secPool: SequentialExecutionContextPool,
-    assignerClusterUri: URI) {
+    assignerClusterUri: URI,
+    dPageNamespaceOpt: Option[String]) {
 
   /** The lock used to protect all state in the test environment. */
   private val lock = new ReentrantLock()
@@ -275,6 +279,26 @@ class InternalDicerTestEnvironment private (
   }
 
   /**
+   * REQUIRES: There is exactly one test Assigner.
+   *
+   * Returns the total attributed load reported in the latest Slicelet watch request for the given
+   * target, or 0 if no watch request has been received yet.
+   */
+  def getTotalAttributedLoad(target: Target): Double = withLock(lock) {
+    testAssignerInternal
+      .getLatestSliceletWatchRequest(target)
+      .map { case (_: RequestHeaders, clientRequest: ClientRequest) => clientRequest } match {
+      case None => 0.0
+      case Some(clientRequest: ClientRequest) =>
+        clientRequest.subscriberData match {
+          case sliceletData: SliceletData =>
+            sliceletData.attributedLoads.map((_: SliceLoad).primaryRateLoad).sum
+          case _ => ifail("Found non-slicelet request in the latest slicelet watch request.")
+        }
+    }
+  }
+
+  /**
    * Like `createSlicelet(target, initialAssignerIndex, watchFromDataPlane)`, but uses the first
    * Assigner instance and sets `watchFromDataPlane` to be false.
    */
@@ -315,7 +339,8 @@ class InternalDicerTestEnvironment private (
         config,
         dynamicConfigProvider,
         dockerizedEtcdOpt,
-        assignerClusterUri
+        assignerClusterUri,
+        dPageNamespaceOpt = dPageNamespaceOpt
       )
     withLock(lock) {
       assigners.append(newTestAssigner)
@@ -453,7 +478,8 @@ class InternalDicerTestEnvironment private (
       newConfig,
       dynamicConfigProvider,
       dockerizedEtcdOpt,
-      assignerClusterUri
+      assignerClusterUri,
+      dPageNamespaceOpt = dPageNamespaceOpt
     )
   }
 }
@@ -462,16 +488,23 @@ class InternalDicerTestEnvironment private (
 object InternalDicerTestEnvironment {
 
   /**
-   * A test internal target config map that always returns a new InternalTargetConfig for a target
-   * if it does not exist in the original config map. This is useful in testing where we want to
-   * use targets without setting up configuration.
+   * Test-only wrapper that makes get() return a default config for any target not in the
+   * underlying map. Only get() has this behavior; size, targetNames, and iterator reflect only
+   * the underlying map (so "default" targets are not included there). Used when tests want to
+   * use arbitrary targets without configuring them (e.g. empty map => every get() returns DEFAULT).
    *
-   * @param targetConfigMap The original target config map.
+   * @param targetConfigMap The underlying target config map.
    */
   private[dicer] class InternalTargetConfigMapWithDefault(targetConfigMap: InternalTargetConfigMap)
       extends InternalTargetConfigMap {
     val configScopeOpt: Option[ConfigScope] = targetConfigMap.configScopeOpt
-    val configMap: Map[TargetName, InternalTargetConfig] = targetConfigMap.configMap
+
+    override def size: Int = targetConfigMap.size
+
+    override def targetNames: Set[TargetName] = targetConfigMap.targetNames
+
+    override def iterator: Iterator[(TargetName, InternalTargetConfig)] =
+      targetConfigMap.iterator
 
     override def get(targetName: TargetName): Option[InternalTargetConfig] =
       targetConfigMap.get(targetName).orElse(Some(InternalTargetConfig.forTest.DEFAULT))
@@ -502,16 +535,19 @@ object InternalDicerTestEnvironment {
    *                            enabled.
    * @param numAssigners The number of test Assigners to initially create in the test environment.
    * @param allowEtcdMode Whether the test environment allows its test assigners to be in etcd store
-   *                      mode or shadow etcd store mode. When this is set to false, creating
-   *                      assigners in etcd mode or shadow etcd mode in this test environment
-   *                      will fail and throw.
+   *                      mode. When this is set to false, creating assigners in etcd mode in this
+   *                      test environment will fail and throw.
    * @param withDefaultTargetConfig Whether the test environment should have a default target config
    *                                for all targets. By default, this is set to true. This means
    *                                that, unlike in production, if a target does not have a config,
    *                                the test environment will return a default target config.
    *                                If this is set to false, the test environment will behave like
    *                                the production environment, where the Assigner will reject any
-   *                                assignment requests for targets that do not have a config.
+   *                                assignment requests for targets that do not have a config
+   *                                (unless `allowDefaultTargetConfigForExperimentalTargets` is
+   *                                enabled).  TODO(<internal bug>): Remove this parameter and replace
+   *                                with use of `allowDefaultTargetConfigForExperimentalTargets` on
+   *                                the [[TestAssigner.Config]].
    * @param secPool The [[SequentialExecutionContextPool]] used by this test environment. The caller
    *                can provide a [[FakeSequentialExecutionContextPool]] to make all Assigners and
    *                their state machine components in the test environment share the same fake
@@ -519,6 +555,9 @@ object InternalDicerTestEnvironment {
    * @param assignerClusterUri The URI of the kubernetes cluster that the assigners created in the
    *                           test environment will run in (see <internal link>).
    *                           Defaults to "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01"
+   * @param dPageNamespaceOpt When specified, this namespace is used for DPage registration.
+   *                          Each assigner instance uses this to register under a unique DAction
+   *                          name. When None, each assigner's UUID is used as the namespace.
    */
   def create(
       config: TestAssigner.Config = TestAssigner.Config.create(),
@@ -532,7 +571,8 @@ object InternalDicerTestEnvironment {
       withDefaultTargetConfig: Boolean = true,
       secPool: SequentialExecutionContextPool =
         SequentialExecutionContextPool.create("testEnvPool", numThreads = 10),
-      assignerClusterUri: URI = new URI("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01")
+      assignerClusterUri: URI = new URI("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01"),
+      dPageNamespaceOpt: Option[String] = None
   ): InternalDicerTestEnvironment = {
     require(numAssigners >= 0)
 
@@ -570,7 +610,8 @@ object InternalDicerTestEnvironment {
       sliceletHostNameOpt,
       dynamicConfigProvider,
       secPool,
-      assignerClusterUri
+      assignerClusterUri,
+      dPageNamespaceOpt
     )
 
     for (_ <- 0 until numAssigners) {

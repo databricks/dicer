@@ -708,5 +708,33 @@ round_tripping_cases: [
       state: RUNNING
       kubernetes_namespace: "localhostNamespace"
     }
+  },
+
+  # ClerkRequest with supports_serialized_assignment = true
+  {
+    target: {
+      name: "softstore"
+    }
+    sync_assignment_state: {
+      known_generation: { incarnation: 10 number: 42 }
+    }
+    subscriber_debug_name: "subscriber"
+    chosen_rpc_timeout_millis: 600000
+    clerk_fields: { }
+    client_feature_support: { supports_serialized_assignment: true }
+  },
+
+  # ClerkRequest with supports_serialized_assignment = false
+  {
+    target: {
+      name: "softstore"
+    }
+    sync_assignment_state: {
+      known_generation: { incarnation: 10 number: 42 }
+    }
+    subscriber_debug_name: "subscriber"
+    chosen_rpc_timeout_millis: 600000
+    clerk_fields: { }
+    client_feature_support: { supports_serialized_assignment: false }
   }
 ]

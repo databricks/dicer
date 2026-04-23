@@ -5,21 +5,28 @@ import com.databricks.featureflag.client.utils.RuntimeContext
 
 /**
  * The base dynamic conf trait for dynamic feature flags. In OSS, dynamic configuration is not
- * supported, and will always return the default value.
+ * supported, but static configuration values are respected.
  */
 trait BaseDynamicConf extends DbConf {
 
-  /** Dynamic feature flag, not supported in OSS: always returns the default value. */
+  /**
+   * Dynamic feature flag. In OSS, dynamic configuration is not supported, but static configuration
+   * values (via [[DbConf]]) are respected. If no static config value is set, returns the default
+   * value.
+   */
   class FeatureFlag[T: Manifest](
       val flagName: String,
       defaultValue: T
   ) {
 
-    /** Always returns the default value. */
-    def getCurrentValue(): T = defaultValue
+    /** The value of `flagName` in the static configuration. */
+    private val staticValue: T = configure(flagName, defaultValue)
 
-    /** Always returns the default value. */
-    def getCurrentValue(runtimeContext: RuntimeContext): T = defaultValue
+    /** Returns the static config value if set, otherwise the default value. */
+    def getCurrentValue(): T = staticValue
+
+    /** Returns the static config value if set, otherwise the default value. */
+    def getCurrentValue(runtimeContext: RuntimeContext): T = staticValue
   }
 
   object FeatureFlag {

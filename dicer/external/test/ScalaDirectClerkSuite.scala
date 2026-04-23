@@ -8,7 +8,7 @@ import com.databricks.conf.trusted.{LocationConf, LocationConfTestUtils}
 /** Tests for Scala Clerk implementation that connects directly to the Assigner for assignments. */
 private class ScalaDirectClerkSuite extends ScalaClerkSuiteBase {
 
-  override protected def createClerk(
+  override protected def createClerkInternal(
       target: Target,
       clerkLocationConfigMap: Option[Map[String, String]],
       clientBranchOpt: Option[String] = None): ClerkDriver = {
@@ -19,12 +19,9 @@ private class ScalaDirectClerkSuite extends ScalaClerkSuiteBase {
       if (clerkLocationConfigMap.isEmpty) {
         LocationConf.restoreSingletonForTest() // Ensure location is cleared.
       }
-      val clusterUriOpt: Option[URI] =
-        locationConf.location.kubernetesClusterUri.map(URI.create)
       val clerk: Clerk[ResourceAddress] =
         testEnv.createDirectClerk(target, initialAssignerIndex = 0, clientBranchOpt)
-      val expectedTarget = ClerkDriver.computeExpectedTargetIdentifier(target, clusterUriOpt)
-      ScalaClerkDriver.create(clerk, expectedTarget)
+      ScalaClerkDriver.create(clerk)
     }
   }
 

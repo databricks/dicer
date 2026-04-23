@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="UTF-8"?><Configuration status="INFO" packages="com.databricks.logging.log4j" shutdownHook="disable">
+<?xml version="1.0" encoding="UTF-8"?><Configuration status="INFO" shutdownHook="disable">
     <Appenders>
         <Console name="Console" follow="true">
             <PatternLayout pattern="%d{yyyy/MM/dd HH:mm:ss.SSS} %p %c %X{traceInfo}: %.16384m%n"/>

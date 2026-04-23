@@ -37,23 +37,15 @@ object ReadinessProbeTracker {
    *   The probe status. In the OSS version, we only check if the status code is 200 (OK) to
    *   determine readiness.
    */
-  def updatePodStatusForTesting(status: ProbeStatus): Unit = {
-    podReady = status.code == 200
+  def updatePodStatusForTesting(status: Int): Unit = {
+    podReady = status == 200
   }
 }
-
-/**
- * Simplified ProbeStatus for OSS.
- *
- * In the internal version, this would have more fields and be tied to the actual probe
- * infrastructure.
- */
-case class ProbeStatus(code: Int, message: String)
 
 /**
  * Common probe statuses.
  */
 object ProbeStatuses {
-  val OK_STATUS: ProbeStatus = ProbeStatus(200, "OK")
-  val NOT_YET_READY_STATUS: ProbeStatus = ProbeStatus(503, "Not yet ready")
+  val OK_STATUS: Int = 200
+  val NOT_YET_READY_STATUS: Int = 418
 }

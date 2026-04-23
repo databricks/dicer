@@ -116,6 +116,7 @@ scala_library(
         "src/HttpMethod.scala",
         "src/HttpRequest.scala",
         "src/RequestHeaders.scala",
+        "src/SimpleWebClient.scala",
     ],
     deps = [":rpc_context"],
 )

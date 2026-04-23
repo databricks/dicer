@@ -1,0 +1,109 @@
+syntax = "proto2";
+
+package dicer;
+
+import "scalapb.proto";
+
+option java_package = "com.databricks.api.proto.dicer.dpage";
+option java_generate_equals_and_hash = true;
+option java_outer_classname = "DpageProto";
+option java_multiple_files = true;
+option (scalapb.options) = {
+  package_name: "com.databricks.api.proto.dicer.dpage",
+  flat_package: true,
+};
+
+// Shared "view proto" definitions for DPage output, used across Dicer components (assigner,
+// storelet, etc.). Component-specific view protos live in their own proto files
+// (e.g. `dicer/assigner/proto/assigner_dpage.proto`).
+
+// Structured view data for a Generation in DPage output.
+message GenerationViewP {
+  // Incarnation number of the generation.
+  optional int64 incarnation = 1;
+  // Generation number (milliseconds since the Unix epoch).
+  optional int64 number = 2;
+  // Human-readable ISO-8601 timestamp derived from the generation number.
+  optional string timestamp_str = 3;
+}
+
+// View data for a Slicelet subscriber in DPage output.
+message SliceletViewP {
+  // Human-readable debug name (e.g. "softstore-storelet-0").
+  optional string debug_name = 1;
+  // Network address of the Slicelet's watch server (e.g. "10.0.0.5:9090").
+  optional string watch_address = 2;
+}
+
+// View data for a Clerk subscriber in DPage output.
+message ClerkViewP {
+  // Human-readable debug name identifying the Clerk.
+  optional string debug_name = 1;
+}
+
+// View data for a resource (SQUID) in a DPage assignment table.
+message ResourceViewP {
+  // Network address of this resource (e.g. "10.0.1.5:8080").
+  optional string address = 1;
+  // Stable UUID for this resource instance, used for affinity-based consistency.
+  optional string uuid = 2;
+  // ISO-8601 timestamp at which this resource was created.
+  optional string creation_time_str = 3;
+  // Load attributed to this resource by the load watcher; absent when no measurement is available.
+  optional double attributed_load = 4;
+}
+
+// View data for a single top key in a DPage assignment table.
+message TopKeyViewP {
+  // String representation of the slice key.
+  optional string key = 1;
+  // Reported load for this key.
+  optional double load = 2;
+}
+
+// View data for a subslice annotation in a DPage assignment table.
+message SubsliceAnnotationViewP {
+  // Network address of the resource that owns this subslice.
+  optional string resource = 1;
+  // Inclusive lower bound of this subslice's key range.
+  optional string low_key = 2;
+  // Exclusive upper bound of this subslice's key range.
+  optional string high_key = 3;
+  // Continuous generation number at which this subslice was last written.
+  optional int64 continuous_generation_number = 4;
+  // Address of the resource transferring state into this subslice; absent when no transfer is
+  // in progress.
+  optional string state_provider_address = 5;
+}
+
+// View data for a single slice in a DPage assignment table.
+message SliceViewP {
+  // Inclusive lower bound of this slice's key range.
+  optional string low_key = 1;
+  // Exclusive upper bound of this slice's key range ("Infinity" for the last slice).
+  optional string high_key = 2;
+  // Structured generation at which this slice assignment was produced.
+  optional GenerationViewP generation = 3;
+  // Addresses of the resources assigned to this slice.
+  repeated string resources = 4;
+  // Load on this slice; absent when no measurement is available.
+  optional double load = 5;
+  // Top keys by load within this slice's key range.
+  repeated TopKeyViewP top_keys = 6;
+  // Subslice annotations describing in-progress state transfers for this slice.
+  repeated SubsliceAnnotationViewP subslice_annotations = 7;
+}
+
+// View data for a full assignment in DPage output.
+message AssignmentViewP {
+  // Structured generation of this assignment; absent when no assignment has been computed.
+  optional GenerationViewP generation = 1;
+  // Whether this assignment has been frozen (no further changes will be made).
+  optional bool is_frozen = 2;
+  // Consistency mode under which this assignment was generated (e.g. "Affinity").
+  optional string consistency_mode = 3;
+  // Resources included in this assignment.
+  repeated ResourceViewP resources = 4;
+  // Per-slice assignment details.
+  repeated SliceViewP slices = 5;
+}

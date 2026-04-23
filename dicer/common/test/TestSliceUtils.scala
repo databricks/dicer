@@ -9,6 +9,7 @@ import scala.util.Random
 import com.google.common.collect.{BoundType, Range}
 import com.google.common.hash.{HashCode, Hashing}
 import com.google.common.primitives.Longs
+import com.google.protobuf.ByteString
 import org.scalatest.Assertions
 import com.databricks.caching.util.{AsciiTable, AssertionWaiter, TestUtils, UnixTimeVersion}
 import com.databricks.caching.util.AsciiTable.Header
@@ -16,7 +17,6 @@ import com.databricks.dicer.assigner.algorithm.{Algorithm, LoadMap, Resources}
 import com.databricks.dicer.assigner.config.InternalTargetConfig
 import com.databricks.dicer.assigner.AssignmentStats.AssignmentLoadStats
 import com.databricks.dicer.client.{ClerkImpl, SliceletImpl}
-import com.databricks.dicer.common.SliceKeyHelper.{FarmHashFingerprint64, IdentitySliceKeyFunction}
 import com.databricks.dicer.external.{
   Clerk,
   HighSliceKey,
@@ -314,34 +314,38 @@ object TestSliceUtils extends Assertions {
   }
 
   /** Creates a [[SliceKey]] with FarmHash Fingerprint64 of the given application key. */
-  def fp(applicationKey: String): SliceKey = SliceKey(applicationKey, FarmHashFingerprint64)
+  def fp(applicationKey: String): SliceKey =
+    SliceKey.newFingerprintBuilder().putString(applicationKey).build()
 
   /** Creates a [[SliceKey]] with FarmHash Fingerprint64 of the given application key. */
-  def fp(applicationKey: Array[Byte]): SliceKey = SliceKey(applicationKey, FarmHashFingerprint64)
+  def fp(applicationKey: Array[Byte]): SliceKey =
+    SliceKey.newFingerprintBuilder().putBytes(applicationKey).build()
 
   /** Creates a [[SliceKey]] with the given application key encoded to UTF-8. */
   def identityKey(applicationKey: String): SliceKey = {
-    SliceKey(applicationKey, IdentitySliceKeyFunction)
+    SliceKey.fromRawBytes(
+      ByteString.copyFrom(applicationKey.getBytes(StandardCharsets.UTF_8))
+    )
   }
 
   /** Creates a [[SliceKey]] with the given application key bytes. */
   def identityKey(applicationKey: Array[Byte]): SliceKey = {
-    SliceKey(applicationKey, IdentitySliceKeyFunction)
+    SliceKey.fromRawBytes(ByteString.copyFrom(applicationKey))
   }
 
   /** Creates a [[SliceKey]] with the given application key integers interpreted as bytes. */
   def identityKey(applicationKey: Int*): SliceKey = {
-    SliceKey(applicationKey.map(_.toByte).toArray, IdentitySliceKeyFunction)
+    SliceKey.fromRawBytes(ByteString.copyFrom(applicationKey.map(_.toByte).toArray))
   }
 
   /** Creates a [[SliceKey]] with the raw bytes of the given application key. */
   def identityKey(applicationKey: Long): SliceKey = {
-    SliceKey(Longs.toByteArray(applicationKey), IdentitySliceKeyFunction)
+    SliceKey.fromRawBytes(ByteString.copyFrom(Longs.toByteArray(applicationKey)))
   }
 
   /** Creates a [[SliceKey]] with a single byte. */
   def singleByteIdentityKey(applicationKey: Int): SliceKey = {
-    SliceKey(Array(applicationKey.toByte), IdentitySliceKeyFunction)
+    SliceKey.fromRawBytes(ByteString.copyFrom(Array(applicationKey.toByte)))
   }
 
   /**
@@ -720,7 +724,7 @@ object TestSliceUtils extends Assertions {
 
     /**
      * Shorthand for `Slice.atLeast(lowInclusive)`. Enables syntax like `20.andGreater` as shorthand
-     * for `Slice.atLeast(SliceKey(Longs.toByteArray(20), IdentitySliceKeyFunction))`.
+     * for `Slice.atLeast(identityKey(Longs.toByteArray(20)))`.
      */
     def andGreater: Slice = Slice.atLeast(lowInclusive)
   }
@@ -1112,9 +1116,9 @@ object TestSliceUtils extends Assertions {
     val bytes: Array[Byte] = sliceKeyP.applicationKey.map((_: Int).toByte).toArray
     sliceKeyP.getSliceKeyFunction match {
       case SliceKeyFunctionP.IDENTITY =>
-        SliceKey(bytes, IdentitySliceKeyFunction)
+        SliceKey.fromRawBytes(ByteString.copyFrom(bytes))
       case SliceKeyFunctionP.FARM_HASH_FINGERPRINT_64 =>
-        SliceKey(bytes, FarmHashFingerprint64)
+        SliceKey.newFingerprintBuilder().putBytes(bytes).build()
       case SliceKeyFunctionP.SLICE_KEY_FUNCTION_P_UNSPECIFIED =>
         throw new IllegalArgumentException("Function unspecified.")
     }

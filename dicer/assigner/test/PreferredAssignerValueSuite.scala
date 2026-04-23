@@ -205,12 +205,12 @@ class PreferredAssignerValueSuite extends DatabricksTest {
     )
 
     // Construct some valid response protos and verify the result is as expected.
-    for (preferredAssignerValue <- Seq(
+    for (preferredAssignerValue: PreferredAssignerValue <- Seq(
         preferredAssignerModeDisabled,
         noPreferredAssigner,
         somePreferredAssigner
       )) {
-      val opId = 42
+      val opId: Long = 42
       val responseP = HeartbeatResponseP(
         opId = Some(opId),
         preferredAssignerValue = Some(
@@ -227,7 +227,7 @@ class PreferredAssignerValueSuite extends DatabricksTest {
 
   test("PreferredAssignerConfig.create") {
     // Test plan: verify that `PreferredAssignerConfig.create` returns an expected instance.
-    // TODO(<internal bug>): Add test for token map when it's implemented.
+
     val thisAssignerInfo = AssignerInfo(UUID.randomUUID(), new URI("http://localhost:1234"))
     val otherAssignerInfo = AssignerInfo(UUID.randomUUID(), new URI("http://localhost:5678"))
 
@@ -247,7 +247,7 @@ class PreferredAssignerValueSuite extends DatabricksTest {
       PreferredAssignerValue.SomeAssigner(otherAssignerInfo, Generation(nonLooseIncarnation, 123))
 
     // If PA is disabled, we should assume the role of preferred.
-    for (value <- Seq(modeDisabledValue, modeDisabledValue2)) {
+    for (value: PreferredAssignerValue <- Seq(modeDisabledValue, modeDisabledValue2)) {
       val config = PreferredAssignerConfig.create(
         value,
         thisAssignerInfo
@@ -257,7 +257,7 @@ class PreferredAssignerValueSuite extends DatabricksTest {
     }
 
     // - For `PreferredAssignerValue.NoAssigner`, always not preferred and redirect to empty.
-    for (value <- Seq(noAssignerValue, noAssignerValue2)) {
+    for (value: PreferredAssignerValue <- Seq(noAssignerValue, noAssignerValue2)) {
       val config = PreferredAssignerConfig.create(
         value,
         thisAssignerInfo

@@ -289,3 +289,163 @@ to_string_test_cases: [
     expected_string: "0x000000000000002a\\0"
   }
 ]
+
+# Test cases for farmhash fingerprint64 builder.
+farmhash_builder_test_cases: [
+  {
+    description: "empty builder"
+    operations: []
+    expected_raw_bytes: [79, 64, 144, 47, 59, 106, 225, 154]
+  },
+  {
+    description: "single string Hello"
+    operations: [
+      { put_string: "Hello" }
+    ]
+    expected_raw_bytes: [135, 32, 107, 50, 30, 124, 200, 213]
+  },
+  {
+    description: "single string Foo"
+    operations: [
+      { put_string: "Foo" }
+    ]
+    expected_raw_bytes: [25, 243, 227, 19, 229, 28, 215, 138]
+  },
+  {
+    description: "single string Fili"
+    operations: [
+      { put_string: "Fili" }
+    ]
+    expected_raw_bytes: [89, 13, 228, 146, 190, 244, 18, 252]
+  },
+  {
+    description: "single bytes Foo"
+    operations: [
+      { put_bytes: "Foo" }
+    ]
+    expected_raw_bytes: [25, 243, 227, 19, 229, 28, 215, 138]
+  },
+  {
+    description: "two strings a then b"
+    operations: [
+      { put_string: "a" },
+      { put_string: "b" }
+    ]
+    expected_raw_bytes: [30, 165, 173, 66, 82, 110, 141, 170]
+  },
+  {
+    description: "two strings b then a"
+    operations: [
+      { put_string: "b" },
+      { put_string: "a" }
+    ]
+    expected_raw_bytes: [100, 230, 178, 3, 86, 72, 112, 148]
+  },
+  {
+    description: "concatenated string ab"
+    operations: [
+      { put_string: "ab" }
+    ]
+    expected_raw_bytes: [30, 165, 173, 66, 82, 110, 141, 170]
+  },
+  {
+    description: "complex string long bytes"
+    operations: [
+      { put_string: "user-" },
+      { put_long: 12345 },
+      { put_bytes: "-suffix" }
+    ]
+    expected_raw_bytes: [90, 164, 225, 93, 44, 78, 187, 65]
+  },
+  {
+    description: "single long 12345"
+    operations: [
+      { put_long: 12345 }
+    ]
+    expected_raw_bytes: [54, 32, 24, 136, 238, 139, 223, 90]
+  }
+]
+
+# Test cases for fromTrustedFingerprint validation.
+# This method only accepts bytes with size <= 32.
+from_trusted_fingerprint_error_test_cases: [
+  # 33 bytes should fail
+  {
+    description: "33 bytes"
+    raw_bytes: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+                1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+    expected_error: "must not exceed 32 bytes"
+  },
+  # 34 bytes should fail
+  {
+    description: "34 bytes"
+    raw_bytes: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    expected_error: "must not exceed 32 bytes"
+  },
+  # 100 bytes should fail
+  {
+    description: "100 bytes"
+    raw_bytes: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    expected_error: "must not exceed 32 bytes"
+  }
+]
+
+# Test cases for comparing builder vs deprecated farmhash methods (single bytes input).
+farmhash_builder_vs_deprecated_test_cases: [
+  {
+    description: "empty bytes"
+    input_bytes: []
+    expected_raw_bytes: [79, 64, 144, 47, 59, 106, 225, 154]
+  },
+  {
+    description: "Hello"
+    input_bytes: [72, 101, 108, 108, 111]
+    expected_raw_bytes: [135, 32, 107, 50, 30, 124, 200, 213]
+  },
+  {
+    description: "Foo"
+    input_bytes: [70, 111, 111]
+    expected_raw_bytes: [25, 243, 227, 19, 229, 28, 215, 138]
+  },
+  {
+    description: "Fili"
+    input_bytes: [70, 105, 108, 105]
+    expected_raw_bytes: [89, 13, 228, 146, 190, 244, 18, 252]
+  },
+  {
+    description: "test-data"
+    input_bytes: [116, 101, 115, 116, 45, 100, 97, 116, 97]
+    expected_raw_bytes: [165, 166, 146, 64, 113, 111, 83, 236]
+  },
+  {
+    description: "a"
+    input_bytes: [97]
+    expected_raw_bytes: [227, 117, 223, 182, 101, 66, 69, 179]
+  },
+  {
+    description: "short"
+    input_bytes: [115, 104, 111, 114, 116]
+    expected_raw_bytes: [3, 87, 151, 193, 134, 140, 68, 56]
+  },
+  {
+    description: "a longer string with more content"
+    input_bytes: [97, 32, 108, 111, 110, 103, 101, 114, 32, 115, 116, 114, 105, 110, 103, 32,
+                  119, 105, 116, 104, 32, 109, 111, 114, 101, 32, 99, 111, 110, 116, 101, 110, 116]
+    expected_raw_bytes: [108, 245, 43, 255, 150, 189, 242, 203]
+  },
+  {
+    description: "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]"
+    input_bytes: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    expected_raw_bytes: [234, 255, 214, 178, 178, 77, 112, 155]
+  },
+  {
+    description: "[255, 254, 253, 252, 251]"
+    input_bytes: [255, 254, 253, 252, 251]
+    expected_raw_bytes: [123, 81, 117, 93, 121, 63, 229, 217]
+  }
+]

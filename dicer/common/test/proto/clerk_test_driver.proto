@@ -5,7 +5,7 @@ package dicer.test;
 import "dicer/common/proto/common.proto";
 import "scalapb.proto";
 
-option java_package = "com.databricks.dicer.common";;
+option java_package = "com.databricks.dicer.common";
 option java_generate_equals_and_hash = true;
 option java_outer_classname = "ClerkTestDriverProto";
 option java_multiple_files = true;

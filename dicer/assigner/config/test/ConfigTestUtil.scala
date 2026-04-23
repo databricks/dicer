@@ -17,10 +17,12 @@ import com.databricks.api.proto.dicer.external.{LoadBalancingMetricConfigP, Targ
 import com.databricks.caching.util.{AssertionWaiter, CachingErrorCode, MetricUtils, Severity}
 import com.databricks.dicer.assigner.config.InternalTargetConfig.{
   HealthWatcherTargetConfig,
+  KeyOfDeathProtectionConfig,
   KeyReplicationConfig,
   LoadBalancingConfig,
   LoadBalancingMetricConfig,
-  LoadWatcherTargetConfig
+  LoadWatcherTargetConfig,
+  TargetWatchRequestRateLimitConfig
 }
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.external.Target
@@ -109,7 +111,9 @@ object ConfigTestUtil {
       loadWatcherConfig = loadWatcherConfig,
       loadBalancingConfig = lbConfig,
       keyReplicationConfig = KeyReplicationConfig.DEFAULT_SINGLE_REPLICA,
-      healthWatcherConfig = HealthWatcherTargetConfig.DEFAULT
+      healthWatcherConfig = HealthWatcherTargetConfig.DEFAULT,
+      keyOfDeathProtectionConfig = KeyOfDeathProtectionConfig.DEFAULT,
+      targetRateLimitConfig = TargetWatchRequestRateLimitConfig.DEFAULT
     )
     // Try parsing as well, just to make sure the assumptions in this helper are valid.
     val proto = TargetConfigFieldsP(
@@ -266,5 +270,16 @@ object ConfigTestUtil {
     val keyReplicationConfig: KeyReplicationConfig = config.keyReplicationConfig
     assertResult(keyReplicationConfig.minReplicas)(minReplicas)
     assertResult(keyReplicationConfig.maxReplicas)(maxReplicas)
+
+    // Compare watch request rate limit config.
+    val clientRequestsPerSecond: Double = MetricUtils
+      .getMetricValue(
+        registry,
+        "dicer_assigner_advanced_target_config_watch_request_rate_limit_client_requests_per_second",
+        Map("targetName" -> target.getTargetNameLabel)
+      )
+    assertResult(config.targetRateLimitConfig.clientRequestsPerSecond.toDouble)(
+      clientRequestsPerSecond
+    )
   }
 }

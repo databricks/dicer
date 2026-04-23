@@ -1,8 +1,7 @@
 package com.databricks.dicer.common
 
-import com.google.common.hash.Hashing
 import com.google.protobuf.ByteString
-import com.databricks.dicer.external.{SliceKey, SliceKeyFunction}
+import com.databricks.dicer.external.SliceKey
 
 /** Utility methods for [[SliceKey]] that are internal (not part of the public API). */
 object SliceKeyHelper {
@@ -59,7 +58,7 @@ object SliceKeyHelper {
     for (i <- skipOffset until bytes.length) {
       key(i + resultOffset) = bytes(i)
     }
-    SliceKey(key, IdentitySliceKeyFunction)
+    SliceKey.fromRawBytes(ByteString.copyFrom(key))
   }
 
   /** Internal extensions for [[SliceKey]]. */
@@ -82,22 +81,7 @@ object SliceKeyHelper {
 
     /** Returns the key that is immediately after this key, i.e. the key with a 0 byte appended. */
     def successor(): SliceKey = {
-      SliceKey.withIdentityFunction(key.bytes.concat(ZERO_BYTE))
-    }
-  }
-
-  /**
-   * [[SliceKeyFunction]] preserving application key bytes. Not to be exposed externally until Dicer
-   * has a sufficiently powerful load balancing strategy to make natural keys safe.
-   */
-  object IdentitySliceKeyFunction extends SliceKeyFunction {
-    def apply(applicationKey: Array[Byte]): Array[Byte] = applicationKey
-  }
-
-  /** [[SliceKeyFunction]] using FarmHash Fingerprint64. */
-  object FarmHashFingerprint64 extends SliceKeyFunction {
-    def apply(applicationKey: Array[Byte]): Array[Byte] = {
-      Hashing.farmHashFingerprint64().hashBytes(applicationKey).asBytes
+      SliceKey.fromRawBytes(key.bytes.concat(ZERO_BYTE))
     }
   }
 }

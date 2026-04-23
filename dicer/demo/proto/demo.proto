@@ -16,7 +16,7 @@ option (scalapb.options) = {
 // Request to get a value for a given key.
 message GetValueRequestP {
   // The integer key to look up (0-10000 range for demo).
-  optional int32 key = 1;
+  optional int64 key = 1;
 }
 
 message GetValueResponseP {
@@ -27,7 +27,7 @@ message GetValueResponseP {
 // Request to put a key-value pair.
 message PutValueRequestP {
   // The integer key.
-  optional int32 key = 1;
+  optional int64 key = 1;
   // The string value to store.
   optional string value = 2;
 }
@@ -39,7 +39,7 @@ message PutValueResponseP {
 // Request to delete a key.
 message DeleteValueRequestP {
   // The integer key to delete.
-  optional int32 key = 1;
+  optional int64 key = 1;
 }
 
 message DeleteValueResponseP {

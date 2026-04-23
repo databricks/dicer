@@ -1,6 +1,7 @@
 package com.databricks.dicer.common
 
 import com.databricks.caching.util.TestUtils.{assertThrow, loadTestData}
+import com.google.protobuf.ByteString
 import io.prometheus.client.CollectorRegistry
 
 import com.databricks.caching.util.{MetricUtils, TestUtils}
@@ -20,6 +21,11 @@ class SliceKeySuite extends DatabricksTest {
   // Since SliceKey mostly encapsulates Bytes, we do not retest the Bytes methods via SliceKey.
   // In that sense, these tests are somewhat more glass box. For SliceKey, we mostly test the end
   // keys.
+
+  /** Converts a sequence of int32 values from proto to a ByteString. */
+  private def intsToBytes(ints: Seq[Int]): ByteString = {
+    ByteString.copyFrom(ints.map(_.toByte).toArray)
+  }
 
   test("ordering") {
     // Test plan: perform generic tests of ordering operators given a manually constructed sequence
@@ -42,7 +48,8 @@ class SliceKeySuite extends DatabricksTest {
       // Include two references to each key and a copy.
       val copy = key match {
         case key: SliceKey =>
-          SliceKey(key.bytes.toByteArray, SliceKeyHelper.IdentitySliceKeyFunction)
+          // Use fromRawBytes to create a copy with the same bytes for equality testing.
+          SliceKey.fromRawBytes(key.toRawBytes)
         case InfinitySliceKey => InfinitySliceKey
       }
       Seq(key, key, copy)
@@ -249,6 +256,131 @@ class SliceKeySuite extends DatabricksTest {
         |  bytesPrefix (bytes): [10, -100, -62, 37, -82, 38, -72, -79]
         |}""".stripMargin
     )
+  }
+
+  test("fingerprint builder") {
+    // Test plan: Verify that the fingerprint builder produces the expected results
+    // using test cases from shared proto test data.
+
+    for (testCase <- SliceKeySuite.TEST_DATA.farmhashBuilderTestCases) {
+      val description: String = testCase.description.get
+
+      // Setup: build the key by applying operations
+      var builder = SliceKey.newFingerprintBuilder()
+      for (op <- testCase.operations) {
+        import SliceKeyTestDataP.FarmhashBuilderTestCaseP.BuilderOperationP.Operation
+        op.operation match {
+          case Operation.PutLong(value) =>
+            builder = builder.putLong(value)
+          case Operation.PutString(value) =>
+            builder = builder.putString(value)
+          case Operation.PutBytes(value) =>
+            builder = builder.putBytes(value)
+          case Operation.Empty =>
+            throw new IllegalArgumentException("Empty operation in test data")
+        }
+      }
+      val key: SliceKey = builder.build()
+
+      // Verify: key matches expected raw bytes
+      val expectedRawBytes: ByteString = intsToBytes(testCase.expectedRawBytes)
+      assertResult(
+        expectedRawBytes,
+        s"Builder test case '$description' should produce expected raw bytes"
+      )(key.toRawBytes)
+    }
+  }
+
+  test("farmhash builder golden bytes") {
+    // Test plan: Verify that the fingerprint builder produces expected raw bytes for single-bytes
+    // inputs using test cases from shared proto test data.
+
+    for (testCase <- SliceKeySuite.TEST_DATA.farmhashBuilderVsDeprecatedTestCases) {
+      val description: String = testCase.description.get
+      val inputBytes: ByteString = intsToBytes(testCase.inputBytes)
+
+      val keyFromBuilder: SliceKey =
+        SliceKey.newFingerprintBuilder().putBytes(inputBytes).build()
+
+      val expectedRawBytes: ByteString = intsToBytes(testCase.expectedRawBytes)
+      assertResult(
+        expectedRawBytes,
+        s"Builder test case '$description' should produce expected raw bytes"
+      )(keyFromBuilder.toRawBytes)
+    }
+  }
+
+  test("fromTrustedFingerprint") {
+    // Test plan: Verify that fromTrustedFingerprint correctly creates SliceKeys for
+    // valid inputs (bytes <= 32) and round-trips correctly.
+
+    for (highSliceKey: HighSliceKey <- SliceKeySuite.ORDERED_SLICE_KEYS) {
+      if (highSliceKey.isFinite) {
+        val original: SliceKey = highSliceKey.asFinite
+        val bytes: ByteString = original.toRawBytes
+
+        if (bytes.size() <= 32) {
+          val roundtrip: SliceKey = SliceKey.fromTrustedFingerprint(bytes)
+
+          assertResult(original, s"Round trip should succeed for $original")(roundtrip)
+          assertResult(bytes, s"Bytes should match for $original")(roundtrip.toRawBytes)
+        }
+      }
+    }
+  }
+
+  test("fromTrustedFingerprint validation") {
+    // Test plan: Verify that fromTrustedFingerprint correctly rejects invalid inputs
+    // (bytes > 32) using test cases from shared proto test data.
+
+    for (testCase <- SliceKeySuite.TEST_DATA.fromTrustedFingerprintErrorTestCases) {
+      val rawBytes: Array[Byte] = testCase.rawBytes.map(_.toByte).toArray
+      val expectedError: String = testCase.expectedError.get
+
+      assertThrow[IllegalArgumentException](expectedError) {
+        SliceKey.fromTrustedFingerprint(ByteString.copyFrom(rawBytes))
+      }
+    }
+  }
+
+  test("putBytes overloads") {
+    // Test plan: Verify that all putBytes overloads (ByteString, Array[Byte], ByteBuffer) produce
+    // identical SliceKey results when given equivalent byte data.
+
+    // Setup: create test data.
+    val testBytes: Array[Byte] = Array[Byte](1, 2, 3, 4, 5)
+    val testByteString: ByteString = ByteString.copyFrom(testBytes)
+    val testByteBuffer: java.nio.ByteBuffer = java.nio.ByteBuffer.wrap(testBytes)
+
+    // Setup: build keys with each overload.
+    val keyFromByteString: SliceKey = SliceKey
+      .newFingerprintBuilder()
+      .putString("prefix-")
+      .putBytes(testByteString)
+      .build()
+
+    val keyFromByteArray: SliceKey = SliceKey
+      .newFingerprintBuilder()
+      .putString("prefix-")
+      .putBytes(testBytes)
+      .build()
+
+    val keyFromByteBuffer: SliceKey = SliceKey
+      .newFingerprintBuilder()
+      .putString("prefix-")
+      .putBytes(testByteBuffer)
+      .build()
+
+    // Verify: all three overloads produce the same result.
+    assert(keyFromByteString == keyFromByteArray)
+    assert(keyFromByteString == keyFromByteBuffer)
+    assert(keyFromByteArray == keyFromByteBuffer)
+
+    // Verify: ByteBuffer position is not modified after putBytes.
+    testByteBuffer.rewind()
+    assertResult(0)(testByteBuffer.position())
+    SliceKey.newFingerprintBuilder().putBytes(testByteBuffer).build()
+    assertResult(0, "putBytes should not modify ByteBuffer position")(testByteBuffer.position())
   }
 
   test("slice key size metrics") {

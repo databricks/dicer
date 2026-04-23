@@ -1,0 +1,15 @@
+load("@rules_proto//proto:defs.bzl", "proto_library")
+load("@rules_scala//scala_proto:scala_proto.bzl", "scala_proto_library")
+
+proto_library(
+    name = "dicer_client_feature_rollout_config_proto_library",
+    srcs = ["dicer_client_feature_rollout_config.proto"],
+    visibility = ["//dicer:internal"],
+    deps = ["//wrappers/rpc:scalapb_proto"],
+)
+
+scala_proto_library(
+    name = "dicer_client_feature_rollout_config_scala_lib",
+    visibility = ["//dicer:internal"],
+    deps = [":dicer_client_feature_rollout_config_proto_library"],
+)

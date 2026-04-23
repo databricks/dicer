@@ -3,7 +3,6 @@ package com.databricks.dicer.external
 import scala.concurrent.duration.Duration
 import scala.collection.mutable
 import com.google.common.collect.ImmutableRangeSet
-import com.google.common.hash.Hashing
 import com.databricks.backend.common.util.Project
 import com.databricks.caching.util.{AssertionWaiter, TestUtils}
 import com.databricks.caching.util.TestUtils.assertThrow
@@ -13,7 +12,6 @@ import com.databricks.dicer.common.TestSliceUtils
 import com.databricks.dicer.external.DicerTestEnvironment.AssignmentHandle
 import com.databricks.dicer.external.Samples.{SampleClientConf, SampleServer, SampleServerConf}
 import com.databricks.testing.DatabricksTest
-
 
 import scala.util.Using
 import com.databricks.caching.util.TestUtils
@@ -63,15 +61,9 @@ abstract class BaseDicerTestEnvironmentSuite extends DatabricksTest with TestUti
     )
   }
 
-  /** [[SliceKeyFunction]] using FarmHash Fingerprint64. */
-  private object FarmHashFingerprint64 extends SliceKeyFunction {
-    override def apply(applicationKey: Array[Byte]): Array[Byte] = {
-      Hashing.farmHashFingerprint64().hashBytes(applicationKey).asBytes
-    }
-  }
-
   /** Given a string `key`, returns the corresponding SliceKey using FarmHash Fingerprint64. */
-  private def makeKey(key: String): SliceKey = SliceKey(key, FarmHashFingerprint64)
+  private def makeKey(key: String): SliceKey =
+    SliceKey.newFingerprintBuilder().putString(key).build()
 
   test("With Slicelets and Clerk") {
     // Test Plan: Create a couple of Slicelets and a Clerk. Make sure that they all get the
@@ -128,7 +120,7 @@ abstract class BaseDicerTestEnvironmentSuite extends DatabricksTest with TestUti
     val target = Target(getSafeName)
     val server0 = createSampleServer(target, selfPort = 0)
     val server1 = createSampleServer(target, selfPort = 1)
-    val server2 = createSampleServer(target, selfPort = 1)
+    val server2 = createSampleServer(target, selfPort = 2)
     val slicelet0: Slicelet = server0.getSlicelet
     val slicelet1: Slicelet = server1.getSlicelet
     val slicelet2: Slicelet = server2.getSlicelet
@@ -151,10 +143,10 @@ abstract class BaseDicerTestEnvironmentSuite extends DatabricksTest with TestUti
     // Setup: Expected assigned resources for slice keys based on the frozen assigned above.
     val expectedKeysWithAssignedResources: Map[SliceKey, Set[ResourceAddress]] = Map(
       SliceKey.MIN -> Set(address0, address1),
-      keys(0) -> Set(address0, address1, address2),
-      keys(1) -> Set(address0, address1, address2),
-      keys(2) -> Set(address0, address1, address2),
-      keys(3) -> Set(address0, address1, address2),
+      keys(0) -> Set(address0, address2),
+      keys(1) -> Set(address0, address2),
+      keys(2) -> Set(address0, address2),
+      keys(3) -> Set(address0, address2),
       keys(4) -> Set(address0),
       keys(5) -> Set(address1, address2)
     )
@@ -203,7 +195,7 @@ abstract class BaseDicerTestEnvironmentSuite extends DatabricksTest with TestUti
     // Create another server.
     val server1 = createSampleServer(target, selfPort = 1)
     // Freeze the assignment and make sure that an assignment is received by the Clerk that obeys
-    // the assignment below (check via getStubForKey). We create a sequence of 6 sorted keys and
+    // the assignment below (check via getStubForKey). We create a sequence of 7 sorted keys and
     // assign single key slices of keys(0) and keys(2) to server0, and to server1 a single key slice
     // of keys(1) and a slice [keys(3), keys(5)) (so that we can check that keys(4) which is
     // contained in the slice [keys(3), keys(5)) is assigned to server1).
@@ -382,6 +374,5 @@ abstract class BaseDicerTestEnvironmentSuite extends DatabricksTest with TestUti
 
     assert(env.getTotalAttributedLoad(target) == 0)
   }
-
 
 }

@@ -1,9 +1,22 @@
 load("@rules_scala//scala:scala.bzl", "scala_test")
 
-filegroup(
-    name = "all_files",
-    srcs = glob(["**"]),
-    visibility = ["//caching/oss:__pkg__"],
+scala_test(
+    name = "slice_accessor_suite",
+    srcs = ["SliceAccessorSuite.scala"],
+    timeout = "short",
+    deps = [
+        "//dicer/external:external_common",
+        "//dicer/friend:slice_accessor",
+        "//wrappers/rpc:rich_scalapb",
+        "//wrappers/util:async_test_helpers",
+        "//wrappers/util:databricks-test",
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_guava_guava",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
+    ],
 )
 
 scala_test(

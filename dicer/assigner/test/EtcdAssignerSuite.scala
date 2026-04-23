@@ -31,7 +31,7 @@ class EtcdAssignerSuite extends DatabricksTest with TestName {
   /** Configuration that connects the test dicer assigner to the dockerized etcd. */
   private[this] val assignerConfig: Config = Configs.parseMap(
     "databricks.dicer.assigner.store.type" -> "etcd",
-    "databricks.dicer.assigner.store.etcd.sslEnabled" -> false,
+    "databricks.dicer.assigner.preferredAssigner.etcd.sslEnabled" -> false,
     "databricks.dicer.assigner.storeIncarnation" -> 2
   )
 
@@ -269,24 +269,24 @@ class EtcdAssignerSuite extends DatabricksTest with TestName {
     (
       Configs.parseMap(
         "databricks.dicer.assigner.store.type" -> "etcd",
-        "databricks.dicer.assigner.store.etcd.sslEnabled" -> false,
+        "databricks.dicer.assigner.preferredAssigner.etcd.sslEnabled" -> false,
         "databricks.dicer.assigner.storeIncarnation" -> 2
       ),
       Configs.parseMap(
         "databricks.dicer.assigner.store.type" -> "in_memory",
-        "databricks.dicer.assigner.store.etcd.sslEnabled" -> false,
+        "databricks.dicer.assigner.preferredAssigner.etcd.sslEnabled" -> false,
         "databricks.dicer.assigner.storeIncarnation" -> 3
       )
     ),
     (
       Configs.parseMap(
         "databricks.dicer.assigner.store.type" -> "in_memory",
-        "databricks.dicer.assigner.store.etcd.sslEnabled" -> false,
+        "databricks.dicer.assigner.preferredAssigner.etcd.sslEnabled" -> false,
         "databricks.dicer.assigner.storeIncarnation" -> 3
       ),
       Configs.parseMap(
         "databricks.dicer.assigner.store.type" -> "etcd",
-        "databricks.dicer.assigner.store.etcd.sslEnabled" -> false,
+        "databricks.dicer.assigner.preferredAssigner.etcd.sslEnabled" -> false,
         "databricks.dicer.assigner.storeIncarnation" -> 4
       )
     )

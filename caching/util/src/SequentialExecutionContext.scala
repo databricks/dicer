@@ -345,18 +345,31 @@ object SequentialExecutionContext {
     )
   }
 
-  /** Creates a context backed by its own (single-thread) pool. */
+  /**
+   * Creates a context backed by its own (single-thread) pool.
+   *
+   * @param name the name of the execution context
+   * @param enableContextPropagation whether to propagate the context object to runnables submitted
+   *                                 to this execution context
+   * @param alertOwnerTeam the team's registered alert routing name, e.g.
+   *                       [[AlertOwnerTeam.CachingTeam.toString]] for Caching-owned pools,
+   *                       or "eng-my-team" for pools owned by other teams. For alert routing to
+   *                       work correctly, this must be used as the `owner_team_name` for some
+   *                       Dicer target config.
+   */
   def createWithDedicatedPool(
       name: String,
-      enableContextPropagation: Boolean = true): SequentialExecutionContext = {
+      enableContextPropagation: Boolean = true,
+      // TODO(<internal bug>): Make alertOwnerTeam required once all call sites are updated.
+      alertOwnerTeam: String = AlertOwnerTeam.CachingTeam.toString): SequentialExecutionContext = {
     val pool = SequentialExecutionContextPool.create(
       s"$name-pool",
       numThreads = 1,
-      enableContextPropagation
+      enableContextPropagation,
+      alertOwnerTeam
     )
     pool.createExecutionContext(contextName = name)
   }
-
 
   /**
    * The production implementation of [[SequentialExecutionContext]]. Separate from the
@@ -383,9 +396,19 @@ object SequentialExecutionContext {
     /** Lock protecting all context state. */
     private val lock = new ReentrantLock()
 
+    // Use `poolName` instead of `name` for the NamedExecutor created in `wrapExecutionContext`
+    // so that all SECs within the same thread pool share one NamedExecutor name. Note that
+    // the per-SEC observability still preserved, as each SEC continues to have its own name.
+    //
+    // This avoids triggering the `ThreadingStaticConf.namedExecutorCreationThreshold` limit,
+    // beyond which NamedExecutor creation will fail in dev and lead to unexpected behavior,
+    // or trigger alerts in staging and production.
+    //
+    // This is safe because the NamedExecutor here is only a thin context-propagation wrapper,
+    // and its name is only used for monitoring purposes.
     private[util] override val contextAwareExecutionContext: ContextAwareExecutionContext =
       ContextAwareUtil.wrapExecutionContext(
-        name,
+        poolName,
         new ExecutionContext {
           override def execute(runnable: Runnable): Unit = {
             // When a runnable is enqueued in this path, it has already been made context-aware

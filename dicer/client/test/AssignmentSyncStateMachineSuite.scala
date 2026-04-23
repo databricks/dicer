@@ -41,6 +41,7 @@ import com.databricks.dicer.external.{Slice, Target}
 import com.databricks.rpc.tls.TLSOptionsMigration
 import com.databricks.rpc.testing.TestSslArguments
 import com.databricks.testing.DatabricksTest
+import TestClientUtils.TEST_CLIENT_UUID
 
 class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
 
@@ -58,7 +59,7 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
   @ThreadSafe
   private class AssignmentSyncStateMachineDriverWrapper(
       sec: SequentialExecutionContext,
-      config: InternalClientConfig) {
+      config: SliceLookupConfig) {
 
     /** The driver for an [[AssignmentSyncStateMachine]]. */
     private val driver: AssignmentSyncStateMachineDriver = new AssignmentSyncStateMachineDriver(
@@ -98,6 +99,10 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
       }, Duration.Inf)
     }
 
+    /** Returns whether the state machine is currently in backoff mode. */
+    def isInBackoff: Boolean =
+      Await.result(sec.call { driver.forTest.getStateMachine.forTest.isInBackoff }, Duration.Inf)
+
     /** Records all the actions received by the `driver`. */
     private def recordAction(action: DriverAction): Unit = {
       sec.assertCurrentContext()
@@ -111,12 +116,13 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
   /**
    * Creates the client configuration for a AssignmentSyncStateMachine, with test SSL parameters.
    */
-  private def createInternalClientConfig(): InternalClientConfig = {
-    InternalClientConfig(
+  private def createSliceLookupConfig(): SliceLookupConfig = {
+    SliceLookupConfig(
       ClientType.Clerk,
       watchAddress = URI.create("fake-address"),
       tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
       target,
+      clientIdOpt = Some(TEST_CLIENT_UUID),
       watchStubCacheTime = 10.seconds,
       watchFromDataPlane = false,
       enableRateLimiting = false
@@ -125,13 +131,13 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
 
   test("StateMachine deadline exceeded") {
     // Test plan: Verify that if the AssignmentSyncStateMachine doesn't get a response by the
-    // deadline, it will hedge and retry a new request. Do this by first setting up a redirect,
+    // deadline, it will hedge and retry with backoff delay. Do this by first setting up a redirect,
     // verifying that a request is sent to the redirected address, and then simulate a timeout of
-    // the redirected request. After the expected deadline, we should retry using the default
-    // address. Then, if we later gets back a successful response to the original request, it will
-    // be incorporated into the state machine.
+    // the redirected request. At the deadline there should be no immediate retry; after backoff
+    // delay, we should retry using the default address. Then, if we later get back a successful
+    // response to the original request, it will be incorporated into the state machine.
 
-    val config: InternalClientConfig = createInternalClientConfig()
+    val config: SliceLookupConfig = createSliceLookupConfig()
     val driver = new AssignmentSyncStateMachineDriverWrapper(sec, config)
 
     driver.start()
@@ -149,8 +155,7 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
       }
 
     // Inject a response with a redirect. We will test later that after the request times out, we
-    // send the next request to the default address. The redirect also makes the test simpler
-    // because in `onReadFailure` we don't add a backoff when falling back to the default address.
+    // send the next request to the default address.
     val uri = URI.create("fake-redirect")
     val redirect = Redirect(Some(uri))
     val response = ClientResponse(
@@ -182,8 +187,17 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     sec.getClock.advanceBy(config.watchRpcTimeout - 100.millis)
     assert(driver.getReceivedActions.size == expectedNumActions)
 
-    // Advancing beyond the deadline should now create another SendRequest.
+    // Advancing to the deadline should clear outstanding state and enter backoff, but should not
+    // send a new request immediately.
+    assert(!driver.isInBackoff)
     sec.getClock.advanceBy(100.millis)
+    AssertionWaiter("Backoff entered after deadline").await {
+      assert(driver.isInBackoff)
+    }
+    assert(driver.getReceivedActions.size == expectedNumActions)
+
+    // Advance enough for the backoff retry to be scheduled and emitted.
+    sec.getClock.advanceBy(config.minRetryDelay * 2)
     expectedNumActions += 1
     val fallbackRequest: DriverAction.SendRequest =
       AssertionWaiter("Retry SendRequest action").await {
@@ -260,14 +274,16 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     // - Cancel the `driver`.
     // - Trigger a `ReadSuccess` with an empty generation and a redirect for `driver` and then
     //   `activeDriver`. Verify that only the latter generates a new redirect request.
-    // - Advance the clock to trigger a timeout and retry of the redirected request for both
-    //   drivers. Verify that only the active driver generates a retry request.
+    // - Advance the clock to the redirected request deadline. Verify that only the active driver
+    //   enters backoff and does not retry immediately.
+    // - Advance the clock past backoff delay. Verify that only the active driver generates a retry
+    //   request.
     // - Trigger a `ReadSuccess` with a valid assignment. Verify that only the active driver
     //   generates a `UseAssignment` action.
     // - Trigger a `ReadFailure` and invoke `onAdvance` explicitly after backoff. Verify that
     //   only the active driver generates a retry request.
 
-    val config: InternalClientConfig = createInternalClientConfig()
+    val config: SliceLookupConfig = createSliceLookupConfig()
     val driver = new AssignmentSyncStateMachineDriverWrapper(sec, config)
 
     // Setup: Create another driver which will not be cancelled and will be always active. All its
@@ -326,8 +342,20 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
       }
     assert(driver.getReceivedActions == Seq(firstRequest))
 
-    // Setup: We advance the clock to trigger a timeout and retry of the redirected request.
+    // Setup: Advance to the request deadline. This should enter backoff for the active driver,
+    // but should not send a retry immediately.
+    assert(!driver.isInBackoff)
+    assert(!activeDriver.isInBackoff)
     sec.getClock.advanceBy(config.watchRpcTimeout)
+    AssertionWaiter("Active driver entered backoff after deadline").await {
+      assert(!driver.isInBackoff)
+      assert(activeDriver.isInBackoff)
+    }
+    assert(driver.getReceivedActions == Seq(firstRequest))
+    assert(activeDriver.getReceivedActions.size == 2)
+
+    // Setup: Advance past the backoff delay so the active driver's retry is emitted.
+    sec.getClock.advanceBy(config.minRetryDelay * 2)
 
     // Verify: `driver` should not send any new requests while `activeDriver` should send a retry
     // request.
@@ -404,7 +432,7 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     val tickerTime: TickerTime = clock.tickerTime()
     val instant: Instant = clock.instant()
 
-    val config: InternalClientConfig = createInternalClientConfig()
+    val config: SliceLookupConfig = createSliceLookupConfig()
     val testDriver: TestStateMachineDriver[Event, DriverAction] =
       new TestStateMachineDriver(
         new AssignmentSyncStateMachine(config, new Random(), "test-clerk")
@@ -516,11 +544,12 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
 
     // Setup: Create a config with rate limiting enabled, a state machine, and a
     // `TestStateMachineDriver`.
-    val config: InternalClientConfig = InternalClientConfig(
+    val config: SliceLookupConfig = SliceLookupConfig(
       ClientType.Clerk,
       watchAddress = URI.create("fake-address"),
       tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
       target,
+      clientIdOpt = Some(TEST_CLIENT_UUID),
       watchStubCacheTime = 10.seconds,
       watchFromDataPlane = false,
       enableRateLimiting = true
@@ -737,11 +766,12 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
 
     // Setup: Create a config with rate limiting enabled, a state machine, and an
     // `AssignmentSyncStateMachineDriver`.
-    val config: InternalClientConfig = InternalClientConfig(
+    val config: SliceLookupConfig = SliceLookupConfig(
       ClientType.Clerk,
       watchAddress = URI.create("fake-address"),
       tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
       target,
+      clientIdOpt = Some(TEST_CLIENT_UUID),
       watchStubCacheTime = 10.seconds,
       watchFromDataPlane = false,
       enableRateLimiting = true
@@ -812,11 +842,12 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
 
     // Setup: Create a config with rate limiting disabled, a state machine, and a
     // `TestStateMachineDriver`.
-    val config: InternalClientConfig = InternalClientConfig(
+    val config: SliceLookupConfig = SliceLookupConfig(
       ClientType.Clerk,
       watchAddress = URI.create("fake-address"),
       tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
       target,
+      clientIdOpt = Some(TEST_CLIENT_UUID),
       watchStubCacheTime = 10.seconds,
       watchFromDataPlane = false,
       enableRateLimiting = false

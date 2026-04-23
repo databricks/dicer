@@ -16,7 +16,7 @@ import com.databricks.api.proto.dicer.common.{ClientRequestP, ClientResponseP}
 import com.databricks.common.http.HttpRequestInfo
 import com.databricks.rpc.RPCContext
 import com.databricks.caching.util.{
-  FakeS2SProxy,
+  FakeProxy,
   FakeSequentialExecutionContextPool,
   PrefixLogger,
   RealtimeTypedClock,
@@ -29,7 +29,7 @@ import com.databricks.conf.Configs
 import com.databricks.dicer.assigner.InterposingEtcdPreferredAssignerDriver.ShutdownOption
 import com.databricks.dicer.assigner.Store.WriteAssignmentResult
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
-import com.databricks.dicer.assigner.conf.StoreConf.StoreEnum.{ETCD, IN_MEMORY, SHADOW}
+import com.databricks.dicer.assigner.conf.StoreConf.StoreEnum.{ETCD, IN_MEMORY}
 import com.databricks.dicer.assigner.config.StaticTargetConfigProvider
 import com.databricks.dicer.assigner.{
   Assigner,
@@ -47,7 +47,6 @@ import com.databricks.dicer.assigner.{
   InterposingEtcdPreferredAssignerDriver,
   InterposingEtcdPreferredAssignerStore,
   PreferredAssignerDriver,
-  ShadowEtcdStore,
   Store,
   TestableDicerAssignerConf
 }
@@ -78,28 +77,36 @@ class TestAssigner private (
     sec: SequentialExecutionContext,
     private[common] val conf: TestableDicerAssignerConf,
     preferredAssignerDriver: PreferredAssignerDriver,
-    interceptableStore: InterceptableStore,
+    storeFactory: TestAssigner.InterceptableStoreFactory,
     fakeKubernetesTargetWatcherFactory: FakeKubernetesTargetWatcherFactory,
     healthWatcherFactory: HealthWatcher.Factory,
     configProvider: StaticTargetConfigProvider,
     uuid: UUID = UUID.randomUUID(),
     hostName: String = "localhost",
     assignerClusterUri: URI,
-    minAssignmentGenerationInterval: FiniteDuration)
+    minAssignmentGenerationInterval: FiniteDuration,
+    dPageNamespaceOpt: Option[String])
     extends Assigner.BaseForTest(
       secPool,
       sec,
       conf,
       preferredAssignerDriver,
-      interceptableStore,
+      storeFactory,
       fakeKubernetesTargetWatcherFactory,
       healthWatcherFactory,
       configProvider,
       uuid,
       hostName,
       assignerClusterUri,
-      minAssignmentGenerationInterval
+      minAssignmentGenerationInterval,
+      dPageNamespaceOpt
     ) {
+
+  /**
+   * The store used by this test Assigner; same instance returned by the factory for all
+   * generators.
+   */
+  private val interceptableStore: InterceptableStore = storeFactory.getStore()
 
   private val logger: PrefixLogger = PrefixLogger.create(this.getClass, "")
 
@@ -204,7 +211,7 @@ class TestAssigner private (
       // This ensures that data plane clients in tests don't have bugs that cause them to try to
       // talk directly to the Assigner instead of going through S2S Proxy.
       val hasS2SProxyHeader: Boolean =
-        rpcContext.httpRequest.getHeader(FakeS2SProxy.ADDED_HEADER).isDefined
+        rpcContext.httpRequest.getHeader(FakeProxy.ADDED_HEADER).isDefined
       if (conf.expectRequestsThroughS2SProxy) {
         require(
           hasS2SProxyHeader,
@@ -472,6 +479,14 @@ class TestAssigner private (
 /** Companion object for [[TestAssigner]]. */
 object TestAssigner {
 
+  /**
+   * A [[Assigner.StoreFactory]] that always returns the same [[InterceptableStore]], allowing
+   * tests to avoid casting when they need the interceptable store.
+   */
+  final class InterceptableStoreFactory(store: InterceptableStore) extends Assigner.StoreFactory {
+    override def getStore(): InterceptableStore = store
+  }
+
   private val logger = PrefixLogger.create(TestAssigner.getClass, "")
 
   /**
@@ -596,7 +611,8 @@ object TestAssigner {
       config: Config,
       configProvider: StaticTargetConfigProvider,
       dockerizedEtcdOpt: Option[EtcdTestEnvironment],
-      assignerClusterUri: URI): TestAssigner = {
+      assignerClusterUri: URI,
+      dPageNamespaceOpt: Option[String] = None): TestAssigner = {
     logger.info(s"Starting TestAssigner")
     val sec: SequentialExecutionContext = secPool.createExecutionContext("test-assigner-store")
     val assignerSec: SequentialExecutionContext = secPool.createExecutionContext("test-assigner")
@@ -623,25 +639,29 @@ object TestAssigner {
         50.milliseconds
     }
 
+    val interceptableStore: InterceptableStore = new InterceptableStore(sec, store)
+    val storeFactory: TestAssigner.InterceptableStoreFactory =
+      new TestAssigner.InterceptableStoreFactory(interceptableStore)
     val testAssigner: TestAssigner = new TestAssigner(
       secPool,
       assignerSec,
       config.assignerConf,
       preferredAssignerDriver,
-      new InterceptableStore(sec, store),
+      storeFactory,
       // Use fake kubernetes watcher, since we can't interact with Kubernetes API server.
       new FakeKubernetesTargetWatcherFactory(),
       new TestHealthWatcherFactory(config.assignerConf.storeIncarnation),
       configProvider,
       assignerClusterUri = assignerClusterUri,
-      minAssignmentGenerationInterval = minAssignmentGenerationInterval
+      minAssignmentGenerationInterval = minAssignmentGenerationInterval,
+      dPageNamespaceOpt = dPageNamespaceOpt
     )
     testAssigner.start()
     testAssigner
   }
 
   /**
-   * REQUIRES: When the config specifies the Assigner to use etcd mode or shadow etcd mode,
+   * REQUIRES: When the config specifies the Assigner to use etcd mode,
    * `dockerizedEtcdOpt` must be defined.
    *
    * Returns a store running on `sec` with the configuration specified in `conf`.
@@ -655,22 +675,6 @@ object TestAssigner {
         logger.info("Initializing InMemoryStore.")
         InMemoryStore(
           sec,
-          conf.storeIncarnation
-        )
-      case SHADOW =>
-        logger.info("Initializing ShadowEtcdStore.")
-        require(
-          dockerizedEtcdOpt.isDefined,
-          "dockerizedEtcdOpt must be defined for assigner using shadow etcd store mode. Please " +
-          "check if allowEtcdMode is set to true if you are using InternalDicerTestEnvironment."
-        )
-        val etcdClient: EtcdClient = dockerizedEtcdOpt.get.createEtcdClient(
-          EtcdClient.Config(Assigner.getAssignmentsEtcdNamespace(conf))
-        )
-        new ShadowEtcdStore(
-          sec,
-          etcdClient,
-          conf.shadowStoreStoreIncarnation,
           conf.storeIncarnation
         )
       case ETCD =>

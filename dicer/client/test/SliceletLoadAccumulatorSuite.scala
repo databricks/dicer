@@ -81,7 +81,7 @@ class SliceletLoadAccumulatorSuite extends DatabricksTest with TestName {
         case Action.IncrementPrimaryLoad(proto) =>
           val key: SliceKey = proto.incrementByKey match {
             case IncrementByKey.Key(key) => TestSliceUtils.toSliceKey(key)
-            case IncrementByKey.BytesKey(bytes) => SliceKey.withIdentityFunction(bytes)
+            case IncrementByKey.BytesKey(bytes) => SliceKey.fromRawBytes(bytes)
             case IncrementByKey.Empty => SliceKey.MIN // Default to MIN if no key is specified
           }
           accumulator.incrementPrimaryRateBy(key, proto.getValue)
@@ -208,7 +208,7 @@ class SliceletLoadAccumulatorSuite extends DatabricksTest with TestName {
 
           if (expected.topSliceKeys.nonEmpty) {
             val topSliceKeys: Set[SliceKey] = expected.topSliceKeys.map { bytes =>
-              SliceKey.withIdentityFunction(bytes)
+              SliceKey.fromRawBytes(bytes)
             }.toSet
             val actual: Set[SliceKey] = actualLoad.topKeys.map((_: KeyLoad).key).toSet
             assert(

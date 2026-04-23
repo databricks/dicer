@@ -204,7 +204,6 @@ class FakeSequentialExecutionContextSuite
     assert(Await.result(exceptionPromise.future, Duration.Inf) == e)
   }
 
-
   /**
    * Thread-safe log used to verify an expected sequence of callbacks executed on a given
    * [[SequentialExecutionContext]].

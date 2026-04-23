@@ -30,7 +30,7 @@ object DebugStringServletRegistry extends HttpHandler {
   case class ActionKey(actionName: String, httpMethod: String)
 
   /** The URL path for the debugging page. */
-  val DEBUG_URL_PATH: String = "/debug"
+  val DEBUG_URL_PATH: String = "/admin/debug"
 
   // NOTE: it's not a good practice to make the `actions` and `components` public, but it's done
   // here for compatibility with the internal codebase.

@@ -1,0 +1,19 @@
+syntax = "proto2";
+
+package databricks.caching.util.javaapi.test;
+
+import "scalapb.proto";
+
+option java_package = "com.databricks.caching.util.javaapi.test";
+option java_generate_equals_and_hash = true;
+option (scalapb.options) = {
+  flat_package: true,
+};
+
+message StringTestMessageP {
+  repeated string strings = 1;
+}
+
+message IntTestMessageP {
+  repeated int32 ints = 1;
+}

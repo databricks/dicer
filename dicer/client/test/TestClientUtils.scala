@@ -4,6 +4,7 @@ import java.util.UUID
 import java.io.File
 import io.prometheus.client.CollectorRegistry
 import com.databricks.backend.common.util.Project
+import com.typesafe.config.ConfigFactory
 import com.databricks.caching.util.AssertMacros.iassert
 import com.databricks.caching.util.{AssertionWaiter, MetricUtils, NonReentrantLock}
 import com.databricks.caching.util.Lock.withLock
@@ -33,6 +34,9 @@ import scala.concurrent.duration.Duration
 case class TlsFilePaths(keystorePath: String, truststorePath: String)
 
 object TestClientUtils {
+
+  /** A fixed client UUID for use in unit tests where the client UUID is not important. */
+  val TEST_CLIENT_UUID: UUID = UUID.fromString("00000000-0000-0000-0000-000000000001")
 
   /** Wait for an assignment to be delivered to `slicelet` in which it is assigned `key`. */
   def waitForAssignment(slicelet: Slicelet, key: SliceKey): Unit = {
@@ -81,7 +85,8 @@ object TestClientUtils {
         "databricks.dicer.assigner.rpc.port" -> assignerPort,
         "databricks.dicer.assigner.host" -> "localhost",
         "databricks.dicer.slicelet.statetransfer.port" -> 0,
-        "databricks.dicer.client.watchFromDataPlane" -> watchFromDataPlane
+        "databricks.dicer.client.watchFromDataPlane" -> watchFromDataPlane,
+        "databricks.dicer.internal.cachingteamonly.clientUuid" -> UUID.randomUUID().toString
       )
     }
     sliceletConfig
@@ -101,7 +106,7 @@ object TestClientUtils {
       clientTlsFilePathsOpt: Option[TlsFilePaths],
       serverTlsFilePathsOpt: Option[TlsFilePaths],
       watchFromDataPlane: Boolean): SliceletConf = {
-    val config =
+    val config: Config =
       createSliceletConfig(
         assignerPort,
         sliceletHost,
@@ -119,7 +124,7 @@ object TestClientUtils {
       override def dicerServerTlsOptions: Option[TLSOptions] =
         buildTlsOptions(serverTlsFilePathsOpt)
 
-      override val branch =
+      override val branch: String =
         "dicer_customer_slicelet_2024-09-04_14.57.01Z_master_164f18b3_1957847387"
     }
   }
@@ -157,8 +162,10 @@ object TestClientUtils {
       clientTlsFilePathsOpt,
       serverTlsFilePathsOpt = None
     )
-    val sliceletEndpointConfig: Config =
-      Configs.parseMap("databricks.dicer.slicelet.rpc.port" -> sliceletPort)
+    val sliceletEndpointConfig: Config = Configs.parseMap(
+      "databricks.dicer.slicelet.rpc.port" -> sliceletPort,
+      "databricks.dicer.internal.cachingteamonly.clientUuid" -> UUID.randomUUID().toString
+    )
     sslConfig.merge(sliceletEndpointConfig).merge(createAllowMultipleClientsConfig())
   }
 
@@ -170,15 +177,20 @@ object TestClientUtils {
       clientTlsFilePathsOpt,
       serverTlsFilePathsOpt = None
     )
-    val assignerEndpointConfig: Config =
-      Configs.parseMap("databricks.dicer.assigner.rpc.port" -> assignerPort)
+    val assignerEndpointConfig: Config = Configs.parseMap(
+      "databricks.dicer.assigner.rpc.port" -> assignerPort,
+      "databricks.dicer.internal.cachingteamonly.clientUuid" -> UUID.randomUUID().toString
+    )
     sslConfig.merge(assignerEndpointConfig).merge(createAllowMultipleClientsConfig())
   }
 
-  /** Returns a [[Config]] with a bit set to allow multiple Clerks per target and Slicelets. */
+  /** Returns a [[Config]] with a bit set to allow multiple Slicelets within this process. */
   def createAllowMultipleClientsConfig(): Config = {
     Configs.parseMap(
-      InternalClientConf.allowMultipleClientInstancesPropertyName -> true
+      InternalClientConf.allowMultipleSliceletInstancesPropertyName -> true,
+      // Tests which create multiple Clerks for the same target should not reuse lookups to
+      // simulate multiple pods between which there may be assignment skew.
+      InternalClientConf.allowMultipleClerksShareLookupPerTargetPropertyName -> false
     )
   }
 
@@ -187,6 +199,19 @@ object TestClientUtils {
       sliceletPort: Int,
       clientTlsFilePathsOpt: Option[TlsFilePaths]): ClerkConf = {
     createTestClerkConfInternal(createClerkConfig(sliceletPort, clientTlsFilePathsOpt))
+  }
+
+  /**
+   * Creates a [[TestableDicerClientProtoLoggerConf]], allowing tests to control the logging sample
+   * fraction via [[MockFeatureFlagReaderProvider]].
+   *
+   * @param sampleFraction The sample fraction to set.
+   */
+  def createTestProtoLoggerConf(sampleFraction: Double): TestableDicerClientProtoLoggerConf = {
+    val conf = new ProjectConf(Project.TestProject, ConfigFactory.empty())
+    with TestableDicerClientProtoLoggerConf
+    conf.setLoggingSampleFraction(sampleFraction)
+    conf
   }
 
   /** Creates a `Clerk[ResourceAddress]` whose stub factory just forwards the resource address. */
@@ -212,8 +237,12 @@ object TestClientUtils {
   }
 
   /** Default branch name for test clerks. */
-  private val DEFAULT_TEST_CLERK_BRANCH: String =
+  private[dicer] val DEFAULT_TEST_CLERK_BRANCH: String =
     "dicer_customer_clerk_2024-09-04_14.57.01Z_master_164f18b3_1957847387"
+
+  /** Default branch name for test slicelets. */
+  private[dicer] val DEFAULT_TEST_SLICELET_BRANCH: String =
+    "dicer_customer_slicelet_2024-09-04_14.57.01Z_master_164f18b3_1957847387"
 
   /** Reads the value of the dicer_slicelet_slicekeyhandles_created_total metric for `target`. */
   def getSliceKeyHandlesCreatedMetric(target: Target): Double = {
@@ -311,7 +340,7 @@ object TestClientUtils {
   }
 
   /** Returns a [[Config]] with SSL conf keys set for test. */
-  private def getSslConfig(
+  private[client] def getSslConfig(
       clientTlsFilePathsOpt: Option[TlsFilePaths],
       serverTlsFilePathsOpt: Option[TlsFilePaths]): Config = {
     val (clientKeystorePath, clientTruststorePath) =
@@ -336,7 +365,7 @@ object TestClientUtils {
     )
   }
 
-  private def buildTlsOptions(tlsFilePathsOpt: Option[TlsFilePaths]): Option[TLSOptions] = {
+  private[client] def buildTlsOptions(tlsFilePathsOpt: Option[TlsFilePaths]): Option[TLSOptions] = {
     (tlsFilePathsOpt) match {
       case (Some(TlsFilePaths(keystorePath, truststorePath))) =>
         Some(

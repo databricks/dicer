@@ -852,7 +852,6 @@ class PipelineSuite
     assert(map2.getNonBlocking == Success(44))
   }
 
-
   test("PipelineExecutor.toString") {
     // Test plan: Verify that pipeline executors have the expected string representation.
     assert(

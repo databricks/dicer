@@ -124,10 +124,13 @@ class AssignmentGeneratorDriver private (
     dicerTeeEventEmitter.maybeEmitEvent(target, event)
   }
 
-  /** Informs the generator of a termination signal for the Slicelet with resourceUuid. */
-  private def onTerminationSignal(resourceUuid: UUID): Unit = sec.run {
-    logger.info(s"Received termination signal for resourceUuid: $resourceUuid")
-    handleEvent(Event.TerminationSignal(resourceUuid))
+  /**
+   * Informs the generator of a termination signal from Kubernetes for the Slicelet with
+   * `resourceUuid`.
+   */
+  private def onTerminationSignalFromKubernetes(resourceUuid: UUID): Unit = sec.run {
+    logger.info(s"Received termination signal from Kubernetes for resourceUuid: $resourceUuid")
+    handleEvent(Event.TerminationSignalFromKubernetes(resourceUuid))
   }
 
   /** Starts the driver. */
@@ -147,7 +150,7 @@ class AssignmentGeneratorDriver private (
         iassert(kubernetesTargetWatcherOpt.isEmpty)
         logger.info(s"Starting KubernetesTargetWatcher for $watchTarget")
         val kubernetesTargetWatcher =
-          kubernetesTargetWatcherFactory.create(watchTarget, onTerminationSignal)
+          kubernetesTargetWatcherFactory.create(watchTarget, onTerminationSignalFromKubernetes)
         kubernetesTargetWatcher.start()
         kubernetesTargetWatcherOpt = Some(kubernetesTargetWatcher)
 

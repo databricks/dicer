@@ -1,6 +1,8 @@
 package com.databricks.dicer.external
 
 import com.databricks.api.proto.dicer.common.DiffAssignmentP
+import com.databricks.dicer.client.TestClientUtils.FakeBlockingReadinessProvider
+import com.databricks.dicer.common.{SetReadinessProviderBlockedRequestP, SetReadinessStatusRequestP}
 import com.databricks.dicer.common.{
   Assignment,
   CloseSliceKeyHandleRequestP,
@@ -71,6 +73,19 @@ trait SliceletDriver {
   /** Returns the active port of the Slicelet's watch server. */
   def activePort: Int
 
+  /**
+   * Sets the readiness status of this Slicelet to the given `isReady` status. If true, the Slicelet
+   * is considered ready to serve traffic; if false, the Slicelet is considered not ready.
+   */
+  def setReadinessStatus(isReady: Boolean): Unit
+
+  /**
+   * Sets the blocking state of this Slicelet's readiness provider. If `blocked` is true, the
+   * `isReady` call will block indefinitely until [[setReadinessProviderBlocked]] is called with
+   * `blocked` set to false.
+   */
+  def setReadinessProviderBlocked(blocked: Boolean): Unit
+
   /** See [[Slicelet.forTest.stop]]. */
   def stop(): Unit
 }
@@ -96,7 +111,10 @@ object SliceletDriver {
 }
 
 /** The [[SliceletDriver]] that exercises the Scala [[Slicelet]] implementation. */
-class ScalaSliceletDriver(val slicelet: Slicelet) extends SliceletDriver {
+class ScalaSliceletDriver(
+    val slicelet: Slicelet,
+    fakeReadinessProviderOpt: Option[FakeBlockingReadinessProvider])
+    extends SliceletDriver {
   override def start(selfPort: Int, listenerOpt: Option[SliceletListener]): Unit = {
     slicelet.start(selfPort, listenerOpt)
   }
@@ -127,6 +145,34 @@ class ScalaSliceletDriver(val slicelet: Slicelet) extends SliceletDriver {
   override def resourceAddress: ResourceAddress = SliceletAccessor.resourceAddress(slicelet)
 
   override def activePort: Int = slicelet.impl.forTest.sliceletPort
+
+  override def setReadinessStatus(isReady: Boolean): Unit = {
+    fakeReadinessProviderOpt match {
+      case Some(fakeReadinessProvider: FakeBlockingReadinessProvider) =>
+        fakeReadinessProvider.setReady(isReady)
+      case None =>
+        throw new UnsupportedOperationException(
+          "SliceletDriver was not initialized with a fake readiness provider, so its " +
+          "readiness status cannot be manually modified."
+        )
+    }
+  }
+
+  override def setReadinessProviderBlocked(blocked: Boolean): Unit = {
+    fakeReadinessProviderOpt match {
+      case Some(fakeReadinessProvider: FakeBlockingReadinessProvider) =>
+        if (blocked) {
+          fakeReadinessProvider.blockForever()
+        } else {
+          fakeReadinessProvider.unblock()
+        }
+      case None =>
+        throw new UnsupportedOperationException(
+          "SliceletDriver was not initialized with a fake readiness provider, so its " +
+          "blocking state cannot be manually modified."
+        )
+    }
+  }
 
   override def stop(): Unit = slicelet.forTest.stop()
 

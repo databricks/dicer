@@ -6,7 +6,7 @@ import "dicer/assigner/config/proto/advanced_target_config.proto";
 import "dicer/external/proto/target.proto";
 import "scalapb.proto";
 
-option java_package = "com.databricks.api.proto.dicer.assigner.config";;
+option java_package = "com.databricks.api.proto.dicer.assigner.config";
 option java_generate_equals_and_hash = true;
 option java_outer_classname = "InternalTargetConfigProto";
 option java_multiple_files = true;

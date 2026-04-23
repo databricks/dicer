@@ -4,7 +4,8 @@ import com.databricks.conf.Configs
 import com.databricks.dicer.assigner.{
   Assigner,
   DisabledPreferredAssignerDriver,
-  EtcdPreferredAssignerDriver
+  EtcdPreferredAssignerDriver,
+  PreferredAssignerTestHelper
 }
 import com.databricks.dicer.common.Incarnation
 import com.databricks.rpc.DatabricksObjectMapper
@@ -31,7 +32,7 @@ class PreferredAssignerStoreConfSuite extends DatabricksTest {
       preferredAssignerEnabled,
       "databricks.dicer.assigner.preferredAssigner.storeIncarnation" ->
       preferredAssignerStoreIncarnation.value,
-      "databricks.dicer.assigner.store.etcd.endpoints" ->
+      "databricks.dicer.assigner.preferredAssigner.etcd.endpoints" ->
       endpointsConfigString
     )
   }
@@ -102,7 +103,10 @@ class PreferredAssignerStoreConfSuite extends DatabricksTest {
     )
     val preferredAssignerConf: DicerAssignerConf =
       new DicerAssignerConf(Configs.parseMap(preferredAssignerConfMap))
-    Assigner.createPreferredAssignerDriver(preferredAssignerConf) match {
+    Assigner.createPreferredAssignerDriver(
+      preferredAssignerConf,
+      PreferredAssignerTestHelper.noOpMembershipCheckerFactory
+    ) match {
       case _: EtcdPreferredAssignerDriver => assert(true)
       case driver => fail(s"expected `EtcdPreferredAssignerDriver` but got $driver")
     }
@@ -114,7 +118,10 @@ class PreferredAssignerStoreConfSuite extends DatabricksTest {
     )
     val disabledPreferredAssignerConf: DicerAssignerConf =
       new DicerAssignerConf(Configs.parseMap(disabledPreferredAssignerConfMap))
-    Assigner.createPreferredAssignerDriver(disabledPreferredAssignerConf) match {
+    Assigner.createPreferredAssignerDriver(
+      disabledPreferredAssignerConf,
+      PreferredAssignerTestHelper.noOpMembershipCheckerFactory
+    ) match {
       case _: DisabledPreferredAssignerDriver => assert(true)
       case driver => fail(s"expected `DisabledPreferredAssignerDriver` but got $driver")
     }

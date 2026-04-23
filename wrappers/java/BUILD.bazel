@@ -1,0 +1,21 @@
+load("@rules_java//java:java_library.bzl", "java_library")
+
+package(
+    default_visibility = ["//visibility:public"],
+)
+
+java_library(
+    name = "databricks_java_test",
+    testonly = True,
+    srcs = [
+        "test/DatabricksJavaTest.java",
+    ],
+    # Export JUnit API so that tests don't need to add it themselves. This matches internal
+    # behavior.
+    exports = [
+        "@contrib_rules_jvm_deps//:org_junit_jupiter_junit_jupiter_api",
+    ],
+    deps = [
+        "@contrib_rules_jvm_deps//:org_junit_jupiter_junit_jupiter_api",
+    ],
+)

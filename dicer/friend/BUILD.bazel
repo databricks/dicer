@@ -4,12 +4,6 @@ package(
     default_visibility = ["//dicer:internal"],
 )
 
-filegroup(
-    name = "all_files",
-    srcs = glob(["**"]),
-    visibility = ["//caching/oss:__pkg__"],
-)
-
 scala_library(
     name = "slicelet_accessor",
     srcs = ["src/SliceletAccessor.scala"],
@@ -27,6 +21,24 @@ scala_library(
     srcs = ["src/ShutdownHookConstants.scala"],
     visibility = ["//visibility:public"],
     deps = ["//wrappers/util:shutdown-hook-manager"],
+)
+
+scala_library(
+    name = "slice_accessor",
+    srcs = ["src/SliceAccessor.scala"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//dicer/common:slice_helper",
+        "//dicer/external:external_common",
+        "//dicer/friend/proto:friend_protolib",
+        "//wrappers/rpc:rich_scalapb",
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_guava_guava",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
+    ],
 )
 
 scala_library(

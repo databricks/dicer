@@ -120,6 +120,34 @@ object Algorithm {
   }
 
   /**
+   * Generates a homomorphic assignment for the given target and predecessor assignment to
+   * prevent the spreading of bad keys across resources. A homomorphic assignment maintains the
+   * topological structure of its predecessor, guaranteeing that slices that did not share a
+   * resource in the predecessor must not share resources in the new assignment. If too few
+   * resources are available, some keys may be temporarily blackholed to maintain the predecessor's
+   * topology. No keys will be reassigned for load balancing or replication purposes, and the
+   * homomorphic assignment generation should be reserved solely for key of death scenarios. Note
+   * that the load tracked by the predecessor assignment is propagated to the new assignment.
+   *
+   * @param targetForDebug the target for which the assignment is being generated, used for
+   *                       debugging only.
+   * @param targetConfig the configuration parameters specific to the target
+   * @param resources the current set of healthy pods.
+   * @param baseAssignmentSliceMap the slice map of the predecessor for the new assignment.
+   */
+  def generateHomomorphicAssignment(
+      targetForDebug: Target,
+      resources: Resources,
+      baseAssignmentSliceMap: SliceMap[SliceAssignment]): SliceMap[ProposedSliceAssignment] = {
+    // Generate a new homomorphic assignment, taking into account any resource health changes.
+    HomomorphicAssignmentAlgorithm.run(
+      targetForDebug,
+      resources,
+      baseAssignmentSliceMap
+    )
+  }
+
+  /**
    * Calculate the adjusted load map based on the uniform load reservation, the available
    * resource count, and the current load map.
    *
@@ -290,7 +318,6 @@ object Algorithm {
       .max(minDesiredLoadExistingResource)
       .max(minDesiredLoadNewResource)
 
-
     DesiredLoadRange(
       splitThreshold = splitThreshold,
       minDesiredLoadExistingResource = minDesiredLoadExistingResource,
@@ -451,5 +478,297 @@ private[assigner] object InitialAssignmentAlgorithm {
       )
     }
     new SliceMap(sliceAssignments.result(), (_: ProposedSliceAssignment).slice)
+  }
+}
+
+/** The class that generates a homomorphic assignment in the case of key of death scenarios. */
+private[assigner] object HomomorphicAssignmentAlgorithm {
+
+  /**
+   * Generates the homomorphic assignment, as described in
+   * `Algorithm.generateHomomorphicAssignment()`.
+   */
+  def run(
+      targetForDebug: Target,
+      resources: Resources,
+      baseAssignmentSliceMap: SliceMap[SliceAssignment]): SliceMap[ProposedSliceAssignment] = {
+
+    val logger = PrefixLogger.create(this.getClass, targetForDebug.getLoggerPrefix)
+    logger.info(s"Generating homomorphic assignment for ${resources.availableResources}")
+
+    // If the available resources are a subset of the base assignment's resources, return the same
+    // assignment as the predecessor. We do an early return here to avoid the overhead of running
+    // the main homomorphic assignment algorithm body.
+    val baseAssignmentResources: Set[Squid] = baseAssignmentSliceMap.entries.flatMap {
+      sliceAssignment: SliceAssignment =>
+        sliceAssignment.sliceWithResources.resources
+    }.toSet
+    if (resources.availableResources.subsetOf(baseAssignmentResources)) {
+      val proposedSliceAssignments: SliceMap[ProposedSliceAssignment] =
+        baseAssignmentSliceMap.map(SliceMapHelper.PROPOSED_SLICE_ASSIGNMENT_ACCESSOR) {
+          sliceAssignment: SliceAssignment =>
+            ProposedSliceAssignment(
+              sliceAssignment.sliceWithResources,
+              sliceAssignment.primaryRateLoadOpt
+            )
+        }
+      return proposedSliceAssignments
+    }
+
+    // High level algorithm:
+    // 1. Identify all unhealthy resources in the predecessor assignment, and organize them from
+    //    hottest (most load-bearing) to coldest.
+    // 2. For each unhealthy resource, assign all slice replicas on it to a new, healthy resource
+    //    not previously present in the old assignment. The hottest resources are prioritized for
+    //    replacement to minimize the traffic disruption during key of death scenarios, especially
+    //    when there are not enough healthy resources to replace all unhealthy ones in the
+    //    predecessor.
+    //    a. If there are fewer new, healthy resources than unhealthy resources, some keys may be
+    //       temporarily blackholed to their existing unhealthy resource to maintain the
+    //       predecessor's topology.
+    //    b. If new, healthy resources with nothing assigned are still available, they will be
+    //       ignored.
+    // 3. Continuously healthy resources -- resources in both the predecessor assignment and the
+    //    set of resources provided -- will maintain the exact same slice replica set as in the
+    //    predecessor, remaining unchanged.
+    //
+    // These steps guarantee that the key of death will never appear on more resources than it did
+    // in the predecessor assignment, as slices are never merged or replicated. Furthermore, slice
+    // assignment boundaries are guaranteed to be the same as the predecessor.
+
+    // Calculate the load per slice replica based on the predecessor assignment's tracked load and
+    // the number of resources assigned to each slice.
+    val loadPerSliceReplica: Map[Slice, Double] = baseAssignmentSliceMap.entries.map {
+      sliceAssignment: SliceAssignment =>
+        val sliceWithResources: SliceWithResources = sliceAssignment.sliceWithResources
+        val slice: Slice = sliceWithResources.slice
+        val numResources: Int = sliceWithResources.resources.size
+        val primaryRateLoad: Double = sliceAssignment.primaryRateLoadOpt.getOrElse(0.0)
+        // SliceWithResources requires that the resources be non-empty, so we will not encounter
+        // any divide-by-zero errors here.
+        (slice, primaryRateLoad / numResources.toDouble)
+    }.toMap
+
+    // Keep track of the slice replicas assigned to each resource, which will be modified
+    // when slice replicas are reassigned from unhealthy to healthy resources.
+    val sliceReplicasPerResource = mutable.Map[Squid, Set[Slice]]().withDefaultValue(Set.empty)
+    for (sliceAssignment: SliceAssignment <- baseAssignmentSliceMap.entries) {
+      val sliceWithResources: SliceWithResources = sliceAssignment.sliceWithResources
+      val slice: Slice = sliceWithResources.slice
+      for (resource: Squid <- sliceWithResources.resources) {
+        sliceReplicasPerResource(resource) += slice
+      }
+    }
+
+    // Identify all resources in the base assignment.
+    val baseResources: Set[Squid] = baseAssignmentSliceMap.entries.flatMap {
+      sliceAssignment: SliceAssignment =>
+        sliceAssignment.sliceWithResources.resources
+    }.toSet
+
+    // Add all unhealthy resources to a priority queue, sorted by load in descending order.
+    val sortedUnhealthyResources: mutable.PriorityQueue[ResourceWithLoad] =
+      mutable.PriorityQueue.empty
+    for (oldResource: Squid <- baseResources) {
+      if (!resources.availableResources.contains(oldResource)) {
+        val resourceLoad: Double = sliceReplicasPerResource(oldResource).toSeq.map { slice: Slice =>
+          loadPerSliceReplica(slice)
+        }.sum
+        sortedUnhealthyResources.enqueue(
+          ResourceWithLoad(
+            oldResource,
+            resourceLoad
+          )
+        )
+      }
+    }
+
+    // Find all new, healthy resources that are not present in the predecessor assignment.
+    val unusedHealthyResources: Vector[Squid] = resources.availableResources.toVector
+      .filter { resource: Squid =>
+        !baseResources.contains(resource)
+      }
+
+    // In order from hottest to coldest, replace each of the unhealthy resources with the new,
+    // healthy resources.
+    val resourceReplacements: Vector[(ResourceWithLoad, Squid)] =
+      sortedUnhealthyResources.toVector
+        .zip(unusedHealthyResources)
+    for (resourceReplacement: (ResourceWithLoad, Squid) <- resourceReplacements) {
+      val (oldResourceWithLoad, newResource): (ResourceWithLoad, Squid) = resourceReplacement
+      val oldResource: Squid = oldResourceWithLoad.squid
+
+      // Update the resource-to-slice replica mappings.
+      sliceReplicasPerResource(newResource) = sliceReplicasPerResource(oldResource)
+      sliceReplicasPerResource.remove(oldResource)
+    }
+
+    // Convert the slice replicas to resource mappings into a SliceMap.
+    val resourcesPerSlice = mutable.Map[Slice, Set[Squid]]().withDefaultValue(Set.empty)
+    for (resource: Squid <- sliceReplicasPerResource.keys) {
+      val sliceReplicas: Set[Slice] = sliceReplicasPerResource(resource)
+      for (slice: Slice <- sliceReplicas) {
+        resourcesPerSlice(slice) += resource
+      }
+    }
+
+    val slicesWithResources: Vector[SliceWithResources] = resourcesPerSlice
+      .map {
+        case (slice: Slice, resources: Set[Squid]) =>
+          SliceWithResources(slice, resources)
+      }
+      .toVector
+      .sortBy(SliceMapHelper.SLICE_WITH_RESOURCES_ACCESSOR)
+    val homomorphicAssignmentSliceMap: SliceMap[SliceWithResources] =
+      new SliceMap(slicesWithResources, SliceMapHelper.SLICE_WITH_RESOURCES_ACCESSOR)
+
+    // Validate the resulting slice map.
+    validateHomomorphicAssignment(
+      targetForDebug,
+      baseAssignmentSliceMap,
+      homomorphicAssignmentSliceMap
+    )
+
+    // Convert the slices with resources to proposed slice assignments.
+    // Create proposed assignment, attributing the load measured by the application to each Slice in
+    // the proposal.
+    val proposedSliceAssignments: SliceMap[ProposedSliceAssignment] =
+      homomorphicAssignmentSliceMap.map(SliceMapHelper.PROPOSED_SLICE_ASSIGNMENT_ACCESSOR) {
+        sliceWithResources: SliceWithResources =>
+          ProposedSliceAssignment(
+            sliceWithResources,
+            // Slice assignments are guaranteed to be the same in homomorphic assignments as the
+            // predecessor, so we can look up the primary rate load for each corresponding slice.
+            baseAssignmentSliceMap.lookUp(sliceWithResources.slice.lowInclusive).primaryRateLoadOpt
+          )
+      }
+
+    proposedSliceAssignments
+  }
+
+  /**
+   * Verifies the properties of a homomorphic assignment, including:
+   * - The homomorphic assignment must have the same slice boundaries as the base assignment.
+   * - The homomorphic assignment must have the same replica groups per resource as the base
+   *   assignment, though the underlying resource may be different.
+   *
+   * Logs if any of the expected properties are violated and reports a DEGRADED severity error
+   * so that we are alerted of the condition and can investigate.
+   *
+   * @param baseAssignmentSliceMap the slice map of the base assignment.
+   * @param homomorphicAssignmentSliceMap the slice map of the homomorphic assignment, as created
+   *                                      by [[generateHomomorphicAssignment()]].
+   */
+  private def validateHomomorphicAssignment(
+      targetForDebug: Target,
+      baseAssignmentSliceMap: SliceMap[SliceAssignment],
+      homomorphicAssignmentSliceMap: SliceMap[SliceWithResources]
+  ): Unit = {
+    val logger = PrefixLogger.create(this.getClass, targetForDebug.getLoggerPrefix)
+
+    // Verify that slice boundaries are the same.
+    val baseAssignmentEntries: Vector[SliceAssignment] = baseAssignmentSliceMap.entries.toVector
+    val homomorphicAssignmentEntries: Vector[SliceWithResources] =
+      homomorphicAssignmentSliceMap.entries
+    // Though zip() takes the shorter of the two collections, we do not need to verify length
+    // equality here, since SliceMap guarantees that the entries must span the entire key space. As
+    // a result, if the lengths are different, the differing slice boundary entries will be caught
+    // within the range of the shorter collection.
+    val hasSameSliceBoundaries: Boolean = baseAssignmentEntries
+      .zip(homomorphicAssignmentEntries)
+      .forall { entries =>
+        val (
+          baseSliceAssignment,
+          homomorphicSliceAssignment
+        ): (SliceAssignment, SliceWithResources) = entries
+        val baseSlice: Slice = SliceMapHelper.SLICE_ASSIGNMENT_ACCESSOR(baseSliceAssignment)
+        val homomorphicSlice: Slice =
+          SliceMapHelper.SLICE_WITH_RESOURCES_ACCESSOR(homomorphicSliceAssignment)
+        val sliceBoundariesMatch: Boolean = baseSlice == homomorphicSlice
+
+        // Log an error if the slice boundaries have changed. Note that forall() short-circuits on
+        // the first false, so the logger will only catch the first difference. This is desired,
+        // since the first change may render all subsequent checks false as well.
+        logger.expect(
+          sliceBoundariesMatch,
+          CachingErrorCode.ASSIGNER_INVALID_HOMOMORPHIC_ASSIGNMENT,
+          s"Slice boundaries have changed for: $baseSlice -> $homomorphicSlice."
+        )
+
+        sliceBoundariesMatch
+      }
+
+    // If slice boundaries have changed, return early. The first change affects subsequent checks,
+    // and we no longer need to check replica groupings since boundary changes affect them.
+    if (!hasSameSliceBoundaries) {
+      return
+    }
+
+    // Verify that the replica groupings are the same.
+    //
+    // For both the base and homomorphic assignments, we group the slice replicas by the resources
+    // they are assigned to. We ignore the actual underlying resource by converting this grouping
+    // into a multi-set by recording the number of times each group appears.
+    val baseReplicasPerResource: mutable.Map[Squid, Set[Slice]] =
+      mutable.Map.empty.withDefaultValue(Set.empty)
+    for (sliceAssignment: SliceAssignment <- baseAssignmentSliceMap.entries) {
+      val slice: Slice = SliceMapHelper.SLICE_ASSIGNMENT_ACCESSOR(sliceAssignment)
+      for (resource: Squid <- sliceAssignment.resources) {
+        baseReplicasPerResource(resource) += slice
+      }
+    }
+    val baseReplicaGroups: Vector[Set[Slice]] = baseReplicasPerResource.values.toVector
+    val baseReplicaGroupCounts: Map[Set[Slice], Int] = baseReplicaGroups
+      .groupBy(identity)
+      .mapValues(
+        (group: Vector[Set[Slice]]) => group.size
+      )
+      .toMap
+
+    // Create the replica group multi-set for the homomorphic assignment.
+    val homomorphicReplicasPerResource: mutable.Map[Squid, Set[Slice]] =
+      mutable.Map.empty.withDefaultValue(Set.empty)
+    for (sliceWithResources: SliceWithResources <- homomorphicAssignmentSliceMap.entries) {
+      val slice: Slice = SliceMapHelper.SLICE_WITH_RESOURCES_ACCESSOR(sliceWithResources)
+      for (resource: Squid <- sliceWithResources.resources) {
+        homomorphicReplicasPerResource(resource) += slice
+      }
+    }
+    val homomorphicReplicaGroups: Vector[Set[Slice]] =
+      homomorphicReplicasPerResource.values.toVector
+    val homomorphicReplicaGroupCounts: Map[Set[Slice], Int] = homomorphicReplicaGroups
+      .groupBy(identity)
+      .mapValues(
+        (group: Vector[Set[Slice]]) => group.size
+      )
+      .toMap
+      .withDefaultValue(0)
+
+    // Verify that the replica group multi-sets are the same.
+    for (sliceReplicaSet: Set[Slice] <- baseReplicaGroupCounts.keys) {
+      val expectedReplicaSetCount: Int = baseReplicaGroupCounts(sliceReplicaSet)
+      // If the replica set is not present in the homomorphic assignment, the count will be 0.
+      val actualReplicaSetCount: Int = homomorphicReplicaGroupCounts(sliceReplicaSet)
+      logger.expect(
+        expectedReplicaSetCount == actualReplicaSetCount,
+        CachingErrorCode.ASSIGNER_INVALID_HOMOMORPHIC_ASSIGNMENT,
+        s"Expected replica group $sliceReplicaSet to appear $expectedReplicaSetCount times, " +
+        s"but found $actualReplicaSetCount times."
+      )
+    }
+  }
+
+  /**
+   * This class represents a resource containing the given load, calculated using its current slice
+   * replica set, so that resources may be sorted by load.
+   */
+  case class ResourceWithLoad(
+      squid: Squid,
+      load: Double
+  ) extends Ordered[ResourceWithLoad] {
+    override def compare(that: ResourceWithLoad): Int = {
+      // Compare based on load.
+      this.load.compare(that.load)
+    }
   }
 }

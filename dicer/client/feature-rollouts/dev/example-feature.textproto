@@ -1,0 +1,92 @@
+# proto-file: dicer/client/feature-rollouts/proto/dicer_client_feature_rollout_config.proto
+# proto-message: DicerClientFeatureRolloutConfigP
+
+# Example configuration for a hypothetical example feature whose feature flag name is
+# "example-feature".
+#
+# The name of this file associates the rollout rules in this file with the feature flag
+# name used in the Scala or Rust code to query the flag value (via
+# `DicerClientFeatureRolloutFlag.isEnabled("example-feature", target)`.
+
+# Example default rule: broad prod rollout at 20%, with known-good targets force-enabled and targets
+# with high risk force-disabled.
+#
+# Target examples:
+#   - Targets whose names are "target1" in region:prod/cloud2/public/region3:
+#       The region is not covered by any override. "target1" is in
+#       force_enable_target_names, so the feature is ENABLED unconditionally.
+#
+#   - Targets whose names are "target2" in region:prod/cloud2/public/region3:
+#       The region is not covered by any override. "target2" is in
+#       force_disable_target_names, so the feature is DISABLED unconditionally, regardless of
+#       target_instance_enable_fraction.
+#
+#   - KubernetesTarget("target3", "") in region:prod/cloud2/public/region3:
+#       The region is not covered by any override. "target3" is not in either force
+#       list, so it is subject to target_instance_enable_fraction: 0.2. With 20% rollout the
+#       feature is likely DISABLED for this instance (depends on a deterministic hash of the
+#       target instance).
+#
+#    - AppTarget("target4", "instance-42") and AppTarget("target4", "instance-43") in
+#      region:prod/cloud2/public/region3:
+#        With 20% rollout the feature is likely DISABLED for each of the 2 target instances. Note
+#        that these 2 target instances are not guaranteed to have the feature enabled or disabled
+#        at the same time.
+# The reasoning above applies to all regions that are not covered by the `override_rules` below.
+default_rule {
+  # The known-good targets that are safe to enable in all prod regions.
+  force_enable_target_names: ["target1", "target6"]
+
+  # These targets are important and critical so we don't want to enable the feature for them now.
+  force_disable_target_names: ["target2"]
+
+  target_instance_enable_fraction: 0.2
+}
+
+override_rules: [
+  # In prod-cloud1-region1, the feature is fully enabled for all targets:
+  #
+  # Target examples:
+  #   - KubernetesTarget("target6", "") in region:prod/cloud1/public/region1:
+  #       The region is covered by this override (target_instance_enable_fraction: 1.0, no force
+  #       lists). The feature is ENABLED for all target instances in this region and thus enabled
+  #       for "target6".
+  #   - Target "target2" is enabled in region:prod/cloud1/public/region1 for the same reason. Note
+  #       that the force_disable_target_names in default_rule is not inherited by or applied to the
+  #       overridden regions.
+  {
+    override_scopes: [
+      { region_uri: "region:prod/cloud1/public/region1" }
+    ]
+    override_config {
+      target_instance_enable_fraction: 1.0
+    }
+  },
+
+  # In prod-cloud1-region2: we enable 50% canary rollout.
+  #
+  # Target examples:
+  #   - Targets whose names are "target3" in region:prod/cloud1/public/region2:
+  #       The region is covered by this override. "target3" is in
+  #       force_enable_target_names, so the feature is ENABLED unconditionally, regardless of
+  #       target_instance_enable_fraction.
+  #
+  #   - KubernetesTarget("target6", "") in region:prod/cloud1/public/region2:
+  #       The region is covered by this override. "target6" is not in either force
+  #       list, so it is subject to target_instance_enable_fraction: 0.5. Whether the feature is
+  #       enabled depends on a deterministic hash of the target instance.
+  #
+  #   - Targets whose names are "target2" in region:prod/cloud1/public/region2:
+  #       The region is covered by this override. "target2" is in
+  #       force_disable_target_names, so the feature is DISABLED unconditionally.
+  {
+    override_scopes: [
+      { region_uri: "region:prod/cloud1/public/region2" }
+    ]
+    override_config {
+      force_enable_target_names: ["target3"]
+      force_disable_target_names: ["target2"]
+      target_instance_enable_fraction: 0.5
+    }
+  }
+]

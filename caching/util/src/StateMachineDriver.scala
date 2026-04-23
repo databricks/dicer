@@ -4,7 +4,7 @@ import java.time.Instant
 import scala.collection.mutable
 import scala.util.control.NonFatal
 import io.grpc.Status
-import com.databricks.caching.util.CachingErrorCode.STATE_MACHINE_EXCEPTION
+import com.databricks.caching.util.CachingErrorCode.UNCAUGHT_STATE_MACHINE_ERROR
 import com.databricks.caching.util.StateMachineDriver.{ConcurrencyDomain, sequentialDomain}
 import com.google.common.base.Throwables
 
@@ -57,14 +57,33 @@ sealed class StateMachineDriver[
     EventT,
     ActionT,
     MachineT <: StateMachine[EventT, ActionT]
-] private (domain: ConcurrencyDomain, stateMachine: MachineT, performAction: ActionT => Unit) {
+] private (
+    domain: ConcurrencyDomain,
+    stateMachine: MachineT,
+    performAction: ActionT => Unit,
+    alertOwnerTeam: AlertOwnerTeam) {
 
-  /** Creates a new [[StateMachineDriver]] in the sequential domain defined by `sec`. */
+  /**
+   * Creates a new [[StateMachineDriver]] in the sequential domain defined by `sec`.
+   *
+   * @param alertOwnerTeam the team's registered alert routing name, e.g.
+   *                       [[AlertOwnerTeam.CachingTeam.toString]] for Caching-owned state machines,
+   *                       or "eng-my-team" for state machines owned by other teams. For alert
+   *                       routing to work correctly, this must be used as the `owner_team_name`
+   *                       for some Dicer target config.
+   */
   def this(
       sec: SequentialExecutionContext,
       stateMachine: MachineT,
-      performAction: ActionT => Unit) = {
-    this(sequentialDomain(sec), stateMachine, performAction)
+      performAction: ActionT => Unit,
+      // TODO(<internal bug>): Make alertOwnerTeam required once all call sites are updated.
+      alertOwnerTeam: String = AlertOwnerTeam.CachingTeam.toString) = {
+    this(
+      sequentialDomain(sec),
+      stateMachine,
+      performAction,
+      AlertOwnerTeam.createFromString(alertOwnerTeam)
+    )
   }
 
   private val logger = PrefixLogger.create(getClass, "")
@@ -109,7 +128,7 @@ sealed class StateMachineDriver[
       case NonFatal(e: Throwable) =>
         logger.alert(
           Severity.CRITICAL,
-          STATE_MACHINE_EXCEPTION,
+          UNCAUGHT_STATE_MACHINE_ERROR(alertOwnerTeam),
           s"Exception in handleEvent: ${Throwables.getStackTraceAsString(e)}"
         )
     }
@@ -130,7 +149,7 @@ sealed class StateMachineDriver[
       case NonFatal(e: Throwable) =>
         logger.alert(
           Severity.CRITICAL,
-          STATE_MACHINE_EXCEPTION,
+          UNCAUGHT_STATE_MACHINE_ERROR(alertOwnerTeam),
           s"Exception in handleAdvance: ${Throwables.getStackTraceAsString(e)}"
         )
     }
@@ -243,14 +262,28 @@ object StateMachineDriver {
 
   /**
    * Creates a new [[StateMachineDriver]] to be used in a hybrid concurrency domain.
+   *
+   * @param alertOwnerTeam the team's registered alert routing name, e.g.
+   *                       [[AlertOwnerTeam.CachingTeam.toString]] for Caching-owned state machines,
+   *                       or "eng-my-team" for state machines owned by other teams. For alert
+   *                       routing to work correctly, this must be used as the `owner_team_name`
+   *                       for some Dicer target config.
    */
   // Note: even though this method is public, visibility is limited in practice at the bazel level
   // by limiting visibility of `HybridConcurrencyDomain`.
   def inHybridDomain[EventT, ActionT, MachineT <: StateMachine[EventT, ActionT]](
       hybrid: HybridConcurrencyDomain,
       stateMachine: MachineT,
-      performAction: ActionT => Unit): StateMachineDriver[EventT, ActionT, MachineT] = {
-    new StateMachineDriver(hybridDomain(hybrid), stateMachine, performAction)
+      performAction: ActionT => Unit,
+      // TODO(<internal bug>): Make alertOwnerTeam required once all call sites are updated.
+      alertOwnerTeam: String = AlertOwnerTeam.CachingTeam.toString
+  ): StateMachineDriver[EventT, ActionT, MachineT] = {
+    new StateMachineDriver(
+      hybridDomain(hybrid),
+      stateMachine,
+      performAction,
+      AlertOwnerTeam.createFromString(alertOwnerTeam)
+    )
   }
 
   /**

@@ -99,14 +99,6 @@ sealed class WatchCell[T] extends WatchCell.Consumer[T] with WatchCell.Producer[
     }
     watchCallbacks.clear()
   }
-
-  private[util] object forTest {
-
-    /** Returns the number of watch callbacks that have been registered with this cell. */
-    def getNumCallbacks: Int = withLock(lock) {
-      watchCallbacks.size
-    }
-  }
 }
 
 /** Declares "Producer" and "Consumer" behaviors for [[WatchCell]]. */
@@ -200,12 +192,6 @@ sealed class WatchValueCell[T] extends WatchValueCell.Consumer[T] with WatchValu
   // Producer calls.
 
   override def setValue(newValue: T): Unit = cell.setValue(newValue)
-
-  private[util] object forTest {
-
-    /** Returns the number of watch callbacks that have been registered with this cell. */
-    def getNumCallbacks: Int = cell.forTest.getNumCallbacks
-  }
 }
 
 /** Declares "Producer" and "Consumer" behaviors for [[WatchValueCell]]. */

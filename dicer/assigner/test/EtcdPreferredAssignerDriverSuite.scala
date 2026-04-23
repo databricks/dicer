@@ -93,7 +93,8 @@ class EtcdPreferredAssignerDriverSuite extends DatabricksTest with TestName {
       fakeSec,
       TestTLSOptions.clientTlsOptionsOpt,
       store,
-      driverConfig
+      driverConfig,
+      PreferredAssignerTestHelper.noOpMembershipCheckerFactory
     )
   }
 

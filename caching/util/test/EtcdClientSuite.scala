@@ -357,8 +357,7 @@ class EtcdClientSuite extends DatabricksTest {
     for (invalidBackupPollingInterval: FiniteDuration <- Seq(
         -1.second,
         0.seconds,
-        1.second,
-        4.seconds
+        0.99.seconds
       )) {
       assertThrow[IllegalArgumentException]("Backup polling interval") {
         WatchArgs(

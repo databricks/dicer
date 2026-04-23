@@ -17,7 +17,7 @@ import io.grpc.TlsServerCredentials
  * This implementation uses gRPC's native TLS API (TlsChannelCredentials and TlsServerCredentials)
  * for transport-independent TLS configuration.
  */
-final class TLSOptions private (
+final case class TLSOptions private (
     private val keyManagerCertChainOpt: Option[File],
     private val keyManagerPrivateKeyOpt: Option[File],
     private val trustManagerCertsOpt: Option[File]) {

@@ -18,15 +18,15 @@ import com.databricks.common.http.Headers.{
 import com.databricks.common.util.ShutdownHookManager
 import com.databricks.dicer.assigner.Assigner.logger
 import com.databricks.dicer.assigner.AssignmentGenerator.GeneratorTargetSlicezData
-import com.databricks.dicer.assigner.conf.StoreConf.StoreEnum.{ETCD, IN_MEMORY, SHADOW}
+import com.databricks.dicer.assigner.conf.StoreConf.StoreEnum.{ETCD, IN_MEMORY}
 import com.databricks.dicer.assigner.conf.{DicerAssignerConf, HealthConf, LoadWatcherConf}
 import com.databricks.dicer.assigner.config.{
   StaticTargetConfigProvider,
   InternalTargetConfig,
   InternalTargetConfigMap,
-  InternalTargetConfigMetrics,
-  TargetName
+  InternalTargetConfigMetrics
 }
+import com.databricks.dicer.common.TargetName
 import com.databricks.dicer.assigner.TargetMetrics.{GeneratorShutdownReason, WatchError}
 import com.databricks.dicer.common.SyncAssignmentState.KnownGeneration
 import com.databricks.dicer.common.{
@@ -42,17 +42,18 @@ import com.databricks.dicer.common.{
   TargetUnmarshaller,
   WatchServerHelper
 }
+import com.databricks.api.base.DatabricksServiceException
+import com.databricks.ErrorCode
 import com.databricks.dicer.external.{AppTarget, KubernetesTarget, Target}
 import com.databricks.rpc.{DatabricksServerWrapper, RPCContext}
 import com.databricks.rpc.tls.TLSOptions
-import com.databricks.threading.NamedExecutor
 import java.net.URI
 import java.util.UUID
 import javax.annotation.concurrent.{GuardedBy, ThreadSafe}
 
 import scala.collection.mutable
 import scala.compat.java8.FutureConverters._
-import scala.concurrent.{ExecutionContext, Future}
+import scala.concurrent.Future
 import scala.concurrent.duration._
 import scala.util.Random
 
@@ -69,13 +70,17 @@ import scala.util.Random
  *                        operations than threads in the pool.
  * @param sec The [[SequentialExecutionContext]] that protects the state of the [[Assigner]].
  * @param conf assigner configuration
- * @param store assignment storage layer, which is responsible for writing, reading, and caching
- *              assignments. Taken as a parameter so that fakes can be injected for tests.
+ * @param storeFactory when applied, returns a [[Store]] for assignment storage. For IN_MEMORY
+ *                     config each application returns a new [[InMemoryStore]]; for ETCD
+ *                     each application returns the same shared store instance.
  * @param assignerClusterUri The URI of the Assigner cluster. This is used to normalize targets.
  * @param minAssignmentGenerationInterval See remarks for
  *        [[AssignmentGenerator.config.minAssignmentGenerationInterval]]. Will be used for the
  *        assignment generators for all targets. This parameter is lifted here in Assigner's
  *        constructor so we can inject different values for TestAssigner.
+ * @param dPageNamespace The namespace used for DPage registration. In production this is
+ *        "dicer"; in tests each [[Assigner]] instance uses its UUID so that concurrent
+ *        instances register under unique DAction names.
  */
 @ThreadSafe
 class Assigner private (
@@ -83,14 +88,15 @@ class Assigner private (
     sec: SequentialExecutionContext,
     private val conf: DicerAssignerConf,
     preferredAssignerDriver: PreferredAssignerDriver,
-    store: Store,
+    storeFactory: Assigner.StoreFactory,
     kubernetesTargetWatcherFactory: KubernetesTargetWatcher.Factory,
     healthWatcherFactory: HealthWatcher.Factory,
     private val configProvider: StaticTargetConfigProvider,
     uuid: UUID,
     hostName: String,
     assignerClusterUri: URI,
-    minAssignmentGenerationInterval: FiniteDuration)
+    minAssignmentGenerationInterval: FiniteDuration,
+    dPageNamespace: String)
     extends AssignerSlicezDataExporter {
   import Assigner.AssignmentGeneratorHandle
 
@@ -103,16 +109,7 @@ class Assigner private (
       suggestedSliceletRpcTimeout = conf.watchServerSuggestedRpcTimeout
     )
 
-  /**
-   * A map that keeps track of all generators.
-   *
-   * We maintain the invariant that a target in this map must have a corresponding config in the
-   * [[configProvider]]. This is guaranteed by:
-   * - a generator is added to this map only when a config is available for the target, see
-   *   [[handleWatch]].
-   * - configs are never removed from the [[configProvider]] at run time. In the case of
-   *   a new deployment, all generators are cleared and need to be recreated.
-   */
+  /** A map that keeps track of all generators.  */
   @GuardedBy("sec")
   private val generatorMap = new mutable.HashMap[Target, AssignmentGeneratorHandle]
 
@@ -156,6 +153,12 @@ class Assigner private (
   private[this] val targetUnmarshaller =
     TargetUnmarshaller.createAssignerUnmarshaller(assignerClusterUri)
 
+  /**
+   * Determines whether this assigner should handle the target locally or redirect to
+   * another assigner.
+   */
+  private val targetMigrationRouter: TargetMigrationRouter = TargetMigrationRouter.ALWAYS_HANDLE
+
   /** The emitter for sending [[AssignmentGenerator.Event]] to Dicer Tee. */
   private val dicerTeeEventEmitter: DicerTeeEventEmitter =
     if (conf.enableDicerTeeForwarding) {
@@ -178,52 +181,74 @@ class Assigner private (
   /**
    * Handles the watch call from a Clerk/Slicelet and returns the relevant response.
    *
-   * @note If the current assigner is a standby assigner, it will redirect the request to the
-   *       preferred assigner. If the current assigner is a preferred assigner, it will handle the
-   *       request and respond with a redirect to be
-   *        - [[Redirect.EMPTY]] if the preferred assigner mode is disabled, or
-   *        - A redirect to the current assigner if the preferred assigner is enabled.
+   * @note The [[targetMigrationRouter]] is checked first. If it returns [[Verdict.Redirect]], the
+   *       request is immediately redirected to the specified assigner. Otherwise, routing proceeds
+   *       as per the preferred assigner's role:
+   *        - If the current assigner is a standby, it redirects to the preferred assigner.
+   *        - If the current assigner is preferred, it handles the request and responds with a
+   *          redirect to be [[Redirect.EMPTY]] if the preferred assigner mode is disabled, or a
+   *          redirect to the current assigner if the preferred assigner is enabled.
    */
   def handleWatch(rpcContext: RPCContext, req: ClientRequestP): Future[ClientResponseP] = {
     sec.flatCall {
       val request = ClientRequest.fromProto(targetUnmarshaller, req)
-      preferredAssignerConfig.role match {
-        case AssignerRole.Preferred =>
-          // If the current assigner is preferred, handle the watch request.
-          validateTarget(request.target, rpcContext, request.getClientType)
-          lookupGenerator(request.target) match {
-            case Some(generatorHandle: AssignmentGeneratorHandle) =>
-              val generator: AssignmentGeneratorDriver = generatorHandle.getGeneratorDriver
-              val redirect: Redirect = preferredAssignerConfig.redirect
-              generator.onWatchRequest(request)
 
-              // Track the last activity time for the target.
-              generatorHandle.updateLastWatchTime(sec.getClock.tickerTime())
-
-              subscriberManager.handleWatchRequest(
-                rpcContext,
-                request,
-                generator.getGeneratorCell,
-                redirect
-              )
-            case None =>
-              logger.warn(
-                s"Received watch request for unknown target: ${request.target}",
-                every = 10.seconds
-              )
-              TargetMetrics.incrementNumTargetWatchErrors(request.target, WatchError.NO_CONFIG)
-              Future.failed(new IllegalArgumentException(s"Unknown target: ${request.target}"))
-          }
-        case AssignerRole.Standby =>
-          // If the current assigner is a standby, redirect the watch request to the preferred
-          // assigner.
+      // Check the migration router first to determine whether to handle or redirect the target.
+      targetMigrationRouter.getVerdict(request.target) match {
+        case Verdict.Redirect(handlingAssigner: URI) =>
           Future.successful(
             ClientResponse(
               syncState = KnownGeneration(Generation.EMPTY),
               suggestedRpcTimeout = getSuggestedWatchRpcTimeout(request),
-              redirect = preferredAssignerConfig.redirect
+              redirect = Redirect(Some(handlingAssigner))
             ).toProto
           )
+        case Verdict.Handle =>
+          preferredAssignerConfig.role match {
+            case AssignerRole.Preferred =>
+              // If the current assigner is preferred, handle the watch request.
+              validateTarget(request.target, rpcContext, request.getClientType)
+              lookupGenerator(request.target) match {
+                case Some(generatorHandle: AssignmentGeneratorHandle) =>
+                  val generator: AssignmentGeneratorDriver = generatorHandle.getGeneratorDriver
+                  val redirect: Redirect = preferredAssignerConfig.redirect
+                  generator.onWatchRequest(request)
+
+                  // Track the last activity time for the target.
+                  val currentTime: TickerTime = sec.getClock.tickerTime()
+                  generatorHandle.updateLastWatchTime(currentTime)
+
+                  subscriberManager.handleWatchRequest(
+                    rpcContext,
+                    request,
+                    generator.getGeneratorCell,
+                    redirect,
+                    currentTime
+                  )
+                case None =>
+                  logger.warn(
+                    s"Received watch request for unknown target: ${request.target}",
+                    every = 10.seconds
+                  )
+                  TargetMetrics.incrementNumTargetWatchErrors(request.target, WatchError.NO_CONFIG)
+                  Future.failed(
+                    DatabricksServiceException(
+                      ErrorCode.NOT_FOUND,
+                      s"Missing target config: ${request.target}"
+                    )
+                  )
+              }
+            case AssignerRole.Standby =>
+              // If the current assigner is a standby, redirect the watch request to the preferred
+              // assigner.
+              Future.successful(
+                ClientResponse(
+                  syncState = KnownGeneration(Generation.EMPTY),
+                  suggestedRpcTimeout = getSuggestedWatchRpcTimeout(request),
+                  redirect = preferredAssignerConfig.redirect
+                ).toProto
+              )
+          }
       }
     }
   }
@@ -306,7 +331,7 @@ class Assigner private (
       }
   }
 
-  /** Terminates the preferred assigner driver when SIGTERM is received. */
+  /** Terminates the preferred assigner driver on SIGTERM. */
   private[this] def onAssignerTerminating(): Unit = {
     // Currently we don't have an integration test using a real Kubernetes environment, but we
     // have test coverage in EtcdPreferredAssignerIntegrationSuite that verifies the preferred
@@ -337,13 +362,18 @@ class Assigner private (
     )
     server.start()
     assignerInfo = AssignerInfo(uuid, URI.create(s"https://$hostName:${server.activePort()}"))
-    // Dedicated execution context for proto logging operations to avoid blocking the main SEC.
-    val protoLoggerExecutor: ExecutionContext =
-      NamedExecutor.create(name = "assigner-proto-logger-ec", maxThreads = 1)
+    // Dedicated SEC for proto logging operations to avoid blocking the main SEC.
+    // Note: Context propagation is disabled because proto logging is asynchronous and not part of a
+    // user request path, so there is no request context to propagate.
+    val protoLoggerSec: SequentialExecutionContext =
+      SequentialExecutionContext.createWithDedicatedPool(
+        "assigner-proto-logger",
+        enableContextPropagation = false
+      )
     assignerProtoLogger = AssignerProtoLogger.create(
       assignerInfo,
       conf.protoLoggerGenerationSampleFraction,
-      protoLoggerExecutor
+      protoLoggerSec
     )
     preferredAssignerDriver.start(assignerInfo, assignerProtoLogger)
 
@@ -355,8 +385,11 @@ class Assigner private (
       )
     )
 
-    // Setup the ZPages
+    // Setup the ZPages and DPages. ZPages provide a legacy HTML fallback when
+    // DBInspect is unavailable to serve the React DView.
     AssignerSlicez.setup(this, assignerInfo.toString)
+    AssignerDPage.setup(this, dPageNamespace)
+    logger.info(s"Registered Assigner DPages for: $assignerInfo")
 
     // Start watching the preferred assigner config from the preferred assigner driver.
     preferredAssignerDriver.watch(new ValueStreamCallback[PreferredAssignerConfig](sec) {
@@ -396,7 +429,7 @@ class Assigner private (
       new ValueStreamCallback[InternalTargetConfigMap](sec) {
         override def onSuccess(configMap: InternalTargetConfigMap): Unit = {
           sec.assertCurrentContext()
-          for (entry <- configMap.configMap) {
+          for (entry <- configMap.iterator) {
             val (targetName, config): (TargetName, InternalTargetConfig) = entry
             updateTargetConfig(targetName, config)
             // Update the metrics with the new config value.
@@ -410,30 +443,49 @@ class Assigner private (
   }
 
   /**
-   * Returns the Assignment generator corresponding to the `target`. If a generator does not exist
-   * but there is a configuration for the target in the config map, a new generator is created and
-   * returned. If the configuration for the target is not found, `None` is returned.
+   * Returns the Assignment generator corresponding to the `target`, creating one if necessary based
+   * on the target config. If no config exists and `allowDefaultTargetConfigForExperimentalTargets`
+   * is enabled, then will create a generator using
+   * [[InternalTargetConfig.DEFAULT_FOR_EXPERIMENTAL_TARGETS]]. If none of the above conditions are
+   * met, returns `None`.
    *
    * Note: Stale generators are removed from the `generatorMap` via the inactivity callback, so if
    * a generator is present in the map, it is considered active and reusable.
    */
   private[this] def lookupGenerator(target: Target): Option[AssignmentGeneratorHandle] = {
     sec.assertCurrentContext()
-    val targetName = TargetName.forTarget(target)
-    configProvider.getLatestTargetConfigMap.get(targetName).map {
-      targetConfig: InternalTargetConfig =>
-        // If the generator exists in the map, use it. Otherwise, create a new one.
-        val generatorHandle: AssignmentGeneratorHandle = generatorMap.getOrElseUpdate(
-          target, {
-            logger.info(s"New generator being created for $target: $targetConfig")
-
-            // Update the active generator count only on new generator creation.
-            TargetMetrics.updateTargetsWithActiveGenerators(target, 1)
-            val generator: AssignmentGeneratorDriver = createGenerator(target, targetConfig)
-            new AssignmentGeneratorHandle(generator, sec.getClock.tickerTime())
+    // If a generator already exists in the generator map, it is returned directly. Otherwise, if a
+    // config exists (or if a config doesn't exist but
+    // `allowDefaultTargetConfigForExperimentalTargets` is enabled), a new generator is created,
+    // cached, and returned.
+    val existingGeneratorHandleOpt: Option[AssignmentGeneratorHandle] = generatorMap.get(target)
+    existingGeneratorHandleOpt match {
+      case Some(_: AssignmentGeneratorHandle) => existingGeneratorHandleOpt
+      case None =>
+        val targetName: TargetName = TargetName.forTarget(target)
+        val targetConfigOpt: Option[InternalTargetConfig] =
+          configProvider.getLatestTargetConfigMap.get(targetName).orElse {
+            if (conf.allowDefaultTargetConfigForExperimentalTargets) {
+              logger.info(
+                s"No config found for $target, using default config for experimental targets " +
+                "(allowDefaultTargetConfigForExperimentalTargets is enabled)"
+              )
+              Some(InternalTargetConfig.DEFAULT_FOR_EXPERIMENTAL_TARGETS)
+            } else {
+              None
+            }
           }
-        )
-        generatorHandle
+        targetConfigOpt.map { targetConfig: InternalTargetConfig =>
+          logger.info(s"New generator being created for $target: $targetConfig")
+
+          // Update the active generator count only on new generator creation.
+          TargetMetrics.updateTargetsWithActiveGenerators(target, 1)
+          val generator: AssignmentGeneratorDriver = createGenerator(target, targetConfig)
+          val generatorHandle: AssignmentGeneratorHandle =
+            new AssignmentGeneratorHandle(generator, sec.getClock.tickerTime())
+          generatorMap.put(target, generatorHandle)
+          generatorHandle
+        }
     }
   }
 
@@ -454,7 +506,7 @@ class Assigner private (
       conf: LoadWatcherConf,
       target,
       targetConfig,
-      store,
+      storeFactory.getStore(),
       kubernetesTargetWatcherFactory,
       healthWatcher = healthWatcherFactory.create(
         target,
@@ -540,11 +592,22 @@ class Assigner private (
       subscriberManager.getSlicezData(target)
 
     // Check in which way the target is configured:
-    // - If dynamic config is enabled, it is considered dynamically configured.
+    // - If the target is not in the config map, it is considered default configured for
+    //   experimental targets (which it must be, because the set of target names in config is fixed
+    //   for the lifetime of the Assigner, as targets are not allowed to be added or removed
+    //   dynamically).
+    // - Else if dynamic config is enabled, it is considered dynamically configured.
     // - Otherwise, it is considered statically configured.
     val targetConfig: InternalTargetConfig = generator.targetConfig
     val targetConfigSlicezData: AssignerTargetSlicezData.TargetConfigData =
-      if (configProvider.isDynamicConfigEnabled) {
+      if (!configProvider.getLatestTargetConfigMap.targetNames.contains(
+          TargetName.forTarget(target)
+        )) {
+        AssignerTargetSlicezData.TargetConfigData(
+          targetConfig,
+          AssignerTargetSlicezData.TargetConfigMethod.DefaultForExperimentalTargets
+        )
+      } else if (configProvider.isDynamicConfigEnabled) {
         AssignerTargetSlicezData.TargetConfigData(
           targetConfig,
           AssignerTargetSlicezData.TargetConfigMethod.Dynamic
@@ -709,6 +772,21 @@ class Assigner private (
       )
       TargetMetrics.updateTargetsWithActiveGenerators(target, 0)
     }
+
+    // Clean up subscriber handlers that have not received watch requests within the inactivity
+    // threshold. These handlers' subscribers have drained and can be safely removed.
+    //
+    // Ordering invariant: generators are shut down first (above), but this is safe because
+    // in-flight watch RPCs are Promise-based and will complete either via the cell's watch
+    // callback or the scheduled timeout. cancel() on the subscriber handler only stops metrics
+    // export and background tasks — it does not cancel in-flight RPCs.
+    // The subscriber inactivity threshold reuses the generator inactivity deadline because
+    // subscriber handlers are logically tied to generators: once a generator is eligible for
+    // cleanup due to inactivity, its corresponding subscriber handler should be too.
+    subscriberManager.removeInactiveHandlers(
+      currentTime,
+      inactivityThreshold = conf.generatorInactivityDeadline
+    )
   }
 
   object forTest {
@@ -748,6 +826,16 @@ class Assigner private (
 
 /** Companion object for [[Assigner]]. */
 object Assigner {
+
+  /**
+   * Provides a [[Store]]. Each call returns a new instance or a shared one depending on
+   * configuration.
+   */
+  trait StoreFactory {
+
+    /** Returns a new [[Store]] when called. */
+    def getStore(): Store
+  }
 
   private val logger = PrefixLogger.create(this.getClass, "")
 
@@ -801,33 +889,41 @@ object Assigner {
    */
   private[dicer] val MIN_ASSIGNMENT_GENERATION_INTERVAL: FiniteDuration = 10.seconds
 
-  /** Allows tests to override methods in [[Assigner]], which is not generally permitted. */
+  /**
+   * Allows tests to override methods in [[Assigner]], which is not generally permitted.
+   *
+   * @param dPageNamespaceOpt when set, overrides the DPage namespace; otherwise
+   *                          defaults to the assigner's UUID so concurrent
+   *                          instances in the same test JVM get unique DAction names
+   */
   class BaseForTest(
       assignerSecPool: SequentialExecutionContextPool,
       sec: SequentialExecutionContext,
       conf: DicerAssignerConf,
       preferredAssignerDriver: PreferredAssignerDriver,
-      store: Store,
+      storeFactory: Assigner.StoreFactory,
       kubernetesTargetWatcherFactory: KubernetesTargetWatcher.Factory,
       healthWatcherFactory: HealthWatcher.Factory,
       configProvider: StaticTargetConfigProvider,
       uuid: UUID,
       hostName: String,
       assignerClusterUri: URI,
-      minAssignmentGenerationInterval: FiniteDuration)
+      minAssignmentGenerationInterval: FiniteDuration,
+      dPageNamespaceOpt: Option[String])
       extends Assigner(
         assignerSecPool,
         sec,
         conf,
         preferredAssignerDriver,
-        store,
+        storeFactory,
         kubernetesTargetWatcherFactory,
         healthWatcherFactory,
         configProvider,
         uuid,
         hostName,
         assignerClusterUri,
-        minAssignmentGenerationInterval
+        minAssignmentGenerationInterval,
+        dPageNamespace = dPageNamespaceOpt.getOrElse(uuid.toString)
       )
 
   /**
@@ -840,7 +936,8 @@ object Assigner {
       uuid: UUID,
       hostName: String,
       assignerClusterUri: URI,
-      kubernetesTargetWatcherFactory: KubernetesTargetWatcher.Factory): Assigner = {
+      kubernetesTargetWatcherFactory: KubernetesTargetWatcher.Factory,
+      membershipCheckerFactory: KubernetesMembershipChecker.Factory): Assigner = {
     // How do we choose the number of threads? Resilience to long-running commands requires us to
     // have more threads than cores, but we don't want lots of preemption (we prefer a cooperative
     // concurrency model after all, see <internal link>) or the overhead cost of
@@ -851,47 +948,63 @@ object Assigner {
       assignerSecPool,
       assignerSec,
       conf,
-      Assigner.createPreferredAssignerDriver(conf),
-      Assigner.createStore(conf),
+      Assigner.createPreferredAssignerDriver(conf, membershipCheckerFactory),
+      Assigner.createStoreFactory(conf),
       kubernetesTargetWatcherFactory,
       HealthWatcher.DefaultFactory,
       configProvider,
       uuid,
       hostName,
       assignerClusterUri,
-      MIN_ASSIGNMENT_GENERATION_INTERVAL
+      MIN_ASSIGNMENT_GENERATION_INTERVAL,
+      dPageNamespace = "dicer"
     )
     assigner.start()
     assigner
   }
 
   /**
-   * Creates a [[Store]] for an assigner using the configuration parameters in `conf`.
+   * Returns a [[StoreFactory]] that, when applied, returns a new [[InMemoryStore]] per call if
+   * `conf.store` is IN_MEMORY, or the same shared store instance if ETCD.
+   *
    * @param conf the assigner configuration.
-   * @return a [[Store]] for use in an assigner.
+   * @return a [[StoreFactory]] that, when applied, returns a new [[Store]]
    */
-  private[assigner] def createStore(conf: DicerAssignerConf): Store = {
-    val sec: SequentialExecutionContext =
-      SequentialExecutionContext.createWithDedicatedPool("assigner-store")
-    val storeIncarnation: Incarnation = conf.storeIncarnation
+  private[assigner] def createStoreFactory(conf: DicerAssignerConf): StoreFactory = {
     conf.store match {
       case IN_MEMORY =>
-        logger.info(s"Initializing InMemoryStore with store incarnation [$storeIncarnation].")
-        InMemoryStore(sec, storeIncarnation)
-      case SHADOW =>
-        val etcdClient: EtcdClient = createEtcdClient(conf, getAssignmentsEtcdNamespace(conf))
-        logger.info(s"Initializing ShadowEtcdStore with store incarnation [$storeIncarnation].")
-        new ShadowEtcdStore(sec, etcdClient, conf.shadowStoreStoreIncarnation, storeIncarnation)
+        // For IN_MEMORY, stores share a [[SequentialExecutionContextPool]]; each store gets a new
+        // [[SequentialExecutionContext]] from that pool.
+        val inMemoryStoreSecPool: SequentialExecutionContextPool =
+          SequentialExecutionContextPool.create("assigner-in-memory-store", numThreads = 8)
+        new StoreFactory {
+
+          override def getStore(): Store = {
+            val sec: SequentialExecutionContext =
+              inMemoryStoreSecPool.createExecutionContext("assigner-store")
+            val storeIncarnation: Incarnation = conf.storeIncarnation
+            logger.info(s"Initializing InMemoryStore with store incarnation [$storeIncarnation].")
+            InMemoryStore(sec, storeIncarnation)
+          }
+        }
       case ETCD =>
+        val sec: SequentialExecutionContext =
+          SequentialExecutionContext.createWithDedicatedPool("assigner-store")
+        val storeIncarnation: Incarnation = conf.storeIncarnation
         val etcdClient: EtcdClient = createEtcdClient(conf, getAssignmentsEtcdNamespace(conf))
+
         logger.info(s"Initializing EtcdStore with store incarnation [$storeIncarnation].")
-        EtcdStore.create(sec, etcdClient, EtcdStoreConfig.create(storeIncarnation), new Random)
+        val sharedStore: Store =
+          EtcdStore.create(sec, etcdClient, EtcdStoreConfig.create(storeIncarnation), new Random)
+        new StoreFactory {
+          override def getStore(): Store = sharedStore
+        }
     }
   }
 
   /**
    * REQUIRES: `conf.preferredAssignerEnabled` is true.
-   * REQUIRES: `conf.etcdEndpoints` is non-empty.
+   * REQUIRES: `conf.preferredAssignerEtcdEndpoints` is non-empty.
    * REQUIRES: `conf.preferredAssignerStoreIncarnation` is not loose.
    *
    * Returns a new preferred assigner store, or throws [[IllegalArgumentException]] if the `conf`
@@ -924,6 +1037,7 @@ object Assigner {
   /** Creates a [[PreferredAssignerDriver]] with the given Dicer and driver configurations. */
   private[dicer] def createPreferredAssignerDriver(
       conf: DicerAssignerConf,
+      membershipCheckerFactory: KubernetesMembershipChecker.Factory,
       driverConfig: EtcdPreferredAssignerDriver.Config = EtcdPreferredAssignerDriver.Config()
   ): PreferredAssignerDriver = {
     if (conf.preferredAssignerEnabled) {
@@ -931,7 +1045,13 @@ object Assigner {
       // Use `getDicerClientTlsOptions` so it can send heartbeats to the preferred assigner.
       val tlsOptions: Option[TLSOptions] = conf.getDicerClientTlsOptions
       val sec = SequentialExecutionContext.createWithDedicatedPool("etcd-preferred-assigner-driver")
-      new EtcdPreferredAssignerDriver(sec, tlsOptions, store, driverConfig)
+      new EtcdPreferredAssignerDriver(
+        sec,
+        tlsOptions,
+        store,
+        driverConfig,
+        membershipCheckerFactory
+      )
     } else {
       val preferredAssignerStoreIncarnation = Incarnation(conf.preferredAssignerStoreIncarnation)
       logger.info(
@@ -971,9 +1091,9 @@ object Assigner {
   private[this] def createEtcdClient(
       conf: DicerAssignerConf,
       etcdKeyNamespace: EtcdClient.KeyNamespace): EtcdClient = {
-    val endpoints: Seq[String] = conf.etcdEndpoints
+    val endpoints: Seq[String] = conf.preferredAssignerEtcdEndpoints
     val tlsOptionsOpt: Option[TLSOptions] =
-      if (conf.etcdSslEnabled) conf.dicerTlsOptions else None
+      if (conf.preferredAssignerEtcdSslEnabled) conf.dicerTlsOptions else None
     logger.info("Creating etcd client with endpoints: " + endpoints)
     EtcdClient.create(
       endpoints,

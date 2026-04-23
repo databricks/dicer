@@ -165,4 +165,76 @@ class WhereAmIHelperSuite extends DatabricksTest {
       WhereAmIHelper.validateCluster(invalidUri5)
     }
   }
+
+  test("getRegionUri without LocationConf singleton is None") {
+    // Test plan: Verify that the region URI is empty when the LocationConf singleton isn't set
+    // and that getRegionUri does not throw an exception. Verify this by calling getRegionUri and
+    // checking that the result is None.
+    val regionUri: Option[String] = WhereAmIHelper.getRegionUri
+    assert(regionUri.isEmpty)
+  }
+
+  test("getRegionUri with LocationConf singleton is set to the expected value") {
+    // Test plan: Verify that the region URI is set to the value of the LocationConf location.
+    // Verify this by setting the LocationConf singleton to the default test value and calling
+    // getRegionUri.
+
+    val locationConf: LocationConf = LocationConfTestUtils.newTestLocationConfig()
+    withLocationConfSingleton(locationConf) {
+      // The default test region URI is "region:dev/cloud1/public/region1".
+      val expectedRegionUri: String = "region:dev/cloud1/public/region1"
+      val regionUri: Option[String] = WhereAmIHelper.getRegionUri
+      assertResult(Some(expectedRegionUri))(regionUri)
+    }
+  }
+
+  test("getRegionUri with LocationConf singleton is set to an invalid value") {
+    // Test plan: Verify that the region URI is empty when the LocationConf singleton is set to
+    // an invalid value and that getRegionUri does not throw an exception. Verify this by setting
+    // the LocationConf singleton to have an empty region URI or no region URI, and calling
+    // getRegionUri in each case.
+
+    // Set the LocationConf singleton to have an empty region URI.
+    val emptyRegionUriJson =
+      s"""
+         |{
+         | "cloud_provider": "AWS",
+         | "cloud_provider_region": "AWS_US_WEST_2",
+         | "environment": "DEV",
+         | "kubernetes_cluster_type": "GENERAL_CLASSIC",
+         | "kubernetes_cluster_uri": "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01",
+         | "region_uri": "",
+         | "regulatory_domain": "PUBLIC"
+         |}
+         |""".stripMargin
+
+    val emptyRegionUriConf: LocationConf = LocationConfTestUtils.newTestLocationConfig(
+      envMap = Map("LOCATION" -> emptyRegionUriJson)
+    )
+    withLocationConfSingleton(emptyRegionUriConf) {
+      val regionUri: Option[String] = WhereAmIHelper.getRegionUri
+      assert(regionUri.isEmpty)
+    }
+
+    // Set the LocationConf singleton to have no region URI field at all.
+    val noRegionUriJson =
+      s"""
+         |{
+         | "cloud_provider": "AWS",
+         | "cloud_provider_region": "AWS_US_WEST_2",
+         | "environment": "DEV",
+         | "kubernetes_cluster_type": "GENERAL_CLASSIC",
+         | "kubernetes_cluster_uri": "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01",
+         | "regulatory_domain": "PUBLIC"
+         |}
+         |""".stripMargin
+
+    val noRegionUriConf: LocationConf = LocationConfTestUtils.newTestLocationConfig(
+      envMap = Map("LOCATION" -> noRegionUriJson)
+    )
+    withLocationConfSingleton(noRegionUriConf) {
+      val regionUri: Option[String] = WhereAmIHelper.getRegionUri
+      assert(regionUri.isEmpty)
+    }
+  }
 }

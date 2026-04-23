@@ -141,16 +141,16 @@ class DemoServiceImpl(slicelet: Slicelet) extends DemoServiceGrpc.DemoService {
    * `maximumWeight` instead of `maximumSize` to control the total size of the cache, if values
    * can have significantly different weights.
    */
-  private val cache: Cache[Int, String] = Scaffeine()
+  private val cache: Cache[Long, String] = Scaffeine()
     .maximumSize(5000)
-    .build[Int, String]()
+    .build[Long, String]()
 
   /**
    * Helper method to run `thunk`, factoring out the common Dicer logic of every request: create a
    * handle, check assignment, report load, execute `thunk`, and ensure cleanup. `operation` is used
    * to describe the operation being performed in logs.
    */
-  private def withHandle[T](key: Int, operation: String)(thunk: => Future[T]): Future[T] = {
+  private def withHandle[T](key: Long, operation: String)(thunk: => Future[T]): Future[T] = {
     val sliceKey: SliceKey = DemoCommon.toSliceKey(key)
 
     // Check if this server is assigned this key by Dicer.
@@ -176,7 +176,7 @@ class DemoServiceImpl(slicelet: Slicelet) extends DemoServiceGrpc.DemoService {
   }
 
   override def getValue(request: GetValueRequestP): Future[GetValueResponseP] = {
-    val key: Int = request.getKey
+    val key: Long = request.getKey
 
     withHandle(key, "getting value") {
       val valueOpt: Option[String] = cache.getIfPresent(key)
@@ -187,7 +187,7 @@ class DemoServiceImpl(slicelet: Slicelet) extends DemoServiceGrpc.DemoService {
   }
 
   override def putValue(request: PutValueRequestP): Future[PutValueResponseP] = {
-    val key: Int = request.getKey
+    val key: Long = request.getKey
     val value: String = request.getValue
 
     withHandle(key, "putting value") {
@@ -198,7 +198,7 @@ class DemoServiceImpl(slicelet: Slicelet) extends DemoServiceGrpc.DemoService {
   }
 
   override def deleteValue(request: DeleteValueRequestP): Future[DeleteValueResponseP] = {
-    val key: Int = request.getKey
+    val key: Long = request.getKey
 
     withHandle(key, "deleting value") {
       cache.invalidate(key)

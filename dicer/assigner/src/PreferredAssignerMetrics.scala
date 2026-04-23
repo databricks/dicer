@@ -13,8 +13,8 @@ object PreferredAssignerMetrics {
 
   /** The possible roles of an assigner. */
   object MonitoredAssignerRole extends Enumeration {
-    val PREFERRED, PREFERRED_BECAUSE_PA_DISABLED, STANDBY_WITHOUT_PREFERRED, STANDBY, STARTUP =
-      Value
+    val PREFERRED, PREFERRED_BECAUSE_PA_DISABLED, STANDBY_WITHOUT_PREFERRED, STANDBY, STARTUP,
+        INELIGIBLE = Value
   }
 
   /**

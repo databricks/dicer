@@ -6,7 +6,6 @@ import com.databricks.testing.DatabricksTest
 
 class WatchAddressHelperSuite extends DatabricksTest {
 
-
   test("getAssignerURI constructs HTTPS URI for regular hostname") {
     // Test plan: Verify that regular hostnames are converted to https:// URIs with the port.
     val hostname = "dicer-assigner.example.com"

@@ -1,19 +1,34 @@
 package com.databricks.dicer.common
 
 import com.databricks.conf.DbConf
-import com.databricks.dicer.common.InternalClientConf.allowMultipleClientInstancesPropertyName
+import com.databricks.dicer.common.InternalClientConf.{
+  allowMultipleSliceletInstancesPropertyName,
+  allowMultipleClerksShareLookupPerTargetPropertyName
+}
 
 /** Dicer-internal client configuration. Should not be used or modified by any external callers. */
 private[dicer] trait InternalClientConf extends DbConf {
 
   /**
-   * Whether to allow multiple Clerks per target and Slicelets within this process.
+   * Whether to allow multiple Slicelet instances within this process.
    *
    * Should only ever be modified by the caching team to support single process tests simulating a
-   * production environment with multiple Clerk and Slicelet processes.
+   * production environment with multiple Slicelet processes.
    */
-  private[dicer] val allowMultipleClientInstances: Boolean = configure[Boolean](
-    allowMultipleClientInstancesPropertyName,
+  private[dicer] val allowMultipleSliceletInstances: Boolean = configure[Boolean](
+    allowMultipleSliceletInstancesPropertyName,
+    defaultValue = false
+  )
+
+  /**
+   * Whether to share [[SliceLookup]] instances across Clerks for the same target.
+   *
+   * By default, this is set to false, meaning that a new [[SliceLookup]] instance will be created
+   * for each Clerk for the same target. When enabled, the same [[SliceLookup]] instance will be
+   * reused for all Clerks for the same target.
+   */
+  private[dicer] val allowMultipleClerksShareLookupPerTarget: Boolean = configure[Boolean](
+    allowMultipleClerksShareLookupPerTargetPropertyName,
     defaultValue = false
   )
 
@@ -27,7 +42,11 @@ private[dicer] trait InternalClientConf extends DbConf {
 
 object InternalClientConf {
 
-  /** The name of the conf property for [[allowMultipleClientInstances]]. */
-  private[dicer] val allowMultipleClientInstancesPropertyName: String =
-    "databricks.dicer.internal.cachingteamonly.allowMultipleClientInstances"
+  /** The name of the conf property for [[allowMultipleSliceletInstances]]. */
+  private[dicer] val allowMultipleSliceletInstancesPropertyName: String =
+    "databricks.dicer.internal.cachingteamonly.allowMultipleSliceletInstances"
+
+  /** The name of the conf property for [[allowMultipleClerksShareLookupPerTarget]]. */
+  private[dicer] val allowMultipleClerksShareLookupPerTargetPropertyName: String =
+    "databricks.dicer.internal.cachingteamonly.allowMultipleClerksShareLookupPerTarget"
 }

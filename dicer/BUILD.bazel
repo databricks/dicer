@@ -3,12 +3,6 @@ package(
     default_visibility = ["//dicer:internal"],
 )
 
-filegroup(
-    name = "all_files",
-    srcs = glob(["**"]),
-    visibility = ["//caching/oss:__pkg__"],
-)
-
 package_group(
     name = "internal",
     packages = [

@@ -9,11 +9,8 @@ import com.databricks.caching.util.TestUtils.{
 }
 import com.google.protobuf.ByteString
 import com.databricks.dicer.common.SliceHelper.RichSlice
-import com.databricks.dicer.common.SliceKeyHelper.{
-  FarmHashFingerprint64,
-  IdentitySliceKeyFunction,
-  RichSliceKey
-}
+import com.databricks.dicer.common.SliceKeyHelper.RichSliceKey
+import com.databricks.dicer.external.SliceKey
 import com.databricks.testing.DatabricksTest
 import com.google.common.collect.Range
 import com.google.common.hash.Hashing
@@ -27,8 +24,7 @@ import com.databricks.dicer.external.{
   InfinitySliceKey,
   ResourceAddress,
   Slice,
-  SliceKey,
-  SliceKeyFunction
+  SliceKey
 }
 
 class SliceSuite extends DatabricksTest {
@@ -54,24 +50,23 @@ class SliceSuite extends DatabricksTest {
     builder.result().toIndexedSeq
   }
 
-  test("SliceKeyFunction FarmHashFingerprint64") {
+  test("SliceKey newFingerprintBuilder") {
     // Test plan: convert key values to fingerprint slice keys. Verify that the expected fingerprint
     // function (FarmHash Fingerprint64) is used.
 
-    val function: SliceKeyFunction = FarmHashFingerprint64
     val expectedFunction =
       (bytes: Array[Byte]) =>
         ByteString.copyFrom(Hashing.farmHashFingerprint64().hashBytes(bytes).asBytes())
 
     // From string.
     {
-      val actual = SliceKey("hello", function)
+      val actual = SliceKey.newFingerprintBuilder().putString("hello").build()
       val expectedBytes = expectedFunction(Array('h', 'e', 'l', 'l', 'o'))
       assert(actual.bytes == expectedBytes)
     }
     // From Unicode string.
     {
-      val actual = SliceKey("adiós", function)
+      val actual = SliceKey.newFingerprintBuilder().putString("adiós").build()
 
       // UTF-8 encoding should be used for Unicode strings.
       val accentBytes = "ó".getBytes(StandardCharsets.UTF_8)
@@ -83,27 +78,31 @@ class SliceSuite extends DatabricksTest {
     // From bytes.
     {
       val bytes = Array[Byte](10, -42, 47)
-      val actual = SliceKey(bytes, function)
+      val actual = SliceKey.newFingerprintBuilder().putBytes(bytes).build()
       val expectedBytes = expectedFunction(bytes)
       assert(actual.bytes == expectedBytes)
     }
   }
 
-  test("IdentitySliceKeyFunction") {
-    // Test plan: convert key values to "identity" slice keys. Verify that the interpretation of the
-    // input keys is used: bytes are copied verbatim; strings are converted to UTF-8 encoding.
+  test("SliceKey.fromRawBytes") {
+    // Test plan: Create SliceKeys from raw bytes without hashing. Verify that the bytes are
+    // preserved verbatim.
 
-    val function: SliceKeyFunction = IdentitySliceKeyFunction
-
-    // From string.
+    // From string (manually encoded to UTF-8).
     {
-      val actual = SliceKey("hello", function)
+      val key: String = "hello"
+      val actual = SliceKey.fromRawBytes(
+        ByteString.copyFromUtf8(key)
+      )
       val expectedBytes = ByteString.copyFrom(Array[Byte]('h', 'e', 'l', 'l', 'o'))
       assert(actual.bytes == expectedBytes)
     }
     // From Unicode string.
     {
-      val actual = SliceKey("adiós", function)
+      val key: String = "adiós"
+      val actual = SliceKey.fromRawBytes(
+        ByteString.copyFromUtf8(key)
+      )
 
       // UTF-8 encoding should be used for Unicode strings.
       val accentBytes = "ó".getBytes(StandardCharsets.UTF_8)
@@ -115,7 +114,7 @@ class SliceSuite extends DatabricksTest {
     // From bytes.
     {
       val bytes = Array[Byte](10, -42, 47)
-      val actual = SliceKey(bytes, function)
+      val actual = SliceKey.fromRawBytes(ByteString.copyFrom(bytes))
       assert(actual.bytes == ByteString.copyFrom(bytes))
     }
   }

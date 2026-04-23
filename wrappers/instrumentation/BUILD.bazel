@@ -7,33 +7,32 @@ package(
 scala_library(
     name = "instrumentation",
     srcs = [
-        "src/DebugHttpServer.scala",
         "src/DebugStringServletRegistry.scala",
+        "src/DebuggingRootPageHandler.scala",
         "src/HasDebugString.scala",
     ],
     deps = [
-        "//wrappers/logging",
         "//wrappers/util:jsonutil",
-        "//wrappers/util:lock",
         "@maven//:com_google_code_findbugs_jsr305",
         "@maven//:com_lihaoyi_geny_2_12",
         "@maven//:com_lihaoyi_scalatags_2_12",
-        "@maven//:io_opencensus_opencensus_contrib_grpc_metrics",
-        "@maven//:io_opencensus_opencensus_contrib_zpages",
         "@maven//:org_scala_lang_modules_scala_xml_2_12",
         "@maven//:org_scala_lang_scala_library",
     ],
 )
 
 scala_test(
-    name = "zpages_server_test",
+    name = "info_service_test",
     testonly = True,
     srcs = [
-        "test/DebugHttpServerSuite.scala",
+        "test/InfoServiceSuite.scala",
     ],
     deps = [
+        ":info-service",
         ":instrumentation",
+        "//wrappers/common/status",
         "//wrappers/logging",
+        "//wrappers/rpc:readiness_probe_tracker",
         "//wrappers/util:databricks-test",
         "//wrappers/util:lock",
         "@maven//:org_scala_lang_scala_library",
@@ -49,9 +48,18 @@ scala_library(
 
 scala_library(
     name = "info-service",
-    srcs = ["src/InfoService.scala"],
+    srcs = [
+        "src/InfoService.scala",
+        "src/ReadinessHandler.scala",
+    ],
     deps = [
         ":instrumentation",
+        "//wrappers/common/status",
         "//wrappers/logging",
+        "//wrappers/rpc:readiness_probe_tracker",
+        "//wrappers/util:lock",
+        "@maven//:com_google_code_findbugs_jsr305",
+        "@maven//:io_opencensus_opencensus_contrib_grpc_metrics",
+        "@maven//:io_opencensus_opencensus_contrib_zpages",
     ],
 )

@@ -369,4 +369,61 @@ object TargetMetricsUtils {
         )
       )
   }
+
+  /**
+   * Gets the number of health watcher resource expirations for `target` with the given
+   * termination signal source labels.
+   */
+  def getHealthWatcherResourceExpirations(
+      target: Target,
+      receivedFromSlicelet: Boolean,
+      receivedFromKubernetes: Boolean): Long = {
+    MetricUtils
+      .getMetricValue(
+        registry,
+        "dicer_assigner_healthwatcher_resource_expirations_total",
+        Map(
+          "targetCluster" -> target.getTargetClusterLabel,
+          "targetName" -> target.getTargetNameLabel,
+          "targetInstanceId" -> target.getTargetInstanceIdLabel,
+          "receivedFromSlicelet" -> receivedFromSlicelet.toString,
+          "receivedFromKubernetes" -> receivedFromKubernetes.toString
+        )
+      )
+      .toLong
+  }
+
+  /**
+   * Gets the count of observations in the health watcher termination signal delay histogram
+   * for `target`.
+   */
+  def getHealthWatcherSliceletVsK8sTerminationSignalDelayCount(target: Target): Int = {
+    MetricUtils
+      .getHistogramCount(
+        registry,
+        "dicer_assigner_healthwatcher_slicelet_vs_k8s_termination_signal_delay_seconds",
+        Map(
+          "targetCluster" -> target.getTargetClusterLabel,
+          "targetName" -> target.getTargetNameLabel,
+          "targetInstanceId" -> target.getTargetInstanceIdLabel
+        )
+      )
+  }
+
+  /**
+   * Gets the sum of observations in the health watcher termination signal delay histogram
+   * for `target`.
+   */
+  def getHealthWatcherSliceletVsK8sTerminationSignalDelaySum(target: Target): Double = {
+    MetricUtils
+      .getHistogramSum(
+        registry,
+        "dicer_assigner_healthwatcher_slicelet_vs_k8s_termination_signal_delay_seconds",
+        Map(
+          "targetCluster" -> target.getTargetClusterLabel,
+          "targetName" -> target.getTargetNameLabel,
+          "targetInstanceId" -> target.getTargetInstanceIdLabel
+        )
+      )
+  }
 }

@@ -1,7 +1,7 @@
 package com.databricks.dicer.client
 
 import java.net.URI
-
+import java.util.UUID
 import scala.concurrent.duration._
 
 import io.prometheus.client.CollectorRegistry
@@ -14,6 +14,7 @@ import com.databricks.dicer.common.ClientType
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.external.Target
 import com.databricks.testing.DatabricksTest
+import TestClientUtils.TEST_CLIENT_UUID
 
 class SliceLookupCacheSuite extends DatabricksTest with TestName {
 
@@ -22,25 +23,29 @@ class SliceLookupCacheSuite extends DatabricksTest with TestName {
    */
   private def createTestConfig(
       target: Target,
+      clientIdOpt: Option[UUID] = Some(TEST_CLIENT_UUID),
       watchRpcTimeout: FiniteDuration = 5.seconds,
       minRetryDelay: FiniteDuration = 1.second,
       maxRetryDelay: FiniteDuration = 10.seconds): InternalClientConfig = {
     InternalClientConfig(
-      clientType = ClientType.Clerk,
-      watchAddress = URI.create("https://localhost:8080"),
-      tlsOptionsOpt = None,
-      target = target,
-      watchStubCacheTime = 5.minutes,
-      watchFromDataPlane = false,
-      watchRpcTimeout = watchRpcTimeout,
-      minRetryDelay = minRetryDelay,
-      maxRetryDelay = maxRetryDelay,
-      enableRateLimiting = false
+      SliceLookupConfig(
+        clientType = ClientType.Clerk,
+        watchAddress = URI.create("https://localhost:8080"),
+        tlsOptionsOpt = None,
+        target = target,
+        clientIdOpt = clientIdOpt,
+        watchStubCacheTime = 5.minutes,
+        watchFromDataPlane = false,
+        watchRpcTimeout = watchRpcTimeout,
+        minRetryDelay = minRetryDelay,
+        maxRetryDelay = maxRetryDelay,
+        enableRateLimiting = false
+      )
     )
   }
 
   /** Creates a SliceLookup using SliceLookup.createUnstarted. */
-  private def createSliceLookup(config: InternalClientConfig): SliceLookup = {
+  private def createSliceLookup(config: SliceLookupConfig): SliceLookup = {
     val subscriberDebugName: String = s"test-lookup-${config.target.name}"
     val sec: SequentialExecutionContext =
       SequentialExecutionContext.createWithDedicatedPool(
@@ -48,10 +53,9 @@ class SliceLookupCacheSuite extends DatabricksTest with TestName {
         enableContextPropagation = false
       )
     val protoLogger: DicerClientProtoLogger = DicerClientProtoLogger.create(
-      conf = TestableDicerClientProtoLoggerConf.create(sampleFraction = 0.0),
       clientType = config.clientType,
-      subscriberDebugName = subscriberDebugName,
-      sec = sec
+      conf = TestClientUtils.createTestProtoLoggerConf(sampleFraction = 0.0),
+      ownerName = subscriberDebugName
     )
     SliceLookup.createUnstarted(
       sec = sec,
@@ -60,6 +64,18 @@ class SliceLookupCacheSuite extends DatabricksTest with TestName {
       protoLogger = protoLogger,
       serviceBuilderOpt = None
     )
+  }
+
+  /**
+   * Returns the [[SliceLookup]] for the given [[InternalClientConfig]] from the
+   * [[SliceLookupCache]].
+   */
+  private def getSliceLookup(
+      cache: SliceLookupCache,
+      config: InternalClientConfig
+  ): SliceLookup = {
+    val sliceLookupConfig: SliceLookupConfig = config.sliceLookupConfig
+    cache.getOrElseCreate(sliceLookupConfig, createSliceLookup(sliceLookupConfig))
   }
 
   /** Creates a ChangeTracker for the cache hit metric (configMatched=true or false). */
@@ -125,13 +141,13 @@ class SliceLookupCacheSuite extends DatabricksTest with TestName {
     val cacheHitConfigMismatchTracker2: ChangeTracker[Double] =
       trackCacheHitMetric(target2, configMatched = false)
 
-    val lookup1: SliceLookup = cache.getOrElseCreate(config1, createSliceLookup(config1))
+    val lookup1: SliceLookup = getSliceLookup(cache, config1)
     assert(
       lookupCountTracker1.totalChange() == 1,
       "target1 lookup should create a new SliceLookup"
     )
 
-    val lookup2: SliceLookup = cache.getOrElseCreate(config2, createSliceLookup(config2))
+    val lookup2: SliceLookup = getSliceLookup(cache, config2)
     assert(
       lookupCountTracker2.totalChange() == 1,
       "target2 lookup should create a new SliceLookup"
@@ -139,8 +155,8 @@ class SliceLookupCacheSuite extends DatabricksTest with TestName {
     assert(lookup1 ne lookup2, "target1 and target2 SliceLookup instances should be different")
 
     // Verify that requesting each target again returns the cached instance
-    val lookup1Again: SliceLookup = cache.getOrElseCreate(config1, createSliceLookup(config1))
-    val lookup2Again: SliceLookup = cache.getOrElseCreate(config2, createSliceLookup(config2))
+    val lookup1Again: SliceLookup = getSliceLookup(cache, config1)
+    val lookup2Again: SliceLookup = getSliceLookup(cache, config2)
     assert(lookup1 eq lookup1Again, "target1 lookup should return the same instance")
     assert(lookup2 eq lookup2Again, "target2 lookup should return the same instance")
     assert(
@@ -182,10 +198,10 @@ class SliceLookupCacheSuite extends DatabricksTest with TestName {
     val cacheHitConfigMismatchTracker: ChangeTracker[Double] =
       trackCacheHitMetric(target, configMatched = false)
 
-    val lookup1: SliceLookup = cache.getOrElseCreate(config1, createSliceLookup(config1))
+    val lookup1: SliceLookup = getSliceLookup(cache, config1)
     assert(lookupCountTracker.totalChange() == 1, "target lookup should create a new SliceLookup")
 
-    val lookup2: SliceLookup = cache.getOrElseCreate(config2, createSliceLookup(config2))
+    val lookup2: SliceLookup = getSliceLookup(cache, config2)
     assert(lookupCountTracker.totalChange() == 2, "target lookup should create a new SliceLookup")
     assert(
       lookup1 ne lookup2,
@@ -198,8 +214,8 @@ class SliceLookupCacheSuite extends DatabricksTest with TestName {
     )
 
     // Verify that requesting each config again returns the cached instance
-    val lookup1Again: SliceLookup = cache.getOrElseCreate(config1, createSliceLookup(config1))
-    val lookup2Again: SliceLookup = cache.getOrElseCreate(config2, createSliceLookup(config2))
+    val lookup1Again: SliceLookup = getSliceLookup(cache, config1)
+    val lookup2Again: SliceLookup = getSliceLookup(cache, config2)
     assert(
       lookupCountTracker.totalChange() == 2,
       "target lookups should not create new SliceLookups"
@@ -237,9 +253,9 @@ class SliceLookupCacheSuite extends DatabricksTest with TestName {
       trackCacheHitMetric(target, configMatched = false)
 
     // Create lookups for all three configs
-    val lookup1: SliceLookup = cache.getOrElseCreate(config1, createSliceLookup(config1))
-    val lookup2: SliceLookup = cache.getOrElseCreate(config2, createSliceLookup(config2))
-    val lookup3: SliceLookup = cache.getOrElseCreate(config3, createSliceLookup(config3))
+    val lookup1: SliceLookup = getSliceLookup(cache, config1)
+    val lookup2: SliceLookup = getSliceLookup(cache, config2)
+    val lookup3: SliceLookup = getSliceLookup(cache, config3)
     assert(
       lookupCountTracker.totalChange() == 3,
       "target lookups should create a new SliceLookup for each config"
@@ -253,9 +269,9 @@ class SliceLookupCacheSuite extends DatabricksTest with TestName {
     )
 
     // Verify that re-requesting each config returns the cached instance
-    val lookup1Again: SliceLookup = cache.getOrElseCreate(config1, createSliceLookup(config1))
-    val lookup2Again: SliceLookup = cache.getOrElseCreate(config2, createSliceLookup(config2))
-    val lookup3Again: SliceLookup = cache.getOrElseCreate(config3, createSliceLookup(config3))
+    val lookup1Again: SliceLookup = getSliceLookup(cache, config1)
+    val lookup2Again: SliceLookup = getSliceLookup(cache, config2)
+    val lookup3Again: SliceLookup = getSliceLookup(cache, config3)
     assert(
       lookupCountTracker.totalChange() == 3,
       "No additional lookups should be created for cached configs"
@@ -265,6 +281,62 @@ class SliceLookupCacheSuite extends DatabricksTest with TestName {
     assert(lookup3 eq lookup3Again, "config3 lookup should return the same instance")
 
     // Each of the 3 re-requests should record a cache hit
+    assert(
+      cacheHitTracker.totalChange() == 3,
+      "config1, config2, and config3 lookups should record a cache hit"
+    )
+  }
+
+  test("getOrElseCreate creates new lookup for same target with different client UUID") {
+    // Test plan: Verify that the same target with different clientIdOpt values results in a cache
+    // miss and a new SliceLookup being created.
+
+    val cache = new SliceLookupCache
+    val target = Target(getSafeName)
+
+    val uuid1: UUID = UUID.fromString("00000000-0000-0000-0000-000000000001")
+    val uuid2: UUID = UUID.fromString("00000000-0000-0000-0000-000000000002")
+
+    // config1, config2, and config3 differ only in clientIdOpt.
+    val config1: InternalClientConfig = createTestConfig(target, clientIdOpt = Some(uuid1))
+    val config2: InternalClientConfig = createTestConfig(target, clientIdOpt = Some(uuid2))
+    val config3: InternalClientConfig = createTestConfig(target, clientIdOpt = None)
+
+    val lookupCountTracker: ChangeTracker[Double] = trackNumSliceLookupsMetric(target)
+    val cacheHitTracker: ChangeTracker[Double] =
+      trackCacheHitMetric(target, configMatched = true)
+    val cacheHitConfigMismatchTracker: ChangeTracker[Double] =
+      trackCacheHitMetric(target, configMatched = false)
+
+    // Create lookups for all three configs.
+    val lookup1: SliceLookup = getSliceLookup(cache, config1)
+    val lookup2: SliceLookup = getSliceLookup(cache, config2)
+    val lookup3: SliceLookup = getSliceLookup(cache, config3)
+    assert(
+      lookupCountTracker.totalChange() == 3,
+      "Each clientIdOpt variant should create a new SliceLookup"
+    )
+
+    // config2 and config3 each record a config mismatch (target found, but config differs).
+    assert(cacheHitTracker.totalChange() == 0, "target lookups should not record a cache hit")
+    assert(
+      cacheHitConfigMismatchTracker.totalChange() == 2,
+      "target lookups should record a config mismatch for config2 and config3"
+    )
+
+    // Verify that re-requesting each config returns the cached instance.
+    val lookup1Again: SliceLookup = getSliceLookup(cache, config1)
+    val lookup2Again: SliceLookup = getSliceLookup(cache, config2)
+    val lookup3Again: SliceLookup = getSliceLookup(cache, config3)
+    assert(
+      lookupCountTracker.totalChange() == 3,
+      "No additional lookups should be created for cached configs"
+    )
+    assert(lookup1 eq lookup1Again, "config1 lookup should return the same instance")
+    assert(lookup2 eq lookup2Again, "config2 lookup should return the same instance")
+    assert(lookup3 eq lookup3Again, "config3 lookup should return the same instance")
+
+    // Each of the 3 re-requests should record a cache hit.
     assert(
       cacheHitTracker.totalChange() == 3,
       "config1, config2, and config3 lookups should record a cache hit"

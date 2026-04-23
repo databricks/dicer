@@ -1,6 +1,14 @@
 package com.databricks.dicer.client
 
-import java.util.Random
+import java.net.URI
+import java.util.{Random, UUID}
+
+import com.databricks.backend.common.util.Project
+import com.databricks.conf.Config
+import com.databricks.conf.Configs
+import com.databricks.conf.trusted.ProjectConf
+import com.databricks.conf.trusted.RPCPortConf
+import com.databricks.rpc.tls.TLSOptions
 
 import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.concurrent.duration.Duration
@@ -17,6 +25,7 @@ import com.databricks.caching.util.{
   FakeTypedClock,
   MetricUtils
 }
+import com.databricks.caching.util.MetricUtils.ChangeTracker
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.common.TestSliceUtils._
 import com.databricks.dicer.common.{
@@ -27,7 +36,7 @@ import com.databricks.dicer.common.{
   InternalDicerTestEnvironment,
   ProposedSliceAssignment
 }
-import com.databricks.dicer.external.{Clerk, ResourceAddress, SliceKey, Slicelet, Target}
+import com.databricks.dicer.external.{Clerk, ClerkConf, ResourceAddress, SliceKey, Slicelet, Target}
 import com.databricks.dicer.friend.SliceMap
 import com.databricks.testing.DatabricksTest
 import com.databricks.threading.NamedExecutor
@@ -256,5 +265,131 @@ class ClerkImplSuite extends DatabricksTest with TestName {
       verifyEventuallyNoWatchRequestsReceivedAfterStop(target)
       assert(!clerk.impl.forTest.getLatestAssignmentOpt.contains(newAssignment))
     }
+  }
+
+  import ClientMetrics.ClientUuidStatus
+
+  /** Type alias for a function that creates a ClerkImpl given a target and UUID status to test. */
+  private type ClerkImplFactory = (Target, ClientUuidStatus) => ClerkImpl[ResourceAddress]
+
+  /** A dummy watch address to use in tests. */
+  private val DUMMY_WATCH_ADDRESS: URI = URI.create("https://localhost:12345")
+
+  /** Creates a [[ClerkConf]] for metric testing with the specified client UUID status. */
+  private def createClientUuidTestClerkConf(status: ClientUuidStatus): ClerkConf = {
+    val baseEntries: Seq[(String, Any)] = Seq(
+      "databricks.dicer.slicelet.rpc.port" -> 0,
+      "databricks.dicer.assigner.rpc.port" -> 0
+    )
+    val entries: Seq[(String, Any)] = status match {
+      case ClientUuidStatus.Valid =>
+        baseEntries :+ (
+          "databricks.dicer.internal.cachingteamonly.clientUuid" -> UUID.randomUUID().toString
+        )
+      case ClientUuidStatus.Malformed =>
+        baseEntries :+ (
+          "databricks.dicer.internal.cachingteamonly.clientUuid" -> "not-a-valid-uuid"
+        )
+      case ClientUuidStatus.Missing =>
+        baseEntries
+    }
+    val config: Config = Configs.parseMap(entries: _*)
+    new ProjectConf(Project.TestProject, config) with ClerkConf with RPCPortConf {
+      override protected def dicerTlsOptions: Option[TLSOptions] = None
+      override def envVars: Map[String, String] = Map.empty
+    }
+  }
+
+  /** Creates a Clerk via [[ClerkImpl.create]] (standard Clerk path). */
+  private def createViaStandard(
+      target: Target,
+      status: ClientUuidStatus): ClerkImpl[ResourceAddress] = {
+    val clerkConf: ClerkConf = createClientUuidTestClerkConf(status)
+    ClerkImpl.create(clerkConf, target, DUMMY_WATCH_ADDRESS, identity[ResourceAddress])
+  }
+
+  /** Creates a Clerk via [[ClerkImpl.createForDataPlaneDirectClerk]] (direct-to-assigner path). */
+  private def createViaDataPlaneDirect(
+      target: Target,
+      status: ClientUuidStatus): ClerkImpl[ResourceAddress] = {
+    val clerkConf: ClerkConf = createClientUuidTestClerkConf(status)
+    ClerkImpl.createForDataPlaneDirectClerk(
+      secPoolOpt = None,
+      clerkConf,
+      target,
+      DUMMY_WATCH_ADDRESS,
+      identity[ResourceAddress]
+    )
+  }
+
+  /** Creates a Clerk via [[ClerkImpl.createForShardedStub]] (sharded stub path). */
+  private def createViaShardedStub(
+      target: Target,
+      status: ClientUuidStatus): ClerkImpl[ResourceAddress] = {
+    val clientUuidOpt: Option[String] = status match {
+      case ClientUuidStatus.Valid => Some(UUID.randomUUID().toString)
+      case ClientUuidStatus.Malformed => Some("not-a-valid-uuid")
+      case ClientUuidStatus.Missing => None
+    }
+    ClerkImpl.createForShardedStub(
+      target,
+      watchAddress = DUMMY_WATCH_ADDRESS,
+      protoLoggerConf = TestClientUtils.createTestProtoLoggerConf(sampleFraction = 0.0),
+      tlsOptions = None,
+      clientUuidOpt = clientUuidOpt
+    )
+  }
+
+  // TODO(<internal bug>): Once all Dicer client deployments are confirmed to set POD_UID, this test can be
+  // retired. Absence of client UUID should trigger an exception at creation time.
+  namedGridTest("Client UUID status metric tracks status correctly")(
+    Map[String, ClerkImplFactory](
+      "standard" -> createViaStandard,
+      "dataPlaneDirectClerk" -> createViaDataPlaneDirect,
+      "shardedStub" -> createViaShardedStub
+    )
+  ) { factory: ClerkImplFactory =>
+    // Test plan: Verify that the dicer_client_uuid_status_total metric correctly tracks client
+    // UUID resolution status at Clerk creation time. For each Clerk creation path:
+    // 1. Create a Clerk with a valid UUID and verify clientUuidStatus=valid increments.
+    // 2. Create a Clerk without UUID and verify clientUuidStatus=missing increments.
+    // 3. Create a Clerk with a malformed UUID and verify clientUuidStatus=malformed increments.
+    val target: Target = Target.createKubernetesTarget(
+      URI.create("kubernetes-cluster:test-env/cloud2/public/region4/clustertype2/01"),
+      getSafeName
+    )
+
+    def createUuidStatusTracker(status: ClientUuidStatus): ChangeTracker[Double] = {
+      ChangeTracker { () =>
+        MetricUtils.getMetricValue(
+          CollectorRegistry.defaultRegistry,
+          "dicer_client_uuid_status_total",
+          Map(
+            "targetName" -> target.getTargetNameLabel,
+            "clientType" -> ClientType.Clerk.toString,
+            "clientUuidStatus" -> status.toString
+          )
+        )
+      }
+    }
+
+    // Verify: Creating a Clerk with a valid UUID is tracked.
+    val validTracker: ChangeTracker[Double] = createUuidStatusTracker(ClientUuidStatus.Valid)
+    val clerkWithUuid: ClerkImpl[ResourceAddress] = factory(target, ClientUuidStatus.Valid)
+    assert(validTracker.totalChange() == 1.0, "valid metric should increment")
+    clerkWithUuid.stop()
+
+    // Verify: Creating a Clerk without UUID is tracked.
+    val missingTracker: ChangeTracker[Double] = createUuidStatusTracker(ClientUuidStatus.Missing)
+    val clerkWithoutUuid: ClerkImpl[ResourceAddress] = factory(target, ClientUuidStatus.Missing)
+    assert(missingTracker.totalChange() == 1.0, "missing metric should increment")
+    clerkWithoutUuid.stop()
+
+    // Verify: Creating a Clerk with malformed UUID is tracked (fail-open).
+    val malformedTracker: ChangeTracker[Double] =
+      createUuidStatusTracker(ClientUuidStatus.Malformed)
+    val clerkMalformed: ClerkImpl[ResourceAddress] = factory(target, ClientUuidStatus.Malformed)
+    assert(malformedTracker.totalChange() == 1.0, "malformed metric should increment")
+    clerkMalformed.stop()
   }
 }

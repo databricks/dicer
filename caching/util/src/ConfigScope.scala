@@ -43,7 +43,7 @@ object ConfigScope {
   }
 
   /**
-   * Finds the config override corresponding to the config scope of the `currentShard`.
+   * Finds the config override corresponding to the given `configScope`.
    *
    * @param configScope the config scope in which this service is currently running.
    * @param scopedOverrides a list of config scope specific overrides.
@@ -53,7 +53,7 @@ object ConfigScope {
    * @return None if no override is found, otherwise return the corresponding override.
    * @throws IllegalArgumentException if `configScope` is defined in multiple overrides.
    */
-  def findShardOverride[ConfigP <: scalapb.Message[ConfigP]](
+  def findScopeOverride[ConfigP <: scalapb.Message[ConfigP]](
       configScope: ConfigScope,
       scopedOverrides: Seq[(Seq[ConfigScopeP], ConfigP)]): Option[ConfigP] = {
     var matchingConfigProto: Option[ConfigP] = None

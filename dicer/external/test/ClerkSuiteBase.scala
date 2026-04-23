@@ -99,14 +99,33 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
   protected def clientLanguage: String
 
   /**
-   * Creates a clerk for the given target.
+   * Creates a clerk for the given target, returning the clerk and the target that it is expected to
+   * use.
    *
    * @param target The target to watch.
    * @param clerkLocationConfigMap The location config map for the Clerk's environment. If provided,
    *                               the Clerk will be created with this location configuration.
    * @param clientBranchOpt The optional branch name to use for client version metrics.
    */
-  protected def createClerk(
+  final protected def createClerk(
+      target: Target,
+      clerkLocationConfigMap: Option[Map[String, String]],
+      clientBranchOpt: Option[String] = None): (ClerkDriver, Target) = {
+    val clerk: ClerkDriver = createClerkInternal(target, clerkLocationConfigMap, clientBranchOpt)
+    val locationConf: LocationConf = LocationConfTestUtils.newTestLocationConfig(
+      envMap = clerkLocationConfigMap.getOrElse(Map.empty)
+    )
+    val clusterUriOpt: Option[URI] = locationConf.location.kubernetesClusterUri.map(URI.create)
+    val expectedTarget: Target = ClerkDriver.computeExpectedTargetIdentifier(target, clusterUriOpt)
+    (clerk, expectedTarget)
+  }
+
+  /**
+   * The core logic of creating a Clerk.
+   *
+   * See [[createClerk]] for full documentation of the parameters.
+   */
+  protected def createClerkInternal(
       target: Target,
       clerkLocationConfigMap: Option[Map[String, String]],
       clientBranchOpt: Option[String] = None): ClerkDriver
@@ -178,7 +197,8 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
     // Block assignment before creating the clerk to prevent the assigner generating an assignment;
     // racing with the assert below.
     testAssigner.blockAssignment(target)
-    val clerk: ClerkDriver = createClerk(target, Some(LOCATION_CONFIG_MAP_DEV_AWS_US_WEST_2))
+    val (clerk, _): (ClerkDriver, _) =
+      createClerk(target, Some(LOCATION_CONFIG_MAP_DEV_AWS_US_WEST_2))
 
     // Verify that the Clerk is not ready. We add a short delay here, because the Rust Clerk driver
     // observes the readiness via RPC. If we immediately check the readiness after creating the
@@ -223,7 +243,8 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
     // Test plan: Create a Clerk and assigner. Provide the assigner with one assignment and ensure
     // that the Clerk receives the assignment. Check some keys with getStubForKey calls.
     val target = Target(getUniqueTargetName)
-    val clerk: ClerkDriver = createClerk(target, Some(LOCATION_CONFIG_MAP_DEV_AWS_US_WEST_2))
+    val (clerk, _): (ClerkDriver, _) =
+      createClerk(target, Some(LOCATION_CONFIG_MAP_DEV_AWS_US_WEST_2))
 
     val proposal = createProposal(
       ("" -- fp("Dori")) -> Seq("Pod2"),
@@ -275,7 +296,8 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
     )
     TestUtils.awaitResult(testAssigner.setAndFreezeAssignment(target, proposal), Duration.Inf)
 
-    val clerk: ClerkDriver = createClerk(target, Some(LOCATION_CONFIG_MAP_DEV_AWS_US_WEST_2))
+    val (clerk, _): (ClerkDriver, _) =
+      createClerk(target, Some(LOCATION_CONFIG_MAP_DEV_AWS_US_WEST_2))
     TestUtils.awaitResult(clerk.ready, Duration.Inf)
 
     // Setup: Hardcode the expected set of resources for some test key.
@@ -319,7 +341,8 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
   test("Clerk debug name") {
     // Test plan: Check that the Clerk's debug name contains the target name.
     val target = Target(getUniqueTargetName)
-    val clerk: ClerkDriver = createClerk(target, Some(LOCATION_CONFIG_MAP_DEV_AWS_US_WEST_2))
+    val (clerk, _): (ClerkDriver, _) =
+      createClerk(target, Some(LOCATION_CONFIG_MAP_DEV_AWS_US_WEST_2))
     assert(clerk.getDebugName.contains(target.name))
   }
 
@@ -357,6 +380,80 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
         "clientType" -> clientType.toString
       )
     )
+  }
+
+  /**
+   * Returns the number of times Clerk.getStubForKey was called for the given target.
+   */
+  private def getClerkGetStubForKeyCallCount(targetIdentifier: Target): Double = {
+    readPrometheusMetric(
+      "dicer_clerk_getstubforkey_call_count_total",
+      Vector(
+        "targetCluster" -> targetIdentifier.getTargetClusterLabel,
+        "targetName" -> targetIdentifier.getTargetNameLabel,
+        "targetInstanceId" -> targetIdentifier.getTargetInstanceIdLabel
+      )
+    )
+  }
+
+  test("Clerk records getStubForKey call count metric") {
+    // Test plan: Verify that the Clerk increments the getStubForKey call count metric each time
+    // getStubForKey is invoked, and verify that this works as expected independently of Clerk
+    // readiness. Verify this by creating a Clerk, calling getStubForKey 10 times, and assert the
+    // metric increased by 10. Then set an assignment, wait for the Clerk to become ready, call
+    // getStubForKey 10 more times, and assert the metric increased by 20 total.
+    //
+    // Note that in test setups where creating a Clerk creates a Slicelet as well, the first part of
+    // the test races with Clerk readiness, as the Slicelet to which the Clerk is connected will
+    // induce assignment generation. However in some test setups the Clerk is a direct Clerk that
+    // connects directly to the Assigner, in which case the first part of the test does not race
+    // with clerk readiness, and we need to explicitly set and freeze an assignment in the second
+    // half of the test in order for the Clerk to become ready. For the former case which races,
+    // this is OK because erroneous metric behavior in the non-ready case will still surface as test
+    // flakiness.
+    val target = Target(getUniqueTargetName)
+    val (clerk, expectedTarget): (ClerkDriver, Target) =
+      createClerk(target, Some(LOCATION_CONFIG_MAP_DEV_AWS_US_WEST_2))
+
+    val callCountTracker: ChangeTracker[Double] =
+      ChangeTracker(() => getClerkGetStubForKeyCallCount(expectedTarget))
+
+    for (_ <- 0 until 10) {
+      clerk.getStubForKey(fp("some-key"))
+    }
+
+    AssertionWaiter("Wait for getStubForKey call count metric to be updated").await {
+      assert(
+        callCountTracker.totalChange() == 10.0,
+        "Expected getStubForKey call count to increase by 10, " +
+        s"but totalChange was ${callCountTracker.totalChange()}"
+      )
+    }
+
+    // Setup: In setups where the Clerk is a direct Clerk connecting directly to the assigner, we
+    // need to explicitly set and freeze an assignment in order to get the Clerk to become ready,
+    // and test that the metric works correctly for ready clerks.
+    val proposal: SliceMap[ProposedSliceAssignment] = createProposal(
+      ("" -- fp("Dori")) -> Seq("Pod2"),
+      (fp("Dori") -- fp("Fili")) -> Seq("Pod0"),
+      (fp("Fili") -- fp("Kili")) -> Seq("Pod1"),
+      (fp("Kili") -- fp("Nori")) -> Seq("Pod0"),
+      (fp("Nori") -- ∞) -> Seq("Pod3")
+    )
+    TestUtils.awaitResult(testAssigner.setAndFreezeAssignment(target, proposal), Duration.Inf)
+    TestUtils.awaitResult(clerk.ready, Duration.Inf)
+
+    for (_ <- 0 until 10) {
+      clerk.getStubForKey(fp("some-key"))
+    }
+
+    AssertionWaiter("Wait for getStubForKey call count metric to be updated again").await {
+      assert(
+        callCountTracker.totalChange() == 20.0,
+        "Expected getStubForKey call count to increase by 10, " +
+        s"but totalChange was ${callCountTracker.totalChange()}"
+      )
+    }
   }
 
   test("Clerk tracks generation and incarnation") {
@@ -408,10 +505,10 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
     }
 
     val target = Target(getUniqueTargetName)
-    val clerk: ClerkDriver = createClerk(target, Some(LOCATION_CONFIG_MAP_DEV_AWS_US_WEST_2))
-    val expectedTarget: Target = clerk.expectedClerkTargetIdentifier
-    val clerkSource = AssignmentMetricsSource.Clerk // added to pass lint-pr
-    val proposal1 = createProposal(
+    val (clerk, expectedTarget): (ClerkDriver, Target) =
+      createClerk(target, Some(LOCATION_CONFIG_MAP_DEV_AWS_US_WEST_2))
+    val clerkSource: AssignmentMetricsSource.AssignmentMetricsSource = AssignmentMetricsSource.Clerk
+    val proposal1: SliceMap[ProposedSliceAssignment] = createProposal(
       ("" -- fp("Dori")) -> Seq("Pod2"),
       (fp("Dori") -- fp("Fili")) -> Seq("Pod0"),
       (fp("Fili") -- fp("Kili")) -> Seq("Pod1"),
@@ -420,7 +517,7 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
     )
 
     // Track changes in the number of new generations metric
-    val newGenerationsTracker =
+    val newGenerationsTracker: ChangeTracker[Double] =
       ChangeTracker(() => getNumNewGenerations(clerkSource, expectedTarget))
 
     val assignment1: Assignment =
@@ -443,7 +540,7 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
       assert(getNumNewGenerations(clerkSource, expectedTarget) >= 1)
     }
 
-    val proposal2 = createProposal(
+    val proposal2: SliceMap[ProposedSliceAssignment] = createProposal(
       ("" -- fp("Fili")) -> Seq("Pod2"),
       (fp("Fili") -- fp("Kili")) -> Seq("Pod1"),
       (fp("Kili") -- fp("Nori")) -> Seq("Pod0"),
@@ -470,7 +567,7 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
 
     val target = Target(getUniqueTargetName)
     // Pre-compute the expected target identifier for metrics.
-    val expectedTarget =
+    val expectedTarget: Target =
       ClerkDriver.computeExpectedTargetIdentifier(target, Some(URI_DEV_AWS_US_WEST_2))
 
     // Set up an assignment before creating the Clerk to ensure it's the first assignment
@@ -492,7 +589,8 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
       () => getClientRequestSizeSum(expectedTarget, ClientType.Clerk)
     )
 
-    val clerk: ClerkDriver = createClerk(target, Some(LOCATION_CONFIG_MAP_DEV_AWS_US_WEST_2))
+    val (clerk, _): (ClerkDriver, _) =
+      createClerk(target, Some(LOCATION_CONFIG_MAP_DEV_AWS_US_WEST_2))
     TestUtils.awaitResult(clerk.ready, Duration.Inf)
 
     val sourceDebugName: String = getWatchSource.toString
@@ -515,13 +613,11 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
 
     // Setup: create a Clerk with a conf that has a valid branch.
     val target: Target = targetFactory(getUniqueTargetName)
-    val clerk: ClerkDriver = createClerk(
+    val (clerk, expectedTarget): (ClerkDriver, Target) = createClerk(
       target,
       Some(LOCATION_CONFIG_MAP_DEV_AWS_US_WEST_2),
       clientBranchOpt = Some(validClientBranch)
     )
-
-    val expectedTarget: Target = clerk.expectedClerkTargetIdentifier
 
     // Verify: the client version is reported correctly for a valid branch.
     AssertionWaiter("Dicer client build info is populated").await {
@@ -564,13 +660,11 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
 
     // Setup: create a Clerk with a conf that has an invalid branch.
     val target: Target = targetFactory(getUniqueTargetName)
-    val clerk: ClerkDriver = createClerk(
+    val (clerk, expectedTarget): (ClerkDriver, Target) = createClerk(
       target,
       Some(LOCATION_CONFIG_MAP_DEV_AWS_US_WEST_2),
       clientBranchOpt = Some(invalidClientBranch)
     )
-
-    val expectedTarget: Target = clerk.expectedClerkTargetIdentifier
 
     // Verify: the client version is reported correctly for an invalid branch.
     AssertionWaiter("Dicer client build info is populated").await {
@@ -617,13 +711,12 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
       createProposal("" -- ∞ -> Seq("pod0"))
     )
     // Create clerk with location configuration to test that it picks up the cluster URI.
-    val clerk: ClerkDriver =
+    val (clerk, expectedTarget): (ClerkDriver, Target) =
       createClerk(
         clusterUnqualifiedTarget,
         Some(LOCATION_CONFIG_MAP_DEV_AWS_US_WEST_2),
         clientBranchOpt = Some(validClientBranch)
       )
-    val expectedTarget: Target = clerk.expectedClerkTargetIdentifier
 
     // Verify: Clerk can receive (the frozen) assignment.
     TestUtils.awaitResult(clerk.ready, Duration.Inf)
@@ -659,9 +752,9 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
   }
 
   test("CrossClusterClerk ignores the cluster URI from the environment variable") {
-    // Verify that Clerks created with cluster-qualified target will ignore the cluster URI
-    // from environment variable. Verify this by simulating a case where a Cross-Cluster-Clerk is
-    // in the general cluster (URI_DEV_AWS_US_WEST_2_GENERAL1) but subscribing to a target in an
+    // Test plan: Verify that Clerks created with cluster-qualified target will ignore the cluster
+    // URI from environment variable. Verify this by simulating a case where a Cross-Cluster-Clerk
+    // is in the general cluster (URI_DEV_AWS_US_WEST_2_GENERAL1) but subscribing to a target in an
     // HGCP cluster (URI_DEV_AWS_US_WEST_2), and the clerk is created with a Target qualified by
     // `URI_DEV_AWS_US_WEST_2`. Verify the clerk emits metrics labeled with `URI_DEV_AWS_US_WEST_2`
     // rather than `URI_DEV_AWS_US_WEST_2_GENERAL1`. Note that this test is only applicable to
@@ -699,7 +792,9 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
     }
 
     clerkOpt.map { clerk: ClerkDriver =>
-      val expectedTarget: Target = clerk.expectedClerkTargetIdentifier
+      // For cross-cluster clerks, the target is expected to be fully qualified.
+      val expectedTarget: Target =
+        Target.createKubernetesTarget(URI_DEV_AWS_US_WEST_2, clusterUnqualifiedTarget.name)
 
       // Verify: Clerk can receive assignments.
       TestUtils.awaitResult(clerk.ready, Duration.Inf)
@@ -766,31 +861,14 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
     slicelet.forTest.stop()
     clerkOpt.map((_: ClerkDriver).stop())
   }
-}
 
-/**
- * Abstract base class for Scala Clerk tests. This class contains test cases that are specific to
- * the Scala implementation or those that do not yet work for the Rust implementation.
- */
-abstract class ScalaClerkSuiteBase extends ClerkSuiteBase {
-
-  override protected def clientLanguage: String = "Scala"
-
-  override protected def readPrometheusMetric(
-      metricName: String,
-      labels: Vector[(String, String)]): Double = {
-    MetricUtils.getMetricValue(CollectorRegistry.defaultRegistry, metricName, labels.toMap)
-  }
-
-  // Note: this test only applies to Scala Clerk because Rust Clerk is more restrictive and requires
-  // WhereAmI to be available.
-  test("Scala Clerk can be created when WhereAmI isn't available") {
-    // Verify that Clerks created with cluster-unqualified target can proceed normally even if the
-    // WhereAmI environment variable is not defined. Verify this by simulating the case where the
-    // Clerk, Slicelet and assigner are running in the same cluster where WhereAmI env var is not
-    // available, creating a clerk using a cluster-unqualified target, and verifying the WhereAmI
-    // URI is not picked up by the clerk and the metrics from the clerk are not labeled with any
-    // cluster URI, but the clerk is still working normally.
+  test("Clerk can be created when WhereAmI isn't available") {
+    // Test plan: Verify that Clerks created with cluster-unqualified target can proceed normally
+    // even if the WhereAmI environment variable is not defined. Verify this by simulating the
+    // case where the Clerk, Slicelet and assigner are running in the same cluster where WhereAmI
+    // env var is not available, creating a clerk using a cluster-unqualified target, and verifying
+    // the WhereAmI URI is not picked up by the clerk and the metrics from the clerk are not
+    // labeled with any cluster URI, but the clerk is still working normally.
     val clusterUnqualifiedTarget: Target = Target(getUniqueTargetName)
     // Setup: Set and freeze an arbitrary assignment so the clerk can observe it and emit metrics.
     testEnv.setAndFreezeAssignment(
@@ -799,7 +877,8 @@ abstract class ScalaClerkSuiteBase extends ClerkSuiteBase {
     )
     // Setup and verify: Clerk can be successfully created even if WhereAmI env var is not
     // available. Pass None to indicate no location configuration.
-    val clerk: ClerkDriver = createClerk(clusterUnqualifiedTarget, clerkLocationConfigMap = None)
+    val (clerk, _): (ClerkDriver, _) =
+      createClerk(clusterUnqualifiedTarget, clerkLocationConfigMap = None)
 
     // Verify: Clerk can receive (the frozen) assignment.
     TestUtils.awaitResult(clerk.ready, Duration.Inf)
@@ -830,5 +909,20 @@ abstract class ScalaClerkSuiteBase extends ClerkSuiteBase {
       )
     }
     clerk.stop()
+  }
+}
+
+/**
+ * Abstract base class for Scala Clerk tests. This class contains test cases that are specific to
+ * the Scala implementation or those that do not yet work for the Rust implementation.
+ */
+abstract class ScalaClerkSuiteBase extends ClerkSuiteBase {
+
+  override protected def clientLanguage: String = "Scala"
+
+  override protected def readPrometheusMetric(
+      metricName: String,
+      labels: Vector[(String, String)]): Double = {
+    MetricUtils.getMetricValue(CollectorRegistry.defaultRegistry, metricName, labels.toMap)
   }
 }

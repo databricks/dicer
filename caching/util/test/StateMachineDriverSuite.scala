@@ -224,7 +224,7 @@ private trait StateMachineDriverSuiteBase extends DatabricksTest with TestName {
       () =>
         MetricUtils.getPrefixLoggerErrorCount(
           Severity.CRITICAL,
-          CachingErrorCode.STATE_MACHINE_EXCEPTION,
+          CachingErrorCode.UNCAUGHT_STATE_MACHINE_ERROR(AlertOwnerTeam.CachingTeam),
           prefix = ""
         )
     )

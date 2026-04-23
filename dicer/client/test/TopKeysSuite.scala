@@ -20,9 +20,9 @@ import com.databricks.dicer.assigner.InterposingEtcdPreferredAssignerDriver
 import com.databricks.dicer.assigner.config.{
   ChurnConfig,
   InternalTargetConfig,
-  InternalTargetConfigMap,
-  TargetName
+  InternalTargetConfigMap
 }
+import com.databricks.dicer.common.TargetName
 import com.databricks.dicer.common.TestSliceUtils._
 import com.databricks.dicer.common.{
   ClientRequest,
@@ -44,7 +44,8 @@ class TopKeysSuite extends DatabricksTest {
       assignerConf = new DicerAssignerConf(
         default.assignerConf.rawConfig.merge(
           Configs.parseMap(
-            "databricks.dicer.common.watchServerSuggestedRpcTimeoutSeconds" -> 1,
+            "databricks.dicer.internal.cachingteamonly" +
+            ".watchServerSuggestedRpcTimeoutMillis" -> 1000,
             "databricks.dicer.assigner.useTopKeys" -> true
           )
         )

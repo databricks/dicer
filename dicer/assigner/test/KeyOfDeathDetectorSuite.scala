@@ -7,10 +7,8 @@ import scala.concurrent.duration.Duration.Infinite
 
 import com.databricks.caching.util.{StateMachineOutput, TickerTime}
 import com.databricks.caching.util.TestUtils.TestName
-import com.databricks.dicer.assigner.HealthWatcher.HealthStatus
 import com.databricks.dicer.assigner.KeyOfDeathDetector.{DriverAction, Event}
 import com.databricks.dicer.assigner.TargetMetrics.KeyOfDeathTransitionType
-import com.databricks.dicer.common.TestSliceUtils.{createTestSquid}
 import com.databricks.dicer.external.{Target}
 import com.databricks.testing.DatabricksTest
 
@@ -128,7 +126,10 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
     // state and produces a heuristic value of 0.
     harness.event(
       35.seconds,
-      Event.ResourcesUpdated(Map(createTestSquid("pod0") -> HealthStatus.Running)),
+      Event.ResourcesUpdated(
+        healthyCount = 1,
+        newlyCrashedCount = 0
+      ),
       Seq.empty,
       Duration.Inf
     )
@@ -168,10 +169,8 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
     harness.event(
       66.seconds,
       Event.ResourcesUpdated(
-        Map(
-          createTestSquid("pod0") -> HealthStatus.Running,
-          createTestSquid("pod1") -> HealthStatus.Running
-        )
+        healthyCount = 2,
+        newlyCrashedCount = 0
       ),
       Seq.empty,
       Duration.Inf
@@ -236,13 +235,8 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
     harness.event(
       35.seconds,
       Event.ResourcesUpdated(
-        Map(
-          createTestSquid("pod0") -> HealthStatus.Running,
-          createTestSquid("pod1") -> HealthStatus.Running,
-          createTestSquid("pod2") -> HealthStatus.Running,
-          createTestSquid("pod3") -> HealthStatus.Running,
-          createTestSquid("pod4") -> HealthStatus.Running
-        )
+        healthyCount = 5,
+        newlyCrashedCount = 0
       ),
       Seq.empty,
       Duration.Inf
@@ -266,12 +260,8 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
     harness.event(
       70.seconds,
       Event.ResourcesUpdated(
-        Map(
-          createTestSquid("pod1") -> HealthStatus.Running,
-          createTestSquid("pod2") -> HealthStatus.Running,
-          createTestSquid("pod3") -> HealthStatus.Running,
-          createTestSquid("pod4") -> HealthStatus.Running
-        )
+        healthyCount = 4,
+        newlyCrashedCount = 1
       ),
       Seq.empty,
       190.seconds // The time at which pod0's crash record expires.
@@ -311,14 +301,10 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
     // value should still be non-zero.
     harness.event(
       185.seconds,
+      // pod0 is resurrected. No new crashes (pod0 reappears, was already recorded as crashed).
       Event.ResourcesUpdated(
-        Map(
-          createTestSquid("pod0") -> HealthStatus.Running,
-          createTestSquid("pod1") -> HealthStatus.Running,
-          createTestSquid("pod2") -> HealthStatus.Running,
-          createTestSquid("pod3") -> HealthStatus.Running,
-          createTestSquid("pod4") -> HealthStatus.Running
-        )
+        healthyCount = 5,
+        newlyCrashedCount = 0
       ),
       Seq.empty,
       190.seconds // The time at which pod0's crash record expires.
@@ -385,13 +371,8 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
     harness.event(
       35.seconds,
       Event.ResourcesUpdated(
-        Map(
-          createTestSquid("pod0") -> HealthStatus.Running,
-          createTestSquid("pod1") -> HealthStatus.Running,
-          createTestSquid("pod2") -> HealthStatus.Running,
-          createTestSquid("pod3") -> HealthStatus.Running,
-          createTestSquid("pod4") -> HealthStatus.Running
-        )
+        healthyCount = 5,
+        newlyCrashedCount = 0
       ),
       Seq.empty,
       Duration.Inf
@@ -414,14 +395,10 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
     // estimated resource workload size should decrease by 1.
     harness.event(
       40.seconds,
+      // pod4 transitions to Terminating (not a crash). healthyCount=4.
       Event.ResourcesUpdated(
-        Map(
-          createTestSquid("pod0") -> HealthStatus.Running,
-          createTestSquid("pod1") -> HealthStatus.Running,
-          createTestSquid("pod2") -> HealthStatus.Running,
-          createTestSquid("pod3") -> HealthStatus.Running,
-          createTestSquid("pod4") -> HealthStatus.Terminating
-        )
+        healthyCount = 4,
+        newlyCrashedCount = 0
       ),
       Seq.empty,
       Duration.Inf
@@ -444,13 +421,10 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
     // no longer present in the health report.
     harness.event(
       45.seconds,
+      // pod4 fully gone. Was Terminating when it left → not a crash. healthyCount=4.
       Event.ResourcesUpdated(
-        Map(
-          createTestSquid("pod0") -> HealthStatus.Running,
-          createTestSquid("pod1") -> HealthStatus.Running,
-          createTestSquid("pod2") -> HealthStatus.Running,
-          createTestSquid("pod3") -> HealthStatus.Running
-        )
+        healthyCount = 4,
+        newlyCrashedCount = 0
       ),
       Seq.empty,
       Duration.Inf
@@ -473,13 +447,10 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
     // estimated resource workload size should decrease by 1.
     harness.event(
       50.seconds,
+      // pod3 transitions to NotReady (not a crash). healthyCount=3.
       Event.ResourcesUpdated(
-        Map(
-          createTestSquid("pod0") -> HealthStatus.Running,
-          createTestSquid("pod1") -> HealthStatus.Running,
-          createTestSquid("pod2") -> HealthStatus.Running,
-          createTestSquid("pod3") -> HealthStatus.NotReady
-        )
+        healthyCount = 3,
+        newlyCrashedCount = 0
       ),
       Seq.empty,
       Duration.Inf
@@ -498,18 +469,14 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
       )
     )
 
-    // Verify that the heuristic does not change if the previously NotReady resource is now
-    // Unknown, with neither the number of crashed resources nor the estimated resource workload
-    // size changing.
+    // Verify that the heuristic does not change if a second Running resource transitions to
+    // NotReady, though the estimated resource workload size should decrease by 1 again.
     harness.event(
       55.seconds,
+      // pod2 also transitions to NotReady (not a crash). healthyCount=2.
       Event.ResourcesUpdated(
-        Map(
-          createTestSquid("pod0") -> HealthStatus.Running,
-          createTestSquid("pod1") -> HealthStatus.Running,
-          createTestSquid("pod2") -> HealthStatus.Running,
-          createTestSquid("pod3") -> HealthStatus.Unknown
-        )
+        healthyCount = 2,
+        newlyCrashedCount = 0
       ),
       Seq.empty,
       Duration.Inf
@@ -519,7 +486,7 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
       expectedHeuristicValue = 0.0,
       expectedNumCrashedResourcesGauge = 0,
       expectedNumCrashedResourcesTotal = 0,
-      expectedEstimatedResourceWorkloadSize = 3,
+      expectedEstimatedResourceWorkloadSize = 2,
       expectedTransitions = Map(
         KeyOfDeathTransitionType.STABLE_TO_ENDANGERED -> 0,
         KeyOfDeathTransitionType.ENDANGERED_TO_STABLE -> 0,
@@ -530,7 +497,7 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
   }
 
   test("New non-Running resources are ignored as both crashed and healthy resources") {
-    // Test plan: Verify that new Unknown/Terminating/NotReady resources are ignored as both
+    // Test plan: Verify that new Terminating/NotReady resources are ignored as both
     // crashed and healthy resources and do not change the heuristic value or the estimated
     // resource workload size.
     val target = Target(getSafeName)
@@ -542,13 +509,8 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
     harness.event(
       35.seconds,
       Event.ResourcesUpdated(
-        Map(
-          createTestSquid("pod0") -> HealthStatus.Running,
-          createTestSquid("pod1") -> HealthStatus.Running,
-          createTestSquid("pod2") -> HealthStatus.Running,
-          createTestSquid("pod3") -> HealthStatus.Running,
-          createTestSquid("pod4") -> HealthStatus.Running
-        )
+        healthyCount = 5,
+        newlyCrashedCount = 0
       ),
       Seq.empty,
       Duration.Inf
@@ -567,20 +529,16 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
       )
     )
 
-    // Crash a resource.
+    // Crash a resource by removing it from the report.
     harness.event(
       55.seconds,
+      // pod4 absent and was Running → 1 crash at t=55. healthyCount=4.
       Event.ResourcesUpdated(
-        Map(
-          createTestSquid("pod0") -> HealthStatus.Running,
-          createTestSquid("pod1") -> HealthStatus.Running,
-          createTestSquid("pod2") -> HealthStatus.Running,
-          createTestSquid("pod3") -> HealthStatus.Running,
-          createTestSquid("pod4") -> HealthStatus.Unknown
-        )
+        healthyCount = 4,
+        newlyCrashedCount = 1
       ),
       Seq.empty,
-      175.seconds // The time at which pod3's crash record expires.
+      175.seconds // The time at which pod4's crash record expires.
     )
     verifyKodTargetMetrics(
       target,
@@ -599,14 +557,10 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
     // Resurrect the resource, so that there are 5 currently healthy resources.
     harness.event(
       58.seconds,
+      // pod4 reappears. No new crashes. healthyCount=5.
       Event.ResourcesUpdated(
-        Map(
-          createTestSquid("pod0") -> HealthStatus.Running,
-          createTestSquid("pod1") -> HealthStatus.Running,
-          createTestSquid("pod2") -> HealthStatus.Running,
-          createTestSquid("pod3") -> HealthStatus.Running,
-          createTestSquid("pod4") -> HealthStatus.Running
-        )
+        healthyCount = 5,
+        newlyCrashedCount = 0
       ),
       Seq.empty,
       175.seconds
@@ -625,21 +579,16 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
       )
     )
 
-    // Add in a new resource in the Unknown state, verifying that the heuristic does not change.
+    // Add in a new resource in the NotReady state, verifying that the heuristic does not change.
     // This resource should neither be counted as a new crashed resource (the total number of
     // crashed resources should remain at 1) nor as a healthy resource (the estimated resource
     // workload size should remain at 5).
     harness.event(
       60.seconds,
+      // pod5 is new and NotReady (not Running) → not counted as crashed or healthy. healthyCount=5.
       Event.ResourcesUpdated(
-        Map(
-          createTestSquid("pod0") -> HealthStatus.Running,
-          createTestSquid("pod1") -> HealthStatus.Running,
-          createTestSquid("pod2") -> HealthStatus.Running,
-          createTestSquid("pod3") -> HealthStatus.Running,
-          createTestSquid("pod4") -> HealthStatus.Running,
-          createTestSquid("pod5") -> HealthStatus.Unknown
-        )
+        healthyCount = 5,
+        newlyCrashedCount = 0
       ),
       Seq.empty,
       175.seconds
@@ -661,45 +610,10 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
     // Add in a new resource in the Terminating state, verifying that the heuristic does not change.
     harness.event(
       65.seconds,
+      // pod6 is new and Terminating → not counted. healthyCount=5 (pod0-pod4 Running).
       Event.ResourcesUpdated(
-        Map(
-          createTestSquid("pod0") -> HealthStatus.Running,
-          createTestSquid("pod1") -> HealthStatus.Running,
-          createTestSquid("pod2") -> HealthStatus.Running,
-          createTestSquid("pod3") -> HealthStatus.Running,
-          createTestSquid("pod4") -> HealthStatus.Running,
-          createTestSquid("pod6") -> HealthStatus.Terminating
-        )
-      ),
-      Seq.empty,
-      175.seconds
-    )
-    verifyKodTargetMetrics(
-      target,
-      expectedHeuristicValue = 1.0 / 5.0,
-      expectedNumCrashedResourcesGauge = 1,
-      expectedNumCrashedResourcesTotal = 1,
-      expectedEstimatedResourceWorkloadSize = 5,
-      expectedTransitions = Map(
-        KeyOfDeathTransitionType.STABLE_TO_ENDANGERED -> 1,
-        KeyOfDeathTransitionType.ENDANGERED_TO_STABLE -> 0,
-        KeyOfDeathTransitionType.ENDANGERED_TO_POISONED -> 0,
-        KeyOfDeathTransitionType.POISONED_TO_STABLE -> 0
-      )
-    )
-
-    // Add in a new resource in the NotReady state, verifying that the heuristic does not change.
-    harness.event(
-      70.seconds,
-      Event.ResourcesUpdated(
-        Map(
-          createTestSquid("pod0") -> HealthStatus.Running,
-          createTestSquid("pod1") -> HealthStatus.Running,
-          createTestSquid("pod2") -> HealthStatus.Running,
-          createTestSquid("pod3") -> HealthStatus.Running,
-          createTestSquid("pod4") -> HealthStatus.Running,
-          createTestSquid("pod7") -> HealthStatus.NotReady
-        )
+        healthyCount = 5,
+        newlyCrashedCount = 0
       ),
       Seq.empty,
       175.seconds
@@ -732,14 +646,10 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
     // state and produces a heuristic value of 0.
     harness.event(
       35.seconds,
+      // 5 Running pods → healthyCount=5, no crashes.
       Event.ResourcesUpdated(
-        Map(
-          createTestSquid("pod0") -> HealthStatus.Running,
-          createTestSquid("pod1") -> HealthStatus.Running,
-          createTestSquid("pod2") -> HealthStatus.Running,
-          createTestSquid("pod3") -> HealthStatus.Running,
-          createTestSquid("pod4") -> HealthStatus.Running
-        )
+        healthyCount = 5,
+        newlyCrashedCount = 0
       ),
       Seq.empty,
       Duration.Inf
@@ -761,12 +671,10 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
     // Crash two resources at once.
     harness.event(
       55.seconds,
+      // pod3 and pod4 crashed (were Running, now absent) → 2 crashes, 3 healthy remaining.
       Event.ResourcesUpdated(
-        Map(
-          createTestSquid("pod0") -> HealthStatus.Running,
-          createTestSquid("pod1") -> HealthStatus.Running,
-          createTestSquid("pod2") -> HealthStatus.Running
-        )
+        healthyCount = 3,
+        newlyCrashedCount = 2
       ),
       Seq(DriverAction.TransitionToPoisoned),
       175.seconds // The time at which pod0 and pod1's crash records expire.
@@ -800,7 +708,11 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
     // Provide an initial health report with one resource in the Running state.
     harness.event(
       35.seconds,
-      Event.ResourcesUpdated(Map(createTestSquid("pod0") -> HealthStatus.Running)),
+      // 1 Running pod → healthyCount=1, no crashes.
+      Event.ResourcesUpdated(
+        healthyCount = 1,
+        newlyCrashedCount = 0
+      ),
       Seq.empty,
       Duration.Inf
     )
@@ -821,7 +733,11 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
     // Remove the resource, which should trigger a key of death scenario.
     harness.event(
       40.seconds,
-      Event.ResourcesUpdated(Map.empty),
+      // pod0 crashed (was Running, now absent) → 1 crash, 0 healthy.
+      Event.ResourcesUpdated(
+        healthyCount = 0,
+        newlyCrashedCount = 1
+      ),
       Seq(DriverAction.TransitionToPoisoned),
       160.seconds // The time at which pod0's crash record expires.
     )
@@ -893,14 +809,10 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
     // Provide an initial health report with 5 healthy resources.
     harness.event(
       35.seconds,
+      // 5 Running pods → healthyCount=5, no crashes.
       Event.ResourcesUpdated(
-        Map(
-          createTestSquid("pod0") -> HealthStatus.Running,
-          createTestSquid("pod1") -> HealthStatus.Running,
-          createTestSquid("pod2") -> HealthStatus.Running,
-          createTestSquid("pod3") -> HealthStatus.Running,
-          createTestSquid("pod4") -> HealthStatus.Running
-        )
+        healthyCount = 5,
+        newlyCrashedCount = 0
       ),
       Seq.empty,
       Duration.Inf
@@ -922,13 +834,10 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
     // Crash 1 resource, which should not yet trigger a key of death scenario.
     harness.event(
       50.seconds,
+      // pod4 crashed (was Running, now absent) → 1 crash, 4 healthy remaining.
       Event.ResourcesUpdated(
-        Map(
-          createTestSquid("pod0") -> HealthStatus.Running,
-          createTestSquid("pod1") -> HealthStatus.Running,
-          createTestSquid("pod2") -> HealthStatus.Running,
-          createTestSquid("pod3") -> HealthStatus.Running
-        )
+        healthyCount = 4,
+        newlyCrashedCount = 1
       ),
       Seq.empty,
       170.seconds // The time at which pod4's crash record expires.
@@ -947,17 +856,14 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
       )
     )
 
-    // Crash another resource, which should trigger a key of death scenario. The new
-    // crashed resource should time out at 200 seconds.
+    // Crash another resource by removing it from the report, which should trigger a key of death
+    // scenario. The new crashed resource should time out at 200 seconds.
     harness.event(
       80.seconds,
+      // pod3 crashed (was Running, now absent) → 1 crash, 3 healthy remaining.
       Event.ResourcesUpdated(
-        Map(
-          createTestSquid("pod0") -> HealthStatus.Running,
-          createTestSquid("pod1") -> HealthStatus.Running,
-          createTestSquid("pod2") -> HealthStatus.Running,
-          createTestSquid("pod3") -> HealthStatus.Unknown
-        )
+        healthyCount = 3,
+        newlyCrashedCount = 1
       ),
       Seq(DriverAction.TransitionToPoisoned),
       170.seconds
@@ -1067,12 +973,10 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
     // Provide an initial health report with 3 healthy resources.
     harness.event(
       0.seconds,
+      // 3 Running pods → healthyCount=3, no crashes.
       Event.ResourcesUpdated(
-        Map(
-          createTestSquid("pod0") -> HealthStatus.Running,
-          createTestSquid("pod1") -> HealthStatus.Running,
-          createTestSquid("pod2") -> HealthStatus.Running
-        )
+        healthyCount = 3,
+        newlyCrashedCount = 0
       ),
       Seq.empty,
       Duration.Inf
@@ -1094,14 +998,10 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
     // Adding two resources should update the estimated resource workload size to 5.
     harness.event(
       10.seconds,
+      // 5 Running pods → healthyCount=5, no crashes.
       Event.ResourcesUpdated(
-        Map(
-          createTestSquid("pod0") -> HealthStatus.Running,
-          createTestSquid("pod1") -> HealthStatus.Running,
-          createTestSquid("pod2") -> HealthStatus.Running,
-          createTestSquid("pod3") -> HealthStatus.Running,
-          createTestSquid("pod4") -> HealthStatus.Running
-        )
+        healthyCount = 5,
+        newlyCrashedCount = 0
       ),
       Seq.empty,
       Duration.Inf
@@ -1123,13 +1023,10 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
     // Crash a resource to have the detector transition to the Endangered state.
     harness.event(
       20.seconds,
+      // pod4 crashed (was Running, now absent) → 1 crash, 4 healthy remaining.
       Event.ResourcesUpdated(
-        Map(
-          createTestSquid("pod0") -> HealthStatus.Running,
-          createTestSquid("pod1") -> HealthStatus.Running,
-          createTestSquid("pod2") -> HealthStatus.Running,
-          createTestSquid("pod3") -> HealthStatus.Running
-        )
+        healthyCount = 4,
+        newlyCrashedCount = 1
       ),
       Seq.empty,
       140.seconds
@@ -1152,15 +1049,10 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
     // updates to 6.
     harness.event(
       30.seconds,
+      // pod4 resurrected + pod5 new → 6 healthy, no new crashes.
       Event.ResourcesUpdated(
-        Map(
-          createTestSquid("pod0") -> HealthStatus.Running,
-          createTestSquid("pod1") -> HealthStatus.Running,
-          createTestSquid("pod2") -> HealthStatus.Running,
-          createTestSquid("pod3") -> HealthStatus.Running,
-          createTestSquid("pod4") -> HealthStatus.Running,
-          createTestSquid("pod5") -> HealthStatus.Running
-        )
+        healthyCount = 6,
+        newlyCrashedCount = 0
       ),
       Seq.empty,
       140.seconds
@@ -1184,14 +1076,10 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
     // estimated resource workload size should decrease to 5.
     harness.event(
       40.seconds,
+      // pod5 crashed (was Running, now absent) → 1 crash, 5 healthy remaining.
       Event.ResourcesUpdated(
-        Map(
-          createTestSquid("pod0") -> HealthStatus.Running,
-          createTestSquid("pod1") -> HealthStatus.Running,
-          createTestSquid("pod2") -> HealthStatus.Running,
-          createTestSquid("pod3") -> HealthStatus.Running,
-          createTestSquid("pod4") -> HealthStatus.Running
-        )
+        healthyCount = 5,
+        newlyCrashedCount = 1
       ),
       Seq(DriverAction.TransitionToPoisoned),
       140.seconds
@@ -1214,15 +1102,10 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
     // though the frozen workload size is still 5.
     harness.event(
       50.seconds,
+      // pod5 resurrected → 6 healthy, no new crashes.
       Event.ResourcesUpdated(
-        Map(
-          createTestSquid("pod0") -> HealthStatus.Running,
-          createTestSquid("pod1") -> HealthStatus.Running,
-          createTestSquid("pod2") -> HealthStatus.Running,
-          createTestSquid("pod3") -> HealthStatus.Running,
-          createTestSquid("pod4") -> HealthStatus.Running,
-          createTestSquid("pod5") -> HealthStatus.Running
-        )
+        healthyCount = 6,
+        newlyCrashedCount = 0
       ),
       Seq.empty,
       140.seconds
@@ -1253,14 +1136,10 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
     // Provide an initial health report with 5 healthy resources.
     harness.event(
       10.seconds,
+      // 5 Running pods → healthyCount=5, no crashes.
       Event.ResourcesUpdated(
-        Map(
-          createTestSquid("pod0") -> HealthStatus.Running,
-          createTestSquid("pod1") -> HealthStatus.Running,
-          createTestSquid("pod2") -> HealthStatus.Running,
-          createTestSquid("pod3") -> HealthStatus.Running,
-          createTestSquid("pod4") -> HealthStatus.Running
-        )
+        healthyCount = 5,
+        newlyCrashedCount = 0
       ),
       Seq.empty,
       Duration.Inf
@@ -1283,12 +1162,10 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
     val crashExpiryTime: FiniteDuration = 1.hours + 20.seconds
     harness.event(
       20.seconds,
+      // pod3 and pod4 crashed (were Running, now absent) → 2 crashes, 3 healthy remaining.
       Event.ResourcesUpdated(
-        Map(
-          createTestSquid("pod0") -> HealthStatus.Running,
-          createTestSquid("pod1") -> HealthStatus.Running,
-          createTestSquid("pod2") -> HealthStatus.Running
-        )
+        healthyCount = 3,
+        newlyCrashedCount = 2
       ),
       Seq(DriverAction.TransitionToPoisoned),
       crashExpiryTime
@@ -1327,14 +1204,10 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
     // Revive the two crashed resources, which do not end the key of death scenario.
     harness.event(
       40.seconds,
+      // pod3 and pod4 resurrected → 5 healthy, no new crashes.
       Event.ResourcesUpdated(
-        Map(
-          createTestSquid("pod0") -> HealthStatus.Running,
-          createTestSquid("pod1") -> HealthStatus.Running,
-          createTestSquid("pod2") -> HealthStatus.Running,
-          createTestSquid("pod3") -> HealthStatus.Running,
-          createTestSquid("pod4") -> HealthStatus.Running
-        )
+        healthyCount = 5,
+        newlyCrashedCount = 0
       ),
       Seq.empty,
       crashExpiryTime
@@ -1395,14 +1268,10 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
     // Provide an initial health report with 5 healthy resources.
     harness.event(
       35.seconds,
+      // 5 Running pods → healthyCount=5, no crashes.
       Event.ResourcesUpdated(
-        Map(
-          createTestSquid("pod0") -> HealthStatus.Running,
-          createTestSquid("pod1") -> HealthStatus.Running,
-          createTestSquid("pod2") -> HealthStatus.Running,
-          createTestSquid("pod3") -> HealthStatus.Running,
-          createTestSquid("pod4") -> HealthStatus.Running
-        )
+        healthyCount = 5,
+        newlyCrashedCount = 0
       ),
       Seq.empty,
       Duration.Inf
@@ -1429,13 +1298,10 @@ class KeyOfDeathDetectorSuite extends DatabricksTest with TestName {
     // Crash 1 resource.
     harness.event(
       50.seconds,
+      // pod4 crashed (was Running, now absent) → 1 crash, 4 healthy remaining.
       Event.ResourcesUpdated(
-        Map(
-          createTestSquid("pod0") -> HealthStatus.Running,
-          createTestSquid("pod1") -> HealthStatus.Running,
-          createTestSquid("pod2") -> HealthStatus.Running,
-          createTestSquid("pod3") -> HealthStatus.Running
-        )
+        healthyCount = 4,
+        newlyCrashedCount = 1
       ),
       Seq.empty,
       170.seconds

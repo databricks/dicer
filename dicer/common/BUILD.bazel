@@ -4,12 +4,6 @@ package(
     default_visibility = ["//dicer:internal"],
 )
 
-filegroup(
-    name = "all_files",
-    srcs = glob(["**"]),
-    visibility = ["//caching/oss:__pkg__"],
-)
-
 scala_library(
     name = "load_measurement",
     srcs = ["src/LoadMeasurement.scala"],
@@ -20,6 +14,13 @@ scala_library(
     name = "client_type",
     srcs = ["src/ClientType.scala"],
     visibility = ["//dicer:internal"],
+)
+
+scala_library(
+    name = "target_name",
+    srcs = ["src/TargetName.scala"],
+    visibility = ["//dicer:internal"],
+    deps = ["//dicer/external:conf"],
 )
 
 scala_library(
@@ -96,6 +97,26 @@ scala_library(
 )
 
 scala_library(
+    name = "dpage_view_helpers",
+    srcs = ["src/DPageViewHelpers.scala"],
+    visibility = ["//dicer:internal"],
+    deps = [
+        ":assignment_core",
+        ":generation",
+        "//caching/util:unix_time_version",
+        "//dicer/common/proto:dpage_proto_scala_lib",
+        "//dicer/external:external_common",
+        "//dicer/friend:squid",
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_guava_guava",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
+    ],
+)
+
+scala_library(
     name = "client_request",
     srcs = ["src/ClientRequest.scala"],
     visibility = ["//dicer:internal"],
@@ -109,6 +130,7 @@ scala_library(
         ":target_unmarshaller",
         ":version",
         ":watch_server_helper",
+        "//caching/util:prefix_logger",
         "//dicer/common/proto:common_proto_scala_lib",
         "//dicer/external:conf",
         "//dicer/external:external_common",
@@ -285,14 +307,19 @@ scala_library(
     ],
     visibility = ["//dicer:caching"],
     deps = [
-        ":slicekey_helper",
         "//caching/util:sequential_execution_context",
         "//dicer/external:conf",
         "//dicer/external:external_common",
         "//wrappers/instrumentation",
+        "@com_google_protobuf_protobuf_java",
         "@maven//:com_google_code_findbugs_jsr305",
+        "@maven//:com_google_guava_guava",
         "@maven//:com_lihaoyi_geny_2_12",
         "@maven//:com_lihaoyi_scalatags_2_12",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
     ],
 )
 
@@ -339,7 +366,6 @@ scala_library(
     deps = [
         ":assignment_core",
         ":slice_helper",
-        ":slicekey_helper",
         ":subscriber_handler",
         ":test_environment",
         "//caching/util:ascii_table",
@@ -390,7 +416,9 @@ scala_library(
         "//dicer:internal",
     ],
     deps = [
+        ":client_request",
         ":test_assigner",
+        "//caching/util:assert_macros",
         "//caching/util:config_scope",
         "//caching/util:etcd_client",
         "//caching/util:etcd_test_env",
@@ -418,9 +446,11 @@ scala_library(
         "//dicer/friend:squid",
         "//wrappers/common/status:status",
         "//wrappers/conf:core",
+        "//wrappers/conf:current_project",
         "//wrappers/conf:project",
         "//wrappers/conf:project-conf",
         "//wrappers/conf:server-conf",
+        "//wrappers/rpc:client",
         "//wrappers/rpc:readiness_probe_tracker",
         "//wrappers/rpc:rpc_server",
         "@maven//:com_google_code_findbugs_jsr305",
@@ -465,7 +495,7 @@ scala_library(
         ":interceptable_store",
         "//caching/util:etcd_client",
         "//caching/util:etcd_test_env",
-        "//caching/util:fake_s2s_proxy",
+        "//caching/util:fake_proxy",
         "//caching/util:fake_sequential_execution_context",
         "//caching/util:lock",
         "//caching/util:prefix_logger",
@@ -490,10 +520,10 @@ scala_library(
         "//dicer/assigner:generator",
         "//dicer/assigner:in_memory_store",
         "//dicer/assigner:interposing_preferred_assigner",
+        "//dicer/assigner:kubernetes_membership_checker",
         "//dicer/assigner:kubernetes_target_watcher",
         "//dicer/assigner:preferred_assigner_driver",
         "//dicer/assigner:preferred_assigner_value",
-        "//dicer/assigner:shadow_etcd_store",
         "//dicer/assigner:store_interface",
         "//dicer/assigner:testable_assigner_conf",
         "//dicer/common/proto:common_proto_scala_lib",
@@ -507,6 +537,7 @@ scala_library(
         "//dicer/friend:slice_map",
         "//dicer/friend:squid",
         "//wrappers/conf:core",
+        "//wrappers/conf:current_project",
         "//wrappers/conf:dbconf",
         "//wrappers/conf:project",
         "//wrappers/conf:project-conf",
@@ -518,7 +549,6 @@ scala_library(
         "//wrappers/util:async_test_helpers",
         "//wrappers/util:databricks-test",
         "@maven//:com_google_code_findbugs_jsr305",
-        "@maven//:com_google_guava_guava",
         "@maven//:com_typesafe_config",
     ],
 )
@@ -615,6 +645,8 @@ scala_test(
         ":generation",
         ":target_unmarshaller",
         ":test_common",
+        "//caching/util:metric_utils",
+        "//caching/util:prefix_logger",
         "//caching/util:test_util",
         "//dicer/common/proto:common_proto_scala_lib",
         "//dicer/common/test/proto:test_data_proto_scala_lib",
@@ -730,6 +762,32 @@ scala_test(
         "//caching/util:unix_time_version",
         "//dicer/common/proto:common_proto_scala_lib",
         "//dicer/common/test/proto:test_data_proto_scala_lib",
+        "//wrappers/util:async_test_helpers",
+        "//wrappers/util:databricks-test",
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_guava_guava",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
+    ],
+)
+
+scala_test(
+    name = "dpage_view_helpers_test",
+    srcs = ["test/DPageViewHelpersSuite.scala"],
+    timeout = "short",
+    deps = [
+        ":assignment_core",
+        ":dpage_view_helpers",
+        ":generation",
+        ":test_common",
+        "//caching/util:unix_time_version",
+        "//dicer/assigner/algorithm",
+        "//dicer/common/proto:dpage_proto_scala_lib",
+        "//dicer/external:external_common",
+        "//dicer/friend:slice_map",
+        "//dicer/friend:squid",
         "//wrappers/util:async_test_helpers",
         "//wrappers/util:databricks-test",
         "@com_google_protobuf_protobuf_java",
@@ -1043,35 +1101,6 @@ scala_test(
     ],
 )
 
-scala_test(
-    name = "subscriber_handler_test",
-    srcs = ["test/SubscriberHandlerSuite.scala"],
-    timeout = "short",
-    deps = [
-        ":assignment_core",
-        ":client_request",
-        ":generation",
-        ":subscriber_handler",
-        ":target_helper",
-        ":test_common",
-        ":version",
-        ":watch_server_helper",
-        "//caching/util:fake_sequential_execution_context",
-        "//caching/util:metric_utils",
-        "//caching/util:sequential_execution_context",
-        "//caching/util:test_util",
-        "//caching/util:watch_cell",
-        "//dicer/common/proto:common_proto_scala_lib",
-        "//dicer/external:slicelet",
-        "//dicer/friend:slice_map",
-        "//dicer/friend:squid",
-        "//wrappers/rpc:rpc_testing",
-        "//wrappers/util:async_test_helpers",
-        "//wrappers/util:databricks-test",
-        "@maven//:io_prometheus_simpleclient",
-    ],
-)
-
 scala_library(
     name = "subscriber_handler_test_base",
     srcs = [
@@ -1084,7 +1113,12 @@ scala_library(
         ":client_request",
         ":generation",
         ":subscriber_handler",
+        ":target_helper",
         ":test_common",
+        ":version",
+        ":watch_server_helper",
+        "//caching/util:metric_utils",
+        "//caching/util:status_utils",
         "//caching/util:test_util",
         "//caching/util:unix_time_version",
         "//dicer/common/proto:common_proto_scala_lib",
@@ -1093,6 +1127,12 @@ scala_library(
         "//dicer/friend:squid",
         "//wrappers/util:async_test_helpers",
         "//wrappers/util:databricks-test",
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_guava_guava",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
     ],
 )
 
@@ -1106,7 +1146,10 @@ scala_test(
         ":generation",
         ":subscriber_handler",
         ":subscriber_handler_test_base",
+        ":test_common",
         "//caching/util:fake_sequential_execution_context",
+        "//caching/util:lock",
+        "//caching/util:metric_utils",
         "//caching/util:test_util",
         "//caching/util:unix_time_version",
         "//caching/util:watch_cell",
@@ -1114,7 +1157,9 @@ scala_test(
         "//dicer/external:slicelet",
         "//wrappers/rpc:rpc_testing",
         "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_code_findbugs_jsr305",
         "@maven//:com_google_guava_guava",
+        "@maven//:io_prometheus_simpleclient",
         "@scala_proto_rules_grpc_api",
         "@scala_proto_rules_grpc_netty",
         "@scala_proto_rules_grpc_stub",

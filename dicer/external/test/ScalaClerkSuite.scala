@@ -11,19 +11,17 @@ import com.databricks.rpc.tls.TLSOptions
 /** Tests for Scala Clerk implementation that connects to Slicelets for assignments.  */
 private class ScalaClerkSuite extends ScalaClerkSuiteBase {
 
-  override protected def createClerk(
+  override protected def createClerkInternal(
       target: Target,
       clerkLocationConfigMap: Option[Map[String, String]],
       clientBranchOpt: Option[String] = None): ClerkDriver = {
-    val envMap = clerkLocationConfigMap.getOrElse(Map.empty)
-    val locationConf = LocationConfTestUtils.newTestLocationConfig(envMap = envMap)
+    val envMap: Map[String, String] = clerkLocationConfigMap.getOrElse(Map.empty)
+    val locationConf: LocationConf = LocationConfTestUtils.newTestLocationConfig(envMap = envMap)
 
     withLocationConfSingleton(locationConf) {
       if (clerkLocationConfigMap.isEmpty) {
         LocationConf.restoreSingletonForTest() // Ensure location is cleared.
       }
-      val clusterUriOpt: Option[URI] =
-        locationConf.location.kubernetesClusterUri.map(URI.create)
       val slicelet: Slicelet =
         testEnv.createSlicelet(target).start(selfPort = 0, listenerOpt = None)
 
@@ -42,8 +40,7 @@ private class ScalaClerkSuite extends ScalaClerkSuiteBase {
         case None =>
           testEnv.createClerk(slicelet)
       }
-      val expectedTarget = ClerkDriver.computeExpectedTargetIdentifier(target, clusterUriOpt)
-      ScalaClerkDriver.create(clerk, expectedTarget)
+      ScalaClerkDriver.create(clerk)
     }
   }
 

@@ -1,6 +1,6 @@
 package com.databricks.dicer.assigner
 
-import scala.concurrent.ExecutionContext
+import com.databricks.caching.util.SequentialExecutionContext
 
 import com.databricks.dicer.common.Assignment
 import com.databricks.dicer.external.Target
@@ -23,6 +23,20 @@ private[assigner] trait AssignerProtoLogger {
       contextOpt: Option[AssignmentGenerator.AssignmentGenerationContext]): Unit
 
   /**
+   * Convenience method to log membership check events from the [[KubernetesMembershipChecker]].
+   *
+   * @param latencyMs the elapsed time of the Kubernetes API call in milliseconds.
+   * @param httpStatusCode the HTTP status code returned by the Kubernetes API.
+   * @param resourceUri the URI of the resource whose membership is being checked.
+   * @param memberUuids the UUIDs of pods that are members of the resource.
+   */
+  def logMembershipCheck(
+      latencyMs: Long,
+      httpStatusCode: Int,
+      resourceUri: String,
+      memberUuids: Seq[String]): Unit
+
+  /**
    * Convenience method to log preferred assigner change events.
    *
    * @param preferredAssignerValue the preferred assigner value containing role and assigner info
@@ -42,6 +56,15 @@ private object NoopAssignerProtoLogger extends AssignerProtoLogger {
     ()
   }
 
+  override def logMembershipCheck(
+      latencyMs: Long,
+      httpStatusCode: Int,
+      resourceUri: String,
+      memberUuids: Seq[String]): Unit = {
+    // No-op
+    ()
+  }
+
   override def logPreferredAssignerChange(preferredAssignerValue: PreferredAssignerValue): Unit = {
     // No-op
     ()
@@ -55,21 +78,21 @@ private[assigner] object AssignerProtoLogger {
    *
    * @param assignerInfo the AssignerInfo.
    * @param generationSampleFraction the fraction of generations to sample.
-   * @param executor the execution context to use for async logging operations.
+   * @param loggingSec the sequential execution context for async logging operations.
    */
   def create(
       assignerInfo: AssignerInfo,
       generationSampleFraction: Double,
-      executor: ExecutionContext): AssignerProtoLogger = {
+      loggingSec: SequentialExecutionContext): AssignerProtoLogger = {
     NoopAssignerProtoLogger
   }
 
   /**
    * A convenience method to create an [[AssignerProtoLogger]] that does not log any events.
    *
-   * @param executor the execution context to use for async logging operations (unused).
+   * @param loggingSec the sequential execution context for async logging operations (unused).
    */
-  def createNoop(executor: ExecutionContext): AssignerProtoLogger = {
+  def createNoop(loggingSec: SequentialExecutionContext): AssignerProtoLogger = {
     NoopAssignerProtoLogger
   }
 }

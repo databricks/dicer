@@ -9,20 +9,27 @@ import scalatags.Text.TypedTag
 import scalatags.Text.all._
 
 import com.databricks.HasDebugString
+import com.databricks.api.proto.dicer.assigner.{
+  AssignerInfoViewP,
+  AssignerSliceViewP,
+  AssignerTargetViewP,
+  ChurnViewP,
+  PreferredAssignerStateViewP,
+  TargetConfigViewP
+}
+import com.databricks.api.proto.dicer.dpage.{ClerkViewP, SliceletViewP}
 import com.databricks.caching.util.SequentialExecutionContext
 import com.databricks.dicer.assigner.AssignmentGenerator.GeneratorTargetSlicezData
 import com.databricks.dicer.assigner.AssignmentStats.AssignmentChangeStats
 import com.databricks.dicer.assigner.PreferredAssignerValue.{ModeDisabled, NoAssigner, SomeAssigner}
-import com.databricks.dicer.assigner.config.{
-  InternalTargetConfig,
-  NamedInternalTargetConfig,
-  TargetName
-}
+import com.databricks.dicer.assigner.config.{InternalTargetConfig, NamedInternalTargetConfig}
+import com.databricks.dicer.common.TargetName
 import com.databricks.dicer.common.ZPageHelpers.{COLLAPSE_SCRIPT, HEAD, createCollapseButton}
 import com.databricks.dicer.common.{
   Assignment,
   ClerkSubscriberSlicezData,
   CommonSlicez,
+  DPageViewHelpers,
   Generation,
   SliceletSubscriberSlicezData,
   SlicezAssignmentKeyTracker,
@@ -31,6 +38,7 @@ import com.databricks.dicer.common.{
 }
 import com.databricks.dicer.external.Target
 import com.databricks.instrumentation.DebugStringServletRegistry
+import com.databricks.rpc.DatabricksObjectMapper
 
 // This file contains support for slicez Zpages for the Assigner.
 
@@ -277,9 +285,7 @@ case class AssignerTargetSlicezData(
    *  }}}
    */
   def createConfigDiv: TypedTag[String] = {
-    val targetName = TargetName.forTarget(getTarget)
-    val namedConfig = NamedInternalTargetConfig(targetName, targetConfig.internalTargetConfig)
-    val prettyConfigString: String = namedConfig.toProto.toProtoString
+    val prettyConfigString: String = namedTargetConfig.toProto.toProtoString
     val collapsedConfigInfo: TypedTag[String] =
       div(
         createCollapseButton("Click to Expand/Collapse"),
@@ -301,6 +307,52 @@ case class AssignerTargetSlicezData(
       )
     )
   }
+
+  /**
+   * Converts this [[AssignerTargetSlicezData]] to an [[AssignerTargetViewP]] view proto,
+   * including subscriber info, assignment, churn ratios, and target configuration.
+   */
+  private[assigner] def toViewProto: AssignerTargetViewP = {
+    AssignerTargetViewP(
+      target = Some(getTarget.toParseableDescription),
+      slicelets = sliceletsData.map { s: SliceletSubscriberSlicezData =>
+        SliceletViewP(debugName = Some(s.debugName), watchAddress = Some(s.address))
+      },
+      clerks = clerksData.map { c: ClerkSubscriberSlicezData =>
+        ClerkViewP(debugName = Some(c.debugName))
+      },
+      assignment = Some(
+        DPageViewHelpers.getAssignmentViewProto(
+          assignmentOpt,
+          generatorTargetSlicezData.reportedLoadPerResourceOpt,
+          generatorTargetSlicezData.reportedLoadPerSliceOpt,
+          generatorTargetSlicezData.topKeysOpt
+        )
+      ),
+      churn = generatorTargetSlicezData.assignmentChangeStatsOpt.map {
+        stats: AssignmentChangeStats =>
+          ChurnViewP(
+            meaningfulAssignmentChange = Some(stats.isMeaningfulAssignmentChange),
+            loadBalancingChurnRatio = Some(stats.loadBalancingChurnRatio),
+            additionChurnRatio = Some(stats.additionChurnRatio),
+            removalChurnRatio = Some(stats.removalChurnRatio)
+          )
+      },
+      config = Some(
+        TargetConfigViewP(
+          configMethod = Some(targetConfig.configMethod.toString),
+          config = Some(namedTargetConfig.toProto.toProtoString)
+        )
+      )
+    )
+  }
+
+  /**
+   * Returns the [[NamedInternalTargetConfig]] for this target, combining the target name with its
+   * internal config. Used by both the ZPage HTML and DPage JSON representations.
+   */
+  private def namedTargetConfig: NamedInternalTargetConfig =
+    NamedInternalTargetConfig(TargetName.forTarget(getTarget), targetConfig.internalTargetConfig)
 }
 
 object AssignerTargetSlicezData {
@@ -346,6 +398,12 @@ object AssignerTargetSlicezData {
 
     /** `Dynamic` means the target is configured dynamically. */
     val Dynamic: TargetConfigMethod = Value("Dynamic")
+
+    /**
+     * `DefaultForExperimentalTargets` means the target is configured by a default config for
+     * experimental targets [[InternalTargetConfig.DEFAULT_FOR_EXPERIMENTAL_TARGETS]].
+     */
+    val DefaultForExperimentalTargets: TargetConfigMethod = Value("DefaultForExperimentalTargets")
   }
 }
 
@@ -371,7 +429,7 @@ case class AssignerSlicezData(
           tr(td("self", td(assignerInfo.uri.toString), td(assignerInfo.uuid.toString)))
         ),
         h3("Preferred Assigner State"),
-        renderPreferredAssignerState(assignerInfo, preferredAssignerValue),
+        renderPreferredAssignerState,
         h3("Subscriber Information"),
         p(
           "This table lists Clerks and Slicelets that sent an RPC to this Dicer Assigner " +
@@ -422,44 +480,115 @@ case class AssignerSlicezData(
     )
   }
 
-  private def renderPreferredAssignerState(
-      assignerInfo: AssignerInfo,
-      preferredAssignerValue: PreferredAssignerValue): TypedTag[String] = {
+  /**
+   * Converts this [[AssignerSlicezData]] to an [[AssignerSliceViewP]] view proto for serialization.
+   */
+  private[assigner] def toViewProto: AssignerSliceViewP = {
+    AssignerSliceViewP(
+      assignerInfo = Some(
+        AssignerInfoViewP(
+          uuid = Some(assignerInfo.uuid.toString),
+          uri = Some(assignerInfo.uri.toString)
+        )
+      ),
+      preferredAssignerState = Some(preferredAssignerStateToViewProto),
+      targets = targetsSlicezData.map { td: AssignerTargetSlicezData =>
+        td.toViewProto
+      }
+    )
+  }
+
+  /** Serializes this [[AssignerSlicezData]] to a JSON string via [[toViewProto]]. */
+  private[assigner] def toJson: String = DatabricksObjectMapper.toJson(toViewProto)
+
+  /**
+   * Returns the display strings for the preferred assigner state, shared between the ZPage HTML
+   * and DPage JSON representations.
+   */
+  private def preferredAssignerStateDisplay: AssignerSlicezData.PreferredAssignerStateDisplay = {
     preferredAssignerValue match {
       case SomeAssigner(preferredAssignerInfo: AssignerInfo, generation: Generation) =>
         if (preferredAssignerInfo.uuid == assignerInfo.uuid) {
-          // Preferred assigner
-          table(cls := "assigner-table")(
-            tr(th("Role"), td("Preferred assigner")),
-            tr(th("Action"), td("Generating assignments while preferred")),
-            tr(th("Generation"), td(generation.toString))
+          AssignerSlicezData.PreferredAssignerStateDisplay(
+            role = "Preferred assigner",
+            action = "Generating assignments while preferred",
+            preferredAssignerUuidOpt = Some("Self"),
+            generation = generation
           )
         } else {
-          // Standby assigner monitoring the preferred assigner
-          table(cls := "assigner-table")(
-            tr(th("Role"), td("Standby")),
-            tr(th("Action"), td("Monitoring health of preferred assigner")),
-            tr(th("PA UUID"), td(preferredAssignerInfo.uuid.toString)),
-            tr(th("Generation"), td(generation.toString))
+          AssignerSlicezData.PreferredAssignerStateDisplay(
+            role = "Standby",
+            action = "Monitoring health of preferred assigner",
+            preferredAssignerUuidOpt = Some(preferredAssignerInfo.uuid.toString),
+            generation = generation
           )
         }
 
-      // Standby without preferred
       case NoAssigner(generation: Generation) =>
-        table(cls := "assigner-table")(
-          tr(th("Role"), td("Standby without preferred")),
-          tr(th("Action"), td("Attempting to take over as preferred assigner")),
-          tr(th("PA UUID"), td("None")),
-          tr(th("Generation"), td(generation.toString))
+        AssignerSlicezData.PreferredAssignerStateDisplay(
+          role = "Standby without preferred",
+          action = "Attempting to take over as preferred assigner",
+          preferredAssignerUuidOpt = Some("N/A"),
+          generation = generation
         )
 
-      // Preferred because PA mode disabled
       case ModeDisabled(generation: Generation) =>
-        table(cls := "assigner-table")(
-          tr(th("Role"), td("Preferred because PA mode disabled")),
-          tr(th("Action"), td("Always generating assignments")),
-          tr(th("Generation"), td(generation.toString))
+        AssignerSlicezData.PreferredAssignerStateDisplay(
+          role = "Preferred because PA mode disabled",
+          action = "Always generating assignments",
+          preferredAssignerUuidOpt = Some("Self"),
+          generation = generation
         )
     }
   }
+
+  /**
+   * Converts [[preferredAssignerValue]] to a [[PreferredAssignerStateViewP]] view proto,
+   * reflecting the role and action of this assigner.
+   */
+  private def preferredAssignerStateToViewProto: PreferredAssignerStateViewP = {
+    val display: AssignerSlicezData.PreferredAssignerStateDisplay = preferredAssignerStateDisplay
+    PreferredAssignerStateViewP(
+      role = Some(display.role),
+      action = Some(display.action),
+      paUuid = display.preferredAssignerUuidOpt,
+      generation = Some(
+        DPageViewHelpers.generationToViewProto(display.generation)
+      )
+    )
+  }
+
+  /** Renders the preferred assigner state as an HTML table (ZPage only). */
+  private def renderPreferredAssignerState: TypedTag[String] = {
+    val display: AssignerSlicezData.PreferredAssignerStateDisplay = preferredAssignerStateDisplay
+    val rows: Seq[TypedTag[String]] = Seq(
+        tr(th("Role"), td(display.role)),
+        tr(th("Action"), td(display.action))
+      ) ++
+      display.preferredAssignerUuidOpt.map { paUuid: String =>
+        tr(th("PA UUID"), td(paUuid))
+      } ++
+      Seq(tr(th("Generation"), td(display.generation.toString)))
+    table(cls := "assigner-table")(rows: _*)
+  }
+}
+
+object AssignerSlicezData {
+
+  /**
+   * Display data for the preferred assigner state, shared between the ZPage HTML and DPage
+   * JSON representations.
+   *
+   * @param role human-readable description of this assigner's role (e.g. "Preferred assigner")
+   * @param action human-readable description of what this assigner is doing
+   * @param preferredAssignerUuidOpt the UUID of the preferred assigner, "Self" when this
+   *                                 assigner is preferred, or "N/A" when no preferred assigner
+   *                                 exists
+   * @param generation the current preferred assigner generation
+   */
+  private case class PreferredAssignerStateDisplay(
+      role: String,
+      action: String,
+      preferredAssignerUuidOpt: Option[String],
+      generation: Generation)
 }

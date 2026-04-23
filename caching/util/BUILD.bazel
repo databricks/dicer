@@ -4,12 +4,6 @@ package(
     default_visibility = ["//caching:all_caching"],
 )
 
-filegroup(
-    name = "all_files",
-    srcs = glob(["**"]),
-    visibility = ["//caching/oss:__pkg__"],
-)
-
 package_group(
     name = "internal",
     packages = [
@@ -48,6 +42,7 @@ scala_library(
 scala_macro_library(
     name = "assert_macros",
     srcs = ["src/AssertMacros.scala"],
+    visibility = ["//caching:all_caching"],
     deps = [
         "@maven//:org_scala_lang_scala_library",
         "@maven//:org_scala_lang_scala_reflect",
@@ -320,13 +315,29 @@ scala_test(
 )
 
 scala_library(
-    name = "fake_s2s_proxy",
-    srcs = ["test/FakeS2SProxy.scala"],
+    name = "fake_proxy",
+    srcs = ["test/FakeProxy.scala"],
     testonly = True,
     deps = [
-        "//caching/util:lock",
+        ":lock",
+        "//wrappers/rpc:rpc_testing",
         "@com_google_protobuf_protobuf_java",
         "@maven//:com_google_code_findbugs_jsr305",
+        "@maven//:com_google_guava_guava",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
+    ],
+)
+
+scala_library(
+    name = "fake_s2s_proxy_metadata_handler",
+    srcs = ["test/FakeS2SProxyMetadataHandler.scala"],
+    testonly = True,
+    deps = [
+        ":fake_proxy",
+        "@com_google_protobuf_protobuf_java",
         "@maven//:com_google_guava_guava",
         "@scala_proto_rules_grpc_api",
         "@scala_proto_rules_grpc_netty",
@@ -349,6 +360,7 @@ scala_library(
         ":context_aware_util",
         ":delegating_sequential_execution_context",
         ":fake_typed_clock",
+        ":prefix_logger",
         ":sequential_execution_context",
     ],
 )
@@ -789,6 +801,7 @@ scala_library(
     name = "test_utils",
     srcs = ["test/TestUtils.scala"],
     testonly = True,
+    visibility = ["//caching:all_caching"],
     deps = [
         ":prefix_logger",
         "//wrappers/rpc:client",
@@ -843,6 +856,7 @@ scala_macro_library(
         ":typed_clock",
         "//wrappers/logging:sourcecode",
     ],
+    visibility = ["//caching:all_caching"],
     deps = [
         ":ticker_time",
         ":typed_clock",

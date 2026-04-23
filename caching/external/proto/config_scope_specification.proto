@@ -4,7 +4,7 @@ package databricks.caching;
 
 import "scalapb.proto";
 
-option java_package = "com.databricks.api.proto.caching.external";;
+option java_package = "com.databricks.api.proto.caching.external";
 option java_generate_equals_and_hash = true;
 option java_outer_classname = "ConfigScopeSpecificationProto";
 option java_multiple_files = true;

@@ -6,6 +6,7 @@ import scala.concurrent.duration._
 
 import com.databricks.caching.util.ConfigScope
 import com.databricks.dicer.assigner.config.InternalTargetConfig.LoadWatcherTargetConfig
+import com.databricks.dicer.common.TargetName
 import com.databricks.testing.DatabricksTest
 
 class InternalTargetConfigMapSuite extends DatabricksTest {
@@ -29,8 +30,7 @@ class InternalTargetConfigMapSuite extends DatabricksTest {
     val existingTargetName = TargetName("softstore-storelet")
     val nonExistentTargetName = TargetName("foo-bar")
 
-    assert(targetConfigMap.configMap.contains(existingTargetName))
-    assert(!targetConfigMap.configMap.contains(nonExistentTargetName))
+    assert(targetConfigMap.get(existingTargetName).isDefined)
     assert(targetConfigMap.get(nonExistentTargetName).isEmpty)
   }
 
@@ -51,11 +51,9 @@ class InternalTargetConfigMapSuite extends DatabricksTest {
     )
 
     // Should load configuration from map.
-    assert(
-      targetConfigMap.configMap.get(TargetName("softstore-storelet")).contains(customTargetConfig)
-    )
+    assert(targetConfigMap.get(TargetName("softstore-storelet")).contains(customTargetConfig))
 
     // Should return empty, since target does not exist in the specified map.
-    assert(targetConfigMap.configMap.get(TargetName("foo-bar")).isEmpty)
+    assert(targetConfigMap.get(TargetName("foo-bar")).isEmpty)
   }
 }

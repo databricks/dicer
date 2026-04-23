@@ -22,11 +22,12 @@ import com.databricks.dicer.common.{
   Generation,
   InternalDicerTestEnvironment,
   SliceletData,
+  SliceletState,
   SyncAssignmentState,
   TestAssigner
 }
 import com.databricks.dicer.assigner.config.InternalTargetConfigMetrics
-import com.databricks.api.proto.dicer.common.{ClientRequestP, ClientResponseP}
+import com.databricks.api.proto.dicer.common.ClientResponseP
 import com.databricks.backend.common.util.Project
 import com.databricks.caching.util.TestUtils.TestName
 import com.databricks.conf.Configs
@@ -34,7 +35,7 @@ import com.databricks.dicer.assigner.conf.DicerAssignerConf
 import com.databricks.dicer.external.{Slicelet, Target}
 import com.databricks.dicer.assigner.TargetMetrics.GeneratorShutdownReason
 import com.databricks.dicer.common.TargetHelper.TargetOps
-import com.databricks.dicer.client.WatchStubHelper
+import com.databricks.dicer.client.WatchStubManager
 import com.databricks.dicer.common.TestSliceUtils.createTestSquid
 import com.databricks.rpc.testing.TestSslArguments
 import com.databricks.rpc.tls.TLSOptionsMigration
@@ -85,13 +86,15 @@ class AssignerGeneratorGCSuite extends DatabricksTest with TestName {
    */
   private val WATCH_RPC_TIMEOUT: FiniteDuration = 1.minute
 
-  /** A helper class for creating Watch stubs. */
-  private val watchStubHelper = new WatchStubHelper(
+  /** Manages the creation of watch stubs for this test suite. */
+  private val watchStubManager = new WatchStubManager(
     clientName = Project.DicerAssigner.name,
     subscriberDebugName = "assigner-generator-clustertype2-test",
     defaultWatchAddress = URI.create(s"http://localhost:${testEnv.getAssignerPort}"),
     tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
-    watchFromDataPlane = false
+    watchFromDataPlane = false,
+    target = Target("test"),
+    clientIdOpt = None
   )
 
   /** RPC stub for sending Watch requests to the Assigner.  */
@@ -99,7 +102,7 @@ class AssignerGeneratorGCSuite extends DatabricksTest with TestName {
 
   override def beforeAll(): Unit = {
     // Create a stub that can be used to communicate with the Assigner to get the assignment.
-    stub = watchStubHelper.createWatchStub(redirectAddressOpt = None)
+    stub = watchStubManager.createWatchStub(redirectAddressOpt = None)
   }
 
   /** Issue a watch request as if sent by a Clerk. */
@@ -130,7 +133,7 @@ class AssignerGeneratorGCSuite extends DatabricksTest with TestName {
       timeout = 5.seconds,
       subscriberData = SliceletData(
         createTestSquid("pod0"),
-        ClientRequestP.SliceletDataP.State.RUNNING,
+        SliceletState.Running,
         "localhostNamespace",
         attributedLoads = Vector.empty,
         unattributedLoadOpt = None
@@ -457,5 +460,70 @@ class AssignerGeneratorGCSuite extends DatabricksTest with TestName {
       targetsWithActiveGeneratorsTracker.totalChange() == 1,
       "Should have 1 active targets"
     )
+  }
+
+  test("Generator for unconfigured experimental target is garbage collected after inactivity") {
+    // Test plan: Verify that a generator created for an unconfigured target (via
+    // allowDefaultTargetConfigForExperimentalTargets) is garbage collected after the inactivity
+    // deadline, just like generators for configured targets. Do this by creating a local test
+    // environment with the experimental flag enabled and no target configs, starting a slicelet
+    // for an unconfigured target, stopping the slicelet, advancing time past the GC deadline,
+    // and verifying the generator is removed.
+
+    // Create a local test environment with the experimental flag and a separate fake clock.
+    val localFakeClock = new FakeTypedClock()
+    val localConf: TestAssigner.Config = TestAssigner.Config.create(
+      assignerConf = new DicerAssignerConf(
+        Configs.parseMap(
+          "databricks.dicer.assigner.generatorInactivityDeadlineSeconds" -> GC_DEADLINE.toSeconds,
+          "databricks.dicer.assigner.generatorInactivityScanIntervalSeconds"
+          -> INACTIVITY_SCAN_INTERVAL.toSeconds,
+          "databricks.dicer.assigner.allowDefaultTargetConfigForExperimentalTargets" -> true
+        )
+      )
+    )
+    val localTestEnv: InternalDicerTestEnvironment = InternalDicerTestEnvironment.create(
+      config = localConf,
+      withDefaultTargetConfig = false,
+      secPool = FakeSequentialExecutionContextPool
+        .create("experimental-clustertype2-test", numThreads = 8, localFakeClock)
+    )
+
+    val target = Target(getSafeName)
+
+    // Start a slicelet for the unconfigured target.
+    val slicelet: Slicelet =
+      localTestEnv.createSlicelet(target).start(selfPort = 1234, listenerOpt = None)
+
+    // Advance time to allow generator creation and initial assignment.
+    localFakeClock.advanceBy(5.seconds)
+
+    // Verify the generator was created and Slicelet has received an assignment.
+    AssertionWaiter("Wait for assignment").await {
+      val generatorOpt: Option[AssignmentGeneratorDriver] = Await.result(
+        localTestEnv.testAssigner.forTest.getGeneratorFromMap(target),
+        Duration.Inf
+      )
+      assert(generatorOpt.isDefined, "Generator should be created")
+      assert(slicelet.assignedSlices.nonEmpty, "Slicelet should have received an assignment")
+    }
+
+    // Stop the slicelet so the generator becomes inactive.
+    slicelet.impl.forTest.cancel()
+
+    // Advance time past the GC deadline.
+    localFakeClock.advanceBy(GC_DEADLINE)
+
+    // Verify the generator is garbage collected.
+    AssertionWaiter("Wait for generator to be garbage collected").await {
+      localFakeClock.advanceBy(INACTIVITY_SCAN_INTERVAL)
+      val generatorOpt: Option[AssignmentGeneratorDriver] = Await.result(
+        localTestEnv.testAssigner.forTest.getGeneratorFromMap(target),
+        Duration.Inf
+      )
+      assert(generatorOpt.isEmpty, "Generator should be removed after GC deadline")
+    }
+
+    localTestEnv.stop()
   }
 }

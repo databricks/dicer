@@ -1,0 +1,49 @@
+load("@rules_scala//scala:scala.bzl", "scala_library", "scala_test")
+
+filegroup(
+    name = "feature_rollout_configs",
+    srcs = glob(["**/*.textproto"]),
+    visibility = ["//dicer:internal"],
+)
+
+scala_library(
+    name = "dicer_client_feature_rollout_config",
+    srcs = [
+        "src/DicerClientFeatureRolloutRule.scala",
+        "src/DicerClientFeatureRolloutScope.scala",
+    ],
+    visibility = ["//dicer:internal"],
+    deps = [
+        "//dicer/client/feature-rollouts/proto:dicer_client_feature_rollout_config_scala_lib",
+        "//dicer/common:target_name",
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_guava_guava",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
+    ],
+)
+
+scala_test(
+    name = "dicer_client_feature_rollout_config_test",
+    srcs = [
+        "test/DicerClientFeatureRolloutRuleSuite.scala",
+        "test/DicerClientFeatureRolloutScopeSuite.scala",
+    ],
+    timeout = "short",
+    deps = [
+        ":dicer_client_feature_rollout_config",
+        "//caching/util:test_util",
+        "//dicer/client/feature-rollouts/proto:dicer_client_feature_rollout_config_scala_lib",
+        "//dicer/common:target_name",
+        "//wrappers/util:async_test_helpers",
+        "//wrappers/util:databricks-test",
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_guava_guava",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
+    ],
+)

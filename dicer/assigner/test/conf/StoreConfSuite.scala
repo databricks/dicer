@@ -2,7 +2,7 @@ package com.databricks.dicer.assigner.conf
 
 import com.databricks.caching.util.TestUtils.assertThrow
 import com.databricks.conf.Configs
-import com.databricks.dicer.assigner.{Assigner, EtcdStore, InMemoryStore, ShadowEtcdStore}
+import com.databricks.dicer.assigner.{Assigner, EtcdStore, InMemoryStore}
 import com.databricks.rpc.DatabricksObjectMapper
 import com.databricks.testing.DatabricksTest
 
@@ -11,7 +11,6 @@ class StoreConfSuite extends DatabricksTest {
   test("StoreConf.StoreEnum parse from string") {
     // Test plan: pass string names to StoreEnum.fromName and verify that parsed Values are correct.
     assert(StoreConf.StoreEnum.fromName("in_memory") == StoreConf.StoreEnum.IN_MEMORY)
-    assert(StoreConf.StoreEnum.fromName("shadow") == StoreConf.StoreEnum.SHADOW)
     assert(StoreConf.StoreEnum.fromName("etcd") == StoreConf.StoreEnum.ETCD)
     // Invalid string should throw IllegalArgumentException
     assertThrow[IllegalArgumentException]("abcd does not match a value of StoreEnum")(
@@ -27,36 +26,26 @@ class StoreConfSuite extends DatabricksTest {
         "databricks.dicer.assigner.store.type" -> "in_memory"
       )
     )
-    Assigner.createStore(inMemoryConf) match {
+    Assigner.createStoreFactory(inMemoryConf).getStore() match {
       case _: InMemoryStore => assert(true)
       case _ => assert(false)
     }
     val endpointsConfigString: String = DatabricksObjectMapper.toJson(
       Seq("http://dicer-etcd-service.test-env-test.svc.cluster.local:2379")
     )
-    val shadowConf: DicerAssignerConf = new DicerAssignerConf(
-      Configs.parseMap(
-        "databricks.dicer.assigner.store.type" -> "shadow",
-        "databricks.dicer.assigner.store.etcd.endpoints" -> endpointsConfigString
-      )
-    )
-    Assigner.createStore(shadowConf) match {
-      case _: ShadowEtcdStore => assert(true)
-      case _ => assert(false)
-    }
     val etcdConf: DicerAssignerConf = new DicerAssignerConf(
       Configs.parseMap(
         "databricks.dicer.assigner.store.type" -> "etcd",
-        "databricks.dicer.assigner.store.etcd.endpoints" -> endpointsConfigString,
+        "databricks.dicer.assigner.preferredAssigner.etcd.endpoints" -> endpointsConfigString,
         "databricks.dicer.assigner.storeIncarnation" -> 2
       )
     )
-    Assigner.createStore(etcdConf) match {
+    Assigner.createStoreFactory(etcdConf).getStore() match {
       case _: EtcdStore => assert(true)
       case _ => assert(false)
     }
     val defaultConf: DicerAssignerConf = new DicerAssignerConf(Configs.empty)
-    Assigner.createStore(defaultConf) match {
+    Assigner.createStoreFactory(defaultConf).getStore() match {
       case _: InMemoryStore => assert(true)
       case _ => assert(false)
     }

@@ -5,12 +5,6 @@ package(
     default_visibility = ["//caching/util:internal"],
 )
 
-filegroup(
-    name = "all_files",
-    srcs = glob(["**"]),
-    visibility = ["//caching/oss:__pkg__"],
-)
-
 proto_library(
     name = "example_config_override_proto_library",
     srcs = ["example_config_override.proto"],

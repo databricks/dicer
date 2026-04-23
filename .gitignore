@@ -1,5 +1,2 @@
 # bazel outputs
 /bazel-*
-# We don't check in MODULE.bazel.lock because it is generated in the destination directory, so it
-# causes issues with copybara.
-/MODULE.bazel.lock

@@ -1,0 +1,25 @@
+# proto-file: dicer/common/test/proto/test_data.proto
+# proto-message: CrossClusterClerkAccessorTestDataP
+
+invalid_cluster_uri_test_cases: [
+  {
+    cluster_uri: "databricks:dev/cloud1/public/region1/clustertype1/kjfna2"
+    expected_error_message: "Expected a kubernetes-cluster URI"
+  },
+  {
+    cluster_uri: "kubernetes-cluster:/dev/cloud1/public/region1/clustertype2/01"
+    expected_error_message: "Expected an opaque URI"
+  },
+  {
+    cluster_uri: "kubernetes-cluster:test-env/region1/clustertype1/kjfna2"
+    expected_error_message: "Cluster URI path must have 6 parts"
+  },
+  {
+    cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01/extra"
+    expected_error_message: "Cluster URI path must have 6 parts"
+  },
+  {
+    cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01#fragment"
+    expected_error_message: "Expected a normalized kubernetes-cluster URI"
+  }
+]

@@ -15,11 +15,18 @@ import com.databricks.conf.{DbConf, DbConfSingletonImpl}
  * and is considered immutable for the life of the node and any process that runs on it.
  * @param kubernetesClusterUri The URI of the Kubernetes cluster where the current process is
  *                             running, or None if not set/unknown.
+ * @param regionUri The URI of the region where the current process is running, or None if not
+ *                  set/unknown.
  */
-case class KubernetesLocation(kubernetesClusterUri: Option[String]) {
+case class KubernetesLocation(
+    kubernetesClusterUri: Option[String] = None,
+    regionUri: Option[String] = None) {
 
   /** The URI of the Kubernetes cluster where the current process is running, or null if not set. */
   def getKubernetesClusterUri: String = kubernetesClusterUri.orNull
+
+  /** The URI of the region where the current process is running, or null if not set. */
+  def getRegionUri: String = regionUri.orNull
 }
 
 /**

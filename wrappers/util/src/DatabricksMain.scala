@@ -2,24 +2,21 @@ package com.databricks
 
 import java.util.concurrent.CountDownLatch
 
+import com.databricks.backend.common.util.CurrentProject
 import com.databricks.backend.common.util.Project
 import com.databricks.common.web.InfoService
-import com.databricks.conf.{Config, Configs}
+import com.databricks.conf.{Config, RawConfigSingleton}
 import com.databricks.conf.Constants.INFO_SERVICE_PORT
 import com.databricks.logging.ConsoleLogging
-import com.databricks.rpc.DatabricksObjectMapper
 
 /** Minimal implementation of DatabricksMain for open-source compatibility. */
 abstract class DatabricksMain(project: Project.Project) extends ConsoleLogging {
+  CurrentProject.initializeProject(project)
 
   override def loggerName: String = s"DatabricksMain(${project.name})"
 
   /** The configuration loaded from the environment. */
-  protected val rawConfig: Config = {
-    val configMap =
-      DatabricksObjectMapper.fromJson[Map[String, Any]](sys.env.getOrElse("DB_CONF", "{}"))
-    Configs.parseMap(configMap)
-  }
+  protected val rawConfig: Config = RawConfigSingleton.conf
 
   /**
    * Latch to keep the JVM alive. A shutdown hook decrements this to allow the main thread to

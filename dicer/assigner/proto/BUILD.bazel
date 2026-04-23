@@ -1,10 +1,20 @@
 load("@rules_proto//proto:defs.bzl", "proto_library")
 load("@rules_scala//scala_proto:scala_proto.bzl", "scala_proto_library")
 
-filegroup(
-    name = "all_files",
-    srcs = glob(["**"]),
-    visibility = ["//caching/oss:__pkg__"],
+proto_library(
+    name = "assigner_dpage_proto_library",
+    srcs = ["assigner_dpage.proto"],
+    visibility = ["//dicer:internal"],
+    deps = [
+        "//dicer/common/proto:dpage_proto_library",
+        "//wrappers/rpc:scalapb_proto",
+    ],
+)
+
+scala_proto_library(
+    name = "assigner_dpage_proto_scala_lib",
+    visibility = ["//dicer:internal"],
+    deps = [":assigner_dpage_proto_library"],
 )
 
 proto_library(

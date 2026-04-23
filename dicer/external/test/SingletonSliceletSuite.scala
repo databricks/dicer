@@ -28,12 +28,12 @@ private class SingletonSliceletSuite extends DatabricksTest with TestName {
   test("Multiple Slicelets throws") {
     // Test plan: Verify that attempts to instantiate multiple Slicelets throw exceptions, even
     // if they're for different targets. Verify this by creating two Slicelets with different
-    // targets and with `allowMultipleClientInstancesPropertyName` set to false, and verifying that
-    // the second one throws an exception.
+    // targets and with `allowMultipleSliceletInstancesPropertyName` set to false, and verifying
+    // that the second one throws an exception.
     val target1 = Target(s"$getSafeName-1")
     val target2 = Target(s"$getSafeName-2")
 
-    // Create a valid config and set `allowMultipleClientInstances` to false, as it would be in a
+    // Create a valid config and set `allowMultipleSliceletInstances` to false, as it would be in a
     // production environment.
     val rawConf: Config = TestClientUtils
       .createSliceletConfig(
@@ -45,7 +45,7 @@ private class SingletonSliceletSuite extends DatabricksTest with TestName {
       )
       .merge(
         Configs.parseMap(
-          InternalClientConf.allowMultipleClientInstancesPropertyName -> false
+          InternalClientConf.allowMultipleSliceletInstancesPropertyName -> false
         )
       )
     val sliceletConf: SliceletConf = new ProjectConf(Project.TestProject, rawConf)

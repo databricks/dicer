@@ -6,7 +6,7 @@ import "caching/external/proto/config_scope_specification.proto";
 import "dicer/external/proto/target.proto";
 import "scalapb.proto";
 
-option java_package = "com.databricks.api.proto.dicer.assigner.config";;
+option java_package = "com.databricks.api.proto.dicer.assigner.config";
 option java_generate_equals_and_hash = true;
 option java_outer_classname = "AdvancedTargetConfigProto";
 option java_multiple_files = true;
@@ -49,6 +49,12 @@ message AdvancedTargetConfigFieldsP {
   // OPTIONAL: configures the health watcher's behavior on startup. When not set, the health
   // watcher defaults to setting Slicelets to the RUNNING state after a timeout.
   optional HealthWatcherConfigP health_watcher_config = 4;
+
+  // OPTIONAL: configures per-target watch request rate limiting. When not set, uses the default
+  // rate limiting configuration defined in `TargetWatchRequestRateLimitConfig.DEFAULT`.
+  // Note: This rate limit applies independently to each client watching this target, i.e. each
+  // Slicelet or Clerk gets its own rate limit budget.
+  optional TargetWatchRequestRateLimitConfigP target_watch_request_rate_limit_config = 5;
 }
 
 // Override of a Dicer advanced target configuration that applies to specific clusters.
@@ -90,11 +96,35 @@ message LoadWatcherConfigP {
 // TODO(<internal bug>): Revisit once we have confidence in pod readiness reporting.
 message HealthWatcherConfigP {
 
-  // Whether to observe a Slicelet's reported state in health reports. If false, the Assigner will
-  // mask the Slicelet's state as Running at startup even if the Slicelet reports itself as
-  // NOT_READY. This ensures the Slicelet becomes assignable even if it never reports to the
-  // Assigner that it's running (e.g., if the readiness probe on the Slicelet is buggy). Note that
-  // even when observing the Slicelet's state, certain status transitions are disallowed by the
-  // Assigner (e.g., Running -> NotReady).
+  // OPTIONAL: Whether to observe a Slicelet's reported state in health reports. If false, the
+  // Assigner will mask the Slicelet's state as Running at startup even if the Slicelet reports
+  // itself as NOT_READY. This ensures the Slicelet becomes assignable even if it never reports to
+  // the Assigner that it's running (e.g., if the readiness probe on the Slicelet is buggy and
+  // never reports ready, which we have seen is the case for some services). Note that even when
+  // observing the Slicelet's state, certain status transitions may be disallowed by the Assigner
+  // (e.g., Running -> NotReady is only permitted if permit_running_to_not_ready is true).
   optional bool observe_slicelet_readiness = 1;
+
+  // OPTIONAL: Whether to permit a Slicelet's health to transition from Running to NotReady at the
+  // Assigner. When true, a Slicelet that reports NOT_READY after the Assigner has labeled it
+  // Running will transition to the NotReady state, allowing the Assigner to remove it from an
+  // assignment. When false, the HealthWatcher will ignore NOT_READY reports from Slicelets labeled
+  // as Running. A valid config may only have this field set to true if observe_slicelet_readiness
+  // is also true.
+  optional bool permit_running_to_not_ready = 2;
+}
+
+// Configuration for watch request rate limiting on a target.
+message TargetWatchRequestRateLimitConfigP {
+
+  // Reserved `requests_per_second` (global target rate limit). No longer used as we have
+  // refactored rate limiting to be per-client for a given target.
+  reserved 1;
+  reserved "requests_per_second";
+
+  // OPTIONAL: Maximum watch requests per second per client. Each client watching this target is
+  // independently rate-limited at this rate. Must be >= 0. Use 0 to disable traffic for this
+  // target. If not specified, defaults to a value defined in
+  // `TargetWatchRequestRateLimitConfig.DEFAULT`.
+  optional int64 client_requests_per_second = 2;
 }

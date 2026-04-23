@@ -60,6 +60,28 @@ class SubscriberHandler(
 
   private val logger = PrefixLogger.create(this.getClass, target.getLoggerPrefix)
 
+  /** Pre-computed metric children, cached to avoid repeated label hashing on every call. */
+  private val loadShedCounterChild: Counter.Child =
+    SubscriberHandlerMetrics.watchRequestsLoadShed.labels(
+      target.getTargetClusterLabel,
+      target.getTargetNameLabel,
+      target.getTargetInstanceIdLabel
+    )
+  private val clientResponseSizeChild: Histogram.Child =
+    SubscriberHandlerMetrics.clientResponseSizeBytes.labels(
+      target.getTargetClusterLabel,
+      target.getTargetNameLabel,
+      target.getTargetInstanceIdLabel,
+      handlerLocation.toString
+    )
+  private val serializedAssignmentSizeChild: Histogram.Child =
+    SubscriberHandlerMetrics.serializedAssignmentSizeBytes.labels(
+      target.getTargetClusterLabel,
+      target.getTargetNameLabel,
+      target.getTargetInstanceIdLabel,
+      handlerLocation.toString
+    )
+
   /**
    * Stores the assignment state proto and generation for the latest full assignment processed from
    * the assignment cell.
@@ -137,35 +159,44 @@ class SubscriberHandler(
     // that is not performed on `sec`.
     val startTime: TickerTime = sec.getClock.tickerTime()
 
-    sec.flatCall {
-      // Get the caller service identity, currently for monitoring purposes and eventually for ACL
-      // checking.
-      val serviceIdentityOpt: Option[ServiceIdentity] = rpcContext.getCallerIdentity
+    sec
+      .flatCall {
+        // Get the caller service identity, currently for monitoring purposes and eventually for ACL
+        // checking.
+        val serviceIdentityOpt: Option[ServiceIdentity] = rpcContext.getCallerIdentity
 
-      logger.info(
-        s"Watch request: $serviceIdentityOpt, ${request.subscriberDebugName}, " +
-        s"${request.subscriberData}",
-        30.seconds
-      )
+        logger.info(
+          s"Watch request: $serviceIdentityOpt, ${request.subscriberDebugName}, " +
+          s"${request.subscriberData}",
+          30.seconds
+        )
 
-      updateWatchMetrics(request, serviceIdentityOpt)
+        updateWatchMetrics(request, serviceIdentityOpt)
 
-      if (TargetHelper.isFatalTargetMismatch(target, request.target)) {
-        // Implementation note: because of the way `SubscriberHandler` is used in the Assigner (a
-        // `SubscriberHandler` is chosen to respond to a request based on a matching target), we do
-        // not expect these errors to surface in the Assigner.
-        Future.failed(
-          new StatusException(
-            Status.NOT_FOUND.withDescription(
-              s"Request for target ${request.target} misrouted to handler for target $target. " +
-              s"See 'Configuration: Clients' in <internal link>."
+        if (TargetHelper.isFatalTargetMismatch(target, request.target)) {
+          // Implementation note: because of the way `SubscriberHandler` is used in the Assigner (a
+          // `SubscriberHandler` is chosen to respond to a request based on a matching target), we
+          // do not expect these errors to surface in the Assigner.
+          Future.failed(
+            new StatusException(
+              Status.NOT_FOUND.withDescription(
+                s"Request for target ${request.target} misrouted to handler for target $target. " +
+                s"See 'Configuration: Clients' in <internal link>."
+              )
             )
           )
-        )
-      } else {
-        replyFromCell(startTime, request, cell, redirect)
+        } else {
+          replyFromCell(startTime, request, cell, redirect)
+        }
       }
-    }
+      .map { responseP: ClientResponseP =>
+        // Record response size metrics using the cached histogram children.
+        clientResponseSizeChild.observe(responseP.serializedSize.toDouble)
+        for (syncState: SyncAssignmentStateP <- responseP.syncAssignmentState) {
+          serializedAssignmentSizeChild.observe(syncState.serializedSize.toDouble)
+        }
+        responseP
+      }(sec)
   }
 
   /** Returns the information about the connect Clerks and Slicelets for the slicez Zpage. */
@@ -291,7 +322,7 @@ class SubscriberHandler(
             "overloaded. Returning just the known generation.",
             every = 30.seconds
           )
-          SubscriberHandlerMetrics.incrementWatchRequestsLoadShed(target)
+          loadShedCounterChild.inc()
           val syncState = SyncAssignmentState.KnownGeneration(watchedAssignment.generation)
           val response = ClientResponse(syncState, getSuggestedRpcTimeout(request), redirect)
           // The promise is only modified on SEC, and we know above that `promise.isCompleted` was
@@ -396,8 +427,9 @@ class SubscriberHandler(
     sec.assertCurrentContext()
     // When a newer assignment is received, update the cached state as needed. Reuse it whenever
     // possible to avoid redundant proto conversions. This logic always assumes full assignments.
-    // In the future, if we implement durable assignments, we could optimize by distributing partial
-    // diffs instead of full assignments.
+    // In the future, if we implement durable assignments (i.e., switch to a store backend that
+    // uses non-loose incarnations), we could optimize by distributing partial diffs instead of
+    // full assignments.
 
     // Update the cached state.
     val cachedState: CachedSyncAssignmentState = cachedSyncAssignmentStateOpt match {
@@ -705,9 +737,11 @@ object SubscriberHandler {
    * requests from different clients.
    *
    * @param syncAssignmentStateP The proto representation of the state containing a *full*
-   *                             assignment.
+   *                             assignment. This is used when the client does not support receiving
+   *                             a serialized assignment.
    * @param syncSerializedAssignmentStateP The proto representation of the state containing a
-   *                                       *serialized full* assignment.
+   *                                       *serialized full* assignment. This is used when the
+   *                                       client supports receiving a serialized assignment.
    * @param generation The generation of the assignment.
    */
   private class CachedSyncAssignmentState private (
@@ -727,10 +761,8 @@ object SubscriberHandler {
      */
     def fromAssignment(assignment: Assignment): CachedSyncAssignmentState = {
       val diffAssignment: DiffAssignment = assignment.toDiff(Generation.EMPTY)
-      val newState: SyncAssignmentStateP =
-        SyncAssignmentState.KnownAssignment(diffAssignment).toProto
-      val newSerializedState: SyncAssignmentStateP =
-        SyncAssignmentState.createWithDiffAssignmentSerialized(diffAssignment)
+      val (newState, newSerializedState): (SyncAssignmentStateP, SyncAssignmentStateP) =
+        SyncAssignmentState.KnownAssignment.toCachedProtos(diffAssignment)
       new CachedSyncAssignmentState(newState, newSerializedState, assignment.generation)
     }
   }
@@ -742,6 +774,50 @@ object SubscriberHandler {
 }
 
 object SubscriberHandlerMetrics {
+
+  /**
+   * Histogram buckets for serialized assignment size in bytes. Uses fine granularity (128 KiB
+   * steps) up to the gRPC limit (currently 4 MiB, see
+   * [[WatchServerHelper.MAX_WATCH_MESSAGE_CONTENT_LENGTH]]) and coarser granularity (1 MiB steps)
+   * beyond.
+   */
+  private val SERIALIZED_ASSIGNMENT_SIZE_BUCKETS: Array[Double] = {
+    val buckets = scala.collection.mutable.ArrayBuffer[Double]()
+
+    // Fine-grained buckets from 128 KiB to 4 MiB (128 KiB increments).
+    var bucketBytes: Long = 128 * 1024 // 128 KiB.
+    while (bucketBytes <= 4 * 1024 * 1024) { // Up to 4 MiB.
+      buckets.append(bucketBytes.toDouble)
+      bucketBytes += 128 * 1024
+    }
+
+    // Coarse-grained buckets from 5 MiB to 10 MiB (1 MiB increments).
+    bucketBytes = 5 * 1024 * 1024 // 5 MiB.
+    while (bucketBytes <= 10 * 1024 * 1024) { // Up to 10 MiB.
+      buckets.append(bucketBytes.toDouble)
+      bucketBytes += 1024 * 1024
+    }
+
+    buckets.toArray
+  }
+
+  private[common] val serializedAssignmentSizeBytes: Histogram = Histogram
+    .build()
+    .name("dicer_serialized_assignment_size_bytes_histogram")
+    .help(
+      "The size of serialized assignment state protos distributed by SubscriberHandler in bytes"
+    )
+    .labelNames("targetCluster", "targetName", "targetInstanceId", "handlerLocation")
+    .buckets(SERIALIZED_ASSIGNMENT_SIZE_BUCKETS: _*)
+    .register()
+
+  private[common] val clientResponseSizeBytes: Histogram = Histogram
+    .build()
+    .name("dicer_client_response_size_bytes_histogram")
+    .help("Size of ClientResponseP protos distributed by SubscriberHandler in bytes")
+    .labelNames("targetCluster", "targetName", "targetInstanceId", "handlerLocation")
+    .buckets(SERIALIZED_ASSIGNMENT_SIZE_BUCKETS: _*)
+    .register()
 
   /**
    * Named tuple for SubscriberHandler "matched-" metric labels.
@@ -822,7 +898,7 @@ object SubscriberHandlerMetrics {
    * [[SyncAssignmentState.KnownGeneration]] rather than the actual assignment. This likely
    * indicates the SEC is overloaded.
    */
-  private val watchRequestsLoadShed: Counter = Counter
+  private[common] val watchRequestsLoadShed: Counter = Counter
     .build()
     .name("dicer_watch_requests_load_shed_total")
     .help(
@@ -895,17 +971,6 @@ object SubscriberHandlerMetrics {
         matchedLabels.matchedName,
         matchedLabels.matchedCluster,
         matchedLabels.matchedInstanceId
-      )
-      .inc()
-  }
-
-  /** Increments the number of watch requests that were load shed. */
-  def incrementWatchRequestsLoadShed(target: Target): Unit = {
-    watchRequestsLoadShed
-      .labels(
-        target.getTargetClusterLabel,
-        target.getTargetNameLabel,
-        target.getTargetInstanceIdLabel
       )
       .inc()
   }

@@ -6,7 +6,8 @@ import "dicer/common/proto/common.proto";
 import "dicer/friend/proto/friend.proto";
 import "scalapb.proto";
 
-option java_package = "com.databricks.dicer.common";;
+
+option java_package = "com.databricks.dicer.common";
 option java_generate_equals_and_hash = true;
 option java_outer_classname = "SliceletTestDriverProto";
 option java_multiple_files = true;
@@ -17,6 +18,9 @@ option (scalapb.options) = {
 
 // Test driver service for Slicelet operations.
 service SliceletTestDriver {
+  // This is a test-only RPC service that is not exposed to customers, so audit logging is not
+  // relevant.
+
   // Creates a Rust `Slicelet` instance.
   rpc CreateSlicelet(CreateSliceletRequestP) returns (CreateSliceletResponseP);
 
@@ -61,6 +65,18 @@ service SliceletTestDriver {
   // Increments load by a given value for a slice key handle.
   rpc IncrementSliceKeyHandleLoadBy(IncrementSliceKeyHandleLoadByRequestP)
       returns (IncrementSliceKeyHandleLoadByResponseP);
+
+  // Sets the readiness status of a Rust `FakeBlockingReadinessProvider`.
+  rpc SetReadinessStatus(SetReadinessStatusRequestP)
+      returns (SetReadinessStatusResponseP);
+
+  // Sets the blocking state of a Rust `FakeBlockingReadinessProvider`.
+  rpc SetReadinessProviderBlocked(SetReadinessProviderBlockedRequestP)
+      returns (SetReadinessProviderBlockedResponseP);
+
+  // Sets the readiness status of a Rust `TestProbeStatusSource`.
+  rpc SetReadinessProbeStatusSource(SetReadinessProbeStatusSourceRequestP)
+      returns (SetReadinessProbeStatusSourceResponseP);
 }
 
 // A request to create a Rust `Slicelet`.
@@ -68,7 +84,7 @@ service SliceletTestDriver {
 // The fields of this proto correspond to parameters of `Slicelet::builder` and of the methods on
 // `SliceletBuilder`.
 message CreateSliceletRequestP {
-  optional TargetP target = 1;
+  optional TestTargetP target = 6;
 
   // OPTIONAL
   optional string slicelet_hostname = 2;
@@ -78,6 +94,30 @@ message CreateSliceletRequestP {
 
   // OPTIONAL
   optional string slicelet_kubernetes_namespace = 4;
+
+  // OPTIONAL
+  optional bool use_fake_readiness_provider = 5;
+
+  reserved 1;
+}
+
+// Specifies which Rust `Target` constructor to call and the arguments to pass to it.
+message TestTargetP {
+  // Specifies the arguments to pass to `new_app_target`.
+  message AppP {
+    optional string app = 1;
+    optional string app_instance = 2;
+  }
+
+  oneof target {
+    // Call `Target::new` with this target name.
+    string target_name = 1;
+
+    // Call `new_app_target` with this app and instance ID.
+    AppP app = 3;
+  }
+
+  reserved 2;
 }
 
 // The response to a `CreateSlicelet` request.
@@ -213,3 +253,37 @@ message GetSliceletWatchServerPortResponseP {
   // The port on which the Slicelet's watch server is listening.
   optional int32 port = 1;
 }
+
+// A request to set the readiness status of a Rust `Slicelet`.
+message SetReadinessStatusRequestP {
+  // The ID for the Slicelet that was previously returned by a `CreateSlicelet` request.
+  optional int64 slicelet_id = 1;
+
+  // The readiness status to be set.
+  optional bool is_ready = 2;
+}
+
+// The response to a `SetReadinessStatus` request.
+message SetReadinessStatusResponseP {}
+
+// A request to set the blocking state of a Rust `Slicelet`'s readiness provider.
+message SetReadinessProviderBlockedRequestP {
+  // The ID for the Slicelet that was previously returned by a `CreateSlicelet` request.
+  optional int64 slicelet_id = 1;
+
+  // Whether the readiness provider should block. If true, the `isReady` call will block
+  // until `blocked` is set to false.
+  optional bool blocked = 2;
+}
+
+// The response to a `SetReadinessProviderBlocked` request.
+message SetReadinessProviderBlockedResponseP {}
+
+// A request to set the readiness status of a Rust `TestProbeStatusSource`.
+message SetReadinessProbeStatusSourceRequestP {
+  // The readiness status to be set.
+  optional int64 status = 1;
+}
+
+// The response to a `SetReadinessProbeStatusSource` request.
+message SetReadinessProbeStatusSourceResponseP {}

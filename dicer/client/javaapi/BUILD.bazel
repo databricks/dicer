@@ -1,0 +1,61 @@
+load("@rules_scala//scala:scala.bzl", "scala_library", "scala_test")
+
+package(
+    default_visibility = ["//dicer:internal"],
+)
+
+scala_library(
+    name = "slicelet_conf_impl",
+    srcs = [
+        "src/DicerClientConfImplCommon.scala",
+        "src/SliceletConfImpl.scala",
+    ],
+    deps = [
+        "//dicer/external:conf",
+        "//wrappers/conf:core",
+        "//wrappers/conf:current_project",
+        "//wrappers/conf:project",
+        "//wrappers/conf:project-conf",
+        "//wrappers/conf:raw_config_singleton",
+        "@maven//:com_typesafe_config",
+    ],
+)
+
+scala_library(
+    name = "clerk_conf_impl",
+    srcs = [
+        "src/ClerkConfImpl.scala",
+        "src/DicerClientConfImplCommon.scala",
+    ],
+    visibility = ["//dicer:internal"],
+    deps = [
+        "//dicer/external:conf",
+        "//wrappers/conf:core",
+        "//wrappers/conf:current_project",
+        "//wrappers/conf:project",
+        "//wrappers/conf:project-conf",
+        "//wrappers/conf:raw_config_singleton",
+        "@maven//:com_typesafe_config",
+    ],
+)
+
+scala_test(
+    name = "dicer_client_conf_impl_suite",
+    srcs = ["test/DicerClientConfImplSuite.scala"],
+    timeout = "short",
+    deps = [
+        ":clerk_conf_impl",
+        ":slicelet_conf_impl",
+        "//caching/util:test_utils",
+        "//dicer/external:conf",
+        "//wrappers/conf:core",
+        "//wrappers/conf:current_project",
+        "//wrappers/conf:project",
+        "//wrappers/conf:project-conf",
+        "//wrappers/conf:raw_config_singleton",
+        "//wrappers/rpc:rpc_testing",
+        "//wrappers/util:async_test_helpers",
+        "//wrappers/util:databricks-test",
+        "@maven//:com_typesafe_config",
+    ],
+)

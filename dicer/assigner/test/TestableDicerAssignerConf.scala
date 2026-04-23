@@ -10,11 +10,8 @@ import com.databricks.rpc.DatabricksObjectMapper
 import com.typesafe.config.Config
 
 import com.databricks.api.proto.dicer.assigner.config.InternalDicerTargetConfigP
-import com.databricks.dicer.assigner.config.{
-  InternalTargetConfig,
-  NamedInternalTargetConfig,
-  TargetName
-}
+import com.databricks.dicer.assigner.config.{InternalTargetConfig, NamedInternalTargetConfig}
+import com.databricks.dicer.common.TargetName
 
 /**
  * Specialization of [[DicerAssignerConf]] that mixes in test support and fakes out SAFE feature

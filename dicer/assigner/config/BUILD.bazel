@@ -4,21 +4,15 @@ package(
     default_visibility = ["//dicer:internal"],
 )
 
-filegroup(
-    name = "all_files",
-    srcs = glob(["**"]),
-    visibility = ["//caching/oss:__pkg__"],
-)
-
 scala_library(
     name = "internal_target_config",
     srcs = [
         "src/ChurnConfig.scala",
         "src/InternalTargetConfig.scala",
-        "src/TargetName.scala",
     ],
     exports = [
         "//caching/util:config_provider_trait",
+        "//dicer/common:target_name",
         "//dicer/external/proto",
     ],
     visibility = ["//dicer:internal"],
@@ -30,12 +24,29 @@ scala_library(
         "//dicer/common/proto:common_proto_scala_lib",
         "//dicer/common:assignment_core",
         "//dicer/common:generation",
+        "//dicer/common:target_name",
         "//dicer/external/proto",
         "//dicer/external:conf",
         "//dicer/external:external_common",
         "//dicer/friend:squid",
         "//wrappers/logging",
         "//wrappers/util:jsonutil",
+    ],
+)
+
+scala_library(
+    name = "target_migration_config",
+    srcs = ["src/TargetMigrationConfig.scala"],
+    deps = [
+        "//dicer/assigner/config/proto:target_migration_config_scala_lib",
+        "//dicer/common:target_name",
+        "//wrappers/util:jsonutil",
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_guava_guava",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
     ],
 )
 
@@ -202,6 +213,26 @@ scala_test(
         "//wrappers/util:async_test_helpers",
         "//wrappers/util:databricks-test",
         "//wrappers/util:jsonutil",
+    ],
+)
+
+scala_test(
+    name = "target_migration_config_test",
+    srcs = ["test/TargetMigrationConfigSuite.scala"],
+    timeout = "short",
+    deps = [
+        ":target_migration_config",
+        "//caching/util:test_util",
+        "//dicer/assigner/config/proto:target_migration_config_scala_lib",
+        "//dicer/common:target_name",
+        "//wrappers/util:async_test_helpers",
+        "//wrappers/util:databricks-test",
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_guava_guava",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
     ],
 )
 

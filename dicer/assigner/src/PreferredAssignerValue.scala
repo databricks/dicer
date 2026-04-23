@@ -177,8 +177,8 @@ object AssignerRole {
 }
 
 /**
- * Encapsulates whether the current assigner is preferred, the routing hint and token map for
- * clients to use.
+ * Encapsulates whether the current assigner is preferred and the routing hint for clients to
+ * use.
  *
  * When the assigner is preferred, it always generates assignments. When the assigner is not
  * preferred, it redirects the client to the preferred assigner if there is one, or a random

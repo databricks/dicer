@@ -5,6 +5,9 @@ import com.databricks.api.proto.infra.infra.KubernetesCluster
 /** Trait for accessing infrastructure definitions. */
 trait InfraDataModel {
   def getInfraDef: ComputeInfraDefinition
+
+  /** Returns the Kubernetes cluster with the given URI, or `None` if not found. */
+  def getKubernetesClusterByUri(uri: String): Option[KubernetesCluster]
 }
 
 /**
@@ -32,6 +35,16 @@ object InfraDataModel {
       )
       new ComputeInfraDefinition(testClusters)
     }
+
+    override def getKubernetesClusterByUri(uri: String): Option[KubernetesCluster] =
+      // First check the static map, then fall back to constructing a cluster from the URI
+      // directly. This allows the OSS implementation to handle any well-formed cluster URI
+      // without requiring all clusters to be listed in the embedded test data.
+      getInfraDef.kubernetesClusters
+        .get(uri)
+        .orElse(
+          if (uri.nonEmpty) Some(new KubernetesCluster(uri)) else None
+        )
   }
 }
 

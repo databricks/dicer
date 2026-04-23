@@ -120,8 +120,8 @@ object DemoClientMain extends DatabricksMain(Project.DemoClient) {
       requestCounter += 1
       val uniform: Double = random.nextDouble()
       // Bias the keys towards lower values (simulating a non-uniform key distribution).
-      val baseKey: Int = (NUM_KEYS * math.pow(uniform, 4.0)).toInt
-      val key: Int = loadShifter.shiftKey(baseKey)
+      val baseKey: Long = (NUM_KEYS * math.pow(uniform, 4.0)).toLong
+      val key: Long = loadShifter.shiftKey(baseKey)
       val sliceKey: SliceKey = DemoCommon.toSliceKey(key)
 
       // Randomly select operation: 60% GET, 30% PUT, 10% DELETE.
@@ -215,7 +215,7 @@ class LoadShifter(numKeys: Int) {
   private var lastShiftTime: Long = System.currentTimeMillis()
 
   /** Current offset added to keys to simulate shifting access patterns. */
-  private var keyOffset: Int = 0
+  private var keyOffset: Long = 0L
 
   /**
    * Applies a shifting offset to the base key. The offset changes periodically
@@ -224,7 +224,7 @@ class LoadShifter(numKeys: Int) {
    * @param baseKey The original key to shift
    * @return The shifted key, wrapped around to stay within [0, numKeys)
    */
-  def shiftKey(baseKey: Int): Int = {
+  def shiftKey(baseKey: Long): Long = {
     val currentTime: Long = System.currentTimeMillis()
     if (currentTime - lastShiftTime >= SHIFT_INTERVAL_MS) {
       keyOffset = currentTime.hashCode().abs % numKeys

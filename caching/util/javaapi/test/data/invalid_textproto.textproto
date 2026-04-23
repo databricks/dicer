@@ -1,0 +1,8 @@
+# proto-file: caching/util/javaapi/test/proto/test_message.proto
+# proto-message: StringTestMessageP
+# Invalid textproto file for testing parse errors
+
+strings: [
+  "test1"
+  "test2"
+# Missing closing bracket and commas

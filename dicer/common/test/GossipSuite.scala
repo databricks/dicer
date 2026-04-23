@@ -17,11 +17,7 @@ import com.databricks.dicer.assigner.config.InternalTargetConfig.{
   KeyReplicationConfig,
   LoadWatcherTargetConfig
 }
-import com.databricks.dicer.assigner.config.{
-  InternalTargetConfig,
-  InternalTargetConfigMap,
-  TargetName
-}
+import com.databricks.dicer.assigner.config.{InternalTargetConfig, InternalTargetConfigMap}
 
 /**
  * Tests exercising Dicer's sync protocol, which allows Clerks, Slicelets, and Assigners to learn
@@ -31,35 +27,19 @@ class GossipSuite extends DatabricksTest with TestName {
   type Clerk = com.databricks.dicer.external.Clerk[ResourceAddress]
   type Proposal = SliceMap[ProposedSliceAssignment]
 
-  /**
-   * Test environment where the Assigner is configured with a durable store that generates non-loose
-   * assignments suitable for exercising diffing logic.
-   */
-  private val nonLooseTestEnv =
-    InternalDicerTestEnvironment.create(
-      TestAssigner.Config.create(assignerConf = getAssignerConf("etcd", 2)),
-      allowEtcdMode = true
-    )
-
-  /**
-   * Test environment where the Assigner is configured with a non-durable store that generates loose
-   * assignments, which will not exercise diffing logic.
-   */
-  private val looseTestEnv = InternalDicerTestEnvironment.create(
+  /** Test environment where the Assigner is configured with an in-memory store. */
+  private val testEnv = InternalDicerTestEnvironment.create(
     TestAssigner.Config.create(assignerConf = getAssignerConf("in_memory", 0))
   )
 
-  /** Test environments supporting incremental and non-incremental assignment distribution. */
-  private val testEnvs = Seq(nonLooseTestEnv, looseTestEnv)
-
   /**
-   * Returns assigner configuration with specified store type (e.g. "in_memory", "shadow", "etcd"),
+   * Returns assigner configuration with specified store type (e.g. "in_memory", "etcd"),
    * and store incarnation, and where delays have been reduced to speed up tests.
    */
   private def getAssignerConf(storeType: String, storeIncarnation: Short) =
     new DicerAssignerConf(
       Configs.parseMap(
-        "databricks.dicer.common.watchServerSuggestedRpcTimeoutSeconds" -> 1,
+        "databricks.dicer.internal.cachingteamonly.watchServerSuggestedRpcTimeoutMillis" -> 1000,
         // This suite uses createDirectClerk, so we need to configure this setting as well.
         "databricks.dicer.assigner.assignerSuggestedClerkWatchTimeoutSeconds" -> 1,
         "databricks.dicer.assigner.store.type" -> storeType,
@@ -114,35 +94,33 @@ class GossipSuite extends DatabricksTest with TestName {
     // Note: non-open source changes to this test should also be applied to GossipWithEdsSuite.
 
     val target = Target(getSafeName)
-    for (testEnv <- testEnvs) {
 
-      // Create a Slicelet.
-      val slicelet: Slicelet =
-        testEnv.createSlicelet(target).start(selfPort = 1234, listenerOpt = None)
+    // Create a Slicelet.
+    val slicelet: Slicelet =
+      testEnv.createSlicelet(target).start(selfPort = 1234, listenerOpt = None)
 
-      // Create a Clerk that watches assignments via `slicelet`.
-      val clerk: Clerk = testEnv.createClerk(slicelet)
+    // Create a Clerk that watches assignments via `slicelet`.
+    val clerk: Clerk = testEnv.createClerk(slicelet)
 
-      /** Waits until all parties have the given `assignment`. */
-      def allAwaitAssignment(assignment: Assignment): Unit = {
-        awaitAssignment(slicelet, assignment)
-        awaitAssignment(testEnv, target, assignment)
-        awaitAssignment(clerk, assignment)
-      }
+    /** Waits until all parties have the given `assignment`. */
+    def allAwaitAssignment(assignment: Assignment): Unit = {
+      awaitAssignment(slicelet, assignment)
+      awaitAssignment(testEnv, target, assignment)
+      awaitAssignment(clerk, assignment)
+    }
 
-      // Wait for the Assigner to produce an initial assignment and for it to be received by the
-      // Clerks and Slicelet.
-      val assignment: Assignment =
-        awaitAssignmentWithResources(testEnv, target, Set(slicelet.impl.squid))
-      allAwaitAssignment(assignment)
+    // Wait for the Assigner to produce an initial assignment and for it to be received by the
+    // Clerks and Slicelet.
+    val assignment: Assignment =
+      awaitAssignmentWithResources(testEnv, target, Set(slicelet.impl.squid))
+    allAwaitAssignment(assignment)
 
-      // Write a sequence of assignments that are designed to exercise diffing logic and verify
-      // they are received by everyone.
-      for (proposal: Proposal <- PROPOSALS) {
-        val nextAssignment: Assignment =
-          TestUtils.awaitResult(testEnv.setAndFreezeAssignment(target, proposal), Duration.Inf)
-        allAwaitAssignment(nextAssignment)
-      }
+    // Write a sequence of assignments that are designed to exercise diffing logic and verify
+    // they are received by everyone.
+    for (proposal: Proposal <- PROPOSALS) {
+      val nextAssignment: Assignment =
+        TestUtils.awaitResult(testEnv.setAndFreezeAssignment(target, proposal), Duration.Inf)
+      allAwaitAssignment(nextAssignment)
     }
   }
 
@@ -152,35 +130,33 @@ class GossipSuite extends DatabricksTest with TestName {
     // are designed to exercise assignment diffs when using `incrementalTestEnv`.
     val target = Target(getSafeName)
 
-    for (testEnv: InternalDicerTestEnvironment <- testEnvs) {
-      // Create two Clerks that watches assignments via the Assigner.
-      val clerk1: Clerk = testEnv.createDirectClerk(target, initialAssignerIndex = 0)
-      val clerk2: Clerk = testEnv.createDirectClerk(target, initialAssignerIndex = 0)
+    // Create two Clerks that watches assignments via the Assigner.
+    val clerk1: Clerk = testEnv.createDirectClerk(target, initialAssignerIndex = 0)
+    val clerk2: Clerk = testEnv.createDirectClerk(target, initialAssignerIndex = 0)
 
-      /** Waits until all parties have the given `assignment`. */
-      def allAwaitAssignment(assignment: Assignment): Unit = {
-        awaitAssignment(testEnv, target, assignment)
-        awaitAssignment(clerk1, assignment)
-        awaitAssignment(clerk2, assignment)
-      }
+    /** Waits until all parties have the given `assignment`. */
+    def allAwaitAssignment(assignment: Assignment): Unit = {
+      awaitAssignment(testEnv, target, assignment)
+      awaitAssignment(clerk1, assignment)
+      awaitAssignment(clerk2, assignment)
+    }
 
-      // Inject an initial assignment.
-      val assignment = TestUtils.awaitResult(
-        testEnv
-          .setAndFreezeAssignment(target, createProposal(("" -- ∞) -> Seq("devnull"))),
-        Duration.Inf
-      )
+    // Inject an initial assignment.
+    val assignment = TestUtils.awaitResult(
+      testEnv
+        .setAndFreezeAssignment(target, createProposal(("" -- ∞) -> Seq("devnull"))),
+      Duration.Inf
+    )
 
-      // Wait for the initial assignment and for it to be received by the Clerks.
-      allAwaitAssignment(assignment)
+    // Wait for the initial assignment and for it to be received by the Clerks.
+    allAwaitAssignment(assignment)
 
-      // Write a sequence of assignments that are designed to exercise diffing logic and verify
-      // they are received by everyone.
-      for (proposal: Proposal <- PROPOSALS) {
-        val nextAssignment: Assignment =
-          TestUtils.awaitResult(testEnv.setAndFreezeAssignment(target, proposal), Duration.Inf)
-        allAwaitAssignment(nextAssignment)
-      }
+    // Write a sequence of assignments that are designed to exercise diffing logic and verify
+    // they are received by everyone.
+    for (proposal: Proposal <- PROPOSALS) {
+      val nextAssignment: Assignment =
+        TestUtils.awaitResult(testEnv.setAndFreezeAssignment(target, proposal), Duration.Inf)
+      allAwaitAssignment(nextAssignment)
     }
   }
 
@@ -191,67 +167,64 @@ class GossipSuite extends DatabricksTest with TestName {
 
     val target = Target(getSafeName)
 
-    for (testEnv <- testEnvs) {
+    // Use frozen assignments for the duration of the test to avoid the assigner generating its
+    // own which would overwrite the ones we inject, and also create issues when attempting to
+    // wait for an "initial" assignment (since multiple assignments may be generated as multiple
+    // slicelets connect to the Assigner). Start with a simple blackhole assignment.
+    val assignment1 =
+      TestUtils.awaitResult(
+        testEnv.setAndFreezeAssignment(
+          target,
+          createProposal(("" -- ∞) -> Seq("devnull"))
+        ),
+        Duration.Inf
+      )
 
-      // Use frozen assignments for the duration of the test to avoid the assigner generating its
-      // own which would overwrite the ones we inject, and also create issues when attempting to
-      // wait for an "initial" assignment (since multiple assignments may be generated as multiple
-      // slicelets connect to the Assigner). Start with a simple blackhole assignment.
-      val assignment1 =
-        TestUtils.awaitResult(
-          testEnv.setAndFreezeAssignment(
-            target,
-            createProposal(("" -- ∞) -> Seq("devnull"))
-          ),
-          Duration.Inf
-        )
+    // Create two Slicelets.
+    val slicelet1: Slicelet =
+      testEnv.createSlicelet(target).start(selfPort = 1234, listenerOpt = None)
+    val slicelet2: Slicelet =
+      testEnv.createSlicelet(target).start(selfPort = 12345, listenerOpt = None)
 
-      // Create two Slicelets.
-      val slicelet1: Slicelet =
-        testEnv.createSlicelet(target).start(selfPort = 1234, listenerOpt = None)
-      val slicelet2: Slicelet =
-        testEnv.createSlicelet(target).start(selfPort = 12345, listenerOpt = None)
+    // Create a Clerk that watches assignments via `slicelet1`.
+    val clerk1: Clerk = testEnv.createClerk(slicelet1)
 
-      // Create a Clerk that watches assignments via `slicelet1`.
-      val clerk1: Clerk = testEnv.createClerk(slicelet1)
+    // Create another Clerk that watches assignments directly via the Assigner.
+    val clerk2: Clerk = testEnv.createDirectClerk(target, initialAssignerIndex = 0)
 
-      // Create another Clerk that watches assignments directly via the Assigner.
-      val clerk2: Clerk = testEnv.createDirectClerk(target, initialAssignerIndex = 0)
-
-      /** Waits until all parties have the given `assignment`. */
-      def allAwaitAssignment(assignment: Assignment): Unit = {
-        awaitAssignment(slicelet1, assignment)
-        awaitAssignment(slicelet2, assignment)
-        awaitAssignment(testEnv, target, assignment)
-        awaitAssignment(clerk1, assignment)
-        awaitAssignment(clerk2, assignment)
-      }
-
-      // Wait for the initial assignment to be received by the Clerk and Slicelets.
-      allAwaitAssignment(assignment1)
-
-      // Now feed assignments to the subscribers and verify that they propagate to all other
-      // participants. The assignment is frozen so that the Assigner doesn't try to overwrite it
-      // (the assignment has the wrong resources).
-      val assignment2: Assignment = createFrozenSuccessor(assignment1, PROPOSAL1)
-      clerk1.impl.forTest.injectAssignment(assignment2)
-      allAwaitAssignment(assignment2)
-
-      // This time feed an assignment to slicelet1.
-      val assignment3: Assignment = createFrozenSuccessor(assignment2, PROPOSAL2)
-      slicelet1.impl.forTest.injectAssignment(assignment3)
-      allAwaitAssignment(assignment3)
-
-      // Feed an assignment to slicelet2.
-      val assignment4: Assignment = createFrozenSuccessor(assignment3, PROPOSAL3)
-      slicelet2.impl.forTest.injectAssignment(assignment4)
-      allAwaitAssignment(assignment4)
-
-      // Finally, feed an assignment to clerk2.
-      val assignment5: Assignment = createFrozenSuccessor(assignment4, PROPOSAL1)
-      clerk2.impl.forTest.injectAssignment(assignment5)
-      allAwaitAssignment(assignment5)
+    /** Waits until all parties have the given `assignment`. */
+    def allAwaitAssignment(assignment: Assignment): Unit = {
+      awaitAssignment(slicelet1, assignment)
+      awaitAssignment(slicelet2, assignment)
+      awaitAssignment(testEnv, target, assignment)
+      awaitAssignment(clerk1, assignment)
+      awaitAssignment(clerk2, assignment)
     }
+
+    // Wait for the initial assignment to be received by the Clerk and Slicelets.
+    allAwaitAssignment(assignment1)
+
+    // Now feed assignments to the subscribers and verify that they propagate to all other
+    // participants. The assignment is frozen so that the Assigner doesn't try to overwrite it
+    // (the assignment has the wrong resources).
+    val assignment2: Assignment = createFrozenSuccessor(assignment1, PROPOSAL1)
+    clerk1.impl.forTest.injectAssignment(assignment2)
+    allAwaitAssignment(assignment2)
+
+    // This time feed an assignment to slicelet1.
+    val assignment3: Assignment = createFrozenSuccessor(assignment2, PROPOSAL2)
+    slicelet1.impl.forTest.injectAssignment(assignment3)
+    allAwaitAssignment(assignment3)
+
+    // Feed an assignment to slicelet2.
+    val assignment4: Assignment = createFrozenSuccessor(assignment3, PROPOSAL3)
+    slicelet2.impl.forTest.injectAssignment(assignment4)
+    allAwaitAssignment(assignment4)
+
+    // Finally, feed an assignment to clerk2.
+    val assignment5: Assignment = createFrozenSuccessor(assignment4, PROPOSAL1)
+    clerk2.impl.forTest.injectAssignment(assignment5)
+    allAwaitAssignment(assignment5)
   }
 
   test("Assignments from multi-replica back to single-replica flow in dicer system") {
@@ -260,82 +233,80 @@ class GossipSuite extends DatabricksTest with TestName {
     // changed back to a single-replica assignment, the system still work as expected.
 
     val target = Target(getSafeName)
-    for (testEnv <- testEnvs) {
 
-      /** Asserts that the `assignment` assigns each Slice to exactly one resource. */
-      def assertSingleReplica(assignment: Assignment): Unit = {
-        for (sliceAssignment: SliceAssignment <- assignment.sliceMap.entries) {
-          assert(sliceAssignment.resources.size == 1)
-        }
+    /** Asserts that the `assignment` assigns each Slice to exactly one resource. */
+    def assertSingleReplica(assignment: Assignment): Unit = {
+      for (sliceAssignment: SliceAssignment <- assignment.sliceMap.entries) {
+        assert(sliceAssignment.resources.size == 1)
       }
-
-      // Setup: 2 initial slicelets, and 2 clerks connected to each of the Slicelets respectively.
-      val slicelet0: Slicelet =
-        testEnv.createSlicelet(target).start(selfPort = 1234, listenerOpt = None)
-      val squid0: Squid = slicelet0.impl.squid
-      val clerk0: Clerk = testEnv.createClerk(slicelet0)
-      val slicelet1: Slicelet =
-        testEnv.createSlicelet(target).start(selfPort = 2345, listenerOpt = None)
-      val squid1: Squid = slicelet1.impl.squid
-      val clerk1: Clerk = testEnv.createClerk(slicelet1)
-
-      // Setup: Wait for the Assigner to produce an initial assignment.
-      val initialAssignment: Assignment =
-        awaitAssignmentWithResources(testEnv, target, Set(squid0, squid1))
-      // Verify: The initial assignment (generated by the assigner) should be single-replica, and
-      // all parties in the system should be able to receive it.
-      assertSingleReplica(initialAssignment)
-      awaitAssignment(testEnv, target, initialAssignment)
-      awaitAssignment(slicelet0, initialAssignment)
-      awaitAssignment(slicelet1, initialAssignment)
-      awaitAssignment(clerk0, initialAssignment)
-      awaitAssignment(clerk1, initialAssignment)
-
-      // Setup: A fake squid to be included in the multi-replica assignment, used to distinguish
-      // the fake assignment and the assignment generated by the assigner in the next step.
-      val otherSquid: Squid = createTestSquid("OtherPod")
-
-      // Setup: Manually create and freeze an assignment with actually multiple replicas.
-      val proposal: Proposal = createProposal(
-        ("" -- "Dumbledore") -> Seq(squid0, squid1),
-        ("Dumbledore" -- "Gandalf") -> Seq(squid0),
-        ("Gandalf" -- "Luke") -> Seq(squid1),
-        ("Luke" -- ∞) -> Seq(squid0, squid1, otherSquid)
-      )
-      testEnv.setAndFreezeAssignment(target, proposal)
-
-      // Verify: All parties in the system should be able to receive the second assignment, which
-      // is the multi-replica fake one.
-      val assignment: Assignment =
-        awaitAssignmentWithResources(testEnv, target, Set(squid0, squid1, otherSquid))
-      awaitAssignment(testEnv, target, assignment)
-      awaitAssignment(slicelet0, assignment)
-      awaitAssignment(slicelet1, assignment)
-      awaitAssignment(clerk0, assignment)
-      awaitAssignment(clerk1, assignment)
-
-      // Setup: Unfreeze the assignment, and connect a new Slicelet to the assigner to trigger it
-      // to generate a new assignment. Also create a Clerk connected to it for better coverage.
-      testEnv.unfreezeAssignment(target)
-      val slicelet2: Slicelet =
-        testEnv.createSlicelet(target).start(selfPort = 3456, listenerOpt = None)
-      val squid2: Squid = slicelet2.impl.squid
-      val clerk2: Clerk = testEnv.createClerk(slicelet2)
-
-      // Verify: Assigner should be able to create a new assignment containing the new Slicelet.
-      val assignmentBackToSingleReplica: Assignment =
-        awaitAssignmentWithResources(testEnv, target, Set(squid0, squid1, squid2))
-      // Verify: The third assignment generated by assigner should be single-replica.
-      assertSingleReplica(assignmentBackToSingleReplica)
-      // Verify: All parties in the system should be able to receive the new assignment.
-      awaitAssignment(testEnv, target, assignmentBackToSingleReplica)
-      awaitAssignment(slicelet0, assignmentBackToSingleReplica)
-      awaitAssignment(slicelet1, assignmentBackToSingleReplica)
-      awaitAssignment(slicelet2, assignmentBackToSingleReplica)
-      awaitAssignment(clerk0, assignmentBackToSingleReplica)
-      awaitAssignment(clerk1, assignmentBackToSingleReplica)
-      awaitAssignment(clerk2, assignmentBackToSingleReplica)
     }
+
+    // Setup: 2 initial slicelets, and 2 clerks connected to each of the Slicelets respectively.
+    val slicelet0: Slicelet =
+      testEnv.createSlicelet(target).start(selfPort = 1234, listenerOpt = None)
+    val squid0: Squid = slicelet0.impl.squid
+    val clerk0: Clerk = testEnv.createClerk(slicelet0)
+    val slicelet1: Slicelet =
+      testEnv.createSlicelet(target).start(selfPort = 2345, listenerOpt = None)
+    val squid1: Squid = slicelet1.impl.squid
+    val clerk1: Clerk = testEnv.createClerk(slicelet1)
+
+    // Setup: Wait for the Assigner to produce an initial assignment.
+    val initialAssignment: Assignment =
+      awaitAssignmentWithResources(testEnv, target, Set(squid0, squid1))
+    // Verify: The initial assignment (generated by the assigner) should be single-replica, and
+    // all parties in the system should be able to receive it.
+    assertSingleReplica(initialAssignment)
+    awaitAssignment(testEnv, target, initialAssignment)
+    awaitAssignment(slicelet0, initialAssignment)
+    awaitAssignment(slicelet1, initialAssignment)
+    awaitAssignment(clerk0, initialAssignment)
+    awaitAssignment(clerk1, initialAssignment)
+
+    // Setup: A fake squid to be included in the multi-replica assignment, used to distinguish
+    // the fake assignment and the assignment generated by the assigner in the next step.
+    val otherSquid: Squid = createTestSquid("OtherPod")
+
+    // Setup: Manually create and freeze an assignment with actually multiple replicas.
+    val proposal: Proposal = createProposal(
+      ("" -- "Dumbledore") -> Seq(squid0, squid1),
+      ("Dumbledore" -- "Gandalf") -> Seq(squid0),
+      ("Gandalf" -- "Luke") -> Seq(squid1),
+      ("Luke" -- ∞) -> Seq(squid0, squid1, otherSquid)
+    )
+    testEnv.setAndFreezeAssignment(target, proposal)
+
+    // Verify: All parties in the system should be able to receive the second assignment, which
+    // is the multi-replica fake one.
+    val assignment: Assignment =
+      awaitAssignmentWithResources(testEnv, target, Set(squid0, squid1, otherSquid))
+    awaitAssignment(testEnv, target, assignment)
+    awaitAssignment(slicelet0, assignment)
+    awaitAssignment(slicelet1, assignment)
+    awaitAssignment(clerk0, assignment)
+    awaitAssignment(clerk1, assignment)
+
+    // Setup: Unfreeze the assignment, and connect a new Slicelet to the assigner to trigger it
+    // to generate a new assignment. Also create a Clerk connected to it for better coverage.
+    testEnv.unfreezeAssignment(target)
+    val slicelet2: Slicelet =
+      testEnv.createSlicelet(target).start(selfPort = 3456, listenerOpt = None)
+    val squid2: Squid = slicelet2.impl.squid
+    val clerk2: Clerk = testEnv.createClerk(slicelet2)
+
+    // Verify: Assigner should be able to create a new assignment containing the new Slicelet.
+    val assignmentBackToSingleReplica: Assignment =
+      awaitAssignmentWithResources(testEnv, target, Set(squid0, squid1, squid2))
+    // Verify: The third assignment generated by assigner should be single-replica.
+    assertSingleReplica(assignmentBackToSingleReplica)
+    // Verify: All parties in the system should be able to receive the new assignment.
+    awaitAssignment(testEnv, target, assignmentBackToSingleReplica)
+    awaitAssignment(slicelet0, assignmentBackToSingleReplica)
+    awaitAssignment(slicelet1, assignmentBackToSingleReplica)
+    awaitAssignment(slicelet2, assignmentBackToSingleReplica)
+    awaitAssignment(clerk0, assignmentBackToSingleReplica)
+    awaitAssignment(clerk1, assignmentBackToSingleReplica)
+    awaitAssignment(clerk2, assignmentBackToSingleReplica)
   }
 
   test("Generate and flow multi-replica assignment") {

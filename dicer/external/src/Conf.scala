@@ -4,6 +4,7 @@ import java.net.URI
 
 import com.databricks.conf.DbConf
 import com.databricks.conf.trusted.{LocationConf, RPCPortConf}
+import com.databricks.dicer.client.DicerClientProtoLoggerConf
 import com.databricks.dicer.common.{CommonSslConf, InternalClientConf, WatchServerConf}
 import com.databricks.rpc.tls.TLSOptions
 
@@ -14,25 +15,6 @@ trait ClerkConf extends DicerClientConf {
   private[dicer] final def getSliceletURI(sliceletHostName: String): URI = {
     URI.create(s"$sliceletHostName:$dicerSliceletRpcPort")
   }
-
-  /**
-   * Whether to enable rate limiting in the Clerk for watch requests.
-   *
-   * While a well-behaved peer will only send a watch response after the Clerk's requested timeout
-   * duration or when a new assignment is available, it is possible for a misbehaving peer to DOS
-   * the Clerk by immediately responding to watch requests. When rate-limiting in the Clerk is
-   * enabled, the Clerk will delay sending consecutive watch requests too quickly to avoid this
-   * scenario.
-   *
-   * Note: as of 1/26/26, the only set of Clerk peers that may be intentionally misbehaving are
-   * internal-system Slicelets, which run in an untrusted environment (using `dicer-assigner-untrusted`).
-   *
-   * Note: this setting applies to all Clerks in the process, not just for some targets. Because
-   * sending watch requests is an internal dicer logic — not a customer-controlled behavior —
-   * applying uniform rate limiting across all targets is reasonable.
-   */
-  private[dicer] final val enableClerkRateLimiting: Boolean =
-    configure("databricks.dicer.clerk.enableClerkRateLimiting", false)
 }
 
 /** The Dicer Slicelet config that a customer should derive from when using Dicer. */
@@ -59,18 +41,6 @@ trait SliceletConf extends DicerClientConf with WatchServerConf {
   /** This is only for internal Databricks compatibility and is not supported in open source. */
   private[dicer] final val watchFromDataPlane: Boolean =
     configure("databricks.dicer.client.watchFromDataPlane", false)
-
-  /**
-   * Whether to enable rate limiting in the Slicelet for watch requests. See
-   * [[ClerkConf.enableClerkRateLimiting]] for details on the purpose and affecting scope of
-   * rate-limiting in Dicer clients.
-   *
-   * Note: as of 1/26/26, there are no known Slicelet peers that may be intentionally misbehaving;
-   * this feature can still help prevent overload in Slicelets in the event of a bug in the watch
-   * request flow from the Assigner (See <internal bug>).
-   */
-  private[dicer] final val enableSliceletRateLimiting: Boolean =
-    configure("databricks.dicer.slicelet.enableSliceletRateLimiting", false)
 }
 
 /**
@@ -82,7 +52,8 @@ trait DicerClientConf
     with RPCPortConf
     with CommonSslConf
     with InternalClientConf
-    with LocationConf {
+    with LocationConf
+    with DicerClientProtoLoggerConf {
 
   /**
    * TlsOptions that should be set by Dicer clients, in their service configuration. Most services
@@ -104,11 +75,11 @@ trait DicerClientConf
   protected def dicerServerTlsOptions: Option[TLSOptions]
 
   /**
-   * The client may be directed to use specific addresses for its watch, which are stored in a
-   * cache. This conf controls how long we keep unaccessed stubs in the cache. We want this value to
-   * be longer than the connection idle timeout, which is currently 60 seconds by default so that we
-   * don't end up creating multiple connections to the same endpoint.
+   * Unique identifier for this Dicer client instance. Defaults to environment variable: POD_UID.
+   *
+   * For Clerks, this is the primary client identifier. For Slicelets, existing code uses
+   * `databricks.dicer.slicelet.uuid` (see [[SliceletConf.sliceletUuidOpt]]).
    */
-  private[dicer] final val watchStubCacheTimeSeconds: Int =
-    configure("databricks.dicer.client.watchStubCacheTimeSeconds", 5 * 60)
+  private[dicer] final val clientUuidOpt: Option[String] =
+    configure("databricks.dicer.internal.cachingteamonly.clientUuid", envVars.get("POD_UID"))
 }

@@ -17,6 +17,7 @@ import com.databricks.api.proto.dicer.external.{
 }
 import com.databricks.caching.util.{ConfigScope, PrefixLogger}
 import com.databricks.common.alias.RichScalaPB.RichMessage
+import com.databricks.dicer.common.TargetName
 import com.google.protobuf.CodedInputStream
 import scalapb.TextFormatException
 
@@ -307,7 +308,7 @@ object TargetConfigReader {
     val targetConfigOverrideOpt: Option[TargetConfigFieldsP] =
       configScopeOpt.flatMap { scope: ConfigScope =>
         ConfigScope
-          .findShardOverride(scope, targetConfig.overrides.map {
+          .findScopeOverride(scope, targetConfig.overrides.map {
             overrideProto: TargetConfigOverrideP =>
               (overrideProto.overrideScopes, overrideProto.getOverrideConfig)
           })
@@ -316,7 +317,7 @@ object TargetConfigReader {
     val advancedConfigOverrideOpt: Option[AdvancedTargetConfigFieldsP] =
       configScopeOpt.flatMap { scope: ConfigScope =>
         ConfigScope
-          .findShardOverride(
+          .findScopeOverride(
             scope,
             advancedConfig.overrides.map { overrideProto: AdvancedTargetConfigOverrideP =>
               (overrideProto.overrideScopes, overrideProto.getOverrideConfig)

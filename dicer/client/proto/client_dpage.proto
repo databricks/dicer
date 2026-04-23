@@ -1,0 +1,76 @@
+syntax = "proto2";
+
+package dicer;
+
+import "dicer/common/proto/dpage.proto";
+import "scalapb.proto";
+
+// "View proto" definitions for the Dicer Client (Slicelet/Clerk) DPages.
+// These protos, serialized as JSON, define the interface between the Client DAction
+// and React DView components.
+//
+// We use separate view protos to decouple DPages from the internal details of the
+// Client proto definitions. This allows us to evolve the Client proto definitions
+// without breaking the views on the DPages.
+
+option java_package = "com.databricks.api.proto.dicer.client";
+option java_generate_equals_and_hash = true;
+option java_outer_classname = "ClientDpageProto";
+option java_multiple_files = true;
+option (scalapb.options) = {
+  package_name: "com.databricks.api.proto.dicer.client",
+  flat_package: true,
+};
+
+// View data for a single unattributed load entry in a DPage assignment table.
+message UnattributedLoadEntryViewP {
+  // Inclusive lower bound of this slice's key range.
+  optional string low_key = 1;
+  // Exclusive upper bound of this slice's key range.
+  optional string high_key = 2;
+  // Unattributed load for this slice.
+  optional double load = 3;
+}
+
+// View data for the client-specific information in DPage output.
+message ClientInfoViewP {
+  // Human-readable debug name of this client subscriber.
+  optional string subscriber_debug_name = 1;
+  // Network address of this client's watch connection.
+  optional string watch_address = 2;
+  // ISO-8601 timestamp at which the current watch address started being used.
+  optional string watch_address_used_since = 3;
+  // ISO-8601 timestamp of the last successful heartbeat from the assignment distributor.
+  optional string last_successful_heartbeat = 4;
+  // Network address of this client's SQUID resource; absent for Clerks.
+  optional string squid_address = 5;
+  // UUID of this client's SQUID resource; absent for Clerks.
+  optional string squid_uuid = 6;
+}
+
+// View data for a single client's target entry in DPage output. Each entry
+// represents one client (Slicelet or Clerk) for a target, including its
+// connection info, the current assignment, and the subscriber lists visible to it.
+// Multiple entries may share the same target if several clients are registered.
+message ClientTargetViewP {
+  // Parseable description of the target (e.g. "softstore-storelet").
+  optional string target = 1;
+  // Slicelet subscribers currently registered with this target.
+  repeated SliceletViewP slicelets = 2;
+  // Clerk subscribers currently registered with this target.
+  repeated ClerkViewP clerks = 3;
+  // Current assignment for this target; absent when no assignment has been computed.
+  optional AssignmentViewP assignment = 4;
+  // Client-specific subscriber and connection information.
+  optional ClientInfoViewP client_info = 5;
+  // Per-slice unattributed load entries; only present for Slicelets.
+  repeated UnattributedLoadEntryViewP unattributed_load = 6;
+}
+
+// Top-level response for the Client DPage endpoint.
+message ClientSliceViewP {
+  // One entry per registered client across all targets in this process.
+  repeated ClientTargetViewP clients = 1;
+  // Error message populated when the DAction fails; absent on success.
+  optional string error = 2;
+}

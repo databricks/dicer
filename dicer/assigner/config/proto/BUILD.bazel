@@ -1,12 +1,6 @@
 load("@rules_proto//proto:defs.bzl", "proto_library")
 load("@rules_scala//scala_proto:scala_proto.bzl", "scala_proto_library")
 
-filegroup(
-    name = "all_files",
-    srcs = glob(["**"]),
-    visibility = ["//caching/oss:__pkg__"],
-)
-
 proto_library(
     name = "advanced_target_config_proto",
     srcs = ["advanced_target_config.proto"],
@@ -39,4 +33,17 @@ scala_proto_library(
     name = "internal_target_config_scala_lib",
     visibility = ["//dicer:internal"],
     deps = [":internal_target_config_proto"],
+)
+
+proto_library(
+    name = "target_migration_config_proto",
+    srcs = ["target_migration_config.proto"],
+    visibility = ["//dicer:internal"],
+    deps = ["//wrappers/rpc:scalapb_proto"],
+)
+
+scala_proto_library(
+    name = "target_migration_config_scala_lib",
+    visibility = ["//dicer:internal"],
+    deps = [":target_migration_config_proto"],
 )

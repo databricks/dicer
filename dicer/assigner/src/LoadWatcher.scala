@@ -194,12 +194,19 @@ private[assigner] class LoadWatcher(config: LoadWatcherTargetConfig, staticConfi
     // Remove Measurements with too short windows, converts them to MeasurementElements and group
     // them by Slice so we can supply the Measurements to SliceLoadWatchers in batch, in order to
     // avoid performing garbage collection multiple times for each Slice.
-    val newMeasurementsBySlice: Map[Slice, Seq[MeasurementElement]] = primaryRateMeasurements
-      .filter((_: Measurement).windowDuration >= config.minDuration)
-      .map(MeasurementElement.from)
-      .groupBy((_: MeasurementElement).slice)
-    for (sliceWithMeasurements <- newMeasurementsBySlice) {
-      val (slice, newMeasurements): (Slice, Seq[MeasurementElement]) = sliceWithMeasurements
+    val newMeasurementsBySlice =
+      mutable.Map[Slice, mutable.Builder[MeasurementElement, Seq[MeasurementElement]]]()
+    for (measurement: Measurement <- primaryRateMeasurements) {
+      if (measurement.windowDuration >= config.minDuration) {
+        val element: MeasurementElement = MeasurementElement.from(measurement)
+        val builder: mutable.Builder[MeasurementElement, Seq[MeasurementElement]] =
+          newMeasurementsBySlice.getOrElseUpdate(element.slice, Seq.newBuilder[MeasurementElement])
+        builder += element
+      }
+    }
+    for (sliceWithBuilder <- newMeasurementsBySlice) {
+      val (slice, newMeasurements): (Slice, Seq[MeasurementElement]) =
+        (sliceWithBuilder._1, sliceWithBuilder._2.result())
       val sliceLoadWatcher: SliceLoadWatcher = sliceLoadWatchersBySlice.getOrElseUpdate(
         slice, {
           // No SliceLoadWatcher exists for `slice`, creates a new one.

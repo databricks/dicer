@@ -6,7 +6,7 @@ import "caching/external/proto/config_scope_specification.proto";
 
 import "scalapb.proto";
 
-option java_package = "com.databricks.api.proto.dicer.external";;
+option java_package = "com.databricks.api.proto.dicer.external";
 option java_generate_equals_and_hash = true;
 option java_outer_classname = "TargetProto";
 option java_multiple_files = true;

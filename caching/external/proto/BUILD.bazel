@@ -5,12 +5,6 @@ package(
     default_visibility = ["//caching:all_caching"],
 )
 
-filegroup(
-    name = "all_files",
-    srcs = glob(["**"]),
-    visibility = ["//caching/oss:__pkg__"],
-)
-
 proto_library(
     name = "config_scope_specification_proto_library",
     srcs = ["config_scope_specification.proto"],

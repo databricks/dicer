@@ -20,13 +20,16 @@ object LocationConfTestUtils {
 
   /**
    * Returns a default test [[LocationConf]] with the cluster URI
-   * "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01".
+   * "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01" and the region URI
+   * "region:dev/cloud1/public/region1".
    */
   def newTestLocationConfig(): LocationConf = {
     new DbConfSingletonImpl with LocationConf {
       override val location: KubernetesLocation =
         KubernetesLocation(
-          Some("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01")
+          kubernetesClusterUri =
+            Some("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01"),
+          regionUri = Some("region:dev/cloud1/public/region1")
         )
     }
   }

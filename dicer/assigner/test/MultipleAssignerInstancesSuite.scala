@@ -364,7 +364,7 @@ private object MultipleAssignerInstancesSuite {
           Map(
             "databricks.dicer.assigner.preferredAssigner.modeEnabled" -> true,
             "databricks.dicer.assigner.preferredAssigner.storeIncarnation" -> 42,
-            "databricks.dicer.assigner.store.etcd.sslEnabled" -> false,
+            "databricks.dicer.assigner.preferredAssigner.etcd.sslEnabled" -> false,
             "databricks.dicer.assigner.store.type" -> "etcd",
             "databricks.dicer.assigner.storeIncarnation" -> 42,
             "databricks.dicer.assigner.storeNamespacePrefix" -> storeNamespacePrefix

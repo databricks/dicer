@@ -6,8 +6,10 @@ import com.databricks.dicer.assigner.config.InternalTargetConfig.{
   KeyReplicationConfig,
   LoadBalancingConfig,
   LoadBalancingMetricConfig,
-  LoadWatcherTargetConfig
+  LoadWatcherTargetConfig,
+  TargetWatchRequestRateLimitConfig
 }
+import com.databricks.dicer.common.TargetName
 
 /** Contains metrics that record values in [[InternalTargetConfig]] across targets. */
 object InternalTargetConfigMetrics {
@@ -96,6 +98,19 @@ object InternalTargetConfigMetrics {
     .labelNames("targetName")
     .register()
 
+  /**
+   * Metric containing the configured watch request rate limit (requests per second per client)
+   * for each target name. Configured through advanced target config.
+   */
+  private val advancedTargetConfigWatchRequestRateLimitClientRequestsPerSecond = Gauge
+    .build()
+    .name(
+      "dicer_assigner_advanced_target_config_watch_request_rate_limit_client_requests_per_second"
+    )
+    .help("The watch request rate limit (requests per second per client) for each target name.")
+    .labelNames("targetName")
+    .register()
+
   /** Exports values in `targetConfig` to metrics. */
   def exportAssignerConfigStats(
       targetName: TargetName,
@@ -107,6 +122,7 @@ object InternalTargetConfigMetrics {
     //                  enableStateTransfer config is removed from the code in all places.
     stateTransferConfigEnabled.labels(targetName.value).set(1)
     setKeyReplicationConfigStats(targetName, targetConfig.keyReplicationConfig)
+    setWatchRequestRateLimitConfigStats(targetName, targetConfig.targetRateLimitConfig)
   }
 
   /** A gauge indicating whether the dynamic values are unavailable during Assigner startup. */
@@ -174,6 +190,15 @@ object InternalTargetConfigMetrics {
       .set(primaryRateMetric.uniformLoadReservationRatio)
   }
 
+  /** Exports the fields in `rateLimitConfig` to metrics. */
+  private def setWatchRequestRateLimitConfigStats(
+      targetName: TargetName,
+      rateLimitConfig: TargetWatchRequestRateLimitConfig): Unit = {
+    advancedTargetConfigWatchRequestRateLimitClientRequestsPerSecond
+      .labels(targetName.value)
+      .set(rateLimitConfig.clientRequestsPerSecond)
+  }
+
   object forTest {
 
     /** Resets all metrics. */
@@ -188,6 +213,7 @@ object InternalTargetConfigMetrics {
       advancedTargetConfigLoadWatcherConfigUseTopKeys.clear()
       dynamicConfigUnavailabilityGauge.clear()
       dynamicConfigMalformedGauge.clear()
+      advancedTargetConfigWatchRequestRateLimitClientRequestsPerSecond.clear()
     }
   }
 }

@@ -32,8 +32,8 @@ object ClerkDriver {
    * Computes the expected target identifier used by a Clerk internally (for sending requests and
    * metrics labeling).
    *
-   * This is necessary because the Scala Clerk public API only supports creating a [[Clerk]] with
-   * a [[Target]] without a cluster URI. The cluster URI is best-effort picked up from the LOCATION
+   * This is necessary because the Clerk public API only supports creating a [[Clerk]] with a
+   * [[Target]] without a cluster URI. The cluster URI is best-effort picked up from the LOCATION
    * environment variable during the Clerk's creation process to form a fully-qualified target and
    * the fully-qualified target is used for metrics labeling internally.
    *
@@ -74,9 +74,6 @@ object ClerkDriver {
  */
 trait ClerkDriver {
 
-  /** The expected target identifier of the Clerk. */
-  def expectedClerkTargetIdentifier: Target
-
   /** See [[Clerk.ready]]. */
   def ready: Future[Unit]
 
@@ -107,14 +104,8 @@ trait ClerkDriver {
  * The [[ClerkDriver]] that exercises the Scala [[Clerk]] implementation.
  *
  * @param clerk The Scala Clerk instance.
- * @param expectedTargetIdentifier The expected target identifier of the Clerk.
  */
-class ScalaClerkDriver private (
-    clerk: Clerk[ResourceAddress],
-    expectedTargetIdentifier: Target
-) extends ClerkDriver {
-
-  override def expectedClerkTargetIdentifier: Target = expectedTargetIdentifier
+class ScalaClerkDriver private (clerk: Clerk[ResourceAddress]) extends ClerkDriver {
 
   override def ready: Future[Unit] = clerk.ready
 
@@ -139,8 +130,8 @@ class ScalaClerkDriver private (
 
 object ScalaClerkDriver {
 
-  def create(clerk: Clerk[ResourceAddress], expectedTargetIdentifier: Target): ScalaClerkDriver = {
-    new ScalaClerkDriver(clerk, expectedTargetIdentifier)
+  def create(clerk: Clerk[ResourceAddress]): ScalaClerkDriver = {
+    new ScalaClerkDriver(clerk)
   }
 }
 

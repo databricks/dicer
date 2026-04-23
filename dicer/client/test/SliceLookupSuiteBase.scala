@@ -2,7 +2,7 @@ package com.databricks.dicer.client
 
 import java.net.URI
 import java.nio.charset.StandardCharsets.UTF_8
-import java.util.Base64
+import java.util.{Base64, UUID}
 
 import com.databricks.rpc.RequestHeaders
 import io.grpc.Metadata
@@ -13,10 +13,10 @@ import scala.util.matching.Regex
 import com.databricks.caching.util.MetricUtils.ChangeTracker
 import com.databricks.caching.util.TestUtils
 import com.databricks.caching.util.TestUtils.TestName
-import com.databricks.caching.util.MetricUtils.ChangeTracker
 import com.databricks.caching.util.{
   AssertionWaiter,
-  FakeS2SProxy,
+  FakeProxy,
+  FakeS2SProxyMetadataHandler,
   LogCapturer,
   LoggingStreamCallback,
   PrefixLogger,
@@ -47,6 +47,7 @@ import com.databricks.dicer.friend.{SliceMap, Squid}
 import com.databricks.rpc.testing.TestTLSOptions
 import com.databricks.rpc.tls.TLSOptions
 import com.databricks.testing.DatabricksTest
+import TestClientUtils.TEST_CLIENT_UUID
 
 /** Contains test cases that apply to both the Scala and Rust implementations. */
 abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
@@ -68,8 +69,8 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
     TestAssigner.Config.create(
       assignerConf = new DicerAssignerConf(
         Configs.parseMap(
-          "databricks.dicer.common.watchServerSuggestedRpcTimeoutSeconds" ->
-          LOW_RPC_TIMEOUT.toSeconds,
+          "databricks.dicer.internal.cachingteamonly.watchServerSuggestedRpcTimeoutMillis" ->
+          LOW_RPC_TIMEOUT.toMillis,
           "databricks.dicer.assigner.assignerSuggestedClerkWatchTimeoutSeconds" ->
           LOW_RPC_TIMEOUT.toSeconds
         )
@@ -90,7 +91,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
    * A fake S2S Proxy server that sits between the `SliceLookup` and the assigner when
    * [[watchFromDataPlane]] is true.
    */
-  protected val fakeS2SProxy: FakeS2SProxy = FakeS2SProxy.createAndStart()
+  protected val fakeS2SProxy: FakeProxy = FakeProxy.createAndStart(FakeS2SProxyMetadataHandler)
 
   /** TLS options to use for the assigners in the test environments. */
   protected def assignerTlsOptionOverride: Option[TLSOptions] = None
@@ -116,11 +117,10 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
    * Returns whether to use SSL for the SliceLookup's stub.
    *
    * The reason we don't use SSL for the watch-from-data-plane variants is that in those, we are
-   * connecting to [[FakeS2SProxy]], which is a vanilla gRPC proxy server, rather than directly
-   * connecting to the assigner, which is an Armeria gRPC server. All of the SSL tooling is geared
-   * toward Armeria (e.g. using JKS format instead of PEM format), so it's not straightforward to
-   * make a vanilla gRPC server use [[TestTLSOptions.serverTlsOptions]].
+   * connecting to a fake S2S proxy, which currently doesn't use TLS, rather than directly
+   * connecting to the assigner, which is an Armeria gRPC server.
    */
+  // TODO(<internal bug>): Investigate if we can always use SSL if we create a fake S2S proxy that uses TLS.
   protected def useSsl: Boolean = !watchFromDataPlane
 
   override def beforeEach(): Unit = {
@@ -156,34 +156,57 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
    * callback registered with the lookup to the given `func`. Cancels the callbacks and lookup after
    * the function returns. Other parameters are used for the lookup's [[InternalClientConfig]].
    *
+   * @param testAssigner    the [[TestAssigner]] to connect the lookup to.
+   * @param watchStubCacheTime how long gRPC stubs are cached before being evicted.
    * @param protoLoggerConf the proto logger configuration. Defaults to a test conf with 0% sampling
    *                        (logging disabled). Tests that want to verify logging should pass a
    *                        [[TestableDicerClientProtoLoggerConf]] with the desired sample fraction.
+   * @param testTarget      the [[Target]] to watch. Defaults to the suite's [[target]] field.
+   * @param clientIdOpt     optional client UUID sent in watch requests. Defaults to
+   *                        [[TEST_CLIENT_UUID]].
+   * @param func            test body receiving the started [[SliceLookupDriver]] and its
+   *                        [[LoggingStreamCallback]].
    */
   protected def withLookup(
       testAssigner: TestAssigner,
       watchStubCacheTime: FiniteDuration = 20.seconds,
-      protoLoggerConf: DicerClientProtoLoggerConf = TestableDicerClientProtoLoggerConf.create())(
+      protoLoggerConf: DicerClientProtoLoggerConf = TestClientUtils.createTestProtoLoggerConf(
+        sampleFraction = 0.0
+      ),
+      testTarget: Target = target,
+      clientIdOpt: Option[UUID] = Some(TEST_CLIENT_UUID))(
       func: (SliceLookupDriver, LoggingStreamCallback[Assignment]) => Unit): Unit
 
   /**
    * Creates the client configuration for a lookup for a local server listening on `assignerPort`.
    * Uses test SSL parameters. Other parameters are used for the lookup's [[InternalClientConfig]].
+   *
+   * @param clientType       the [[ClientType]] (e.g. Clerk) for the [[SliceLookupConfig]].
+   * @param assignerPort     local port of the test assigner to connect to.
+   * @param watchStubCacheTime how long gRPC stubs are cached before being evicted.
+   * @param testTarget       the [[Target]] to watch. Defaults to the suite's [[target]] field.
+   * @param clientIdOpt      optional client UUID included in the [[SliceLookupConfig]]. Defaults to
+   *                         [[TEST_CLIENT_UUID]].
    */
   protected def createInternalClientConfig(
       clientType: ClientType,
       assignerPort: Int,
-      watchStubCacheTime: FiniteDuration): InternalClientConfig = {
+      watchStubCacheTime: FiniteDuration,
+      testTarget: Target = target,
+      clientIdOpt: Option[UUID] = Some(TEST_CLIENT_UUID)): InternalClientConfig = {
     val scheme: String = if (useSsl) "https" else "http"
     InternalClientConfig(
-      clientType,
-      watchAddress = new URI(s"$scheme://localhost:$assignerPort"),
-      tlsOptionsOpt = if (useSsl) TestTLSOptions.clientTlsOptionsOpt else None,
-      target,
-      watchStubCacheTime,
-      watchRpcTimeout = LOW_RPC_TIMEOUT,
-      watchFromDataPlane = watchFromDataPlane,
-      enableRateLimiting = false
+      SliceLookupConfig(
+        clientType,
+        watchAddress = new URI(s"$scheme://localhost:$assignerPort"),
+        tlsOptionsOpt = if (useSsl) TestTLSOptions.clientTlsOptionsOpt else None,
+        testTarget,
+        clientIdOpt = clientIdOpt,
+        watchStubCacheTime,
+        watchRpcTimeout = LOW_RPC_TIMEOUT,
+        watchFromDataPlane = watchFromDataPlane,
+        enableRateLimiting = false
+      )
     )
   }
 
@@ -652,13 +675,14 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
 
   test("Fallback when redirected Assigner request fails") {
     // Test plan: Verify that when the lookup receives a redirect, and the requests to the
-    // redirected address succeed but then start failing, the next request falls back to the default
-    // address. Also verify that stubs are cleared from the cache after some delay.
+    // redirected address succeed but then start failing, the lookup enters backoff and the next
+    // retry eventually falls back to the default address. Also verify that stubs are cleared from
+    // the cache after some delay.
     //
     // Do this by setting an assignment at the Assigner and checking that the lookup receives it.
     // Then inject a redirect into the Assigners, and verify that the lookup receives a new
-    // assignment from the new Assigner. Then fail requests from the new Assigner. Verify that the
-    // next request goes back to the original Assigner.
+    // assignment from the new Assigner. Then fail requests from the new Assigner, verify the
+    // lookup enters backoff, and then verify it falls back to the original Assigner.
     val assigner1 = multiAssignerTestEnv.testAssigners(0)
     val assigner2 = multiAssignerTestEnv.testAssigners(1)
 
@@ -699,6 +723,12 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
       // Fail requests to `assigner2`, succeed them from `assigner1`.
       assigner1.setReplyType(createRedirectReply(Some(assigner1.localUri)))
       assigner2.setReplyType(AssignerReplyType.Error())
+
+      // Verify that the lookup enters backoff.
+      AssertionWaiter("Lookup enters backoff").await {
+        assert(lookup.isInBackoff)
+      }
+
       // Setup new assignment.
       val defaultAsn2: Assignment =
         TestUtils.awaitResult(
@@ -707,6 +737,11 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
         )
       AssertionWaiter("Lookup falls back to original Assigner").await {
         assert(lookup.generationOpt.get == defaultAsn2.generation)
+      }
+
+      // Verify that the lookup exits backoff.
+      AssertionWaiter("Lookup exits backoff").await {
+        assert(!lookup.isInBackoff)
       }
     // Note the cache will not evict the stub for assigner1 because it always explicitly redirects
     // to itself in our redirect model.
@@ -807,6 +842,88 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
 
     assert(getNumSliceLookupsMetric(target, ClientType.Clerk) == initialClerkLookups + 2)
     assert(getNumSliceLookupsMetric(target, ClientType.Slicelet) == initialSliceletLookups + 1)
+  }
+
+  test("Redirect failure retries are backoff-bounded") {
+    // Test plan: Verify that a persistent redirect/failure path does not create a tight retry loop.
+    // Specifically, when the preferred assigner keeps failing requests, the lookup should enter
+    // backoff before retrying via the default route, preventing a high-frequency retry loop to DOS
+    // the preferred assigner. This is a regression test for <internal link>.
+    //
+    // Do this by configuring assigner1 to always redirect to assigner2, and assigner2 to always
+    // fail with ABORTED, so the client cycles assigner1 (redirect success) -> clear backoff ->
+    // assigner2 (failure) -> backoff -> repeat.
+    //
+    // Verify ABORTED failures are bounded by measuring their rate over a fixed observation window:
+    // wait until at least one ABORTED failure is observed, record failuresAtStart and startTime,
+    // sleep for the window, then record failuresAtEnd and endTime. Compute the failure rate and
+    // verify it is greater than 0 and bounded to a reasonable value.
+    val assigner1: TestAssigner = multiAssignerTestEnv.testAssigners(0)
+    val assigner2: TestAssigner = multiAssignerTestEnv.testAssigners(1)
+    val observationWindow: Duration = 4.seconds
+    // With 40% jitter, the first backoff delay can be as low as 0.8s, so the QPS can be as high as
+    // 1.25, we set the maxAbortedFailuresQps to 1.5 to allow for some wiggle room.
+    val maxAbortedFailuresQps: Double = 1.5
+
+    // Configure S2S proxy to route initial requests to assigner1 when watchFromDataPlane is true.
+    if (watchFromDataPlane) {
+      fakeS2SProxy.setFallbackUpstreamPorts(Vector(assigner1.localUri.getPort))
+    }
+
+    // Helper to read the number of aborted watch failures.
+    def getAbortedWatchFailureCount: Long = {
+      readPrometheusMetric(
+        "dicer_client_watch_requests_total",
+        Vector(
+          "targetCluster" -> target.getTargetClusterLabel,
+          "targetName" -> target.getTargetNameLabel,
+          "targetInstanceId" -> target.getTargetInstanceIdLabel,
+          "clientType" -> ClientType.Slicelet.getMetricLabel,
+          "status" -> "failure",
+          "grpc_status" -> "ABORTED"
+        )
+      ).toLong
+    }
+
+    assigner1.setReplyType(createRedirectReply(Some(assigner2.localUri)))
+    assigner2.setReplyType(AssignerReplyType.Error())
+
+    val failureTracker = ChangeTracker(() => getAbortedWatchFailureCount)
+    assert(getAbortedWatchFailureCount == 0)
+    assert(failureTracker.totalChange() == 0)
+
+    val lookup: SliceLookupDriver =
+      createUnstartedSliceLookup(assigner1, clientType = ClientType.Slicelet)
+
+    try {
+      lookup.start()
+
+      // Ensure the persistent failure loop is active before measuring bounded growth.
+      AssertionWaiter("Wait for first ABORTED watch failure").await {
+        assert(failureTracker.totalChange() >= 1)
+      }
+
+      // Record the start time of the observation window.
+      val failuresAtStart: Long = failureTracker.totalChange()
+      val startNs: Long = System.nanoTime()
+
+      // Apply a sleep to ensure the observation window elapses.
+      Thread.sleep(observationWindow.toMillis)
+
+      // Verify that the failure rate does not exceed `maxAbortedFailuresQps`.
+      val failuresAtEnd: Long = failureTracker.totalChange()
+      val endNs: Long = System.nanoTime()
+      val elapsedSeconds: Double = (endNs - startNs) / 1e9
+      val abortedFailureQps: Double =
+        (failuresAtEnd - failuresAtStart) / elapsedSeconds
+      assert(abortedFailureQps > 0.0, "Expected at least one aborted failure")
+      assert(
+        abortedFailureQps <= maxAbortedFailuresQps,
+        s"Aborted failure rate too high over $observationWindow: $abortedFailureQps"
+      )
+    } finally {
+      lookup.cancel()
+    }
   }
 
   namedGridTest("SliceLookup records serialized client request sizes as metrics")(
@@ -1026,4 +1143,5 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
         assert(finalSum > initialSum, "Histogram sum should increase")
     }
   }
+
 }

@@ -1,6 +1,7 @@
 package com.databricks.dicer.client
 
 import java.net.{InetAddress, URI}
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
 
 import scala.concurrent.duration._
@@ -10,6 +11,7 @@ import javax.annotation.concurrent.ThreadSafe
 
 import com.databricks.caching.util.AssertMacros.iassert
 import com.databricks.caching.util.{
+  AlertOwnerTeam,
   PrefixLogger,
   SequentialExecutionContext,
   SequentialExecutionContextPool,
@@ -54,6 +56,9 @@ private[dicer] class ClerkImpl[Stub <: AnyRef] private (
     stubFactory: ResourceAddress => Stub) {
 
   private val logger = PrefixLogger.create(getClass, subscriberDebugName)
+
+  // For capturing metrics for this target.
+  private val clerkMetrics = new ClerkMetrics(target)
 
   /**
    * ResourceRouter for caching the mapping from resource addresses to application-defined stubs
@@ -101,6 +106,7 @@ private[dicer] class ClerkImpl[Stub <: AnyRef] private (
    * [[stop]], the returned stub may not be to the most recently assigned resource.
    */
   def getStubForKey(key: SliceKey): Option[Stub] = {
+    clerkMetrics.incrementClerkGetStubForKeyCallCount()
     resourceRouter.getStubForKey(key)
   }
 
@@ -142,6 +148,22 @@ private[dicer] class ClerkImpl[Stub <: AnyRef] private (
 /** Companion object for [[ClerkImpl]]. */
 private[dicer] object ClerkImpl {
 
+  private val logger = PrefixLogger.create(this.getClass, "")
+
+  /**
+   * SliceLookup instances which may be reused across Clerk instances. This is a defensive measure
+   * to protect backend services against misconfigured clients which create too many Clerk
+   * instances. Without this cache, a client may create an unbounded number of Clerks (and thus
+   * SliceLookups), each of which perform their own assignment sync in the background. Eventually,
+   * this may be enough to overload the backend.
+   *
+   * Note that we cache SliceLookups instead of ClerkImpls due to the lack of an meaningful
+   * equivalence relation for the Clerk's `stubFactory`; most stub factories are created using
+   * anonymous function, so reference equality would be too strict to ever catch a misbehaving
+   * client. See [[SliceLookupCache]] for more details.
+   */
+  private val lookupCache: SliceLookupCache = new SliceLookupCache()
+
   /** See specs for the external [[Clerk.create()]] for details. */
   def create[Stub <: AnyRef](
       clerkConf: ClerkConf,
@@ -156,6 +178,8 @@ private[dicer] object ClerkImpl {
         target
     }
 
+    val reuseLookups: Boolean = clerkConf.allowMultipleClerksShareLookupPerTarget
+
     val podName: String = InetAddress.getLocalHost.getHostName
     val clerkIndex: Int = assignNextClerkIndex()
     val clerkDebugName = s"C$clerkIndex-$targetBestEffortFullyQualified-$podName"
@@ -167,22 +191,28 @@ private[dicer] object ClerkImpl {
     )
 
     val config: InternalClientConfig = InternalClientConfig(
-      ClientType.Clerk,
-      watchAddress,
-      clerkConf.getDicerClientTlsOptions,
-      targetBestEffortFullyQualified,
-      clerkConf.watchStubCacheTimeSeconds.seconds,
-      watchFromDataPlane = false,
-      enableRateLimiting = clerkConf.enableClerkRateLimiting
+      SliceLookupConfig(
+        ClientType.Clerk,
+        watchAddress,
+        clerkConf.getDicerClientTlsOptions,
+        targetBestEffortFullyQualified,
+        clientIdOpt = resolveClientUuid(clerkConf.clientUuidOpt, target),
+        SliceLookupConfig.DEFAULT_WATCH_STUB_CACHE_TIME,
+        watchFromDataPlane = false,
+        // TODO(<internal bug>): Use client side feature flag to gradually rollout rate limiting.
+        enableRateLimiting = false
+      )
     )
 
     createInternal(
       secPoolOpt = None,
-      protoLoggerSecPoolOpt = None,
+      protoLogger =
+        DicerClientProtoLogger.create(ClientType.Clerk, clerkConf, ownerName = clerkDebugName),
       config,
       clerkIndex,
       clerkDebugName,
-      stubFactory
+      stubFactory,
+      reuseLookups
     )
   }
 
@@ -192,27 +222,23 @@ private[dicer] object ClerkImpl {
    * Creates a clerk that directly watches the Assigner from the data plane. This is for supporting
    * internal-system and internal-system use cases specifically before the Rust Slicelet is able to
    *
-   * @param secPoolOpt            If provided, the SEC pool to use for the clerk's async operations
-   *                              other than proto logging. If None, a dedicated pool is created for
-   *                              this clerk.
-   * @param protoLoggerSecPoolOpt If provided, the SEC pool to use for the proto logger's async
-   *                              operations. If None, a dedicated pool is created for this clerk's
-   *                              proto logger.
+   * @param secPoolOpt If provided, the SEC pool to use for the clerk's async operations.
+   *                   If None, a dedicated pool is created for this clerk.
    */
   def createForDataPlaneDirectClerk[Stub <: AnyRef](
       secPoolOpt: Option[SequentialExecutionContextPool],
-      protoLoggerSecPoolOpt: Option[SequentialExecutionContextPool],
       clerkConf: ClerkConf,
       target: Target,
       assignerAddress: URI,
       stubFactory: ResourceAddress => Stub): ClerkImpl[Stub] = {
     createForDataPlaneCommon(
       secPoolOpt,
-      protoLoggerSecPoolOpt,
+      sharedProtoLoggerOpt = None,
       clerkConf,
       target,
       assignerAddress,
-      stubFactory
+      stubFactory,
+      reuseLookups = clerkConf.allowMultipleClerksShareLookupPerTarget
     )
   }
 
@@ -220,29 +246,28 @@ private[dicer] object ClerkImpl {
    * PRECONDITION: `target` must have the cluster URI populated.
    *
    * Creates a clerk for use in a MultiClerk setup, where multiple clerks share execution context
-   * pools and watch the Assigner from the control plane.
+   * pools and a proto logger, and watch the Assigner from the control plane.
    *
-   * @param secPoolOpt            If provided, the SEC pool to use for the clerk's async operations
-   *                              other than proto logging. If None, a dedicated pool is created for
-   *                              this clerk.
-   * @param protoLoggerSecPoolOpt If provided, the SEC pool to use for the proto logger's async
-   *                              operations. If None, a dedicated pool is created for this clerk's
-   *                              proto logger.
+   * @param secPoolOpt  If provided, the SEC pool to use for the clerk's async operations.
+   *                    If None, a dedicated pool is created for this clerk.
+   * @param protoLogger The shared proto logger.
    */
   def createForMultiClerk[Stub <: AnyRef](
       secPoolOpt: Option[SequentialExecutionContextPool],
-      protoLoggerSecPoolOpt: Option[SequentialExecutionContextPool],
+      protoLogger: DicerClientProtoLogger,
       clerkConf: ClerkConf,
       target: Target,
       assignerAddress: URI,
       stubFactory: ResourceAddress => Stub): ClerkImpl[Stub] = {
     createForDataPlaneCommon(
       secPoolOpt,
-      protoLoggerSecPoolOpt,
+      sharedProtoLoggerOpt = Some(protoLogger),
       clerkConf,
       target,
       assignerAddress,
-      stubFactory
+      stubFactory,
+      // MultiClerk doesn't support lookup reuse, as it can arbitrarily stop Clerks.
+      reuseLookups = false
     )
   }
 
@@ -253,12 +278,10 @@ private[dicer] object ClerkImpl {
   def createForShardedStub(
       target: Target,
       watchAddress: URI,
-      tlsOptions: Option[TLSOptions]
+      protoLoggerConf: DicerClientProtoLoggerConf,
+      tlsOptions: Option[TLSOptions],
+      clientUuidOpt: Option[String]
   ): ClerkImpl[ResourceAddress] = {
-    // See https://src.dev.databricks.com/databricks-eng/universe@e71a7d85903f5d32801235994951c33ddb2629c0/-/blob/dicer/external/src/Conf.scala?L72-80
-    // for why we use this particular value. ShardedStubs don't offer a way to customize the
-    // internal Clerk-Slicelet connection idle timeout, so we simply hardcode it.
-    val watchStubCacheTime: FiniteDuration = 5.minutes
 
     val targetBestEffortFullyQualified: Target = target match {
       case kubernetesTarget: KubernetesTarget =>
@@ -274,22 +297,28 @@ private[dicer] object ClerkImpl {
       s"C-$targetBestEffortFullyQualified-$podName-sharded-stub-$clerkIndex"
 
     val config = InternalClientConfig(
-      ClientType.Clerk,
-      watchAddress,
-      tlsOptions,
-      targetBestEffortFullyQualified,
-      watchStubCacheTime,
-      watchFromDataPlane = false,
-      // TODO(<internal bug>): Enable rate limiting for the sharded stub.
-      enableRateLimiting = false
+      SliceLookupConfig(
+        ClientType.Clerk,
+        watchAddress,
+        tlsOptions,
+        targetBestEffortFullyQualified,
+        clientIdOpt = resolveClientUuid(clientUuidOpt, target),
+        SliceLookupConfig.DEFAULT_WATCH_STUB_CACHE_TIME,
+        watchFromDataPlane = false,
+        // TODO(<internal bug>): Use client side feature flag to gradually rollout rate limiting.
+        enableRateLimiting = false
+      )
     )
     createInternal(
       secPoolOpt = None,
-      protoLoggerSecPoolOpt = None,
+      protoLogger = DicerClientProtoLogger
+        .create(ClientType.Clerk, protoLoggerConf, ownerName = clerkDebugName),
       config,
       clerkIndex,
       clerkDebugName,
-      stubFactory = (resourceAddress: ResourceAddress) => resourceAddress
+      stubFactory = (resourceAddress: ResourceAddress) => resourceAddress,
+      // TODO(<internal bug>): Enable lookup reuse for sharded stubs, once rolled out to all clusters.
+      reuseLookups = false
     )
   }
 
@@ -319,56 +348,89 @@ private[dicer] object ClerkImpl {
    * by generating an [[InternalClientConfig]] from its own arguments rather than from a
    * [[ClerkConf]].
    *
-   * @param secPoolOpt            If provided, the SEC pool to use for the clerk's async operations
-   *                              other than proto logging. If None, a dedicated pool is created for
-   *                              this clerk.
-   * @param protoLoggerSecPoolOpt If provided, the SEC pool to use for the proto logger's async
-   *                              operations. If None, a dedicated pool is created for this clerk's
-   *                              proto logger.
+   * @param secPoolOpt   If provided, the SEC pool to use for the clerk's async operations.
+   *                     If None, a dedicated pool is created for this clerk.
+   * @param protoLogger  The Clerk's proto logger.
+   * @param reuseLookups If true, the [[SliceLookup]] instance for the given config is
+   *                     reused from the cache. If false, a new [[SliceLookup]] instance
+   *                     is created.
    */
   private def createInternal[Stub <: AnyRef](
       secPoolOpt: Option[SequentialExecutionContextPool],
-      protoLoggerSecPoolOpt: Option[SequentialExecutionContextPool],
+      protoLogger: DicerClientProtoLogger,
       config: InternalClientConfig,
       clerkIndex: Int,
       subscriberDebugName: String,
-      stubFactory: ResourceAddress => Stub): ClerkImpl[Stub] = {
+      stubFactory: ResourceAddress => Stub,
+      reuseLookups: Boolean): ClerkImpl[Stub] = {
 
+    val sliceLookupConfig: SliceLookupConfig = config.sliceLookupConfig
+    // Note: This SEC (and the proto logger created by the caller) are allocated unconditionally,
+    // even when the lookup cache below returns a hit. Our intent for lookup caching is to protect
+    // servers from being overloaded by misbehaving clients that create too many Clerks, but each
+    // creation will still leak resources (threads) in the client.
     val sec: SequentialExecutionContext =
-      createExecutor(secPoolOpt, config.target, clerkIndex, secNameSuffix = "")
-    val protoLoggerSec: SequentialExecutionContext =
-      createExecutor(
-        protoLoggerSecPoolOpt,
-        config.target,
-        clerkIndex,
-        secNameSuffix = "-proto-logger"
+      createExecutor(secPoolOpt, sliceLookupConfig.target, clerkIndex, secNameSuffix = "")
+
+    // TODO(<internal bug>): Once lookup reuse is rolled out everywhere, we should be able to retire the
+    // reuseLookups flag usage in tests and instead use different clientIds to instantiate distinct
+    // Clerks/SliceLookups.
+    val lookup: SliceLookup = if (reuseLookups) {
+      // Important things to note when we get a "cache hit".
+      // 1. A hit generally indicates an error by the caller, as they should be creating Clerks
+      //    once per target and reusing them.
+      // 2. The lookup may already be started; calling `lookup.start()` later is a no-op in that
+      //    case.
+      // 3. The `subscriberDebugName` used by the lookup will not be the same as the one used for
+      //    this ClerkImpl, creating some mismatches in the logs and z-pages.
+      // 4. The SEC used by the lookup will not be the same as the one used for this ClerkImpl, so
+      //    ClerkImpl code must not depend on running in the same concurrency domain as the lookup.
+      lookupCache.getOrElseCreate(
+        sliceLookupConfig,
+        createLookup(sec, sliceLookupConfig, subscriberDebugName, protoLogger)
       )
-
-    val protoLogger: DicerClientProtoLogger = DicerClientProtoLogger.create(
-      conf = DicerClientProtoLoggerConf,
-      clientType = config.clientType,
-      subscriberDebugName = subscriberDebugName,
-      sec = protoLoggerSec
-    )
-
-    val lookup = SliceLookup.createUnstarted(
-      sec,
-      config,
-      subscriberDebugName,
-      protoLogger,
-      serviceBuilderOpt = None
-    )
+    } else {
+      createLookup(sec, sliceLookupConfig, subscriberDebugName, protoLogger)
+    }
 
     val clerk = new ClerkImpl[Stub](
       sec,
-      config.target,
+      sliceLookupConfig.target,
       lookup,
       subscriberDebugName,
       stubFactory
     )
     clerk.start()
-    clerk.logger.info(s"Starting Clerk, awaiting assignment from ${config.watchAddress}")
+    clerk.logger.info(s"Starting Clerk, awaiting assignment from ${sliceLookupConfig.watchAddress}")
     clerk
+  }
+
+  /**
+   * Creates an unstarted [[SliceLookup]] instance for the given configuration.
+   *
+   * @param sec                 The [[SequentialExecutionContext]] for the lookup's async
+   *                            operations. Note that [[SliceLookup]] is independently
+   *                            thread-safe and makes no assumptions about the caller's
+   *                            concurrency domain; cached lookups may be used by multiple Clerks
+   *                            in different SECs.
+   * @param sliceLookupConfig   The client configuration containing target and watch address.
+   * @param subscriberDebugName Debug name for logging and z-pages.
+   * @param protoLogger         The Clerk's proto logger.
+   * @return An unstarted [[SliceLookup]] instance.
+   */
+  private def createLookup(
+      sec: SequentialExecutionContext,
+      sliceLookupConfig: SliceLookupConfig,
+      subscriberDebugName: String,
+      protoLogger: DicerClientProtoLogger
+  ): SliceLookup = {
+    SliceLookup.createUnstarted(
+      sec,
+      sliceLookupConfig,
+      subscriberDebugName,
+      protoLogger,
+      serviceBuilderOpt = None
+    )
   }
 
   /**
@@ -376,8 +438,8 @@ private[dicer] object ClerkImpl {
    * empty, it creates a dedicated pool for the SEC (this class is the "top"/ "main" class for the
    * Clerk and hence it may create threads). Otherwise, `secPoolOpt` is used to allow the caller to
    * inject a shared thread pool. The SEC is passed down to the background components of ClerkImpl
-   * but is not used for the ClerkImpl's own isolation. The ClerkImpl is thread-safe because all its
-   * components are thread-safe, and it doesn't hold any cross-component invariant.
+   * but is not used for the ClerkImpl's own isolation. The ClerkImpl is thread-safe because all
+   * its internal components are thread-safe, and it doesn't hold any cross-component invariant.
    *
    * @param secNameSuffix A suffix to append to the SEC name, used to distinguish between different
    *                      SECs for the same clerk (e.g., "" for the main SEC, "-proto-logger" for
@@ -405,25 +467,26 @@ private[dicer] object ClerkImpl {
   /**
    * Create a Clerk for the data plane.
    *
-   * @param secPoolOpt            If provided, the SEC pool to use for the clerk's async operations
-   *                              other than proto logging. If None, a dedicated pool is created
-   *                              for this clerk.
-   * @param protoLoggerSecPoolOpt If provided, the SEC pool to use for the proto logger's async
-   *                              operations. If None, a dedicated pool is created for this clerk's
-   *                              proto logger.
-   * @param clerkConf             The Clerk configuration.
-   * @param target                The target to create the Clerk for.
-   * @param assignerAddress       The address of the assigner to create the Clerk for.
-   * @param stubFactory           The factory to create the stub for the Clerk.
-   * @return The created Clerk.
+   * @param secPoolOpt      If provided, the SEC pool to use for the clerk's async operations.
+   *                        If None, a dedicated pool is created for this clerk.
+   * @param sharedProtoLoggerOpt  If provided, the shared proto logger to use by the Clerk.
+   *                        If None, a dedicated proto logger is created for the Clerk.
+   * @param clerkConf       The Clerk configuration.
+   * @param target          The target to create the Clerk for.
+   * @param assignerAddress The address of the assigner to create the Clerk for.
+   * @param stubFactory     The factory to create the stub for the Clerk.
+   * @param reuseLookups    If true, the [[SliceLookup]] instance for the given config is
+   *                        reused from the cache. If false, a new [[SliceLookup]] instance
+   *                        is created.
    */
   private def createForDataPlaneCommon[Stub <: AnyRef](
       secPoolOpt: Option[SequentialExecutionContextPool],
-      protoLoggerSecPoolOpt: Option[SequentialExecutionContextPool],
+      sharedProtoLoggerOpt: Option[DicerClientProtoLogger],
       clerkConf: ClerkConf,
       target: Target,
       assignerAddress: URI,
-      stubFactory: ResourceAddress => Stub): ClerkImpl[Stub] = {
+      stubFactory: ResourceAddress => Stub,
+      reuseLookups: Boolean): ClerkImpl[Stub] = {
     target match {
       case kubernetesTarget: KubernetesTarget =>
         iassert(kubernetesTarget.clusterOpt.isDefined, "target must have the cluster URI populated")
@@ -437,25 +500,58 @@ private[dicer] object ClerkImpl {
     val clerkIndex: Int = assignNextClerkIndex()
     val clerkDebugName = s"C$clerkIndex-$target-$podName"
 
+    val protoLogger: DicerClientProtoLogger = sharedProtoLoggerOpt.getOrElse(
+      DicerClientProtoLogger.create(ClientType.Clerk, clerkConf, ownerName = clerkDebugName)
+    )
+
     val config = InternalClientConfig(
-      ClientType.Clerk,
-      assignerAddress,
-      clerkConf.getDicerClientTlsOptions,
-      target,
-      clerkConf.watchStubCacheTimeSeconds.seconds,
-      watchFromDataPlane = true,
-      enableRateLimiting = clerkConf.enableClerkRateLimiting
+      SliceLookupConfig(
+        ClientType.Clerk,
+        assignerAddress,
+        clerkConf.getDicerClientTlsOptions,
+        target,
+        clientIdOpt = resolveClientUuid(clerkConf.clientUuidOpt, target),
+        SliceLookupConfig.DEFAULT_WATCH_STUB_CACHE_TIME,
+        watchFromDataPlane = true,
+        // TODO(<internal bug>): Use client side feature flag to gradually rollout rate limiting.
+        enableRateLimiting = false
+      )
     )
 
     Version.recordClientVersion(target, AssignmentMetricsSource.Clerk, clerkConf.branch)
     createInternal(
       secPoolOpt,
-      protoLoggerSecPoolOpt,
+      protoLogger,
       config,
       clerkIndex,
       clerkDebugName,
-      stubFactory
+      stubFactory,
+      reuseLookups
     )
+  }
+
+  /**
+   * Parses a UUID from the given string if present. Returns None if the string is absent or
+   * malformed. Records a metric tracking the resolution status.
+   *
+   * TODO(<internal bug>): Make the clientUuid required once all Dicer client deployments are confirmed to
+   * set POD_UID (i.e. throw an exception if clientUuidOpt is absent).
+   */
+  private def resolveClientUuid(uuidStrOpt: Option[String], target: Target): Option[UUID] = {
+    val (uuidOpt, status): (Option[UUID], ClientMetrics.ClientUuidStatus) = uuidStrOpt match {
+      case None =>
+        (None, ClientMetrics.ClientUuidStatus.Missing)
+      case Some(uuidStr: String) =>
+        try {
+          (Some(UUID.fromString(uuidStr)), ClientMetrics.ClientUuidStatus.Valid)
+        } catch {
+          case _: IllegalArgumentException =>
+            logger.error(s"Malformed client UUID: $uuidStr")
+            (None, ClientMetrics.ClientUuidStatus.Malformed)
+        }
+    }
+    ClientMetrics.recordClientUuidStatus(target, ClientType.Clerk, status)
+    uuidOpt
   }
 
   /** Assigns an index number for the next Clerk to be created. */

@@ -17,11 +17,11 @@ class CachingLatencyHistogramSuite extends DatabricksTest {
   private val clock = new FakeTypedClock()
 
   // Name for the histogram metric.
-  private val METRIC = "softstore_testlib_op_latency"
+  private val METRIC: String = "softstore_testlib_op_latency"
 
   private val METRIC_LABEL_NAMES: Vector[String] = Vector("namespace", "softmap")
-  private val NAMESPACE = "MyNamespace"
-  private val SOFTMAP = "MySoftmap"
+  private val NAMESPACE: String = "MyNamespace"
+  private val SOFTMAP: String = "MySoftmap"
   private val METRIC_LABELS: Vector[String] = Vector(NAMESPACE, SOFTMAP)
 
   /**
@@ -32,8 +32,8 @@ class CachingLatencyHistogramSuite extends DatabricksTest {
   private val BUCKETS_SECS = Vector[Double](.001, .003, .005, .007)
 
   // Expected values for the status label.
-  private val SUCCESS = "success"
-  private val FAILURE = "failure"
+  private val SUCCESS: String = "success"
+  private val FAILURE: String = "failure"
 
   // Expected values for the operation label
   private val READ: String = "read"
@@ -82,7 +82,7 @@ class CachingLatencyHistogramSuite extends DatabricksTest {
       operation: String,
       status: String,
       grpcStatusOpt: Option[Status]): Int = {
-    val labelsMap = Map(
+    val labelsMap: Map[String, String] = Map(
         "operation" -> operation,
         "status" -> status
       ) ++
@@ -394,7 +394,7 @@ class CachingLatencyHistogramSuite extends DatabricksTest {
       assertApproxEqual(bucketSecs(i) / bucketSecs(i - 1), expectedBigBucketRatio)
     }
 
-    val expectedCounts: Seq[Int] = bucketSecs.map { bucketLessThanDuration =>
+    val expectedCounts: Seq[Int] = bucketSecs.map { bucketLessThanDuration: Double =>
         if (callDuration < bucketLessThanDuration.seconds) 1 else 0
       } ++
       Seq(1) // Append the expected +Inf count which is always 1.
@@ -521,11 +521,11 @@ class CachingLatencyHistogramSuite extends DatabricksTest {
       )
     )
 
-    var failureCount = 0
+    var failureCount: Int = 0
 
     for (testResult: Int <- testResults) {
       // Randomly inject exception.
-      val willThrow = Random.nextBoolean()
+      val willThrow: Boolean = Random.nextBoolean()
 
       val fut: Future[Int] =
         histogram
@@ -589,7 +589,7 @@ class CachingLatencyHistogramSuite extends DatabricksTest {
     )
 
     // Record examples of all error codes returned by the extractor, and one success.
-    val computeExtraLabels = (_: Try[Int]) => METRIC_LABELS
+    val computeExtraLabels: Try[Int] => Seq[String] = (_: Try[Int]) => METRIC_LABELS
     assertThrow[IllegalArgumentException]("bad arg") {
       histogram.recordLatencySync(WRITE, computeExtraLabels) {
         clock.advanceBy(BUCKETS_SECS(0).seconds)

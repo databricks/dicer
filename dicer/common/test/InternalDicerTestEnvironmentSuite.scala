@@ -20,8 +20,7 @@ import com.databricks.dicer.assigner.TargetMetricsUtils
 import com.databricks.dicer.assigner.config.{
   ChurnConfig,
   InternalTargetConfig,
-  InternalTargetConfigMap,
-  TargetName
+  InternalTargetConfigMap
 }
 import com.databricks.dicer.common.TestAssigner.AssignerReplyType
 import com.databricks.dicer.common.TestSliceUtils._
@@ -54,9 +53,9 @@ class InternalDicerTestEnvironmentSuite extends DatabricksTest with TestName {
     testEnv.stop()
   }
 
-  test("Preferred Assigner and replica count greater than 1") {
-    // Test plan: Verify that we can't initiate an environment with preferred assigner being
-    // enabled and replicaCount greater than 1.
+  test("Reject invalid replicaCount configurations") {
+    // Test plan: Verify that we can't initiate an environment with replicaCount greater than 1
+    // when preferred assigner is disabled.
     assertThrow[IllegalArgumentException](
       "replicaCount must be 1 if not preferredAssignerEnabled."
     ) {
@@ -422,7 +421,7 @@ class InternalDicerTestEnvironmentSuite extends DatabricksTest with TestName {
       new DicerAssignerConf(
         Configs.parseMap(
           "databricks.dicer.assigner.store.type" -> "in_memory",
-          "databricks.dicer.assigner.store.etcd.sslEnabled" -> false,
+          "databricks.dicer.assigner.preferredAssigner.etcd.sslEnabled" -> false,
           "databricks.dicer.assigner.storeIncarnation" -> storeIncarnation0.value
         )
       )
@@ -433,7 +432,7 @@ class InternalDicerTestEnvironmentSuite extends DatabricksTest with TestName {
       new DicerAssignerConf(
         Configs.parseMap(
           "databricks.dicer.assigner.store.type" -> "in_memory",
-          "databricks.dicer.assigner.store.etcd.sslEnabled" -> false,
+          "databricks.dicer.assigner.preferredAssigner.etcd.sslEnabled" -> false,
           "databricks.dicer.assigner.storeIncarnation" -> storeIncarnation1.value
         )
       )
@@ -456,7 +455,6 @@ class InternalDicerTestEnvironmentSuite extends DatabricksTest with TestName {
     assert(assigner1.storeIncarnation == storeIncarnation1)
   }
 
-
   test("Assigners share same etcd") {
     // Test plan: Verify the assigners in the internal dicer test environment can correctly sync
     // data by etcd. Verify this by dynamically adding two assigners in etcd mode to the test
@@ -468,7 +466,7 @@ class InternalDicerTestEnvironmentSuite extends DatabricksTest with TestName {
       new DicerAssignerConf(
         Configs.parseMap(
           "databricks.dicer.assigner.store.type" -> "etcd",
-          "databricks.dicer.assigner.store.etcd.sslEnabled" -> false,
+          "databricks.dicer.assigner.preferredAssigner.etcd.sslEnabled" -> false,
           "databricks.dicer.assigner.storeIncarnation" -> 2
         )
       )
@@ -535,7 +533,7 @@ class InternalDicerTestEnvironmentSuite extends DatabricksTest with TestName {
       new DicerAssignerConf(
         Configs.parseMap(
           "databricks.dicer.assigner.store.type" -> "etcd",
-          "databricks.dicer.assigner.store.etcd.sslEnabled" -> false,
+          "databricks.dicer.assigner.preferredAssigner.etcd.sslEnabled" -> false,
           "databricks.dicer.assigner.storeIncarnation" -> 2
         )
       )

@@ -7,6 +7,7 @@ import scala.concurrent.Future
 import scalatags.Text.TypedTag
 import scalatags.Text.all._
 import com.databricks.caching.util.SequentialExecutionContext
+import com.google.protobuf.ByteString
 import com.databricks.dicer.common.SlicezKeyTracker.{KEY_VARIANTS, SlicezKeyTrackable}
 import com.databricks.dicer.external.{SliceKey, Target}
 import com.databricks.instrumentation.DebugStringServlet
@@ -253,14 +254,14 @@ object SlicezKeyTracker {
 
   /**
    * The mapping from key variants to functions that generates the SliceKey based on
-   * various common [[SliceKeyFunction]]s.
+   * various common hashing approaches.
    */
   private val KEY_VARIANTS: Map[String, Array[Byte] => SliceKey] = Map(
-    "Identity key" -> (key => SliceKey(key, SliceKeyHelper.IdentitySliceKeyFunction)),
-    "FarmHashed key" -> (key => SliceKey(key, SliceKeyHelper.FarmHashFingerprint64)),
+    "Identity key" -> (key => SliceKey.fromRawBytes(ByteString.copyFrom(key))),
+    "FarmHashed key" -> (key => SliceKey.newFingerprintBuilder().putBytes(key).build()),
     "SHA-256 hashed then FarmHashed key" -> (key => {
       val messageDigest = java.security.MessageDigest.getInstance("SHA-256")
-      SliceKey(messageDigest.digest(key), SliceKeyHelper.FarmHashFingerprint64)
+      SliceKey.newFingerprintBuilder().putBytes(messageDigest.digest(key)).build()
     })
   )
 }

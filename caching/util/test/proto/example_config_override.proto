@@ -5,7 +5,7 @@ package databricks.caching.test;
 import "scalapb.proto";
 import "caching/external/proto/config_scope_specification.proto";
 
-option java_package = "com.databricks.api.proto.caching.util.test";;
+option java_package = "com.databricks.api.proto.caching.util.test";
 option java_generate_equals_and_hash = true;
 option java_outer_classname = "ExampleConfigOverrideProto";
 option java_multiple_files = true;

@@ -23,9 +23,13 @@ class WatchCellSuite extends DatabricksTest {
 
     assert(cell.getLatestValueOpt.get == "Hello")
     assert(cell.getStatus == Status.OK)
-    // Ensure that the callback was removed from the cell.
-    val numCallbacks: Int = cell.forTest.getNumCallbacks
-    assert(numCallbacks == 0)
+
+    // Ensure that the callback was removed from the cell. The `WatchCell.watch` contract requires
+    // that the same callback not be used with `watch` on the same cell multiple times without in
+    // intervening cancel. Therefore, cancel works correctly if adding the same callback does not
+    // throw an error.
+    cell.watch(callback)
+    assert(cell.getStatus == Status.OK)
   }
 
   test("Set WatchCell value before watch") {
@@ -45,8 +49,9 @@ class WatchCellSuite extends DatabricksTest {
     assert(cell.getLatestValueOpt.get == "Bye")
 
     cancellable.cancel(Status.CANCELLED)
-    val numCallbacks: Int = cell.forTest.getNumCallbacks
-    assert(numCallbacks == 0)
+    // Verify that the watch for `callback` was cancelled by starting another watch for `callback`
+    // and checking that no error is thrown.
+    cell.watch(callback)
     assert(cell.getStatus == Status.OK)
   }
 
@@ -62,8 +67,9 @@ class WatchCellSuite extends DatabricksTest {
     callback.waitForStatus(Status.FAILED_PRECONDITION, 0)
 
     // No need to cancel since the cell has already cancelled the callback.
-    val numCallbacks: Int = cell.forTest.getNumCallbacks
-    assert(numCallbacks == 0)
+    // Verify that the watch for `callback` was cancelled by starting another watch for `callback`
+    // and checking that no error is thrown.
+    cell.watch(callback)
     assert(cell.getLatestValueOpt.isEmpty)
     assert(cell.getStatus == Status.FAILED_PRECONDITION)
   }
@@ -83,8 +89,9 @@ class WatchCellSuite extends DatabricksTest {
     callback.waitForStatus(Status.FAILED_PRECONDITION, 1)
 
     // No need to cancel since the cell has already cancelled the callback.
-    val numCallbacks: Int = cell.forTest.getNumCallbacks
-    assert(numCallbacks == 0)
+    // Verify that the watch for `callback` was cancelled by starting another watch for `callback`
+    // and checking that no error is thrown.
+    cell.watch(callback)
 
     // Check that both the latest value and error conditions are available as expected.
     assert(cell.getLatestValueOpt.get == "Hello")
@@ -103,8 +110,9 @@ class WatchCellSuite extends DatabricksTest {
     assert(callback.numElements == 1, "one callback expected with the pre-set error")
 
     // Check that the callback has been cancelled by the cell.
-    val numCallbacks: Int = cell.forTest.getNumCallbacks
-    assert(numCallbacks == 0)
+    // Verify that the watch for `callback` was cancelled by starting another watch for `callback`
+    // and checking that no error is thrown.
+    cell.watch(callback)
     assert(cell.getLatestValueOpt.isEmpty)
     assert(cell.getStatus == Status.FAILED_PRECONDITION)
   }
@@ -131,8 +139,10 @@ class WatchCellSuite extends DatabricksTest {
     // Cancel both callbacks and ensure that the cell has no watchers.
     cancellable.cancel(Status.CANCELLED)
     cancellable2.cancel(Status.CANCELLED)
-    val numCallbacks: Int = cell.forTest.getNumCallbacks
-    assert(numCallbacks == 0)
+    // Verify that the watches were cancelled by starting watches for the same callbacks and
+    // checking that no error is thrown.
+    cell.watch(callback)
+    cell.watch(callback2)
   }
 
   test("Set WatchCell error multiple subscribers") {
@@ -155,8 +165,10 @@ class WatchCellSuite extends DatabricksTest {
     // Cancel both callbacks and ensure that the cell has no watchers.
     cancellable.cancel(Status.CANCELLED)
     cancellable2.cancel(Status.CANCELLED)
-    val numCallbacks: Int = cell.forTest.getNumCallbacks
-    assert(numCallbacks == 0)
+    // Verify that the watches were cancelled by starting watches for the same callbacks and
+    // checking that no error is thrown.
+    cell.watch(callback)
+    cell.watch(callback2)
     assert(cell.getStatus == Status.FAILED_PRECONDITION)
   }
 
@@ -222,9 +234,9 @@ class WatchCellSuite extends DatabricksTest {
     // Cancel the callback so that the cell has no callbacks registered.
     cancellable.cancel(Status.CANCELLED)
 
-    // Ensure that the callback was removed from the cell.
-    val numCallbacks: Int = cell.forTest.getNumCallbacks
-    assert(numCallbacks == 0)
+    // Verify that the watch for `callback` was cancelled by starting another watch for `callback`
+    // and checking that no error is thrown.
+    cell.watch(callback)
   }
 
   /**

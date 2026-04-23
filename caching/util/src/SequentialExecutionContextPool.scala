@@ -5,7 +5,7 @@ import java.util.concurrent.ThreadFactory
 
 import io.prometheus.client.Gauge
 
-import com.databricks.caching.util.CachingErrorCode.UNCAUGHT_SEC_POOL_EXCEPTION
+import com.databricks.caching.util.CachingErrorCode.UNCAUGHT_SEC_POOL_ERROR
 import com.databricks.caching.util.ContextAwareUtil.ContextAwareScheduledExecutorService
 import com.databricks.caching.util.SequentialExecutionContextPool.{ExceptionHandler, Metrics}
 
@@ -53,15 +53,23 @@ object SequentialExecutionContextPool {
    * @param numThreads the number of threads in the pool
    * @param enableContextPropagation whether to propagate the context object to runnables submitted
    *                                 to execution contexts created by this pool
+   * @param alertOwnerTeam the team's registered alert routing name, e.g.
+   *                       [[AlertOwnerTeam.CachingTeam.toString]] for Caching-owned pools,
+   *                       or "eng-my-team" for pools owned by other teams. For alert routing to
+   *                       work correctly, this must be used as the `owner_team_name` for some
+   *                       Dicer target config.
    */
   def create(
       poolName: String,
       numThreads: Int,
-      enableContextPropagation: Boolean = true): SequentialExecutionContextPool = {
-    val exceptionHandler = new ExceptionHandler(poolName)
+      enableContextPropagation: Boolean = true,
+      // TODO(<internal bug>): Make alertOwnerTeam required once all call sites are updated.
+      alertOwnerTeam: String = AlertOwnerTeam.CachingTeam.toString)
+      : SequentialExecutionContextPool = {
+    val exceptionHandler =
+      new ExceptionHandler(poolName, AlertOwnerTeam.createFromString(alertOwnerTeam))
     createInternal(poolName, numThreads, exceptionHandler, enableContextPropagation)
   }
-
 
   private def createInternal(
       poolName: String,
@@ -106,8 +114,11 @@ object SequentialExecutionContextPool {
    *
    * Uncaught exceptions may be intercepted from multiple locations, enumerated in
    * [[UncaughtExceptionSource]].
+   *
+   * @param alertOwnerTeam the team that owns the pool and should receive alerts.
    */
-  class ExceptionHandler(poolName: String) extends Thread.UncaughtExceptionHandler {
+  class ExceptionHandler(poolName: String, alertOwnerTeam: AlertOwnerTeam)
+      extends Thread.UncaughtExceptionHandler {
     private val logger = PrefixLogger.create(getClass, poolName)
 
     /** Used by this handler to interrupt the thread on which the pool was created. */
@@ -128,7 +139,7 @@ object SequentialExecutionContextPool {
       val stackTrace = e.getStackTrace.mkString("Array(\n    ", "\n    ", ")")
       logger.alert(
         Severity.CRITICAL,
-        UNCAUGHT_SEC_POOL_EXCEPTION,
+        UNCAUGHT_SEC_POOL_ERROR(alertOwnerTeam),
         s"Unhandled exception from $source:$debugName is $e:\n$stackTrace"
       )
       if (creatingThread.isAlive) {

@@ -5,6 +5,7 @@ import java.io.File
 import com.databricks.caching.util.{ConfigScope, SafeConfigProvider, SafeConfigUtil}
 import com.databricks.conf.trusted.DeploymentModes
 import com.databricks.dicer.assigner.config.TargetConfigReader.TargetDefaultAndOverride
+import com.databricks.dicer.common.TargetName
 
 /**
  * A SAFE config tool provider defined for Dicer. It gathers config information in a way that is

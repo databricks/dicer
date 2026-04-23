@@ -8,6 +8,7 @@ import scala.collection.mutable
 import scala.collection.JavaConverters._
 import scala.concurrent.duration._
 import scala.reflect.ClassTag
+import scala.reflect.runtime.universe.{ClassSymbol, Mirror, Symbol, TypeTag, runtimeMirror, typeOf}
 import scala.util.Random
 import io.grpc.Status
 import scalapb.{
@@ -129,6 +130,8 @@ object TestUtils {
      *  - Converts to lowercase
      *  - Replaces non-alphanumeric characters with '-' (dash)
      *  - Exception: First and last characters use '0' instead of '-' (DNS label requirement)
+     *  - Collapses runs of multiple '-' to a single '-' (gridTest names contain a space followed by
+     *    a parenthesis, which would otherwise result in multiple consecutive hyphens)
      *
      * If the test name would cause the total length to exceed 63 characters, it is truncated to fit
      * within the limit.
@@ -249,7 +252,7 @@ object TestUtils {
         escapedTestName
       }
 
-      (finalName + finalSuffix).toLowerCase
+      (finalName + finalSuffix).toLowerCase.replaceAll("-{2,}", "-")
     }
 
     /** Generates a 4-character hash code from a string, formatted as lowercase hexadecimal. */
@@ -526,6 +529,22 @@ object TestUtils {
   )
   def awaitReady[T](awaitable: scala.concurrent.Awaitable[T], timeout: Duration): awaitable.type = {
     scala.concurrent.Await.ready(awaitable, timeout)
+  }
+
+  /** Returns all variants of an enum-like sealed trait `T`. */
+  @throws[IllegalArgumentException]("if T is not a sealed trait")
+  @throws[IllegalArgumentException]("if T has no known subclasses")
+  def getAllVariantsOfEnumLikeTrait[T: TypeTag]: Set[T] = {
+    val classSymbol: ClassSymbol = typeOf[T].typeSymbol.asClass
+    require(classSymbol.isSealed, "Not a sealed trait")
+
+    val subclasses: Set[Symbol] = classSymbol.knownDirectSubclasses
+    require(subclasses.nonEmpty, "No known direct subclasses")
+
+    val mirror: Mirror = runtimeMirror(getClass.getClassLoader)
+    subclasses.map { subclass: Symbol =>
+      mirror.reflectModule(subclass.asClass.module.asModule).instance.asInstanceOf[T]
+    }
   }
 
   /**

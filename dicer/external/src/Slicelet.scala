@@ -102,6 +102,17 @@ object Slicelet {
   def apply(sliceletConf: SliceletConf, target: Target): Slicelet = {
     new Slicelet(SliceletImpl.createForExternal(sliceletConf, target))
   }
+
+  private[external] object forTestStatic {
+
+    /**
+     * Creates a Slicelet whose implementation is the given `sliceletImpl`. See [[apply]]
+     * for requirements and behavior.
+     */
+    def createFromImpl(sliceletImpl: SliceletImpl): Slicelet = {
+      new Slicelet(sliceletImpl)
+    }
+  }
 }
 
 /**

@@ -7,7 +7,7 @@ import "dicer/common/proto/common.proto";
 import "dicer/friend/proto/friend.proto";
 import "scalapb.proto";
 
-option java_package = "com.databricks.dicer.common.test";;
+option java_package = "com.databricks.dicer.common.test";
 option java_generate_equals_and_hash = true;
 option (scalapb.options) = {
   flat_package: true,
@@ -675,6 +675,69 @@ message SliceKeyTestDataP {
 
   // Test cases verifying the expected toString value of SliceKeys.
   repeated ToStringTestCaseP to_string_test_cases = 2;
+
+  // Test cases for the farmhash fingerprint64 builder.
+  repeated FarmhashBuilderTestCaseP farmhash_builder_test_cases = 3;
+
+  message FarmhashBuilderTestCaseP {
+    optional string description = 1;
+
+    // Operations to perform on the builder.
+    repeated BuilderOperationP operations = 2;
+
+    // Expected raw bytes of the SliceKey (as int32 list).
+    repeated int32 expected_raw_bytes = 3;
+
+    message BuilderOperationP {
+      oneof operation {
+        int64 put_long = 1;
+        string put_string = 2;
+        bytes put_bytes = 3;
+      }
+    }
+  }
+
+  // Test cases comparing builder vs deprecated farmhash methods (single bytes input).
+  repeated FarmhashBuilderVsDeprecatedTestCaseP farmhash_builder_vs_deprecated_test_cases = 5;
+
+  message FarmhashBuilderVsDeprecatedTestCaseP {
+    optional string description = 1;
+
+    // Input bytes to hash (as int32 list to make textproto easier).
+    repeated int32 input_bytes = 2;
+
+    // Expected raw bytes of the SliceKey (as int32 list).
+    repeated int32 expected_raw_bytes = 3;
+  }
+
+  // Test cases for fromRawBytes validation errors.
+  // NOTE: fromRawBytes no longer performs validation, so this field is deprecated.
+  repeated RawBytesErrorTestCaseP raw_bytes_error_test_cases = 4 [deprecated = true];
+
+  message RawBytesErrorTestCaseP {
+    optional string description = 1;
+
+    // Raw bytes that should cause an error (as int32 list).
+    repeated int32 raw_bytes = 2;
+
+    // Expected error message substring.
+    optional string expected_error = 3;
+  }
+
+  // Test cases for fromTrustedFingerprint validation errors.
+  // This method only accepts bytes with size <= 32.
+  repeated FromTrustedFingerprintErrorTestCaseP
+      from_trusted_fingerprint_error_test_cases = 6;
+
+  message FromTrustedFingerprintErrorTestCaseP {
+    optional string description = 1;
+
+    // Raw bytes that should cause an error (as int32 list).
+    repeated int32 raw_bytes = 2;
+
+    // Expected error message substring.
+    optional string expected_error = 3;
+  }
 }
 
 // Test data for verifying the expected non-fatal target mismatch behavior.
@@ -726,5 +789,15 @@ message ResourceAddressTestDataP {
   /** A group of URIs that produce the same ResourceAddress instance. */
   message EqualityGroupP {
     repeated string uris = 1;
+  }
+}
+
+message CrossClusterClerkAccessorTestDataP {
+  // Test cases for invalid Kubernetes cluster URIs rejected by CrossClusterClerkAccessor.create().
+  repeated InvalidClusterUriTestCaseP invalid_cluster_uri_test_cases = 1;
+
+  message InvalidClusterUriTestCaseP {
+    optional string cluster_uri = 1;
+    optional string expected_error_message = 2;
   }
 }

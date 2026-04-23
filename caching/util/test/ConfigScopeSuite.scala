@@ -61,7 +61,7 @@ class ConfigScopeSuite extends DatabricksTest {
     assert(configScope.toString == "kubernetes-cluster:prod/cloud2/public/region6/clustertype2/01")
   }
 
-  test("Validate `findShardOverride` throws if config scope is duplicated") {
+  test("Validate `findScopeOverride` throws if config scope is duplicated") {
     // Test plan: Verify IllegalArgumentException exception is thrown when duplicated config scopes
     // are encountered in the overrides.
     // Note that we only care about the shard in which we are currently running, so even if other
@@ -92,7 +92,7 @@ class ConfigScopeSuite extends DatabricksTest {
 
     // `configScopeUsWest1` is in both overrides, expect exception to be thrown.
     assertThrow[IllegalArgumentException]("At most one override can be defined") {
-      ConfigScope.findShardOverride(
+      ConfigScope.findScopeOverride(
         configScopeUsWest1,
         overridesWithDuplicates
       )
@@ -100,7 +100,7 @@ class ConfigScopeSuite extends DatabricksTest {
 
     // 'shardUsWest2' is not duplicated, so no exception should be thrown.
     val overrideOpt1: Option[TestOnlyExampleConfigFieldsP] =
-      ConfigScope.findShardOverride(
+      ConfigScope.findScopeOverride(
         configScopeUsWest2,
         overridesWithDuplicates
       )
@@ -110,12 +110,12 @@ class ConfigScopeSuite extends DatabricksTest {
 
     // No exception should be thrown if no shard for the override matches the current shard.
     val overrideOpt2: Option[TestOnlyExampleConfigFieldsP] =
-      ConfigScope.findShardOverride(configScopeUsWest2, Seq())
+      ConfigScope.findScopeOverride(configScopeUsWest2, Seq())
     assert(overrideOpt2.isEmpty)
   }
 
   test(
-    "Validate `findShardOverride` doesn't throw if invalid shard unrelated to the current " +
+    "Validate `findScopeOverride` doesn't throw if invalid shard unrelated to the current " +
     "shard is encountered"
   ) {
     // Test plan: Create various invalid shard, verify that no exception is thrown when unrelated
@@ -139,7 +139,7 @@ class ConfigScopeSuite extends DatabricksTest {
     val shardUsWest1 = ConfigScope("kubernetes-cluster:test-env/cloud1/public/region9/clustertype2/01")
 
     val overrideOpt: Option[TestOnlyExampleConfigFieldsP] =
-      ConfigScope.findShardOverride(
+      ConfigScope.findScopeOverride(
         shardUsWest1,
         overridesWithDuplicates
       )

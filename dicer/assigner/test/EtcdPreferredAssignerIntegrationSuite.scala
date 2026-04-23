@@ -40,8 +40,8 @@ import io.prometheus.client.CollectorRegistry
 
 class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName {
 
-  // TODO(<internal bug>) make this a base test have three suites (assignment store mode "in-memory",
-  //  "shadow", and "etcd") that extend it. In each suite, test the combination of the following
+  // TODO(<internal bug>) make this a base test with two suites (assignment store mode "in-memory"
+  //  and "etcd") that extend it. In each suite, test the combination of the following
   //  scenarios:
   //  - assignment store has a higher incarnation than the preferred assigner store.
   //  - both stores have the same incarnation.
@@ -344,7 +344,6 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
       assert(assignmentOpt.get.assignedResources.contains(testSquid2))
     }
   }
-
 
   test("Assigner loses and then reassumes preferred assignership") {
     // Test plan: Verify that when an assigner loses the preferred assignership, it can reassume

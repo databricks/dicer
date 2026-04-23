@@ -27,12 +27,12 @@ class PrefixLoggerSuite extends DatabricksTest with TestName {
       Seq(logger.info, logger.warn, logger.debug, logger.error)
     for (loggingFunction <- loggingFunctions) {
       loggingFunction("TestPrefixMessage 1", Duration.Zero) // Won't be captured.
-      LogCapturer.withCapturer(new Regex("TestPrefixMessage")) { capturer =>
+      LogCapturer.withCapturer(new Regex("TestPrefixMessage")) { capturer: LogCapturer =>
         loggingFunction("Random message not to be captured", Duration.Zero)
         loggingFunction("TestPrefixMessage 2", Duration.Zero)
         loggingFunction("TestPrefixMessage 3", Duration.Zero)
 
-        val events = capturer.getCapturedEvents
+        val events: Vector[CapturedLogEvent] = capturer.getCapturedEvents
         assert(events.size == 2)
         assert(
           events.head.formattedMessage.matches(".*PrefixLoggerSuite.scala.*TestPrefixMessage 2")
@@ -53,7 +53,7 @@ class PrefixLoggerSuite extends DatabricksTest with TestName {
       val outStream = new ByteArrayOutputStream()
       System.setOut(new PrintStream(outStream))
       logger.info("Test message")
-      val output = outStream.toString
+      val output: String = outStream.toString
       val expectedRegex: Regex =
         raw".*\[Multi, word\. prefix].*PrefixLoggerSuite\.scala:\d+.*Test message".r
       assert(expectedRegex.findFirstIn(output).isDefined, s"Output: $output")
@@ -68,12 +68,12 @@ class PrefixLoggerSuite extends DatabricksTest with TestName {
     import scala.concurrent.duration._
     val fakeClock = new FakeTypedClock
     val logger = PrefixLogger.create(getClass, "Every", clock = fakeClock)
-    LogCapturer.withCapturer(new Regex("Time log")) { capturer =>
+    LogCapturer.withCapturer(new Regex("Time log")) { capturer: LogCapturer =>
       for (i <- 0 until 10) {
         logger.info(s"Time log $i", 30.seconds)
         fakeClock.advanceBy(10.seconds)
       }
-      val events = capturer.getCapturedEvents
+      val events: Vector[CapturedLogEvent] = capturer.getCapturedEvents
       assert(events.size == 4)
       assert(events.head.formattedMessage.contains("Time log 0"))
       assert(events(1).formattedMessage.contains("Time log 3"))
@@ -85,7 +85,7 @@ class PrefixLoggerSuite extends DatabricksTest with TestName {
   test("Log every included in output") {
     // Test plan: Verify that log messages include an indication of the `every` parameter.
     val logger = PrefixLogger.create(getClass, "Every output")
-    LogCapturer.withCapturer(new Regex("Every")) { capturer =>
+    LogCapturer.withCapturer(new Regex("Every")) { capturer: LogCapturer =>
       logger.info(s"Every 1", 30.seconds)
       logger.info(s"Every 2", 842.millis)
       logger.info(s"Every 3", 1820.millis)
@@ -93,7 +93,7 @@ class PrefixLoggerSuite extends DatabricksTest with TestName {
       logger.info(s"Every 5", 1.hour)
       logger.info(s"Every 6", 1.micros)
 
-      val events = capturer.getCapturedEvents
+      val events: Vector[CapturedLogEvent] = capturer.getCapturedEvents
       val expectedOutputs = Seq(
         "every=30s",
         "every=842ms",
@@ -126,7 +126,7 @@ class PrefixLoggerSuite extends DatabricksTest with TestName {
     import scala.concurrent.duration._
     val fakeClock = new FakeTypedClock
     val logger = PrefixLogger.create(getClass, "Thunk check", clock = fakeClock)
-    var counter = 0
+    var counter: Int = 0
     for (i <- 0 until 3) {
       logger.info(s"Thunk log ${ counter += 1; i }  ", 30.seconds)
       fakeClock.advanceBy(10.seconds)
@@ -202,6 +202,18 @@ class PrefixLoggerSuite extends DatabricksTest with TestName {
     assert(criticalErrorInitialValue + 1 == getMetricValue(Severity.CRITICAL))
   }
 
+  test("UNCAUGHT_STATE_MACHINE_ERROR and UNCAUGHT_SEC_POOL_ERROR route alerts to the owner team") {
+    // Test plan: Verify that the parameterized error codes correctly reflect the owner team.
+    // Do this by constructing error codes with both a named team (CachingTeam) and a custom
+    // team, and verifying that alertOwnerTeam returns the expected AlertOwnerTeam in both cases.
+    assertResult(AlertOwnerTeam.CachingTeam)(
+      CachingErrorCode.UNCAUGHT_STATE_MACHINE_ERROR(AlertOwnerTeam.CachingTeam).alertOwnerTeam
+    )
+    assertResult(AlertOwnerTeam.CachingTeam)(
+      CachingErrorCode.UNCAUGHT_SEC_POOL_ERROR(AlertOwnerTeam.CachingTeam).alertOwnerTeam
+    )
+  }
+
   test("expect and assert logs are recorded after specified duration") {
     // Test plan: expect with a fake clock, advance time and make sure that the
     // logging statements are printed at the expected frequency ie. every 30 seconds
@@ -209,7 +221,7 @@ class PrefixLoggerSuite extends DatabricksTest with TestName {
     val fakeClock = new FakeTypedClock
     val logger = PrefixLogger.create(getClass, getSafeName, clock = fakeClock)
 
-    LogCapturer.withCapturer(new Regex("happened")) { capturer =>
+    LogCapturer.withCapturer(new Regex("happened")) { capturer: LogCapturer =>
       for (i <- 0 until 10) {
         logger.expect(
           assertion = false,
@@ -227,10 +239,10 @@ class PrefixLoggerSuite extends DatabricksTest with TestName {
         }
         fakeClock.advanceBy(10.seconds)
       }
-      val events = capturer.getCapturedEvents
+      val events: Vector[CapturedLogEvent] = capturer.getCapturedEvents
 
       // log events from assert.
-      val errorEvents = events.filter(_.level == Level.ERROR)
+      val errorEvents: Vector[CapturedLogEvent] = events.filter(_.level == Level.ERROR)
       assert(errorEvents.size == 4)
       assert(errorEvents.head.formattedMessage.contains("assert happened 0"))
       assert(errorEvents(1).formattedMessage.contains("assert happened 3"))
@@ -238,7 +250,7 @@ class PrefixLoggerSuite extends DatabricksTest with TestName {
       assert(errorEvents(3).formattedMessage.contains("assert happened 9"))
 
       // log events from expect.
-      val warnEvents = events.filter(_.level == Level.WARN)
+      val warnEvents: Vector[CapturedLogEvent] = events.filter(_.level == Level.WARN)
       assert(warnEvents.size == 4)
       assert(warnEvents.head.formattedMessage.contains("expect happened 0"))
       assert(warnEvents(1).formattedMessage.contains("expect happened 3"))

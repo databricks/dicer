@@ -1,0 +1,72 @@
+syntax = "proto2";
+
+package dicer;
+
+import "scalapb.proto";
+
+option java_package = "com.databricks.api.proto.dicer.assigner.config";
+option java_generate_equals_and_hash = true;
+option java_outer_classname = "TargetMigrationConfigProto";
+option java_multiple_files = true;
+option (scalapb.options) = {
+  package_name: "com.databricks.api.proto.dicer.assigner.config",
+  flat_package: true,
+};
+
+// Target migration is a general mechanism to migrate a target from one 
+// Assigner deployment to another. More specifically, this mechanism enables us to migrate a target
+// from the Assigner that it is currently handled by (i.e. the "SOURCE" Assigner) to the Assigner
+// that we intend for it to be handled by (i.e. the "DESTINATION" Assigner).
+//
+//
+// It should be noted that the "target migration" does not necessarily need to happen only at
+// a cluster-level. How the "SOURCE" and "DESTINATION" Assigner is determined will be defined by 
+// the user based on the migration type.
+//
+// This proto is serialized/deserialized to JSON and propagated to Assigners through SAFE.
+// The migration configs will be supplied by SAFE and will be used to determine whether 
+// a target should be handled by the "SOURCE" Assigner or the "DESTINATION" Assigner.
+message TargetMigrationConfigP {
+  // The version of the target migration config. Newer versions take precedence.
+  // NOTE: We will have separate tooling that ensures the version number should
+  //       always be increased any time these configs are updated.
+  optional int32 version = 1;
+
+  // A list of target NAMES that should always be handled by the "SOURCE" Assigner.
+  // Evaluation priority:
+  //   force_to_source_target_names > force_to_destination_target_names >
+  //   destination_target_name_fraction.
+  //
+  // This must not overlap with `force_to_destination_target_names`.
+  repeated string force_to_source_target_names = 2;
+
+  // A list of target NAMES that should always be handled by the "DESTINATION" Assigner.
+  //
+  // This must not overlap with `force_to_source_target_names`.
+  repeated string force_to_destination_target_names = 3;
+
+  // The fraction of target NAMES that should be handled by the "DESTINATION" Assigner
+  // in the range [0.0, 1.0]. NOTE: This should be a double within [0.0, 1.0] rather than
+  // an integer within [0, 100].
+  //
+  // This fraction is applied to target names whose names are NOT included in
+  // `force_to_source_target_names` and `force_to_destination_target_names`.
+  //
+  // The selection of target names is deterministic and consistent across process restarts
+  // and redeployments.
+  optional double destination_target_name_fraction = 4;
+
+  // The type of migration being performed.
+  // Each migration type defines its own notion of "SOURCE" and "DESTINATION" Assigner.
+  // (see: dicer/assigner/config/src/TargetMigrationConfig.scala for more details)
+  enum TargetMigrationTypeP {
+    TARGET_MIGRATION_TYPE_P_UNSPECIFIED = 0;
+
+    // Migrating targets from being handled by the Assigner in the General cluster to the 
+    // Assigner in the SMK cluster.
+    GENERAL_TO_SMK = 1;
+  }
+
+  // The type of migration being performed. Determines how SOURCE and DESTINATION are resolved.
+  optional TargetMigrationTypeP migration_type = 5;
+}

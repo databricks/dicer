@@ -174,7 +174,7 @@ class MetricUtilsSuite extends DatabricksTest with TestName {
     val samplesFoo: Seq[Double] = Seq(1, 2, 3, 4, 5, 10, 50, 100)
     val samplesBar: Seq[Double] = Seq(12, 10, 8, 6, 4, 2)
     val bucket: Seq[Double] = Seq(10, 20, 30, 40, 50)
-    val histogram = createHistogram(bucket, suffix = 1)
+    val histogram: Histogram = createHistogram(bucket, suffix = 1)
     for (sample: Double <- samplesFoo) {
       histogram.labels("foo").observe(sample)
     }
@@ -227,7 +227,7 @@ class MetricUtilsSuite extends DatabricksTest with TestName {
     // verifying that `getHistogramCount` and `getHistogramSum` return the expected values.
     val samples: Seq[Double] = Seq(1.1, 2, 3, 4, 5, 10, 50, 100)
     val bucket: Seq[Double] = Seq(10, 20, 30, 40, 50)
-    val histogram = createHistogram(bucket, suffix = 1)
+    val histogram: Histogram = createHistogram(bucket, suffix = 1)
     for (sample: Double <- samples) {
       histogram.labels("foo").observe(sample)
     }
@@ -323,7 +323,6 @@ class MetricUtilsSuite extends DatabricksTest with TestName {
       MetricUtils.getMetricValueOpt(registry, counterName, Map("l1" -> "B", "l2" -> "C")).isEmpty
     )
   }
-
 
   test("Change Tracker for Int") {
     // Test plan: Create a change tracker on top of an Int "counter". Verify that `change()`

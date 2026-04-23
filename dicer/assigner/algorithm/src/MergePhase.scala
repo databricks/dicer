@@ -115,7 +115,6 @@ private[assigner] object MergePhase {
         val merged: assignment.MutableSliceAssignment =
           left.mergeWithSuccessor(config.resourceAdjustedKeyReplicationConfig.minReplicas)
 
-
         if (predecessorOpt.isDefined) {
           val predecessor: CandidateSlicePair = predecessorOpt.get
           predecessor.right = merged

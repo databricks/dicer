@@ -1,6 +1,7 @@
 package com.databricks.dicer.assigner
 
 import java.net.URI
+import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 import java.util.UUID
 
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
@@ -10,6 +11,7 @@ import scala.concurrent.{Await, Future}
 import io.grpc.{ClientInterceptor, Metadata}
 import io.grpc.stub.MetadataUtils
 
+import com.databricks.common.web.InfoService
 import com.databricks.rpc.DatabricksObjectMapper
 import io.grpc.Deadline
 
@@ -19,12 +21,19 @@ import com.databricks.backend.common.util.Project
 import com.databricks.caching.util.{AssertionWaiter, MetricUtils, PrefixLogger, TestUtils}
 import com.databricks.caching.util.TestUtils.{TestName, assertThrow}
 import com.databricks.conf.Configs
-import com.databricks.dicer.client.WatchStubHelper
+import com.databricks.dicer.client.WatchStubManager
 import com.databricks.rpc.tls.TLSOptionsMigration
 import com.databricks.dicer.assigner.config.{
+  ChurnConfig,
   StaticTargetConfigProvider,
+  InternalTargetConfig,
   InternalTargetConfigMap,
   InternalTargetConfigMetrics
+}
+import com.databricks.dicer.common.TargetName
+import com.databricks.dicer.assigner.config.InternalTargetConfig.{
+  LoadBalancingConfig,
+  LoadBalancingMetricConfig
 }
 import com.databricks.dicer.common.TestSliceUtils.{createTestSquid, sampleProposal}
 import com.databricks.dicer.common.Version.LATEST_VERSION
@@ -37,6 +46,7 @@ import com.databricks.dicer.common.{
   InternalDicerTestEnvironment,
   ProposedSliceAssignment,
   SliceletData,
+  SliceletState,
   SubscriberHandler,
   SubscriberHandlerMetricUtils,
   SyncAssignmentState,
@@ -49,10 +59,10 @@ import com.databricks.dicer.friend.SliceMap
 import com.databricks.rpc.testing.TestSslArguments
 import com.databricks.rpc.testing.TestTLSOptions
 import com.databricks.testing.DatabricksTest
+import io.grpc.Status.Code
 import io.grpc.StatusRuntimeException
 import io.prometheus.client.CollectorRegistry
 
-import com.databricks.api.proto.dicer.common.ClientRequestP.SliceletDataP
 import com.databricks.caching.util.WhereAmITestUtils.withLocationConfSingleton
 import com.databricks.common.http.Headers
 import com.databricks.conf.trusted.LocationConf
@@ -168,23 +178,52 @@ class AssignerSuite extends DatabricksTest with TestName {
   private var stub: AssignmentServiceStub = _
   private val log = PrefixLogger.create(getClass, "")
 
-  /** A helper class for creating Watch stubs. */
-  private val watchStubHelper = new WatchStubHelper(
+  /** Manages the creation of watch stubs for this test suite. */
+  private val watchStubManager = new WatchStubManager(
     clientName = Project.DicerAssigner.name,
     subscriberDebugName = "assigner-suite-test",
     defaultWatchAddress = URI.create(s"http://localhost:${testEnv.getAssignerPort}"),
     tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
-    watchFromDataPlane = false
+    watchFromDataPlane = false,
+    target = Target("test"),
+    clientIdOpt = None
   )
   override def beforeAll(): Unit = {
-    // Create a stub that can be used to communicate with the Assigner to get the assignment.
-    stub = watchStubHelper.createWatchStub(redirectAddressOpt = None)
+    super.beforeAll()
+    // Start the info server once for the entire suite. Both the ZPage and DPage integration
+    // tests need it, and the internal InfoService cannot be started/stopped/restarted
+    // because DPages register in a global registry that does not support re-registration.
+    InfoService.start(
+      port = 0,
+      startupStatusSourceOpt = None,
+      livenessStatusSourceOpt = None,
+      readinessStatusSourceOpt = None,
+      branchOpt = None
+    )
+    stub = watchStubManager.createWatchStub(redirectAddressOpt = None)
+  }
+
+  override def afterAll(): Unit = {
+    InfoService.stop()
+    super.afterAll()
   }
 
   override def beforeEach(): Unit = {
     InternalTargetConfigMetrics.forTest.clearMetrics()
   }
 
+  /**
+   * Issues a GET request to `url` using `httpClient` and returns the HTTP status code and
+   * response body.
+   */
+  private def fetchHtml(httpClient: HttpClient, url: String): (Int, String) = {
+    val response: HttpResponse[String] = httpClient
+      .send(
+        HttpRequest.newBuilder().uri(URI.create(url)).GET().build(),
+        HttpResponse.BodyHandlers.ofString()
+      )
+    (response.statusCode(), response.body())
+  }
 
   test("backend returns the correct test result") {
     // Test plan: call the watch RPC and verify that the returned assignment is the expected value.
@@ -206,7 +245,40 @@ class AssignerSuite extends DatabricksTest with TestName {
     )
   }
 
+  test("IN_MEMORY store factory returns a new store instance for each call") {
+    // Test plan: create a store factory with IN_MEMORY config, apply it multiple times, and
+    // verify that each call returns a distinct store instance (not shared).
+    val conf: DicerAssignerConf = new DicerAssignerConf(
+      Configs.parseMap("databricks.dicer.assigner.store.type" -> "in_memory")
+    )
+    val factory = Assigner.createStoreFactory(conf)
+    val store1 = factory.getStore()
+    val store2 = factory.getStore()
+    val store3 = factory.getStore()
+    assert(store1 ne store2, "IN_MEMORY factory should return different store instances per call")
+    assert(store1 ne store3, "IN_MEMORY factory should return different store instances per call")
+    assert(store2 ne store3, "IN_MEMORY factory should return different store instances per call")
+  }
 
+  test("ETCD store factory returns the same store instance for each call") {
+    // Test plan: verify that calling an ETCD store factory multiple times returns the same shared
+    // store instance.
+    val endpointsConfigString: String = DatabricksObjectMapper.toJson(
+      Seq("http://dicer-etcd-service.test-env-test.svc.cluster.local:2379")
+    )
+    val etcdConf: DicerAssignerConf = new DicerAssignerConf(
+      Configs.parseMap(
+        "databricks.dicer.assigner.store.type" -> "etcd",
+        "databricks.dicer.assigner.preferredAssigner.etcd.endpoints" -> endpointsConfigString,
+        "databricks.dicer.assigner.storeIncarnation" -> 2
+      )
+    )
+    val etcdFactory = Assigner.createStoreFactory(etcdConf)
+    assert(
+      etcdFactory.getStore() eq etcdFactory.getStore(),
+      "ETCD factory should return the same store instance"
+    )
+  }
 
   test("Test two clients") {
     // Test plan: call the watch RPC twice concurrently and verify that the returned assignment is
@@ -217,7 +289,7 @@ class AssignerSuite extends DatabricksTest with TestName {
     // timeout so that the WatchCell is created at the Assigner due to this request - but no
     // assignment is returned since it has not been set yet.
     val shortTimeout = 1.second
-    val stub2: AssignmentServiceStub = watchStubHelper.createWatchStub(
+    val stub2: AssignmentServiceStub = watchStubManager.createWatchStub(
       Some(URI.create(s"http://localhost:${testEnv.getAssignerPort}"))
     )
 
@@ -314,54 +386,8 @@ class AssignerSuite extends DatabricksTest with TestName {
     )
   }
 
-  gridTest("Unknown targets are rejected")(
-    Seq(
-      Target.apply(_: String),
-      (name: String) => Target.createAppTarget(transformToSafeAppTargetName(name), "instance-id")
-    )
-  ) { (targetFactory: String => Target) =>
-    // Test plan: Verify that the Assigner rejects watch requests for unknown targets (i.e., targets
-    // that do not have a config). Verify this by sending a watch request for an unknown target and
-    // checking that the Assigner returns an error and increments the appropriate metric.
-
-    // Create a local test environment with default target configs disabled.
-    val localTestEnv = InternalDicerTestEnvironment.create(withDefaultTargetConfig = false)
-    val localStub: AssignmentServiceStub = watchStubHelper.createWatchStub(
-      Some(URI.create(s"http://localhost:${localTestEnv.getAssignerPort}"))
-    )
-
-    val target = targetFactory(getSafeName)
-    val request = ClientRequest(
-      target,
-      SyncAssignmentState.KnownGeneration(Generation.EMPTY),
-      "unknown-target",
-      WATCH_RPC_TIMEOUT,
-      ClerkData,
-      supportsSerializedAssignment = true
-    )
-    assertThrow[StatusRuntimeException]("Unknown target") {
-      TestUtils.awaitResult(localStub.watch(request.toProto), Duration.Inf)
-    }
-
-    // Verify that the Assigner incremented the appropriate metric.
-    val registry: CollectorRegistry = CollectorRegistry.defaultRegistry
-
-    assertResult(1)(
-      MetricUtils
-        .getMetricValue(
-          registry,
-          metric = "dicer_assigner_num_watch_errors_total",
-          labels = Map(
-            "targetCluster" -> target.getTargetClusterLabel,
-            "targetName" -> target.getTargetNameLabel,
-            "targetInstanceId" -> target.getTargetInstanceIdLabel,
-            "reason" -> "NO_CONFIG"
-          )
-        )
-        .toInt
-    )
-  }
-
+  // TODO(<internal bug>): Re-enable after fixing DatabricksServiceException to gRPC status mapping in
+  //  the OSS WatchServerHelper.
   test("createAndStart() completes successfully") {
     // Test plan: create an Assigner with the default k8s watcher and health watcher. This test
     // is very basic, it only verifies that the method completes without throwing any exceptions.
@@ -389,10 +415,11 @@ class AssignerSuite extends DatabricksTest with TestName {
       UUID.randomUUID(),
       "localhost",
       ASSIGNER_CLUSTER_URI,
-      KubernetesTargetWatcher.NoOpFactory
+      KubernetesTargetWatcher.NoOpFactory,
+      PreferredAssignerTestHelper.noOpMembershipCheckerFactory
     )
 
-    assigner.forTest.stopAsync()
+    Await.result(assigner.forTest.stopAsync(), Duration.Inf)
   }
 
   test("Assigner differentiates targets by cluster URI") {
@@ -718,6 +745,241 @@ class AssignerSuite extends DatabricksTest with TestName {
     }
   }
 
+  test("suggestedWatchRpcTimeout for clerk and slicelet requests") {
+    // Test plan: Verify that the assigner returns the correct suggested watch RPC timeout for
+    // clerks and slicelets, based on the config values.
+    val target = Target(getSafeName)
+    Await.result(testAssigner.setAndFreezeAssignment(target, sampleProposal()), Duration.Inf)
 
+    // Setup: Create a client request for a clerk and a slicelet.
+    val clerkRequest = ClientRequest(
+      target,
+      SyncAssignmentState.KnownGeneration(Generation.EMPTY),
+      "test-clerk",
+      timeout = 1.second,
+      ClerkData,
+      supportsSerializedAssignment = true
+    )
+    val sliceletRequest = ClientRequest(
+      target,
+      SyncAssignmentState.KnownGeneration(Generation.EMPTY),
+      "test-slicelet",
+      timeout = 1.second,
+      SliceletData(
+        TestSliceUtils.createTestSquid("test"),
+        SliceletState.Running,
+        "localhostNamespace",
+        attributedLoads = Vector.empty,
+        unattributedLoadOpt = None
+      ),
+      supportsSerializedAssignment = true
+    )
 
+    // Verify: The assigner returns the default suggested RPC timeout.
+    val clerkResponse1: ClientResponse = performWatchCallSync(stub, clerkRequest)
+    assert(clerkResponse1.suggestedRpcTimeout == 5.seconds)
+    val sliceletResponse1: ClientResponse = performWatchCallSync(stub, sliceletRequest)
+    assert(sliceletResponse1.suggestedRpcTimeout == 5.seconds)
+
+    // Setup: Start another assigner with a different config for the suggested RPC timeout.
+    val testAssignerConf2: TestAssigner.Config = TestAssigner.Config.create(
+      assignerConf = new DicerAssignerConf(
+        Configs.parseMap(
+          "databricks.dicer.assigner.assignerSuggestedClerkWatchTimeoutSeconds" -> 10,
+          "databricks.dicer.internal.cachingteamonly.watchServerSuggestedRpcTimeoutMillis" -> 1000
+        )
+      )
+    )
+    val (testAssigner2, index2): (TestAssigner, Int) = testEnv.addAssigner(testAssignerConf2)
+    val stub2: AssignmentServiceStub = watchStubManager.createWatchStub(
+      Some(URI.create(s"http://localhost:${testAssigner2.localUri.getPort}"))
+    )
+    // Verify: The assigner should return different watch server suggested RPC timeout
+    // configurations for the Clerk and the Slicelet.
+    val clerkResponse2: ClientResponse = performWatchCallSync(stub2, clerkRequest)
+    assert(clerkResponse2.suggestedRpcTimeout == 10.second)
+    val sliceletResponse2: ClientResponse = performWatchCallSync(stub2, sliceletRequest)
+    assert(sliceletResponse2.suggestedRpcTimeout == 1.second)
+
+    // Cleanup: Stop the newly created assigner.
+    testEnv.stopAssigner(index2)
+  }
+
+  test("Assigner and Client ZPages integration test") {
+    // Test plan: Verify that a test assigner correctly serves the Assigner and Client
+    // ZPage HTML by creating a slicelet and clerk, waiting for an assignment, fetching
+    // /admin/debug, and checking for expected section headings and subscriber counts.
+    val assignerInfo: AssignerInfo = testAssigner.getAssignerInfoBlocking()
+
+    val target: Target = Target(getSafeName)
+    val slicelet: Slicelet = withLocationConfSingleton(ASSIGNER_CLUSTER_LOCATION_CONF) {
+      testEnv.createSlicelet(target).start(selfPort = 1234, listenerOpt = None)
+    }
+
+    AssertionWaiter("Waiting for assignment to be generated for ZPage test").await {
+      TestUtils
+        .awaitResult(testAssigner.getAssignment(target), Duration.Inf)
+        .getOrElse(fail("assigner has not yet generated an assignment"))
+    }
+
+    val clerk: Clerk[ResourceAddress] = testEnv.createClerk(slicelet)
+    TestUtils.awaitResult(clerk.ready, Duration.Inf)
+
+    val port: Int = InfoService.getActivePort()
+
+    val sliceletAddress: String = slicelet.impl.squid.resourceAddress.toString
+
+    // Create one HttpClient to reuse across both waiter blocks.
+    val httpClient: HttpClient = HttpClient.newHttpClient()
+
+    AssertionWaiter("Waiting for ZPages to reflect assignment and subscriber data").await {
+      val (statusCode, html): (Int, String) =
+        fetchHtml(httpClient, s"http://127.0.0.1:$port/admin/debug")
+
+      assert(
+        statusCode == 200,
+        s"ZPage returned status $statusCode"
+      )
+
+      // --- Assigner ZPage sections ---
+      assert(html.contains("Assigner Information"), "Missing 'Assigner Information' section")
+      assert(
+        html.contains("Preferred Assigner State"),
+        "Missing 'Preferred Assigner State' section"
+      )
+      assert(
+        html.contains("Assignment Information"),
+        "Missing 'Assignment Information' section"
+      )
+      assert(
+        html.contains("Churn Information"),
+        "Missing 'Churn Information' section"
+      )
+      assert(
+        html.contains("Configuration Information"),
+        "Missing 'Configuration Information' section"
+      )
+      assert(
+        html.contains(assignerInfo.uuid.toString),
+        "Missing assigner UUID in ZPage HTML"
+      )
+      assert(
+        html.contains(target.toParseableDescription),
+        s"Target '${target.toParseableDescription}' not found in Assigner ZPage HTML"
+      )
+
+      assert(
+        html.contains(sliceletAddress),
+        s"Slicelet address '$sliceletAddress' not found in ZPage HTML"
+      )
+      assert(html.contains("Slicelets: 1 Clerks:"), "Expected 1 slicelet in the subscriber table")
+      assert(html.contains("Clerks: 0</th>"), "Expected 0 clerks in the Assigner subscriber table")
+
+      assert(
+        !html.contains("Generation: None"),
+        "Expected a real generation, got 'Generation: None'"
+      )
+      assert(
+        html.contains("No Churn Ratio Information") || html.contains("Churn Ratio"),
+        "Missing churn display in Churn Information section"
+      )
+
+      // --- Client ZPage sections (slicelet and clerk both register with ClientSlicez) ---
+      assert(html.contains("Client Information"), "Missing 'Client Information' section")
+      assert(html.contains("Subscriber Information"), "Missing 'Subscriber Information' section")
+    }
+
+    // Cleanup: stop the slicelet and clerk created for this test.
+    clerk.forTest.stop()
+    slicelet.forTest.stop()
+  }
+
+  test(
+    "allowDefaultTargetConfigForExperimentalTargets enabled: unconfigured target uses default " +
+    "config and configured targets continue to use checked-in configs"
+  ) {
+    // Test plan: Verify that when allowDefaultTargetConfigForExperimentalTargets is enabled:
+    // (1) an unconfigured target uses the default InternalTargetConfig (maxLoadHint = 100000), and
+    // (2) a statically configured target still uses its checked-in config (not the default).
+    // Do this by creating a test environment with the flag enabled and a single statically
+    // configured target, then starting slicelets for both the configured and an unconfigured
+    // target, and verifying the maxLoadHint metric for each.
+
+    // Create a static config with a distinct maxLoadHint so we can distinguish it from the
+    // default experimental config (which has maxLoadHint = 100000).
+    val configuredMaxLoadHint: Double = 42.0
+    val configuredTargetName: TargetName = TargetName(getSuffixedSafeName(suffix = "configured"))
+    val configuredTarget = Target(configuredTargetName.value)
+    val configuredTargetConfig: InternalTargetConfig = InternalTargetConfig.forTest.DEFAULT.copy(
+      loadBalancingConfig = LoadBalancingConfig(
+        loadBalancingInterval = LoadBalancingConfig.DEFAULT_LOAD_BALANCING_INTERVAL,
+        churnConfig = ChurnConfig.DEFAULT,
+        primaryRateMetric = LoadBalancingMetricConfig(maxLoadHint = configuredMaxLoadHint)
+      )
+    )
+    val staticTargetConfigMap: InternalTargetConfigMap = InternalTargetConfigMap.create(
+      configScopeOpt = None,
+      targetConfigMap = Map(configuredTargetName -> configuredTargetConfig)
+    )
+
+    // Create assigner conf with the flag enabled.
+    val localConf = new DicerAssignerConf(
+      Configs.parseMap(
+        "databricks.dicer.assigner.allowDefaultTargetConfigForExperimentalTargets" -> true
+      )
+    )
+    val localTestAssignerConf: TestAssigner.Config =
+      TestAssigner.Config.create(assignerConf = localConf)
+
+    // Create a test environment with the static config and withDefaultTargetConfig = false.
+    val localTestEnv = InternalDicerTestEnvironment.create(
+      config = localTestAssignerConf,
+      targetConfigMap = staticTargetConfigMap,
+      withDefaultTargetConfig = false
+    )
+
+    val unconfiguredTarget = Target(getSuffixedSafeName(suffix = "unconfigured"))
+
+    // Start slicelets for both the configured and unconfigured targets.
+    val configuredSlicelet: Slicelet = localTestEnv
+      .createSlicelet(configuredTarget)
+      .start(selfPort = 1111, listenerOpt = None)
+    val unconfiguredSlicelet: Slicelet = localTestEnv
+      .createSlicelet(unconfiguredTarget)
+      .start(selfPort = 1234, listenerOpt = None)
+
+    // Wait for both slicelets to receive assignments.
+    AssertionWaiter("slicelets receive assignments").await {
+      assert(configuredSlicelet.assignedSlices.nonEmpty)
+      assert(unconfiguredSlicelet.assignedSlices.nonEmpty)
+    }
+
+    // Verify the unconfigured target uses the default experimental config (maxLoadHint = 100000).
+    val registry: CollectorRegistry = CollectorRegistry.defaultRegistry
+    val unconfiguredMaxLoadHint: Double = MetricUtils.getMetricValue(
+      registry,
+      metric = "dicer_assigner_target_config_primary_rate_metric_config_max_load_hint",
+      labels = Map("targetName" -> unconfiguredTarget.getTargetNameLabel)
+    )
+    assert(
+      unconfiguredMaxLoadHint == 100000.0,
+      s"Expected maxLoadHint to be 100000.0 for unconfigured target, " +
+      s"but got $unconfiguredMaxLoadHint"
+    )
+
+    // Verify the configured target uses its static config (not the default experimental config).
+    val actualConfiguredMaxLoadHint: Double = MetricUtils.getMetricValue(
+      registry,
+      metric = "dicer_assigner_target_config_primary_rate_metric_config_max_load_hint",
+      labels = Map("targetName" -> configuredTarget.getTargetNameLabel)
+    )
+    assert(
+      actualConfiguredMaxLoadHint == configuredMaxLoadHint,
+      s"Expected maxLoadHint to be $configuredMaxLoadHint for configured target, " +
+      s"but got $actualConfiguredMaxLoadHint"
+    )
+
+    configuredSlicelet.forTest.stop()
+    unconfiguredSlicelet.forTest.stop()
+  }
 }

@@ -1,16 +1,11 @@
 
 filegroup(
-    name = "all_files",
-    srcs = glob(["**"]),
-    visibility = ["//caching/oss:__pkg__"],
-)
-
-filegroup(
     name = "data",
     srcs = [
         "assignment_test_data.textproto",
         "client_request_test_data.textproto",
         "client_response_test_data.textproto",
+        "cross_cluster_clerk_accessor_test_data.textproto",
         "diff_assignment_test_data.textproto",
         "fatal_target_mismatch_test_data.textproto",
         "generation_test_data.textproto",

@@ -205,9 +205,10 @@ class ByteSizeSuite extends DatabricksTest {
     // Test plan: Test the ByteSize.fromString function with both valid and invalid inputs.
     // Verify the function returns / throws expected results.
 
-    val ERR_FORMAT_MSG = "The input memory size is not in the correct format."
-    val ERR_TOO_HIGH_MEMORY_MSG = "The input memory size must be less than 8 EiB."
-    val ERR_TOO_LOW_MEMORY_MSG = "The input memory size must be greater than or equal to -8 EiB."
+    val ERR_FORMAT_MSG: String = "The input memory size is not in the correct format."
+    val ERR_TOO_HIGH_MEMORY_MSG: String = "The input memory size must be less than 8 EiB."
+    val ERR_TOO_LOW_MEMORY_MSG: String =
+      "The input memory size must be greater than or equal to -8 EiB."
 
     // Test table containing invalid string representations of `ByteSize` and the expected error
     // messages.

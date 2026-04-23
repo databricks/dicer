@@ -6,7 +6,8 @@ import scala.concurrent.duration._
 import com.databricks.api.proto.dicer.assigner.config.{
   AdvancedTargetConfigFieldsP,
   HealthWatcherConfigP,
-  LoadWatcherConfigP
+  LoadWatcherConfigP,
+  TargetWatchRequestRateLimitConfigP
 }
 import com.databricks.api.proto.dicer.external.LoadBalancingMetricConfigP.{
   ImbalanceToleranceHintP,
@@ -20,11 +21,14 @@ import com.databricks.api.proto.dicer.external.{
 import com.databricks.caching.util.TestUtils.assertThrow
 import com.databricks.dicer.assigner.config.InternalTargetConfig.{
   HealthWatcherTargetConfig,
+  KeyOfDeathProtectionConfig,
   KeyReplicationConfig,
   LoadBalancingConfig,
   LoadBalancingMetricConfig,
-  LoadWatcherTargetConfig
+  LoadWatcherTargetConfig,
+  TargetWatchRequestRateLimitConfig
 }
+import com.databricks.dicer.common.TargetName
 import com.databricks.dicer.common.TestSliceUtils._
 import com.databricks.dicer.common.{SliceAssignment, SubsliceAnnotation}
 import com.databricks.dicer.friend.Squid
@@ -107,7 +111,9 @@ class InternalTargetConfigSuite extends DatabricksTest {
             LoadBalancingMetricConfig(1000, ImbalanceToleranceHintP.DEFAULT)
           ),
           KeyReplicationConfig.DEFAULT_SINGLE_REPLICA,
-          HealthWatcherTargetConfig.DEFAULT
+          HealthWatcherTargetConfig.DEFAULT,
+          KeyOfDeathProtectionConfig.DEFAULT,
+          TargetWatchRequestRateLimitConfig.DEFAULT
         )
       ),
       TestCase(
@@ -138,7 +144,9 @@ class InternalTargetConfigSuite extends DatabricksTest {
             LoadBalancingMetricConfig(1000, ImbalanceToleranceHintP.DEFAULT)
           ),
           KeyReplicationConfig.DEFAULT_SINGLE_REPLICA,
-          HealthWatcherTargetConfig.DEFAULT
+          HealthWatcherTargetConfig.DEFAULT,
+          KeyOfDeathProtectionConfig.DEFAULT,
+          TargetWatchRequestRateLimitConfig.DEFAULT
         )
       ),
       TestCase(
@@ -162,7 +170,9 @@ class InternalTargetConfigSuite extends DatabricksTest {
             LoadBalancingMetricConfig(1000, ImbalanceToleranceHintP.DEFAULT)
           ),
           KeyReplicationConfig.DEFAULT_SINGLE_REPLICA,
-          HealthWatcherTargetConfig.DEFAULT
+          HealthWatcherTargetConfig.DEFAULT,
+          KeyOfDeathProtectionConfig.DEFAULT,
+          TargetWatchRequestRateLimitConfig.DEFAULT
         )
       ),
       TestCase(
@@ -183,7 +193,9 @@ class InternalTargetConfigSuite extends DatabricksTest {
             LoadBalancingMetricConfig(100, ImbalanceToleranceHintP.TIGHT)
           ),
           KeyReplicationConfig.DEFAULT_SINGLE_REPLICA,
-          HealthWatcherTargetConfig.DEFAULT
+          HealthWatcherTargetConfig.DEFAULT,
+          KeyOfDeathProtectionConfig.DEFAULT,
+          TargetWatchRequestRateLimitConfig.DEFAULT
         )
       ),
       TestCase(
@@ -208,7 +220,9 @@ class InternalTargetConfigSuite extends DatabricksTest {
             LoadBalancingMetricConfig(100, ImbalanceToleranceHintP.TIGHT)
           ),
           KeyReplicationConfig(minReplicas = 5, maxReplicas = 10),
-          HealthWatcherTargetConfig.DEFAULT
+          HealthWatcherTargetConfig.DEFAULT,
+          KeyOfDeathProtectionConfig.DEFAULT,
+          TargetWatchRequestRateLimitConfig.DEFAULT
         )
       ),
       TestCase(
@@ -233,7 +247,37 @@ class InternalTargetConfigSuite extends DatabricksTest {
             LoadBalancingMetricConfig(100, ImbalanceToleranceHintP.TIGHT)
           ),
           KeyReplicationConfig.DEFAULT_SINGLE_REPLICA,
-          HealthWatcherTargetConfig(observeSliceletReadiness = false)
+          HealthWatcherTargetConfig.DEFAULT,
+          KeyOfDeathProtectionConfig.DEFAULT,
+          TargetWatchRequestRateLimitConfig.DEFAULT
+        )
+      ),
+      TestCase(
+        TargetConfigFieldsP(
+          primaryRateMetricConfig = Some(
+            LoadBalancingMetricConfigP(
+              maxLoadHint = Some(100)
+            )
+          )
+        ),
+        AdvancedTargetConfigFieldsP(
+          targetWatchRequestRateLimitConfig = Some(
+            TargetWatchRequestRateLimitConfigP(
+              clientRequestsPerSecond = Some(500L)
+            )
+          )
+        ),
+        InternalTargetConfig(
+          LoadWatcherTargetConfig.DEFAULT,
+          LoadBalancingConfig(
+            loadBalancingInterval = 1.minute,
+            ChurnConfig.DEFAULT,
+            LoadBalancingMetricConfig(100, ImbalanceToleranceHintP.DEFAULT)
+          ),
+          KeyReplicationConfig.DEFAULT_SINGLE_REPLICA,
+          HealthWatcherTargetConfig.DEFAULT,
+          KeyOfDeathProtectionConfig.DEFAULT,
+          TargetWatchRequestRateLimitConfig(clientRequestsPerSecond = 500L)
         )
       )
     )
@@ -336,10 +380,6 @@ class InternalTargetConfigSuite extends DatabricksTest {
     }
   }
 
-
-
-
-
   test("InternalTargetConfig.toString") {
     // Test plan: Verify that InternalTargetConfig.toString correctly prints the non-default
     // configurations and emits default configurations. Verify this by checking the toString()
@@ -356,20 +396,32 @@ class InternalTargetConfigSuite extends DatabricksTest {
       LoadWatcherTargetConfig(minDuration = 2.minutes, maxAge = 20.minutes, useTopKeys = false)
     val nonDefaultKeyReplicationConfig = KeyReplicationConfig(minReplicas = 5, maxReplicas = 10)
     val nonDefaultHealthWatcherConfig =
-      HealthWatcherTargetConfig(observeSliceletReadiness = true)
+      HealthWatcherTargetConfig(
+        observeSliceletReadiness = true,
+        permitRunningToNotReady = true
+      )
+    val nonDefaultKeyOfDeathProtectionConfig =
+      KeyOfDeathProtectionConfig(homomorphicGenerationEnabled = true)
+
+    val nonDefaultTargetWatchRequestRateLimitConfig =
+      TargetWatchRequestRateLimitConfig(clientRequestsPerSecond = 1000L)
 
     val internalTargetConfigWithAllNonDefault = InternalTargetConfig(
       nonDefaultLoadWatcherConfig,
       nonDefaultLoadBalancingConfig,
       nonDefaultKeyReplicationConfig,
-      nonDefaultHealthWatcherConfig
+      nonDefaultHealthWatcherConfig,
+      nonDefaultKeyOfDeathProtectionConfig,
+      nonDefaultTargetWatchRequestRateLimitConfig
     )
     val expectedStringWithAllNonDefault = "InternalTargetConfig(, " +
       "LoadWatcherTargetConfig(minDuration=2 minutes, maxAge=20 minutes, useTopKeys=false), " +
       "LoadBalancingConfig(primaryRate=LoadBalancingMetricConfig(maxLoadHint=1.0), " +
       "LoadBalancingInterval=2 minutes), " +
       "KeyReplicationConfig(minReplicas=5, maxReplicas=10), " +
-      "HealthWatcherConfig(observeSliceletReadiness=true))"
+      "HealthWatcherConfig(observeSliceletReadiness=true, permitRunningToNotReady=true), " +
+      "KeyOfDeathProtectionConfig(homomorphicGenerationEnabled=true), " +
+      "TargetWatchRequestRateLimitConfig(clientRequestsPerSecond=1000, burstCapacity=10000))"
     assert(
       internalTargetConfigWithAllNonDefault.toString ==
       expectedStringWithAllNonDefault
@@ -379,13 +431,17 @@ class InternalTargetConfigSuite extends DatabricksTest {
       nonDefaultLoadWatcherConfig,
       nonDefaultLoadBalancingConfig,
       KeyReplicationConfig.DEFAULT_SINGLE_REPLICA,
-      nonDefaultHealthWatcherConfig
+      nonDefaultHealthWatcherConfig,
+      nonDefaultKeyOfDeathProtectionConfig,
+      nonDefaultTargetWatchRequestRateLimitConfig
     )
     val expectedStringWithDefaultKeyReplication = "InternalTargetConfig(, " +
       "LoadWatcherTargetConfig(minDuration=2 minutes, maxAge=20 minutes, useTopKeys=false), " +
       "LoadBalancingConfig(primaryRate=LoadBalancingMetricConfig(maxLoadHint=1.0), " +
       "LoadBalancingInterval=2 minutes), " +
-      "HealthWatcherConfig(observeSliceletReadiness=true))"
+      "HealthWatcherConfig(observeSliceletReadiness=true, permitRunningToNotReady=true), " +
+      "KeyOfDeathProtectionConfig(homomorphicGenerationEnabled=true), " +
+      "TargetWatchRequestRateLimitConfig(clientRequestsPerSecond=1000, burstCapacity=10000))"
 
     assert(
       internalTargetConfigWithDefaultKeyReplication.toString ==
@@ -429,17 +485,30 @@ class InternalTargetConfigSuite extends DatabricksTest {
   }
 
   test("HealthWatcherTargetConfig verification and round-trip") {
-    // Test plan: Verify that HealthWatcherTargetConfig can be converted to proto and back, and
-    // that default values are handled correctly.
+    // Test plan: Verify that HealthWatcherTargetConfig enforces the invariant that
+    // permitRunningToNotReady requires observeSliceletReadiness, can be converted to proto and
+    // back, and that default values are handled correctly.
+
+    // Test that an invalid config (permitRunningToNotReady=true with
+    // observeSliceletReadiness=false) is rejected.
+    assertThrow[IllegalArgumentException](
+      "permitRunningToNotReady can only be true if observeSliceletReadiness is also true"
+    ) {
+      HealthWatcherTargetConfig(
+        observeSliceletReadiness = false,
+        permitRunningToNotReady = true
+      )
+    }
 
     // Test round-trip with non-default value (true).
-    val config1 = HealthWatcherTargetConfig(observeSliceletReadiness = true)
+    val config1 =
+      HealthWatcherTargetConfig(observeSliceletReadiness = true, permitRunningToNotReady = true)
     val proto1: HealthWatcherConfigP = config1.toProto
     val roundTrippedConfig1 = HealthWatcherTargetConfig.fromProto(proto1)
     assertResult(config1)(roundTrippedConfig1)
 
     // Test round-trip with default value (false).
-    val config2 = HealthWatcherTargetConfig(observeSliceletReadiness = false)
+    val config2 = HealthWatcherTargetConfig.DEFAULT
     val proto2: HealthWatcherConfigP = config2.toProto
     val roundTrippedConfig2 = HealthWatcherTargetConfig.fromProto(proto2)
     assertResult(config2)(roundTrippedConfig2)
@@ -515,7 +584,6 @@ class InternalTargetConfigSuite extends DatabricksTest {
     )
   }
 
-
   test("InternalTargetConfig forward-compatability") {
     // Test plan: Verify that InternalTargetConfig can still generate dynamic config that can be
     // read by the old scala binary. This is basically to verify that the deprecated
@@ -535,7 +603,9 @@ class InternalTargetConfigSuite extends DatabricksTest {
           LoadBalancingMetricConfig(1000, ImbalanceToleranceHintP.DEFAULT)
         ),
         keyReplicationConfig,
-        HealthWatcherTargetConfig.DEFAULT
+        HealthWatcherTargetConfig.DEFAULT,
+        KeyOfDeathProtectionConfig.DEFAULT,
+        TargetWatchRequestRateLimitConfig.DEFAULT
       )
     )
     // It's hard to access a real stale version of InternalTargetConfig in test and verify this in
@@ -544,5 +614,45 @@ class InternalTargetConfigSuite extends DatabricksTest {
     assert(namedInternalTargetConfig.toProto.advancedConfig.get.keyReplicationConfig.isDefined)
   }
 
+  test("TargetWatchRequestRateLimitConfig rejects negative clientRequestsPerSecond") {
+    // Test plan: Verify that clientRequestsPerSecond must be >= 0.
+    assertThrow[IllegalArgumentException]("clientRequestsPerSecond must be >= 0") {
+      TargetWatchRequestRateLimitConfig(clientRequestsPerSecond = -1L)
+    }
+    // Verify that 0 is valid (used to disable traffic for a target).
+    TargetWatchRequestRateLimitConfig(clientRequestsPerSecond = 0L)
+  }
+
+  test("TargetWatchRequestRateLimitConfig caps burstCapacity at Long.MaxValue on overflow") {
+    // Test plan: Verify that overflow in burstCapacity calculation is capped at Long.MaxValue.
+
+    // Long.MaxValue * 10 (BURST_CAPACITY_IN_SECONDS) will overflow, but should be capped.
+    val config = TargetWatchRequestRateLimitConfig(clientRequestsPerSecond = Long.MaxValue)
+    assert(config.burstCapacity == Long.MaxValue)
+  }
+
+  test("TargetWatchRequestRateLimitConfig.fromProto with empty proto uses DEFAULT values") {
+    // Test plan: Verify that fromProto uses DEFAULT values when the proto is empty.
+    val emptyProto = TargetWatchRequestRateLimitConfigP()
+    val config = TargetWatchRequestRateLimitConfig.fromProto(emptyProto)
+    assert(config == TargetWatchRequestRateLimitConfig.DEFAULT)
+  }
+
+  test("TargetWatchRequestRateLimitConfig toProto and fromProto round-trip") {
+    // Test plan: Verify that clientRequestsPerSecond survives round-trip through proto.
+    val config = TargetWatchRequestRateLimitConfig(clientRequestsPerSecond = 100L)
+    val proto = config.toProto
+    val roundTripped = TargetWatchRequestRateLimitConfig.fromProto(proto)
+    assert(roundTripped == config)
+  }
+
+  test("TargetWatchRequestRateLimitConfig.fromProto rejects negative clientRequestsPerSecond") {
+    // Test plan: Verify that fromProto rejects negative clientRequestsPerSecond values.
+    val protoRateNegative =
+      TargetWatchRequestRateLimitConfigP.of(clientRequestsPerSecond = Some(-1L))
+    assertThrow[IllegalArgumentException]("clientRequestsPerSecond must be >= 0") {
+      TargetWatchRequestRateLimitConfig.fromProto(protoRateNegative)
+    }
+  }
 
 }

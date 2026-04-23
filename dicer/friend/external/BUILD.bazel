@@ -1,0 +1,43 @@
+load("@rules_scala//scala:scala.bzl", "scala_library", "scala_test")
+
+scala_library(
+    name = "slice_key_accessor",
+    srcs = ["src/SliceKeyAccessor.scala"],
+    visibility = [
+        "//caching:all_caching",
+        "//dicer:internal",
+    ],
+    deps = [
+        "//dicer/external:external_common",
+        "//wrappers/rpc:rich_scalapb",
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_guava_guava",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
+    ],
+)
+
+scala_test(
+    name = "slice_key_accessor_suite",
+    srcs = ["test/SliceKeyAccessorSuite.scala"],
+    data = ["//dicer/common/test/data"],
+    timeout = "short",
+    deps = [
+        ":slice_key_accessor",
+        "//caching/util:test_util",
+        "//dicer/common/test/proto:test_data_proto_scala_lib",
+        "//dicer/common:test_common",
+        "//dicer/external:external_common",
+        "//wrappers/rpc:rich_scalapb",
+        "//wrappers/util:async_test_helpers",
+        "//wrappers/util:databricks-test",
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_guava_guava",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
+    ],
+)

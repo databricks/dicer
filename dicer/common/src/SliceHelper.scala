@@ -13,10 +13,10 @@ object SliceHelper {
    */
   @throws[IllegalArgumentException]
   def fromProto(proto: SliceP): Slice = {
-    val lowInclusive = SliceKey.withIdentityFunction(proto.getLowInclusive)
+    val lowInclusive = SliceKey.fromRawBytes(proto.getLowInclusive)
     proto.highExclusive match {
       case Some(highExclusiveBytes) =>
-        val highExclusive = SliceKey.withIdentityFunction(highExclusiveBytes)
+        val highExclusive = SliceKey.fromRawBytes(highExclusiveBytes)
         Slice(lowInclusive, highExclusive)
       case None =>
         // Unset `high_exclusive` proto field represents "Infinity".

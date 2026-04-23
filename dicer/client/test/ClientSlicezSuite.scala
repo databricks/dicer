@@ -1,11 +1,8 @@
 package com.databricks.dicer.client
 
 import java.net.URI
-import java.time.Instant
 
-import scala.collection.mutable.ArrayBuffer
-import scala.concurrent.duration.Duration
-import scala.concurrent.{Future}
+import scala.concurrent.Future
 import scala.concurrent.duration._
 
 import org.apache.commons.text.StringEscapeUtils
@@ -14,57 +11,21 @@ import com.databricks.caching.util.AssertionWaiter
 import com.databricks.caching.util.SequentialExecutionContext
 import com.databricks.caching.util.TestUtils
 import com.databricks.caching.util.TestUtils.TestName
-import com.databricks.dicer.assigner.config.InternalTargetConfig.KeyReplicationConfig
-import com.databricks.dicer.assigner.algorithm.{Algorithm, Resources}
+import com.databricks.dicer.client.ClientSlicezTestHelper._
 import com.databricks.dicer.common.TestSliceUtils._
-import com.databricks.dicer.common.{
-  Assignment,
-  AssignmentConsistencyMode,
-  ClerkData,
-  ClientType,
-  Generation,
-  ProposedAssignment,
-  TestSliceUtils
-}
+import com.databricks.dicer.common.{Assignment, ClerkData, ClientType}
 import com.databricks.dicer.external.{Slice, Target}
 import com.databricks.testing.DatabricksTest
+import TestClientUtils.TEST_CLIENT_UUID
 
 class ClientSlicezSuite extends DatabricksTest with TestName {
 
-  private val TARGET: Target = Target("softstore-storelet")
-
-  private val SUBSCRIBER_DEBUG_NAMES: Array[String] =
-    Array("S0-softstore-storelet-localhost", "S1-softstore-storelet-localhost")
-
-  private val WATCH_ADDRESS: URI = URI.create("https://localhost:12345")
-
   private val sec = SequentialExecutionContext.createWithDedicatedPool("client-slicez-suite")
-
-  /** Create an assignment for tests. */
-  private def createAssignment: Assignment = {
-    val RESOURCES: Resources = createResources("resource0")
-    val proposedAsn1: ProposedAssignment = ProposedAssignment(
-      predecessorOpt = None,
-      Algorithm.generateInitialAssignment(
-        TARGET,
-        RESOURCES,
-        KeyReplicationConfig.DEFAULT_SINGLE_REPLICA
-      )
-    )
-
-    val generation: Generation = TestSliceUtils.createLooseGeneration(42)
-
-    proposedAsn1.commit(
-      isFrozen = false,
-      AssignmentConsistencyMode.Affinity,
-      generation
-    )
-  }
 
   test("Check ClientTargetSlicezData data table HTML contents") {
     // Test plan: Directly create ClientTargetSlicezData and use golden snippets to verify
     // elements are correctly rendered.
-    val assignment: Assignment = createAssignment
+    val assignment: Assignment = ClientSlicezTestHelper.createAssignment
     val unattributedLoadBySliceOpt: Option[Map[Slice, Double]] = Some(
       Map(
         ("" -- "Kili", 0.5),
@@ -72,37 +33,16 @@ class ClientSlicezSuite extends DatabricksTest with TestName {
       )
     )
 
-    val clientTargetSlicezData1: ClientTargetSlicezData = ClientTargetSlicezData(
-      target = TARGET,
-      sliceletsData = ArrayBuffer.empty,
-      clerksData = ArrayBuffer.empty,
-      assignmentOpt = None,
-      reportedLoadPerResourceOpt = None,
-      reportedLoadPerSliceOpt = None,
-      topKeysOpt = None,
-      squidOpt = None,
-      unattributedLoadBySliceOpt = None,
-      subscriberDebugName = SUBSCRIBER_DEBUG_NAMES(0),
-      watchAddress = WATCH_ADDRESS,
-      watchAddressUsedSince = Instant.EPOCH,
-      lastSuccessfulHeartbeat = Instant.EPOCH
-    )
+    val clientTargetSlicezData1: ClientTargetSlicezData = createClientTargetSlicezData(TARGET)
 
-    val clientTargetSlicezData2: ClientTargetSlicezData = ClientTargetSlicezData(
-      target = TARGET,
-      sliceletsData = ArrayBuffer.empty,
-      clerksData = ArrayBuffer.empty,
-      assignmentOpt = Option(assignment),
-      reportedLoadPerResourceOpt = None,
-      reportedLoadPerSliceOpt = None,
-      topKeysOpt = None,
-      squidOpt = None,
-      unattributedLoadBySliceOpt,
-      subscriberDebugName = SUBSCRIBER_DEBUG_NAMES(1),
-      watchAddress = WATCH_ADDRESS,
-      watchAddressUsedSince = Instant.EPOCH,
-      lastSuccessfulHeartbeat = Instant.EPOCH
-    )
+    val clientTargetSlicezData2: ClientTargetSlicezData =
+      createClientTargetSlicezData(
+        TARGET,
+        clientClusterOpt = None,
+        subscriberDebugName = SUBSCRIBER_DEBUG_NAMES(1),
+        assignmentOpt = Option(assignment),
+        unattributedLoadBySliceOpt = unattributedLoadBySliceOpt
+      )
 
     val clientTableHtml1: String = clientTargetSlicezData1.getHtml.render
     val clientTableHtml2: String = clientTargetSlicezData2.getHtml.render
@@ -153,21 +93,11 @@ class ClientSlicezSuite extends DatabricksTest with TestName {
     // Calculate expected escaped contents using `StringEscapeUtils.escapeHtml4`.
     val nonsenseNameEscaped = StringEscapeUtils.escapeHtml4(nonsenseName)
 
-    val clientTargetSlicezData: ClientTargetSlicezData = ClientTargetSlicezData(
-      target = Target("target-with-nonsense-debug-name"),
-      sliceletsData = ArrayBuffer.empty,
-      clerksData = ArrayBuffer.empty,
-      assignmentOpt = None,
-      reportedLoadPerResourceOpt = None,
-      reportedLoadPerSliceOpt = None,
-      topKeysOpt = None,
-      squidOpt = None,
-      unattributedLoadBySliceOpt = None,
-      subscriberDebugName = nonsenseName,
-      watchAddress = WATCH_ADDRESS,
-      watchAddressUsedSince = Instant.EPOCH,
-      lastSuccessfulHeartbeat = Instant.EPOCH
-    )
+    val clientTargetSlicezData: ClientTargetSlicezData =
+      createClientTargetSlicezData(
+        Target("target-with-nonsense-debug-name"),
+        subscriberDebugName = nonsenseName
+      )
 
     val renderedData = clientTargetSlicezData.getHtml.render
 
@@ -184,25 +114,8 @@ class ClientSlicezSuite extends DatabricksTest with TestName {
 
     // Setup: Create a test implementation that always returns a dummy ClientTargetSlicezData.
     class TestExporter extends ClientTargetSlicezDataExporter {
-      override def getSlicezData: Future[ClientTargetSlicezData] = {
-        Future.successful(
-          ClientTargetSlicezData(
-            target = TARGET,
-            sliceletsData = ArrayBuffer.empty,
-            clerksData = ArrayBuffer.empty,
-            assignmentOpt = None,
-            reportedLoadPerResourceOpt = None,
-            reportedLoadPerSliceOpt = None,
-            topKeysOpt = None,
-            squidOpt = None,
-            unattributedLoadBySliceOpt = None,
-            subscriberDebugName = SUBSCRIBER_DEBUG_NAMES(0),
-            watchAddress = WATCH_ADDRESS,
-            watchAddressUsedSince = Instant.EPOCH,
-            lastSuccessfulHeartbeat = Instant.EPOCH
-          )
-        )
-      }
+      override def getSlicezData: Future[ClientTargetSlicezData] =
+        Future.successful(createClientTargetSlicezData(TARGET))
     }
 
     // Setup: Create two distinct instances with identical data, and one alias to the first
@@ -239,6 +152,86 @@ class ClientSlicezSuite extends DatabricksTest with TestName {
     assert(exporter1.hashCode() != "string".hashCode())
   }
 
+  test("getHtml - same cluster shows no indicator in target cell") {
+    // Test plan: Verify that no connection type indicator appears in the Target column when the
+    // target and client are in the same cluster. Construct a ClientTargetSlicezData with a
+    // KubernetesTarget carrying a cluster URI and the same URI as the client cluster, render it,
+    // and verify the target cell contains only the bare target description.
+    val cluster: URI = URI.create("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01")
+    val target: Target = Target.createKubernetesTarget(cluster, "softstore-storelet")
+    val renderedHtml: String =
+      createClientTargetSlicezData(target, clientClusterOpt = Some(cluster)).getHtml.render
+
+    assert(renderedHtml.contains(s"<td>${target.toParseableDescription}</td>"))
+    assert(!renderedHtml.contains("[Cross-cluster]"))
+    assert(!renderedHtml.contains("[Cross-region]"))
+  }
+
+  test("getHtml - different cluster same region shows [Cross-cluster] in target cell") {
+    // Test plan: Verify that a bolded [Cross-cluster] indicator appears in the Target column when
+    // the target and client are in different clusters within the same region. Construct a
+    // ClientTargetSlicezData with a KubernetesTarget in gc/01 and gc/02 as the client cluster
+    // (same region, different cluster code), render it, and verify the target cell contains the
+    // target description followed by a bold [Cross-cluster] tag.
+    val targetCluster: URI = URI.create("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01")
+    val clientCluster: URI = URI.create("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/02")
+    val target: Target = Target.createKubernetesTarget(targetCluster, "softstore-storelet")
+    val renderedHtml: String =
+      createClientTargetSlicezData(target, clientClusterOpt = Some(clientCluster)).getHtml.render
+
+    assert(
+      renderedHtml
+        .contains(s"<td>${target.toParseableDescription} <strong>[Cross-cluster]</strong></td>")
+    )
+    assert(!renderedHtml.contains("[Cross-region]"))
+  }
+
+  test("getHtml - different region shows [Cross-region] in target cell") {
+    // Test plan: Verify that a bolded [Cross-region] indicator appears in the Target column when
+    // the target and client are in different regions. Construct a ClientTargetSlicezData with a
+    // KubernetesTarget in region1 and region8 as the client cluster, render it, and verify
+    // the target cell contains the target description followed by a bold [Cross-region] tag.
+    val targetCluster: URI = URI.create("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01")
+    val clientCluster: URI = URI.create("kubernetes-cluster:test-env/cloud1/public/region8/clustertype2/01")
+    val target: Target = Target.createKubernetesTarget(targetCluster, "softstore-storelet")
+    val renderedHtml: String =
+      createClientTargetSlicezData(target, clientClusterOpt = Some(clientCluster)).getHtml.render
+
+    assert(
+      renderedHtml
+        .contains(s"<td>${target.toParseableDescription} <strong>[Cross-region]</strong></td>")
+    )
+    assert(!renderedHtml.contains("[Cross-cluster]"))
+  }
+
+  test("getHtml - target with no cluster info shows no indicator in target cell") {
+    // Test plan: Verify that no indicator appears when the target has no cluster information
+    // (a KubernetesTarget created via Target.apply, which sets clusterOpt = None). The target
+    // cell should contain only the bare target description even when the client has cluster info.
+    val target: Target = Target("softstore-storelet")
+    val clientCluster: URI = URI.create("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01")
+    val renderedHtml: String =
+      createClientTargetSlicezData(target, clientClusterOpt = Some(clientCluster)).getHtml.render
+
+    assert(renderedHtml.contains(s"<td>${target.toParseableDescription}</td>"))
+    assert(!renderedHtml.contains("[Cross-cluster]"))
+    assert(!renderedHtml.contains("[Cross-region]"))
+  }
+
+  test("getHtml - client with no cluster info shows no indicator in target cell") {
+    // Test plan: Verify that no indicator appears when the client's cluster information is
+    // unavailable (clientClusterOpt = None). Even with a KubernetesTarget carrying a cluster URI,
+    // the target cell should contain only the bare target description.
+    val targetCluster: URI = URI.create("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01")
+    val target: Target = Target.createKubernetesTarget(targetCluster, "softstore-storelet")
+    val renderedHtml: String =
+      createClientTargetSlicezData(target, clientClusterOpt = None).getHtml.render
+
+    assert(renderedHtml.contains(s"<td>${target.toParseableDescription}</td>"))
+    assert(!renderedHtml.contains("[Cross-cluster]"))
+    assert(!renderedHtml.contains("[Cross-region]"))
+  }
+
   test("ClientSlicez register and unregister") {
     // Test plan: Verify that ClientSlicez correctly handles exporter registration and
     // unregistration by checking that `ClientSlicez.getData` includes the subscriberDebugName when
@@ -250,24 +243,26 @@ class ClientSlicezSuite extends DatabricksTest with TestName {
     // Setup: Create an exporter (SliceLookup) with the `subscriberDebugName`.
     val config: InternalClientConfig =
       InternalClientConfig(
-        ClientType.Clerk,
-        watchAddress = WATCH_ADDRESS,
-        tlsOptionsOpt = None,
-        TARGET,
-        watchStubCacheTime = 20.seconds,
-        watchFromDataPlane = false,
-        enableRateLimiting = false
+        SliceLookupConfig(
+          ClientType.Clerk,
+          watchAddress = WATCH_ADDRESS,
+          tlsOptionsOpt = None,
+          TARGET,
+          clientIdOpt = Some(TEST_CLIENT_UUID),
+          watchStubCacheTime = 20.seconds,
+          watchFromDataPlane = false,
+          enableRateLimiting = false
+        )
       )
     val protoLogger: DicerClientProtoLogger = DicerClientProtoLogger.create(
-      conf = DicerClientProtoLoggerConf,
-      ClientType.Clerk,
-      subscriberDebugName,
-      sec
+      clientType = ClientType.Clerk,
+      conf = TestClientUtils.createTestProtoLoggerConf(sampleFraction = 0.0),
+      ownerName = subscriberDebugName
     )
     val exporter: SliceLookup =
       SliceLookup.createUnstarted(
         sec,
-        config,
+        config.sliceLookupConfig,
         subscriberDebugName,
         protoLogger,
         serviceBuilderOpt = None

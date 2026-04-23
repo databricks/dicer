@@ -1,0 +1,135 @@
+load("@contrib_rules_jvm//java:defs.bzl", "java_junit5_test")
+load("@rules_java//java:java_library.bzl", "java_library")
+
+package(
+    default_visibility = ["//caching:all_caching"],
+)
+
+java_library(
+    name = "constants",
+    srcs = ["src/Constants.java"],
+)
+
+java_library(
+    name = "jfake_typed_clock",
+    srcs = ["testing/src/main/java/com/databricks/caching/util/javaapi/JFakeTypedClock.java"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":constants",
+        "//caching/util:fake_typed_clock",
+        "@maven//:org_scala_lang_modules_scala_java8_compat_2_12",
+        "@maven//:org_scala_lang_scala_library",
+    ],
+)
+
+java_library(
+    name = "metric_utils",
+    srcs = ["testing/src/MetricUtils.java"],
+    testonly = True,
+    deps = ["@maven//:io_prometheus_simpleclient"],
+)
+
+java_library(
+    name = "test_utils",
+    srcs = ["src/TestUtils.java"],
+    testonly = True,
+    deps = [
+        "//caching/util:test_util",
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_guava_guava",
+        "@maven//:org_assertj_assertj_core",
+        "@maven//:org_scala_lang_modules_scala_collection_compat_2_12",
+        "@maven//:org_scala_lang_scala_library",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
+    ],
+)
+
+java_junit5_test(
+    name = "constants_test",
+    srcs = ["test/ConstantsTest.java"],
+    runtime_deps = [
+        "@contrib_rules_jvm_deps//:org_junit_jupiter_junit_jupiter_engine",
+        "@contrib_rules_jvm_deps//:org_junit_platform_junit_platform_launcher",
+        "@contrib_rules_jvm_deps//:org_junit_platform_junit_platform_reporting",
+    ],
+    size = "small",
+    test_class = "com.databricks.caching.util.javaapi.ConstantsTest",
+    testonly = True,
+    timeout = "short",
+    deps = [
+        ":constants",
+        "//caching/util/javaapi:test_utils",
+        "@contrib_rules_jvm_deps//:org_junit_jupiter_junit_jupiter_api",
+        "@maven//:org_assertj_assertj_core",
+        "@maven//:org_scala_lang_modules_scala_java8_compat_2_12",
+    ],
+)
+
+java_junit5_test(
+    name = "jfake_typed_clock_test",
+    srcs = ["testing/src/test/java/com/databricks/caching/util/javaapi/JFakeTypedClockTest.java"],
+    runtime_deps = [
+        "@contrib_rules_jvm_deps//:org_junit_jupiter_junit_jupiter_engine",
+        "@contrib_rules_jvm_deps//:org_junit_platform_junit_platform_launcher",
+        "@contrib_rules_jvm_deps//:org_junit_platform_junit_platform_reporting",
+    ],
+    size = "small",
+    test_class = "com.databricks.caching.util.javaapi.JFakeTypedClockTest",
+    testonly = True,
+    timeout = "short",
+    deps = [
+        ":jfake_typed_clock",
+        "//caching/util/javaapi:test_utils",
+        "//caching/util:fake_typed_clock",
+        "//wrappers/java:databricks_java_test",
+        "@contrib_rules_jvm_deps//:org_junit_jupiter_junit_jupiter_api",
+        "@maven//:org_assertj_assertj_core",
+    ],
+)
+
+java_junit5_test(
+    name = "metric_utils_test",
+    srcs = ["testing/test/MetricUtilsTest.java"],
+    runtime_deps = [
+        "@contrib_rules_jvm_deps//:org_junit_jupiter_junit_jupiter_engine",
+        "@contrib_rules_jvm_deps//:org_junit_platform_junit_platform_launcher",
+        "@contrib_rules_jvm_deps//:org_junit_platform_junit_platform_reporting",
+    ],
+    size = "small",
+    test_class = "com.databricks.caching.util.javaapi.MetricUtilsTest",
+    deps = [
+        ":metric_utils",
+        "//wrappers/java:databricks_java_test",
+        "@contrib_rules_jvm_deps//:org_junit_jupiter_junit_jupiter_api",
+        "@maven//:io_prometheus_simpleclient",
+        "@maven//:org_assertj_assertj_core",
+    ],
+)
+
+java_junit5_test(
+    name = "test_utils_test",
+    srcs = ["test/TestUtilsTest.java"],
+    data = [":test_data"],
+    runtime_deps = [
+        "@contrib_rules_jvm_deps//:org_junit_jupiter_junit_jupiter_engine",
+        "@contrib_rules_jvm_deps//:org_junit_platform_junit_platform_launcher",
+        "@contrib_rules_jvm_deps//:org_junit_platform_junit_platform_reporting",
+    ],
+    size = "small",
+    test_class = "com.databricks.caching.util.javaapi.TestUtilsTest",
+    deps = [
+        ":test_utils",
+        "//caching/util/javaapi/test/proto:test_message_proto_java_lib",
+        "@com_google_protobuf_protobuf_java",
+        "@contrib_rules_jvm_deps//:org_junit_jupiter_junit_jupiter_api",
+        "@maven//:org_assertj_assertj_core",
+    ],
+)
+
+filegroup(
+    name = "test_data",
+    srcs = glob(["test/data/*.textproto"]),
+)

@@ -4,6 +4,7 @@ import java.io.File
 
 import com.databricks.caching.util.ConfigScope
 import com.databricks.dicer.assigner.config.TargetConfigReader.readScopeConfigMapFromDirectories
+import com.databricks.dicer.common.TargetName
 
 /**
  * The abstraction that tracks the configuration for each sharded target.
@@ -12,9 +13,14 @@ private[dicer] trait InternalTargetConfigMap {
   // The scope of the configs used by the map (for debugging purposes).
   val configScopeOpt: Option[ConfigScope]
 
-  // Map from target name to its config.
-  // TODO (<internal bug>): The configMap should not be exposed directly.
-  val configMap: Map[TargetName, InternalTargetConfig]
+  /** Returns the number of targets in this config map. */
+  def size: Int
+
+  /** Returns the set of target names in this config map. */
+  def targetNames: Set[TargetName]
+
+  /** Returns an iterator over all (targetName, config) entries in this map. */
+  def iterator: Iterator[(TargetName, InternalTargetConfig)]
 
   /** Returns the config for the given target name, if it exists. */
   def get(targetName: TargetName): Option[InternalTargetConfig]
@@ -31,8 +37,14 @@ object InternalTargetConfigMap {
    */
   private final class InternalTargetConfigMapImpl(
       val configScopeOpt: Option[ConfigScope],
-      val configMap: Map[TargetName, InternalTargetConfig])
+      private val configMap: Map[TargetName, InternalTargetConfig])
       extends InternalTargetConfigMap {
+
+    override def size: Int = configMap.size
+
+    override def targetNames: Set[TargetName] = configMap.keySet
+
+    override def iterator: Iterator[(TargetName, InternalTargetConfig)] = configMap.iterator
 
     override def get(targetName: TargetName): Option[InternalTargetConfig] =
       configMap.get(targetName)

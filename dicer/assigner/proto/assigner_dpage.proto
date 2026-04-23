@@ -1,0 +1,90 @@
+syntax = "proto2";
+
+package dicer;
+
+import "dicer/common/proto/dpage.proto";
+import "scalapb.proto";
+
+// "View proto" definitions for the Assigner DPages.
+// These protos, serialized as JSON, define the interface between the Assigner DAction
+// and React DView components.
+//
+// We use separate view protos to decouple DPages from the internal details of the
+// Assigner proto definitions. This allows us to evolve the Assigner proto
+// definitions without breaking the views on the DPages.
+
+option java_package = "com.databricks.api.proto.dicer.assigner";
+option java_generate_equals_and_hash = true;
+option java_outer_classname = "AssignerDpageProto";
+option java_multiple_files = true;
+option (scalapb.options) = {
+  package_name: "com.databricks.api.proto.dicer.assigner",
+  flat_package: true,
+};
+
+// View data for the Assigner's identity in DPage output.
+message AssignerInfoViewP {
+  // UUID of this Assigner instance.
+  optional string uuid = 1;
+  // URI at which this Assigner instance is reachable.
+  optional string uri = 2;
+}
+
+// View data for the preferred assigner state in DPage output.
+message PreferredAssignerStateViewP {
+  // Human-readable role of this assigner (e.g. "Preferred assigner", "Standby").
+  optional string role = 1;
+  // Human-readable description of what this assigner is currently doing.
+  optional string action = 2;
+  // Structured generation of the preferred assigner state.
+  optional GenerationViewP generation = 3;
+  // UUID of the current preferred assigner, "Self" when this assigner is preferred,
+  // or "N/A" when no preferred assigner exists.
+  optional string pa_uuid = 4;
+}
+
+// View data for assignment churn statistics in DPage output.
+message ChurnViewP {
+  // Whether the assignment change resulted in any resource-to-slice mapping changes.
+  optional bool meaningful_assignment_change = 2;
+  // Fraction of total load that moved due to load balancing.
+  optional double load_balancing_churn_ratio = 3;
+  // Fraction of total load that moved due to resources being added.
+  optional double addition_churn_ratio = 4;
+  // Fraction of total load that moved due to resources being removed.
+  optional double removal_churn_ratio = 5;
+}
+
+// View data for a target's active configuration in DPage output.
+message TargetConfigViewP {
+  // How this target's config was specified (e.g. "Static", "Dynamic").
+  optional string config_method = 1;
+  // Proto text-format representation of the full NamedInternalTargetConfig.
+  optional string config = 2;
+}
+
+// View data for a single Assigner-managed target in DPage output.
+message AssignerTargetViewP {
+  // Parseable description of the target (e.g. "softstore-storelet").
+  optional string target = 1;
+  // Slicelet subscribers currently registered with this target.
+  repeated SliceletViewP slicelets = 2;
+  // Clerk subscribers currently registered with this target.
+  repeated ClerkViewP clerks = 3;
+  // Current assignment for this target; absent when no assignment has been computed.
+  optional AssignmentViewP assignment = 4;
+  // Churn statistics from the most recent assignment change; absent when no change has occurred.
+  optional ChurnViewP churn = 5;
+  // Active configuration for this target.
+  optional TargetConfigViewP config = 6;
+}
+
+// Top-level response for the Assigner DPage endpoint.
+message AssignerSliceViewP {
+  // Identity of this Assigner instance.
+  optional AssignerInfoViewP assigner_info = 1;
+  // Current preferred assigner state as seen by this Assigner.
+  optional PreferredAssignerStateViewP preferred_assigner_state = 2;
+  // Per-target assignment state for all targets managed by this Assigner.
+  repeated AssignerTargetViewP targets = 3;
+}

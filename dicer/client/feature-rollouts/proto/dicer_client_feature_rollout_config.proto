@@ -1,0 +1,124 @@
+syntax = "proto2";
+
+package dicer;
+
+import "scalapb.proto";
+
+option java_package = "com.databricks.api.proto.dicer.client.featurerollouts";
+option java_generate_equals_and_hash = true;
+option java_outer_classname = "DicerClientFeatureRolloutConfigProto";
+option java_multiple_files = true;
+option (scalapb.options) = {
+  package_name: "com.databricks.api.proto.dicer.client.featurerollouts",
+  flat_package: true,
+};
+
+// The configuration controlling the rollout of a certain Dicer client feature across all regions
+// and all target names. See `dicer/client/feature-rollouts/dev/example-feature.textproto`
+// for a usage example.
+//
+// To add a new feature rollout:
+// 1. Add the configuration files for the feature in
+//    `dicer/client/feature-rollouts/{dev/staging/prod}/` directories and add the rollout
+//    rules as desired.
+// 2. Call the feature flag function in production code:
+//    // TODO(<internal bug>): API will be introduced in a follow-up PR.
+//    if (DicerClientFeatureRolloutFlag.isEnabled("example-feature", target)) {
+//      // Use the feature.
+//    }
+//
+// The .textproto file name serves as the unique feature name used by DicerClientFeatureRolloutFlag
+// to look up rollout rules. Each feature name in `dicer/client/feature-rollouts/{dev/staging/prod}`
+// must be unique; otherwise the build will fail.
+//
+// Next ID: 3.
+message DicerClientFeatureRolloutConfigP {
+
+  // OPTIONAL: The default rollout rule for regions not covered by any entry in `override_rules`.
+  // When absent, the feature is disabled for all uncovered regions (equivalent to
+  // target_instance_enable_fraction = 0.0 with empty force lists).
+  optional DicerClientFeatureRolloutRuleP default_rule = 1;
+
+  // PRECONDITION: A given `region_uri` can appear at most once across all `override_scopes`
+  // in all entries of `override_rules`.
+  //
+  // Overrides for specific regions. A `DicerClientFeatureRolloutScopeP` override may be referenced
+  // at most once in this collection.
+  repeated DicerClientFeatureRolloutRuleOverrideP override_rules = 2;
+}
+
+// The rollout rule defining which target instances a Dicer client feature is enabled for, and at
+// what fraction. Used in DicerClientFeatureRolloutConfigP.default_rule and in each
+// DicerClientFeatureRolloutRuleOverrideP.override_config.
+//
+// Next ID: 4.
+message DicerClientFeatureRolloutRuleP {
+
+  // PRECONDITION: Must not overlap with `force_disable_target_names`.
+  //
+  // Target NAMES for which the feature is unconditionally enabled, regardless of the rollout
+  // fraction. All targets whose name is listed here, regardless of its kubernetes cluster URI
+  // or app instance ID, will have the feature enabled.
+  repeated string force_enable_target_names = 1;
+
+  // PRECONDITION: Must not overlap with `force_enable_target_names`.
+  //
+  // Target NAMES for which the feature is unconditionally disabled, regardless of the rollout
+  // fraction. All targets whose name is listed here, regardless of its kubernetes cluster URI
+  // or app instance ID, will have the feature disabled.
+  repeated string force_disable_target_names = 2;
+
+  // Fraction of target INSTANCES for which the feature is enabled, in the range [0.0, 1.0]. Note
+  // this should be a double within [0.0, 1.0] rather than an integer within [0, 100].
+  //
+  // The fraction is applied to target instances whose names are NOT included in
+  // `force_enable_target_names` or `force_disable_target_names`. For example, if there are 100
+  // target instances in total, 10 whose names are in `force_enable_target_names` and 20 whose
+  // names are in `force_disable_target_names`, and `target_instance_enable_fraction` is set to
+  // 0.5, then roughly (100 - 10 - 20) * 50% = 35 target instances will have the feature enabled.
+  //
+  // The selection of target instances is deterministic and consistent across process restarts and
+  // redeployments.
+  //
+  // This field must always be set. To disable percentage-based rollout, set this field to 0.0.
+  optional double target_instance_enable_fraction = 3;
+}
+
+// Override of a Dicer client feature rollout rule that applies to specific regions.
+//
+// Next ID: 3.
+message DicerClientFeatureRolloutRuleOverrideP {
+
+  // PRECONDITION: Must be non-empty.
+  //
+  // A list of regions to which this override applies. A specific config scope may be referenced at
+  // most once in the `override_scopes` here, as well as in the parent
+  // `DicerClientFeatureRolloutConfigP.override_rules` collection.
+  //
+  // IMPORTANT: The override is applied to Slicelets or Clerks that are *RUNNING* in the regions
+  // specified by the override scopes, not to the Slicelets or Clerks whose target cluster URI is
+  // within the override scopes. This matters for Clerks watching Slicelets across regions.
+  repeated DicerClientFeatureRolloutScopeP override_scopes = 1;
+
+  // The rule that is applied to the `override_scopes`, overriding the default rule in
+  // `DicerClientFeatureRolloutConfigP`.
+  optional DicerClientFeatureRolloutRuleP override_config = 2;
+}
+
+// The config scope specifying a region to which a DicerClientFeatureRolloutRuleOverrideP applies. The
+// only supported override level is region-level, indicated by region URIs. This wrapper exists for
+// semantic clarity and to allow future extension beyond region-level scoping.
+//
+// Next ID: 2.
+message DicerClientFeatureRolloutScopeP {
+
+  // PRECONDITION: Must be a valid region URI format, for example: region:prod/cloud1/public/region2.
+  // See the format requirement for "Region" in <internal link>.
+  //
+  // The URI of the region that this config override applies to. Note that only region-level
+  // override is supported, while cluster-level override is unsupported. This is because we have
+  // Slicelets running in different clusters forming the same target instance, and we prevent the
+  // Slicelets for the same target to have different feature rollout values by preventing the
+  // cluster-level override.
+  optional string region_uri = 1;
+}

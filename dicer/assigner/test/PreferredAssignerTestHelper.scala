@@ -9,7 +9,6 @@ import com.databricks.caching.util.{
   ValueStreamCallback,
   TestUtils
 }
-import com.databricks.api.proto.dicer.common.ClientRequestP.SliceletDataP
 import scala.concurrent.duration._
 
 import com.databricks.conf.Configs
@@ -28,6 +27,7 @@ import com.databricks.dicer.common.{
   InternalDicerTestEnvironment,
   Redirect,
   SliceletData,
+  SliceletState,
   TestAssigner
 }
 import com.databricks.dicer.external.{Clerk, ResourceAddress, Slicelet, Target}
@@ -42,6 +42,17 @@ import scala.util.Random
 import com.databricks.caching.util.TestUtils
 
 object PreferredAssignerTestHelper {
+
+  /**
+   * A [[KubernetesMembershipChecker.Factory]] for tests that always returns [[None]],
+   * disabling K8s pod membership checking.
+   */
+  val noOpMembershipCheckerFactory: KubernetesMembershipChecker.Factory =
+    new KubernetesMembershipChecker.Factory {
+      override def create(
+          assignerInfo: AssignerInfo,
+          assignerProtoLogger: AssignerProtoLogger): Option[KubernetesMembershipChecker] = None
+    }
 
   /** The RPC context used in watch requests. */
   private val CTX: RPCContext = JettyTestRPCContext
@@ -224,7 +235,7 @@ object PreferredAssignerTestHelper {
       WATCH_RPC_TIMEOUT,
       SliceletData(
         squid,
-        SliceletDataP.State.RUNNING,
+        SliceletState.Running,
         "localhostNamespace",
         attributedLoads = Vector.empty,
         unattributedLoadOpt = None

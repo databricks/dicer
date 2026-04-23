@@ -73,9 +73,9 @@ class MutableSliceMapSuite extends DatabricksTest {
     val sortedKeys = TreeMultimap.create[HighSliceKey, Integer]()
 
     for ((slice, j) <- slices.zipWithIndex) {
-      val value = j + 1
+      val value: Int = j + 1
       // Update `map` as well as `sortedKeys`.
-      map.merge(slice, value, (oldVal, newVal) => {
+      map.merge(slice, value, (oldVal: Int, newVal: Int) => {
         assert(newVal == value)
         oldVal + value
       })
@@ -86,8 +86,9 @@ class MutableSliceMapSuite extends DatabricksTest {
     // Go through `sortedKeys`, keeping track of the current counter value and putting each range
     // into a TreeRangeMap.
     val reference = TreeRangeMap.create[SliceKey, Int]()
-    var counter = 0
-    val iterator = sortedKeys.asMap().entrySet().iterator().asScala
+    var counter: Int = 0
+    val iterator: Iterator[util.Map.Entry[HighSliceKey, util.Collection[Integer]]] =
+      sortedKeys.asMap().entrySet().iterator().asScala
     val sortedEntries: Iterator[(HighSliceKey, util.Collection[Integer])] =
       iterator.map(entry => (entry.getKey, entry.getValue))
     // Iterate through previous and current elements from `sortedEntries`.
@@ -121,25 +122,25 @@ class MutableSliceMapSuite extends DatabricksTest {
     val map = new MutableSliceMap[String]
     val slice = Slice(identityKey("a"), identityKey("b"))
     map.put(slice, "foo")
-    map.merge(slice, "bar", (oldVal, newVal) => null)
+    map.merge(slice, "bar", (oldVal: String, newVal: String) => null)
     assert(map.lookUp("a").isEmpty)
   }
 
   test("Put randomized") {
     // Test plan: Pick random slice boundaries and values to put into the map. Make corresponding
     // puts to a Guava RangeMap, and periodically validate that both maps contain the same entries.
-    val numIterations = 10
+    val numIterations: Int = 10
     val rng = new Random
     for (_ <- 0 until numIterations) {
-      val numSlices = 200
+      val numSlices: Int = 200
       // Restrict the possible values so that there is more chance of coalescing.
-      val maxValue = 10
-      val slices = createRandomSlices(rng, numSlices, None)
+      val maxValue: Int = 10
+      val slices: Seq[Slice] = createRandomSlices(rng, numSlices, None)
       val map = new MutableSliceMap[Int]
       val reference = TreeRangeMap.create[SliceKey, Int]()
 
       for (slice <- slices) {
-        val value = rng.nextInt(maxValue)
+        val value: Int = rng.nextInt(maxValue)
         map.put(slice, value)
         reference.putCoalescing(rangeFromSlice(slice), value)
         assertEqual(map, reference)
@@ -151,11 +152,11 @@ class MutableSliceMapSuite extends DatabricksTest {
     // Test plan: Pick random slice boundaries and incrementing values to merge into the map.
     // Specify a combiner that sums the values. Keep a sorted map of the start and end keys of each
     // slice, and put each successive range into a RangeMap to validate the entries in the map.
-    val numIterations = 10
+    val numIterations: Int = 10
     val rng = new Random
     for (_ <- 0 until numIterations) {
-      val numSlices = 200
-      val slices = createRandomSlices(rng, numSlices, None)
+      val numSlices: Int = 200
+      val slices: Seq[Slice] = createRandomSlices(rng, numSlices, None)
       testMerge(slices)
     }
   }
@@ -163,12 +164,12 @@ class MutableSliceMapSuite extends DatabricksTest {
   test("Merge randomized with colliding keys") {
     // Test plan: Same as "Merge randomized", but limit keys to 300 distinct values so that there
     // is a very high probability of some collisions.
-    val numIterations = 10
-    val maxKey = 300
+    val numIterations: Int = 10
+    val maxKey: Int = 300
     val rng = new Random
     for (_ <- 0 until numIterations) {
-      val numSlices = 200
-      val slices = createRandomSlices(rng, numSlices, Some(maxKey))
+      val numSlices: Int = 200
+      val slices: Seq[Slice] = createRandomSlices(rng, numSlices, Some(maxKey))
       testMerge(slices)
     }
   }
@@ -176,16 +177,16 @@ class MutableSliceMapSuite extends DatabricksTest {
   test("clear") {
     // Test plan: Pick random slice boundaries and values to put into the map. Call the map's clear
     // method, and validate that the map contains no entries.
-    val numIterations = 10
+    val numIterations: Int = 10
     val rng = new Random
     for (_ <- 0 until numIterations) {
-      val numSlices = 200
-      val maxValue = 10
-      val slices = createRandomSlices(rng, numSlices, None)
+      val numSlices: Int = 200
+      val maxValue: Int = 10
+      val slices: Seq[Slice] = createRandomSlices(rng, numSlices, None)
       val map = new MutableSliceMap[Int]
 
       for (slice <- slices) {
-        val value = rng.nextInt(maxValue)
+        val value: Int = rng.nextInt(maxValue)
         map.put(slice, value)
       }
       assert(map.iterator.nonEmpty)

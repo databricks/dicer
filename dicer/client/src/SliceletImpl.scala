@@ -11,12 +11,15 @@ import scala.util.matching.Regex
 
 import io.grpc.Status
 
+import com.databricks.dicer.common.ClientType
+
 import com.databricks.api.proto.dicer.common.ClientRequestP.SliceletDataP
 import com.databricks.caching.util.InstantiationTracker.{
   PerProcessSingleton,
   PerProcessSingletonType
 }
 import com.databricks.caching.util.{
+  AlertOwnerTeam,
   Cancellable,
   GenericRpcServiceBuilder,
   InstantiationTracker,
@@ -38,6 +41,7 @@ import com.databricks.dicer.common.{
   Generation,
   SliceSetImpl,
   SliceletData,
+  SliceletState,
   SubsliceAnnotationsMap,
   Version,
   WatchServerHelper
@@ -70,6 +74,8 @@ private[dicer] class SliceletImpl private (
     private[client] val metrics: SliceletMetrics,
     private[client] val loadAccumulator: SliceletLoadAccumulator,
     lookup: SliceletSliceLookup) {
+
+  private val sliceLookupConfig: SliceLookupConfig = config.sliceLookupConfig
 
   private val logger = PrefixLogger.create(getClass, subscriberDebugName)
 
@@ -115,7 +121,7 @@ private[dicer] class SliceletImpl private (
   def squid: Squid = lookup.squidOrThrowIfUnstarted()
 
   /** The sharded target. */
-  def target: Target = config.target
+  def target: Target = sliceLookupConfig.target
 
   /** See `Slicelet.start()`. */
   def start(selfPort: Int, listenerOpt: Option[SliceletListener]): Unit = {
@@ -167,7 +173,7 @@ private[dicer] class SliceletImpl private (
     lookup.start(sliceletUuid, resourceAddress)
     logger.info(
       s"Started Slicelet ($sliceletUuid) with address = $resourceAddress communicating with " +
-      s"${config.watchAddress}. Watch requests handled on port ${server.activePort()}."
+      s"${sliceLookupConfig.watchAddress}. Watch requests handled on port ${server.activePort()}."
     )
   }
 
@@ -339,7 +345,7 @@ private[dicer] object SliceletImpl {
       sliceletConf: SliceletConf,
       target: Target,
       readinessProvider: BlockingReadinessProvider): SliceletImpl = {
-    if (!sliceletConf.allowMultipleClientInstances) {
+    if (!sliceletConf.allowMultipleSliceletInstances) {
       instantiationTracker.enforceAndRecord(PerProcessSingleton)
     }
 
@@ -353,6 +359,8 @@ private[dicer] object SliceletImpl {
         )
     }
 
+    // TODO(<internal bug>): Replace sliceletUuidOpt with clientUuidOpt. Verify both config keys resolve
+    //               to the same value in all deployed environments before migration.
     val uuid: UUID = sliceletConf.sliceletUuidOpt match {
       case Some(sliceletUuid: String) if sliceletUuid.nonEmpty => UUID.fromString(sliceletUuid)
       case _ =>
@@ -373,32 +381,27 @@ private[dicer] object SliceletImpl {
         )
     }
 
-    val config = InternalClientConfig(
+    val sliceLookupConfig: SliceLookupConfig = SliceLookupConfig(
       ClientType.Slicelet,
       assignerWatchAddress,
       sliceletConf.getDicerClientTlsOptions,
       target,
-      sliceletConf.watchStubCacheTimeSeconds.seconds,
+      clientIdOpt = Some(uuid),
+      SliceLookupConfig.DEFAULT_WATCH_STUB_CACHE_TIME,
       sliceletConf.watchFromDataPlane,
-      enableRateLimiting = sliceletConf.enableSliceletRateLimiting
+      // TODO(<internal bug>): Use client side feature flag to gradually rollout rate limiting.
+      enableRateLimiting = false
     )
+    val config: InternalClientConfig = InternalClientConfig(sliceLookupConfig)
 
     // Create a service builder on which the SliceLookup can register a watch handler.
     val serviceBuilder: GenericRpcServiceBuilder = GenericRpcServiceBuilder.create()
 
-    // Create a dedicated SEC for the proto logger's async operations.
-    val protoLoggerSec: SequentialExecutionContext =
-      SequentialExecutionContext.createWithDedicatedPool(
-        s"SliceletProtoLogger-$sliceletDebugName",
-        enableContextPropagation = false
-      )
-
-    // Create the logger for assignment propagation latency events.
+    // Create the proto logger for assignment propagation latency events.
     val protoLogger: DicerClientProtoLogger = DicerClientProtoLogger.create(
-      conf = DicerClientProtoLoggerConf,
-      clientType = config.clientType,
-      subscriberDebugName = sliceletDebugName,
-      sec = protoLoggerSec
+      clientType = sliceLookupConfig.clientType,
+      conf = sliceletConf,
+      ownerName = sliceletDebugName
     )
 
     // The readiness provider runs on a separate thread from the main Slicelet thread because
@@ -422,7 +425,7 @@ private[dicer] object SliceletImpl {
     val lookup =
       new SliceletSliceLookup(
         sec,
-        config,
+        sliceLookupConfig,
         readinessPoller,
         serviceBuilder,
         loadAccumulator,
@@ -464,6 +467,24 @@ private[dicer] object SliceletImpl {
    * dependencies to [[SliceletImpl]] using [[SliceletImpl.create]].
    */
   def createForExternal(sliceletConf: SliceletConf, target: Target): SliceletImpl = {
+    createForExternalWithReadinessProvider(
+      sliceletConf,
+      target,
+      readinessProvider = RealBlockingReadinessProvider
+    )
+  }
+
+  /**
+   * Creates a [[SliceletImpl]] for the given `sliceletConf` and `target`. See the specs of the
+   * external [[Slicelet.apply]] for details on how these parameters are used to instantiate the
+   * Slicelet. This factory method also takes a `readinessProvider` as a parameter, which allows
+   * test code to inject a dependency while otherwise initializing the Slicelet as would be done
+   * in production code.
+   */
+  def createForExternalWithReadinessProvider(
+      sliceletConf: SliceletConf,
+      target: Target,
+      readinessProvider: BlockingReadinessProvider): SliceletImpl = {
     // This execution context does not propagate the context to the threads it creates to avoid
     // the overhead of unnecessarily copying the context to background threads.
     val sec = SequentialExecutionContext.createWithDedicatedPool(
@@ -474,11 +495,12 @@ private[dicer] object SliceletImpl {
     // different clusters or app instances.
     //
     // TODO(<internal bug>): We only include this information for data plane Slicelets of
-    // KubernetesTargets, since we do not want to put existing control plane Slicelets at risk of
-    // taking a WhereAmI dependency that they don't need today. However we should eventually include
-    // ClusterURI information everywhere once it is has matured, and take necessary steps to check
-    // its validity (that it does in fact align with the local Assigner's cluster URI) before
-    // including it in control plane Slicelet target identifiers.
+    // KubernetesTargets, since we need Slicelets from multiple clusters to be part of the same
+    // target for SMK migrations, and also because we do not want to put existing control plane
+    // Slicelets at risk of taking a WhereAmI dependency that they don't need today. However we
+    // should eventually include ClusterURI information everywhere once it is has matured, and take
+    // necessary steps to check its validity (that it does in fact align with the local Assigner's
+    // cluster URI) before including it in control plane Slicelet target identifiers.
     val fullyQualifiedTargetIfNeeded: Target =
       if (sliceletConf.watchFromDataPlane) {
         // The Slicelet is in the data plane watching the assigner in the general cluster.
@@ -528,7 +550,7 @@ private[dicer] object SliceletImpl {
       assignerURI,
       sliceletConf,
       fullyQualifiedTargetIfNeeded,
-      RealBlockingReadinessProvider
+      readinessProvider
     )
 
     // In production, make the transition to the terminating state automatically when the process
@@ -632,7 +654,7 @@ object SliceletAssignment {
  */
 private[client] final class SliceletSliceLookup(
     sec: SequentialExecutionContext,
-    config: InternalClientConfig,
+    config: SliceLookupConfig,
     readinessPoller: WatchValueCellPollAdapter[Boolean, Boolean],
     serviceBuilder: GenericRpcServiceBuilder,
     loadAccumulator: SliceletLoadAccumulator,
@@ -815,7 +837,7 @@ private[client] final class SliceletSliceLookup(
 
     SliceletData(
       squid,
-      stateP,
+      SliceletState.fromProto(stateP, config.target),
       kubernetesNamespace,
       attributedLoads,
       Some(unattributedLoad)
