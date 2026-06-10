@@ -6,7 +6,7 @@ import "scalapb.proto";
 
 option java_package = "com.databricks.api.proto.dicer.assigner.config";
 option java_generate_equals_and_hash = true;
-option java_outer_classname = "TargetMigrationConfigProto";
+
 option java_multiple_files = true;
 option (scalapb.options) = {
   package_name: "com.databricks.api.proto.dicer.assigner.config",
@@ -62,9 +62,13 @@ message TargetMigrationConfigP {
   enum TargetMigrationTypeP {
     TARGET_MIGRATION_TYPE_P_UNSPECIFIED = 0;
 
-    // Migrating targets from being handled by the Assigner in the General cluster to the 
+    // No-op migration type.
+    // An Assigner receiving a config with this type will not be migrating any targets.
+    NO_MIGRATION = 1;
+
+    // Migrating targets from being handled by the Assigner in the General cluster to the
     // Assigner in the SMK cluster.
-    GENERAL_TO_SMK = 1;
+    GENERAL_TO_SMK = 2;
   }
 
   // The type of migration being performed. Determines how SOURCE and DESTINATION are resolved.

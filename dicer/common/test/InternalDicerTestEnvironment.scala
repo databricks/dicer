@@ -31,7 +31,6 @@ import com.databricks.dicer.assigner.{
   TestableDicerAssignerConf
 }
 import com.databricks.dicer.client.{TestClientUtils, TlsFilePaths}
-import com.databricks.dicer.common.InternalDicerTestEnvironment.initializeEtcdNamespaces
 import com.databricks.dicer.common.SliceletData.SliceLoad
 import com.databricks.dicer.external.{
   Clerk,
@@ -50,8 +49,6 @@ import java.time.Instant
 import java.util.UUID
 
 import scala.concurrent.duration.Duration
-
-import com.databricks.dicer.assigner.conf.DicerAssignerConf
 
 /**
  * InternalDicerTestEnvironment encapsulates a full Dicer environment that can be used in tests
@@ -204,7 +201,7 @@ class InternalDicerTestEnvironment private (
 
     for (dockerizedEtcd: EtcdTestEnvironment <- dockerizedEtcdOpt) {
       dockerizedEtcd.deleteAll()
-      initializeEtcdNamespaces(dockerizedEtcd, assignerConf)
+      dockerizedEtcd.initializeStore(Assigner.getPreferredAssignerEtcdNamespace(assignerConf))
     }
   }
 
@@ -385,7 +382,8 @@ class InternalDicerTestEnvironment private (
       val previousPort: Int = assigners(index).localUri.getPort
       val newConfig = TestAssigner.Config.create(
         assigners(index).conf,
-        designatedDicerAssignerRpcPort = Some(previousPort)
+        designatedDicerAssignerRpcPort = Some(previousPort),
+        targetMigratorOpt = Some(assigners(index).targetMigrator)
       )
       restartAssignerInternal(index, newConfig)
     }
@@ -534,9 +532,9 @@ object InternalDicerTestEnvironment {
    * @param enableDynamicConfig Whether the test environment should have dynamic target config
    *                            enabled.
    * @param numAssigners The number of test Assigners to initially create in the test environment.
-   * @param allowEtcdMode Whether the test environment allows its test assigners to be in etcd store
-   *                      mode. When this is set to false, creating assigners in etcd mode in this
-   *                      test environment will fail and throw.
+   * @param allowEtcdMode Whether the test environment creates a dockerized etcd and threads it
+   *                      into its test assigners. The assigners only actually use etcd when
+   *                      `conf.preferredAssignerEnabled` is also true.
    * @param withDefaultTargetConfig Whether the test environment should have a default target config
    *                                for all targets. By default, this is set to true. This means
    *                                that, unlike in production, if a target does not have a config,
@@ -597,7 +595,7 @@ object InternalDicerTestEnvironment {
     val dockerizedEtcdOpt: Option[EtcdTestEnvironment] =
       if (allowEtcdMode) {
         val dockerizedEtcd = EtcdTestEnvironment.create()
-        initializeEtcdNamespaces(dockerizedEtcd, assignerConf)
+        dockerizedEtcd.initializeStore(Assigner.getPreferredAssignerEtcdNamespace(assignerConf))
         Some(dockerizedEtcd)
       } else {
         None
@@ -630,12 +628,6 @@ object InternalDicerTestEnvironment {
     ReadinessProbeTracker.updatePodStatusForTesting(ProbeStatuses.OK_STATUS)
 
     internalDicerTestEnvironment
-  }
-
-  /** Initializes all known EtcdClient namespaces in `etcd`. */
-  private def initializeEtcdNamespaces(etcd: EtcdTestEnvironment, conf: DicerAssignerConf): Unit = {
-    etcd.initializeStore(Assigner.getAssignmentsEtcdNamespace(conf))
-    etcd.initializeStore(Assigner.getPreferredAssignerEtcdNamespace(conf))
   }
 
   /** The address of the resource to which all unassigned keys are routed. */

@@ -1,9 +1,12 @@
 package com.databricks.dicer.common
 
 import com.databricks.api.proto.dicer.common.DiffAssignmentP
-import com.databricks.caching.util.TestUtils.{assertThrow, loadTestData}
+import com.databricks.caching.util.TestUtils.{
+  assertThrow,
+  getAllVariantsOfEnumLikeTrait,
+  loadTestData
+}
 import com.databricks.dicer.common.Assignment.DiffUnused
-import com.databricks.dicer.common.Assignment.DiffUnused.DiffUnused
 import com.databricks.dicer.common.TestSliceUtils._
 import com.databricks.dicer.external.SliceKey
 import com.databricks.dicer.friend.Squid
@@ -12,6 +15,7 @@ import com.databricks.dicer.common.test.AssignmentTestDataP
 import com.databricks.dicer.common.test.AssignmentTestDataP.DiffUnusedP.DIFF_UNUSED_P_UNSPECIFIED
 import com.databricks.dicer.common.test.AssignmentTestDataP.FromDiffFailureTestCaseP.ExpectedFailure
 import com.databricks.dicer.common.test.AssignmentTestDataP.{
+  AssignedResourcesTestCaseP,
   DiffUnusedP,
   FromDiffFailureTestCaseP,
   FromDiffWithLooseIncarnationDataP,
@@ -65,7 +69,7 @@ class AssignmentSuite extends DatabricksTest {
         assignment.toDiff(diffGeneration = Generation.EMPTY)
       val diffAssignmentP: DiffAssignmentP = diffAssignment.toProto
       val diffAssignmentFromProto = DiffAssignment.fromProto(diffAssignmentP)
-      val assignmentAfterRoundTrip: Either[Assignment, DiffUnused.DiffUnused] =
+      val assignmentAfterRoundTrip: Either[Assignment, DiffUnused] =
         Assignment.fromDiff(knownAssignmentOpt = None, diffAssignmentFromProto)
 
       assert(assignmentAfterRoundTrip == Left(assignment))
@@ -91,14 +95,14 @@ class AssignmentSuite extends DatabricksTest {
         // Test round-trip via diff.
         val diffAssignment: DiffAssignment =
           assignment.toDiff(diffGeneration = knownAssignment.generation)
-        val assignmentAfterDiffRoundTrip: Either[Assignment, DiffUnused.DiffUnused] =
+        val assignmentAfterDiffRoundTrip: Either[Assignment, DiffUnused] =
           Assignment.fromDiff(Some(knownAssignment), diffAssignment)
         assert(assignmentAfterDiffRoundTrip == Left(assignment))
 
         // Test round-trip via diff proto.
         val diffAssignmentP: DiffAssignmentP = diffAssignment.toProto
         val diffAssignmentFromProto = DiffAssignment.fromProto(diffAssignmentP)
-        val assignmentAfterProtoRoundTrip: Either[Assignment, DiffUnused.DiffUnused] =
+        val assignmentAfterProtoRoundTrip: Either[Assignment, DiffUnused] =
           Assignment.fromDiff(Some(knownAssignment), diffAssignmentFromProto)
         assert(assignmentAfterProtoRoundTrip == Left(assignment))
       } else {
@@ -106,7 +110,7 @@ class AssignmentSuite extends DatabricksTest {
         // assignment, `fromDiff` should report that the diff is unused and report the
         // difference in generation.
         val diff: DiffAssignment = assignment.toDiff(Generation.EMPTY)
-        val roundtrip: Either[Assignment, DiffUnused.DiffUnused] =
+        val roundtrip: Either[Assignment, DiffUnused] =
           Assignment.fromDiff(Some(knownAssignment), diff)
 
         val expectedReason: DiffUnused =
@@ -229,52 +233,15 @@ class AssignmentSuite extends DatabricksTest {
     }
   }
 
-  test("Assignment.assignedResources") {
-    // Test plan: Verify that assignedResources returns the expected values for
-    // Assignment.
-
-    // Test data maps test assignments to expected set of assigned resources.
-    val testAssignmentsWithExpectedResources = Seq[(Assignment, Set[String])](
-      (
-        createAssignment(
-          generation = 67,
-          AssignmentConsistencyMode.Affinity,
-          ("" -- fp("Dori")) @@ 34 -> Set("Pod2", "Pod3", "Pod101", "Pod102"),
-          (fp("Dori") -- fp("Fili")) @@ 24 -> Set("Pod0", "Pod1"),
-          (fp("Fili") -- fp("Kili")) @@ 45 -> Set("Pod1", "Pod103"),
-          (fp("Kili") -- fp("Nori")) @@ 67 -> Set("Pod2"),
-          (fp("Nori") -- ∞) @@ 34 -> Set("Pod3", "Pod100")
-        ),
-        Set("Pod0", "Pod1", "Pod2", "Pod3", "Pod100", "Pod101", "Pod102", "Pod103")
-      ),
-      (
-        createAssignment(
-          generation = 67,
-          AssignmentConsistencyMode.Affinity,
-          ("" -- fp("Dori")) @@ 34 -> Set("Pod2"),
-          (fp("Dori") -- fp("Kili")) @@ 45 -> Set("Pod1"),
-          (fp("Kili") -- fp("Nori")) @@ 67 -> Set("Pod2"),
-          (fp("Nori") -- ∞) @@ 34 -> Set("Pod3", "Pod4", "Pod5", "Pod6")
-        ),
-        Set("Pod1", "Pod2", "Pod3", "Pod4", "Pod5", "Pod6")
-      ),
-      (
-        createAssignment(
-          generation = 2 ## 81,
-          AssignmentConsistencyMode.Strong,
-          ("" -- fp("Dori")) @@ (2 ## 55) -> Set("Pod2023"),
-          (fp("Dori") -- fp("Kili")) @@ (2 ## 45) -> Set("Pod2024", "Pod2025"),
-          (fp("Kili") -- ∞) @@ (2 ## 67) -> Set("Pod2000", "Pod2027")
-        ),
-        Set("Pod2000", "Pod2023", "Pod2024", "Pod2025", "Pod2027")
-      )
-    )
-    for (assignmentWithExpectedResources <- testAssignmentsWithExpectedResources) {
-      val (assignment, expectedAssignedResourceUris): (Assignment, Set[String]) =
-        assignmentWithExpectedResources
-      val expectedAssignedResources: Set[Squid] = expectedAssignedResourceUris.map { uri: String =>
-        createTestSquid(uri)
-      }
+  test("Assignment.assignedResources shared test data") {
+    // Test plan: Verify that assignedResources returns the expected values for shared test-data
+    // assignments.
+    for (testCase: AssignedResourcesTestCaseP <- TEST_DATA.assignedResourcesTestCases) {
+      val assignment: Assignment = parseSimpleAssignment(testCase.getAssignment)
+      val expectedAssignedResources: Set[Squid] = testCase.expectedAssignedResources.map {
+        uri: String =>
+          createTestSquid(uri)
+      }.toSet
       assert(assignment.assignedResources == expectedAssignedResources)
     }
   }
@@ -409,5 +376,13 @@ class AssignmentSuite extends DatabricksTest {
         ("" -- ∞) @@ 10 -> Seq("pod0")
       )
     }
+  }
+
+  test("DiffUnused.values contains all sealed trait variants") {
+    // Test plan: Verify that DiffUnused.values stays in sync with the sealed trait. Use
+    // reflection to enumerate every case object extending DiffUnused and assert that
+    // values contains exactly that set, so a newly added case object that someone forgets
+    // to register in values will fail this test.
+    assert(DiffUnused.values.toSet == getAllVariantsOfEnumLikeTrait[DiffUnused])
   }
 }

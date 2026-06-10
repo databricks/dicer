@@ -1,5 +1,6 @@
 package com.databricks.caching.util
 
+import com.databricks.api.proto.infra.Environment
 import com.databricks.conf.trusted.LocationConf
 
 import scala.util.control.NonFatal
@@ -44,6 +45,35 @@ object WhereAmIHelper {
       case "" | null => None
       case uri: String =>
         Some(uri)
+    }
+  }
+
+  /**
+   * Gets the legacy `kube_context` alias of the Kubernetes cluster where the current process is
+   * running, if available (e.g., `"prod-cloud1-region1"`).
+   *
+   * The value comes from `WhereAmI.KubernetesLocation.legacy_kube_context` (which mirrors
+   * `KubernetesCluster.deprecated_aliases.kube_context` in the IDM model). Standard service
+   * deployment frameworks (k8sconfig, servicecfg) populate this field on every pod's `LOCATION`
+   * env var; callers that need the kubeContext should still treat absence as a possibility and
+   * handle the `None` case explicitly rather than relying on the framework guarantee.
+   */
+  def getLegacyKubeContext: Option[String] = {
+    LocationConf.singleton.location.getLegacyKubeContext match {
+      case "" | null => None
+      case ctx: String => Some(ctx)
+    }
+  }
+
+  /**
+   * Gets the deployment environment of the Kubernetes cluster where the current process is running.
+   * The returned string is the canonical resource-ID component name: one of `"dev"`, `"staging"`,
+   * or `"prod"`. Returns None when the environment is unspecified.
+   */
+  def getEnvironment: Option[String] = {
+    LocationConf.singleton.location.getEnvironment match {
+      case Environment.Kind.KIND_UNSPECIFIED => None
+      case kind: Environment.Kind => Some(kind.toString.toLowerCase())
     }
   }
 

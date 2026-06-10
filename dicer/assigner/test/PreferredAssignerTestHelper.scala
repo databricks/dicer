@@ -39,9 +39,22 @@ import java.net.URI
 
 import scala.concurrent.{Future, Promise}
 import scala.util.Random
-import com.databricks.caching.util.TestUtils
 
 object PreferredAssignerTestHelper {
+
+  /**
+   * The [[Target]] that [[getConvergedPreferredAssigner]] probes to determine the converged
+   * Preferred Assigner.
+   */
+  val TEST_TARGET_FOR_PA_DISCOVERY: Target =
+    Target("test-target-for-pa-discovery")
+
+  /** The RPC context used in watch requests. */
+  private val CTX: RPCContext = JettyTestRPCContext
+    .builder()
+    .method("POST")
+    .uri("/")
+    .build()
 
   /**
    * A [[KubernetesMembershipChecker.Factory]] for tests that always returns [[None]],
@@ -53,13 +66,6 @@ object PreferredAssignerTestHelper {
           assignerInfo: AssignerInfo,
           assignerProtoLogger: AssignerProtoLogger): Option[KubernetesMembershipChecker] = None
     }
-
-  /** The RPC context used in watch requests. */
-  private val CTX: RPCContext = JettyTestRPCContext
-    .builder()
-    .method("POST")
-    .uri("/")
-    .build()
 
   /** The [[CollectorRegistry]] for which to fetch metric samples for. */
   private val registry: CollectorRegistry = CollectorRegistry.defaultRegistry
@@ -92,13 +98,13 @@ object PreferredAssignerTestHelper {
    */
   def getConvergedPreferredAssigner(assigners: Seq[TestAssigner]): TestAssigner = {
     require(assigners.nonEmpty)
-    val target: Target = Target("test-target-for-pa-discovery")
+    val target: Target = TEST_TARGET_FOR_PA_DISCOVERY
     if (assigners.size == 1) {
       AssertionWaiter("Wait for single assigner to be preferred").await {
         assertAssignerGeneratesAssignmentByDirectWatchRequest(
           assigners.head,
           target,
-          Redirect(Some(assigners.head.localUri))
+          Redirect(Some(assigners.head.localUri), redirectTokenOpt = None)
         )
       }
       assigners.head
@@ -163,17 +169,16 @@ object PreferredAssignerTestHelper {
    *       different pods, and we can filter by "kubernetes_pod_name" label to get the role of a
    *       specific assigner.
    */
-  def assertAssignerRoleGaugeMatches(
-      role: PreferredAssignerMetrics.MonitoredAssignerRole.Value): Unit = {
+  def assertAssignerRoleGaugeMatches(role: PreferredAssignerMetrics.MonitoredAssignerRole): Unit = {
     val gaugeName: String = "dicer_assigner_preferred_assigner_role_gauge"
     AssertionWaiter(s"Assert current role is $role").await {
       val currentRoleValues: Map[String, Int] = MonitoredAssignerRole.values.map {
-        role: MonitoredAssignerRole.Value =>
+        role: MonitoredAssignerRole =>
           role.toString -> MetricUtils
             .getMetricValue(registry, gaugeName, Map("role" -> role.toString))
             .toInt
       }.toMap
-      for (otherRole: MonitoredAssignerRole.Value <- MonitoredAssignerRole.values.filterNot(
+      for (otherRole: MonitoredAssignerRole <- MonitoredAssignerRole.values.filterNot(
           _ == role
         )) {
         assert(currentRoleValues(otherRole.toString) == 0, s"Role $otherRole should be 0")
@@ -182,9 +187,37 @@ object PreferredAssignerTestHelper {
     }
   }
 
+  /**
+   * Asserts that the current CH assigner role in the gauge is `role`.
+   *
+   * @note Please note that when there are multiple assigners, this method will only check the role
+   *       of the one who last updated the gauge. In production, different assigners are running in
+   *       different pods, and we can filter by "kubernetes_pod_name" label to get the role of a
+   *       specific assigner.
+   */
+  def assertChAssignerRoleGaugeMatches(
+      role: PreferredAssignerMetrics.MonitoredAssignerRole): Unit = {
+    val gaugeName: String = "dicer_assigner_ch_preferred_assigner_role_gauge"
+    AssertionWaiter(s"Assert current CH role is $role").await {
+      val currentRoleValues: Map[String, Int] = MonitoredAssignerRole.values.map {
+        role: MonitoredAssignerRole =>
+          role.toString -> MetricUtils
+            .getMetricValue(registry, gaugeName, Map("role" -> role.toString))
+            .toInt
+      }.toMap
+      for (otherRole: MonitoredAssignerRole <- MonitoredAssignerRole.values.filterNot(
+          _ == role
+        )) {
+        assert(currentRoleValues(otherRole.toString) == 0, s"CH role $otherRole should be 0")
+      }
+      assert(currentRoleValues(role.toString) == 1, s"CH role $role should be 1")
+    }
+  }
+
   def createAssignerConfig(
       preferredAssignerStoreIncarnation: Incarnation,
-      preferredAssignerEnabled: Boolean = true): TestAssigner.Config = {
+      preferredAssignerEnabled: Boolean = true,
+      targetMigratorOpt: Option[TargetMigrator] = None): TestAssigner.Config = {
     TestAssigner.Config.create(
       assignerConf = new DicerAssignerConf(
         Configs.parseMap(
@@ -193,7 +226,8 @@ object PreferredAssignerTestHelper {
           preferredAssignerStoreIncarnation.value,
           "databricks.dicer.assigner.store.etcd.sslEnabled" -> false
         )
-      )
+      ),
+      targetMigratorOpt = targetMigratorOpt
     )
   }
 
@@ -240,7 +274,8 @@ object PreferredAssignerTestHelper {
         attributedLoads = Vector.empty,
         unattributedLoadOpt = None
       ),
-      supportsSerializedAssignment = true
+      supportsSerializedAssignment = true,
+      redirectTokenOpt = None
     )
   }
 
@@ -252,7 +287,8 @@ object PreferredAssignerTestHelper {
       "direct-clerk",
       WATCH_RPC_TIMEOUT,
       ClerkData,
-      supportsSerializedAssignment = true
+      supportsSerializedAssignment = true,
+      redirectTokenOpt = None
     )
   }
 

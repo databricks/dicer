@@ -116,7 +116,8 @@ class AssignerGeneratorGCSuite extends DatabricksTest with TestName {
       subscriberDebugName = "subscriber1",
       timeout = 5.seconds,
       subscriberData = ClerkData,
-      supportsSerializedAssignment = true
+      supportsSerializedAssignment = true,
+      redirectTokenOpt = None
     )
     issueWatchCall(stub, request)
   }
@@ -138,7 +139,8 @@ class AssignerGeneratorGCSuite extends DatabricksTest with TestName {
         attributedLoads = Vector.empty,
         unattributedLoadOpt = None
       ),
-      supportsSerializedAssignment = true
+      supportsSerializedAssignment = true,
+      redirectTokenOpt = None
     )
     issueWatchCall(stub, request)
   }

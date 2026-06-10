@@ -18,22 +18,13 @@ import com.databricks.dicer.common.TargetName
  *                                region.
  * @param canaryScope the config region.
  */
-class DicerConfigProvider(
+class DicerConfigProvider private (
     defaultConfigsAndOverrides: Map[
       DeploymentModes.Value,
       Map[TargetName, TargetDefaultAndOverride]],
     productionCanaryConfigs: Map[TargetName, InternalTargetConfig],
     canaryScope: ConfigScope)
     extends SafeConfigProvider[NamedInternalTargetConfig] {
-
-  require(
-    defaultConfigsAndOverrides.keySet == SafeConfigProvider.VALID_MODES,
-    s"default configs should be provided for exactly ${SafeConfigProvider.VALID_MODES}"
-  )
-  require(
-    productionCanaryConfigs.keySet == defaultConfigsAndOverrides(DeploymentModes.Production).keySet,
-    s"Must provide a canary config for each namespace in production"
-  )
 
   override def configTargets(mode: DeploymentModes.Value): Set[String] = {
     defaultConfigsAndOverrides(mode).keySet.map { targetName: TargetName =>
@@ -61,15 +52,20 @@ class DicerConfigProvider(
     }
   }
 
-  override def getProductionCanaryConfigs: Map[String, NamedInternalTargetConfig] = {
-    productionCanaryConfigs.map {
-      case (targetName: TargetName, config: InternalTargetConfig) =>
-        targetName.value -> NamedInternalTargetConfig(targetName, config)
+  // TODO(<internal bug>): Support multiple canary config clusters.
+  override def getProductionCanaryConfigs(
+      canaryConfigScope: ConfigScope): Map[String, NamedInternalTargetConfig] = {
+    if (canaryConfigScope == canaryScope) {
+      productionCanaryConfigs.map {
+        case (targetName: TargetName, config: InternalTargetConfig) =>
+          targetName.value -> NamedInternalTargetConfig(targetName, config)
+      }
+    } else {
+      throw new NoSuchElementException(s"$canaryConfigScope is not a valid canary scope")
     }
   }
 
-  /** Returns the canary config scope. */
-  override def canaryConfigScope: ConfigScope = canaryScope
+  override def canaryConfigScopes: Set[ConfigScope] = Set(canaryScope)
 
   /** Gets the default and override config for the given mode and target. */
   private def getDefaultAndOverride(
@@ -137,10 +133,35 @@ object DicerConfigProvider {
           )
       }
 
-    new DicerConfigProvider(
+    val provider: DicerConfigProvider = new DicerConfigProvider(
       defaultConfigsAndOverrides,
       productionCanaryConfigs,
       canaryConfigScope
     )
+    SafeConfigProvider.validate(provider)
+    provider
+  }
+
+  object forTest {
+
+    /**
+     * Test-only constructor that takes in the resolved configs directly. This is provided such
+     * that test can easily create a provider with the desired configs, without needing to write
+     * config textprotos to files.
+     */
+    def create(
+        defaultConfigsAndOverrides: Map[
+          DeploymentModes.Value,
+          Map[TargetName, TargetDefaultAndOverride]],
+        productionCanaryConfigs: Map[TargetName, InternalTargetConfig],
+        canaryScope: ConfigScope): DicerConfigProvider = {
+      val provider: DicerConfigProvider = new DicerConfigProvider(
+        defaultConfigsAndOverrides,
+        productionCanaryConfigs,
+        canaryScope
+      )
+      SafeConfigProvider.validate(provider)
+      provider
+    }
   }
 }

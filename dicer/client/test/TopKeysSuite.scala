@@ -46,7 +46,7 @@ class TopKeysSuite extends DatabricksTest {
           Configs.parseMap(
             "databricks.dicer.internal.cachingteamonly" +
             ".watchServerSuggestedRpcTimeoutMillis" -> 1000,
-            "databricks.dicer.assigner.useTopKeys" -> true
+            "databricks.dicer.assigner.allowTopKeys" -> true
           )
         )
       )

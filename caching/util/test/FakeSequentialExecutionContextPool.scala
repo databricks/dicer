@@ -4,7 +4,7 @@ import com.databricks.caching.util.SequentialExecutionContextPool.ExceptionHandl
 
 import com.databricks.caching.util.ContextAwareUtil.ContextAwareScheduledExecutorService
 
-import com.databricks.caching.util.SequentialExecutionContextPool.UncaughtExceptionSource.UncaughtExceptionSource
+import com.databricks.caching.util.SequentialExecutionContextPool.UncaughtExceptionSource
 
 /**
  * A [[SequentialExecutionContextPool]] implementation that creates

@@ -5,6 +5,16 @@ package(
 )
 
 java_library(
+    name = "jtls",
+    srcs = ["src/JTLSOptions.java"],
+    deps = [
+        "//wrappers/rpc:rpc_tls",
+        "@maven//:com_google_code_findbugs_jsr305",
+        "@maven//:org_scala_lang_scala_library",
+    ],
+)
+
+java_library(
     name = "databricks_java_test",
     testonly = True,
     srcs = [

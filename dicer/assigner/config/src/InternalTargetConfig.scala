@@ -28,7 +28,6 @@ import com.databricks.dicer.assigner.config.InternalTargetConfig.{
   TargetWatchRequestRateLimitConfig,
   fromProtos
 }
-import com.databricks.rpc.DatabricksObjectMapper
 
 /**
  * Stores the config for the given `target`.
@@ -38,6 +37,12 @@ import com.databricks.rpc.DatabricksObjectMapper
  * @param keyReplicationConfig   Asymmetric key replication configuration for the target.
  * @param healthWatcherConfig    The configuration for the health watcher.
  * @param targetRateLimitConfig  The configuration for per-target rate limiting.
+ * @param authorizer             The authorization policy for this target, or
+ *                               [[AuthorizerHelper.DEFAULT_AUTHORIZER]] if no policy is configured.
+ *                               TODO(<internal bug>): Replace the [[authorizer]] field with a
+ *                                             AuthorizerConfig class which can create different
+ *                                             Authorizers for different targets, rather than hard-
+ *                                             coding the Authorizer class in the config fields.
  */
 case class InternalTargetConfig(
     loadWatcherConfig: LoadWatcherTargetConfig,
@@ -45,7 +50,8 @@ case class InternalTargetConfig(
     keyReplicationConfig: KeyReplicationConfig,
     healthWatcherConfig: HealthWatcherTargetConfig,
     keyOfDeathProtectionConfig: KeyOfDeathProtectionConfig,
-    targetRateLimitConfig: TargetWatchRequestRateLimitConfig) {
+    targetRateLimitConfig: TargetWatchRequestRateLimitConfig,
+    authorizer: Authorizer) {
 
   override def toString: String = {
     // Format non-default configuration parameters.
@@ -80,7 +86,9 @@ object InternalTargetConfig {
    *                  customer-controlled settings).
    * TODO(<internal bug>): take into account region overrides in `TargetConfigP`.
    *
-   * @param proto Proto representation of customer-controlled configuration.
+   * @param proto Proto representation of customer-controlled configuration. The authorizer is
+   *              parsed from `proto.authorizer`; an unset field decodes to
+   *              [[AuthorizerHelper.DEFAULT_AUTHORIZER]].
    * @param advancedProto Proto representation of Dicer-team-controlled configuration. If no
    *                      advanced configuration is present for a target, the caller should supply
    *                      the default proto, which is semantically equivalent: by design, all fields
@@ -138,13 +146,17 @@ object InternalTargetConfig {
     // once that is enabled.
     val keyOfDeathProtectionConfig = KeyOfDeathProtectionConfig.DEFAULT
 
+    // Decode the authorizer `Any`; an absent field decodes to the default authorizer.
+    val authorizer: Authorizer = AuthorizerHelper.fromAnyProto(proto.authorizer)
+
     InternalTargetConfig(
       loadWatcherConfig,
       loadBalancingConfig,
       replicationConfig,
       healthWatcherConfig,
       keyOfDeathProtectionConfig,
-      targetRateLimitConfig
+      targetRateLimitConfig,
+      authorizer
     )
   }
 
@@ -583,7 +595,8 @@ object InternalTargetConfig {
     KeyReplicationConfig.DEFAULT_SINGLE_REPLICA,
     HealthWatcherTargetConfig.DEFAULT,
     KeyOfDeathProtectionConfig.DEFAULT,
-    TargetWatchRequestRateLimitConfig.DEFAULT
+    TargetWatchRequestRateLimitConfig.DEFAULT,
+    AuthorizerHelper.DEFAULT_AUTHORIZER
   )
 
   object forTest {
@@ -603,7 +616,8 @@ object InternalTargetConfig {
       KeyReplicationConfig.DEFAULT_SINGLE_REPLICA,
       HealthWatcherTargetConfig.DEFAULT,
       KeyOfDeathProtectionConfig.DEFAULT,
-      TargetWatchRequestRateLimitConfig.DEFAULT
+      TargetWatchRequestRateLimitConfig.DEFAULT,
+      AuthorizerHelper.DEFAULT_AUTHORIZER
     )
   }
 }
@@ -616,10 +630,8 @@ object InternalTargetConfig {
  */
 case class NamedInternalTargetConfig(targetName: TargetName, config: InternalTargetConfig)
     extends JsonSerializableConfig {
-  override def toJsonString: String = {
-    val proto: InternalDicerTargetConfigP = toProto
-    DatabricksObjectMapper.toJson(proto)
-  }
+  override def toJsonString: String =
+    InternalTargetConfigJsonConverter.toJsonString(toProto)
 
   /** Converts this instance to a [[InternalDicerTargetConfigP]] proto object. */
   // TODO(<internal bug>): Modify this function once key of death protection config is added to advanced
@@ -655,8 +667,9 @@ case class NamedInternalTargetConfig(targetName: TargetName, config: InternalTar
       }
 
     val targetConfigProto: TargetConfigFieldsP = TargetConfigFieldsP.of(
-      Some(config.loadBalancingConfig.primaryRateMetric.toProto),
-      keyReplicationConfigProtoOpt
+      primaryRateMetricConfig = Some(config.loadBalancingConfig.primaryRateMetric.toProto),
+      keyReplicationConfig = keyReplicationConfigProtoOpt,
+      authorizer = AuthorizerHelper.toAnyProto(config.authorizer)
     )
 
     val advancedConfigProto: AdvancedTargetConfigFieldsP = AdvancedTargetConfigFieldsP.of(
@@ -683,9 +696,7 @@ object NamedInternalTargetConfig {
    */
   def fromJsonString(jsonString: String): NamedInternalTargetConfig = {
     val proto: InternalDicerTargetConfigP = Try[InternalDicerTargetConfigP](
-      // DatabricksObjectMapper requires adding //api/rpc:rpc_parser to the dependency list
-      // for proto and JSON conversion.
-      DatabricksObjectMapper.fromJson[InternalDicerTargetConfigP](jsonString)
+      InternalTargetConfigJsonConverter.fromJsonString(jsonString)
     ) match {
       case Failure(e) =>
         throw new IllegalArgumentException(

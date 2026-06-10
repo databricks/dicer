@@ -140,16 +140,16 @@ scala_library(
 
 scala_library(
     name = "dicer_client_proto_logger",
-    srcs = ["src/DicerClientProtoLogger.scala"],
-    visibility = ["//dicer:internal"],
+    srcs = [
+        "src/DicerClientProtoLogger.scala",
+    ],
     deps = [
         ":dicer_client_proto_logger_conf",
-        "//caching/util:prefix_logger",
-        "//caching/util:sequential_execution_context",
         "//dicer/common:client_type",
         "//dicer/common:generation",
     ],
 )
+
 
 scala_library(
     name = "dicer_client_proto_logger_conf",
@@ -282,6 +282,7 @@ scala_library(
         ":metrics",
         ":slicez",
         "//caching/util:assert_macros",
+        "//caching/util:consistent_hash_ring",
         "//caching/util:prefix_logger",
         "//caching/util:sequential_execution_context",
         "//caching/util:watch_cell",
@@ -494,6 +495,7 @@ scala_test(
     timeout = "short",
     deps = [
         ":clerk_impl",
+        ":dicer_client_proto_logger",
         ":metrics",
         ":slicez",
         ":test_client",
@@ -576,7 +578,7 @@ scala_test(
 
 scala_library(
     name = "slice_lookup_driver",
-    srcs = ["test/SliceLookupDriver.scala"],
+    srcs = ["test/SliceLookupHarness.scala"],
     testonly = True,
     deps = [
         ":client",
@@ -627,12 +629,14 @@ scala_library(
         "//dicer/assigner/config:internal_target_config_map",
         "//dicer/assigner:assigner_conf",
         "//dicer/assigner:assigner_slicez",
-        "//dicer/assigner:generator",
         "//dicer/assigner:target_metrics_utils",
+        "//dicer/client/proto:client_dpage_proto_scala_lib",
         "//dicer/common/proto:common_proto_scala_lib",
+        "//dicer/common/proto:dpage_proto_scala_lib",
         "//dicer/common:assignment_core",
         "//dicer/common:client_request",
         "//dicer/common:client_type",
+        "//dicer/common:dicer_internal_headers",
         "//dicer/common:generation",
         "//dicer/common:sliceset_impl",
         "//dicer/common:target_helper",
@@ -648,7 +652,6 @@ scala_library(
         "//wrappers/conf:project-conf",
         "//wrappers/logging",
         "//wrappers/rpc:client",
-        "//wrappers/rpc:headers",
         "//wrappers/rpc:rpc_context",
         "//wrappers/rpc:rpc_testing",
         "//wrappers/rpc:rpc_tls",

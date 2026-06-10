@@ -2,8 +2,10 @@ package com.databricks.dicer.client
 
 import java.net.URI
 import java.nio.charset.StandardCharsets.UTF_8
+import java.time.Instant
 import java.util.{Base64, UUID}
 
+import com.databricks.api.proto.dicer.client.ClientTargetViewP
 import com.databricks.rpc.RequestHeaders
 import io.grpc.Metadata
 import scala.concurrent.{Await, Future}
@@ -13,6 +15,7 @@ import scala.util.matching.Regex
 import com.databricks.caching.util.MetricUtils.ChangeTracker
 import com.databricks.caching.util.TestUtils
 import com.databricks.caching.util.TestUtils.TestName
+import com.google.protobuf.ByteString
 import com.databricks.caching.util.{
   AssertionWaiter,
   FakeProxy,
@@ -24,8 +27,8 @@ import com.databricks.caching.util.{
 }
 import com.databricks.conf.Configs
 import com.databricks.dicer.assigner.TargetMetricsUtils
-import com.databricks.dicer.assigner.TargetMetrics.AssignmentDistributionSource
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
+import com.databricks.dicer.common.TargetHelper
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.common.TestAssigner.AssignerReplyType
 import com.databricks.dicer.common.TestSliceUtils._
@@ -39,7 +42,9 @@ import com.databricks.dicer.common.{
   ProposedSliceAssignment,
   Redirect,
   SliceSetImpl,
+  ClerkSubscriberSlicezData,
   SyncAssignmentState,
+  SliceletSubscriberSlicezData,
   TestAssigner
 }
 import com.databricks.dicer.external.Target
@@ -132,7 +137,8 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
     // TODO(<internal bug>): Remove the manual redirect overrides when we have integrated the preferred
     // assigner mechanism.
     val redirectToAssigner1: AssignerReplyType.OverwriteRedirect = createRedirectReply(
-      Some(multiAssignerTestEnv.testAssigners.head.localUri)
+      Some(multiAssignerTestEnv.testAssigners.head.localUri),
+      redirectTokenOpt = None
     )
     for (assigner <- multiAssignerTestEnv.testAssigners) {
       assigner.setReplyType(redirectToAssigner1)
@@ -149,7 +155,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
       testAssigner: TestAssigner,
       clientType: ClientType,
       watchStubCacheTime: FiniteDuration = 20.seconds,
-      sec: SequentialExecutionContext = sec): SliceLookupDriver
+      sec: SequentialExecutionContext = sec): SliceLookupHarness
 
   /**
    * Creates and starts a [[SliceLookup]] connecting to `testAssigner`. Supplies the lookup and a
@@ -164,7 +170,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
    * @param testTarget      the [[Target]] to watch. Defaults to the suite's [[target]] field.
    * @param clientIdOpt     optional client UUID sent in watch requests. Defaults to
    *                        [[TEST_CLIENT_UUID]].
-   * @param func            test body receiving the started [[SliceLookupDriver]] and its
+   * @param func            test body receiving the started [[SliceLookupHarness]] and its
    *                        [[LoggingStreamCallback]].
    */
   protected def withLookup(
@@ -175,7 +181,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
       ),
       testTarget: Target = target,
       clientIdOpt: Option[UUID] = Some(TEST_CLIENT_UUID))(
-      func: (SliceLookupDriver, LoggingStreamCallback[Assignment]) => Unit): Unit
+      func: (SliceLookupHarness, LoggingStreamCallback[Assignment]) => Unit): Unit
 
   /**
    * Creates the client configuration for a lookup for a local server listening on `assignerPort`.
@@ -192,6 +198,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
       clientType: ClientType,
       assignerPort: Int,
       watchStubCacheTime: FiniteDuration,
+      subscriberDebugName: String,
       testTarget: Target = target,
       clientIdOpt: Option[UUID] = Some(TEST_CLIENT_UUID)): InternalClientConfig = {
     val scheme: String = if (useSsl) "https" else "http"
@@ -206,7 +213,8 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
         watchRpcTimeout = LOW_RPC_TIMEOUT,
         watchFromDataPlane = watchFromDataPlane,
         enableRateLimiting = false
-      )
+      ),
+      subscriberDebugName = subscriberDebugName
     )
   }
 
@@ -215,9 +223,10 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
    * token.
    */
   protected def createRedirectReply(
-      uriOpt: Option[URI]
+      uriOpt: Option[URI],
+      redirectTokenOpt: Option[ByteString]
   ): AssignerReplyType.OverwriteRedirect = {
-    AssignerReplyType.OverwriteRedirect(Redirect(uriOpt))
+    AssignerReplyType.OverwriteRedirect(Redirect(uriOpt, redirectTokenOpt = redirectTokenOpt))
   }
 
   /**
@@ -252,11 +261,40 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
    */
   protected def readPrometheusMetric(metricName: String, labels: Vector[(String, String)]): Double
 
+  test("getSlicezData exposes expected dPage data") {
+    // Test plan: Verify that SliceLookup exposes the expected dPage data. Do this by starting a
+    // lookup and checking the returned Slicez data against the expected dPage data.
+    val assigner: TestAssigner = singleAssignerTestEnv.testAssigner
+    withLookup(assigner) { (lookup: SliceLookupHarness, _: LoggingStreamCallback[Assignment]) =>
+      val data: ClientTargetSlicezData = lookup.getSlicezData
+      val scheme: String = if (useSsl) "https" else "http"
+      assert(data.target == target)
+      assert(
+        data.watchAddress.toString.contains(s"$scheme://localhost:${portToConnectTo(assigner)}")
+      )
+    }
+  }
+
+  test("getSlicezData returns appropriate watch address") {
+    // Test plan: Verify that `watchAddress` from `lookup.getSlicezData` reflects the address used
+    // by the lookup. In control-plane tests this is the assigner address; in data-plane tests this
+    // is the fake S2S proxy address.
+    val assigner1: TestAssigner = multiAssignerTestEnv.testAssigners(0)
+
+    withLookup(assigner1) { (lookup: SliceLookupHarness, _: LoggingStreamCallback[Assignment]) =>
+      val data: ClientTargetSlicezData = lookup.getSlicezData
+      val scheme: String = if (useSsl) "https" else "http"
+      assert(
+        data.watchAddress.toString.contains(s"$scheme://localhost:${portToConnectTo(assigner1)}")
+      )
+    }
+  }
+
   test("Receive first assignment") {
     // Test plan: Create a SliceLookup. Provide the assigner with a single assignment and ensure
     // that the watcher gets it.
     withLookup(singleAssignerTestEnv.testAssigner) {
-      (_: SliceLookupDriver, callback: LoggingStreamCallback[Assignment]) =>
+      (_: SliceLookupHarness, callback: LoggingStreamCallback[Assignment]) =>
         val proposal: SliceMap[ProposedSliceAssignment] = sampleProposal()
         val numInitialElements = callback.numElements
         val assignment: Assignment =
@@ -274,7 +312,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
     val initialNumEmptyResponses: Double = getNumEmptyWatchResponses(target)
     TestUtils.awaitResult(singleAssignerTestEnv.testAssigner.blockAssignment(target), Duration.Inf)
     withLookup(singleAssignerTestEnv.testAssigner) {
-      (_: SliceLookupDriver, _: LoggingStreamCallback[Assignment]) =>
+      (_: SliceLookupHarness, _: LoggingStreamCallback[Assignment]) =>
         // Now wait for an empty message by waiting for the metric to increment.
         AssertionWaiter("Wait for empty message").await {
           val numEmptyResponses: Double = getNumEmptyWatchResponses(target)
@@ -287,7 +325,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
     // Test plan: Create a SliceLookup. Provide different assignments to the Assigner and ensure
     // that they are received by the lookup.
     withLookup(singleAssignerTestEnv.testAssigner) {
-      (_: SliceLookupDriver, callback: LoggingStreamCallback[Assignment]) =>
+      (_: SliceLookupHarness, callback: LoggingStreamCallback[Assignment]) =>
         val proposal: SliceMap[ProposedSliceAssignment] = sampleProposal()
         val numInitialElements = callback.numElements
         var assignment: Assignment =
@@ -328,7 +366,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
     // return an empty message and then send another assignment.
     val initialNumEmptyResponses: Double = getNumEmptyWatchResponses(target)
     withLookup(singleAssignerTestEnv.testAssigner) {
-      (_: SliceLookupDriver, callback: LoggingStreamCallback[Assignment]) =>
+      (_: SliceLookupHarness, callback: LoggingStreamCallback[Assignment]) =>
         // Set the assignment and wait for the first assignment to be received.
         val proposal: SliceMap[ProposedSliceAssignment] = sampleProposal()
         val numInitialElements = callback.numElements
@@ -366,7 +404,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
     TestUtils.awaitResult(singleAssignerTestEnv.testAssigner.blockAssignment(target), Duration.Inf)
 
     withLookup(singleAssignerTestEnv.testAssigner) {
-      (_: SliceLookupDriver, callback: LoggingStreamCallback[Assignment]) =>
+      (_: SliceLookupHarness, callback: LoggingStreamCallback[Assignment]) =>
         // Do nothing, there will be an empty message.
         // Wait for an empty message by waiting for the metric to increment.
         AssertionWaiter("Wait for empty message").await {
@@ -400,7 +438,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
         Duration.Inf
       )
     withLookup(singleAssignerTestEnv.testAssigner) {
-      (lookup: SliceLookupDriver, callback: LoggingStreamCallback[Assignment]) =>
+      (lookup: SliceLookupHarness, callback: LoggingStreamCallback[Assignment]) =>
         val numInitialElements = callback.numElements
 
         // Send an invalid assignment, i.e., fails validation.
@@ -431,7 +469,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
         Duration.Inf
       )
     withLookup(singleAssignerTestEnv.testAssigner) {
-      (_: SliceLookupDriver, callback: LoggingStreamCallback[Assignment]) =>
+      (_: SliceLookupHarness, callback: LoggingStreamCallback[Assignment]) =>
         val numInitialElements = callback.numElements
 
         // Send an unparseable assignment.
@@ -477,7 +515,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
       ChangeTracker(() => getWatchRequestCount("failure", "INVALID_ARGUMENT"))
 
     withLookup(singleAssignerTestEnv.testAssigner) {
-      (_: SliceLookupDriver, _: LoggingStreamCallback[Assignment]) =>
+      (_: SliceLookupHarness, _: LoggingStreamCallback[Assignment]) =>
         // Test 1: Verify successful watch requests are recorded.
         singleAssignerTestEnv.testAssigner.setReplyType(AssignerReplyType.Normal)
         AssertionWaiter("Wait for success watch request metric").await {
@@ -514,7 +552,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
     // Test Plan: Create a SliceLookup. Set an assignment at the Assigner and check that the lookup
     // receives it. Then send another assignment and make sure that it receives the assignment.
     withLookup(singleAssignerTestEnv.testAssigner) {
-      (lookup: SliceLookupDriver, _: LoggingStreamCallback[Assignment]) =>
+      (lookup: SliceLookupHarness, _: LoggingStreamCallback[Assignment]) =>
         val proposal: SliceMap[ProposedSliceAssignment] = sampleProposal()
         var assignment: Assignment =
           TestUtils.awaitResult(
@@ -559,7 +597,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
     val assigner1 = multiAssignerTestEnv.testAssigners(0)
     val assigner2 = multiAssignerTestEnv.testAssigners(1)
 
-    withLookup(assigner1) { (lookup: SliceLookupDriver, _: LoggingStreamCallback[Assignment]) =>
+    withLookup(assigner1) { (lookup: SliceLookupHarness, _: LoggingStreamCallback[Assignment]) =>
       val proposal: SliceMap[ProposedSliceAssignment] = sampleProposal()
       val assignment: Assignment =
         TestUtils.awaitResult(
@@ -571,7 +609,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
       }
 
       // Redirect `lookup` to `assigner2`.
-      val redirectReply = createRedirectReply(Some(assigner2.localUri))
+      val redirectReply = createRedirectReply(Some(assigner2.localUri), redirectTokenOpt = None)
       assigner1.setReplyType(redirectReply)
       assigner2.setReplyType(redirectReply)
 
@@ -622,10 +660,10 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
       // by actually being a TestAssigner and handling the request directly.
       val fakeS2SProxyTestAssigner: TestAssigner = singleAssignerTestEnv.testAssigners(0)
       withLookup(fakeS2SProxyTestAssigner) {
-        (lookup: SliceLookupDriver, _: LoggingStreamCallback[Assignment]) =>
+        (lookup: SliceLookupHarness, _: LoggingStreamCallback[Assignment]) =>
           // Setup: Set the redirect to a URI which does not have a host or port
           fakeS2SProxyTestAssigner.setReplyType(
-            createRedirectReply(Some(URI.create("/bogus/redirect")))
+            createRedirectReply(Some(URI.create("/bogus/redirect")), redirectTokenOpt = None)
           )
 
           // Verify: Check that the lookup is still issuing watch requests despite the bogus
@@ -689,7 +727,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
     withLookup(
       assigner1,
       watchStubCacheTime = LOW_RPC_TIMEOUT * 2
-    ) { (lookup: SliceLookupDriver, _: LoggingStreamCallback[Assignment]) =>
+    ) { (lookup: SliceLookupHarness, _: LoggingStreamCallback[Assignment]) =>
       val defaultAsn: Assignment =
         TestUtils.awaitResult(
           assigner1.setAndFreezeAssignment(target, sampleProposal()),
@@ -705,13 +743,23 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
           assigner2.setAndFreezeAssignment(target, sampleProposal()),
           Duration.Inf
         )
-      // Redirect `lookup` to `assigner2`. First ensure that it will keep directing requests to
-      // itself.
-      val redirectReply = createRedirectReply(Some(assigner2.localUri))
-      assigner1.setReplyType(redirectReply)
+      // Redirect `lookup` to `assigner2` with an opaque token. First ensure `assigner2` will keep
+      // directing requests to itself.
+      val redirectToken: ByteString = ByteString.copyFrom(Array[Byte](1, 2, 3, 4))
+      val redirectReply =
+        createRedirectReply(Some(assigner2.localUri), redirectTokenOpt = Some(redirectToken))
       assigner2.setReplyType(redirectReply)
+      assigner1.setReplyType(redirectReply)
       AssertionWaiter("Lookup connects to redirected Assigner").await {
         assert(lookup.generationOpt.get == newAsn.generation)
+        // Verify: Watch requests sent to the redirected assigner echo back the opaque token.
+        val (_, latestRequest): (RequestHeaders, ClientRequest) = assigner2
+          .getLatestClerkWatchRequest(target)
+          .getOrElse(throw new AssertionError("No watch request received by redirected assigner"))
+        assert(
+          latestRequest.redirectTokenOpt.contains(redirectToken),
+          "Redirected assigner should have received the echoed redirect token"
+        )
       }
 
       AssertionWaiter("Cache evicts old stub").await {
@@ -720,8 +768,9 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
         }
       }
 
-      // Fail requests to `assigner2`, succeed them from `assigner1`.
-      assigner1.setReplyType(createRedirectReply(Some(assigner1.localUri)))
+      // Fail requests to `assigner2`, succeed them from `assigner1`. `assigner1`'s redirect-to-self
+      // reply carries no token so we can observe the lookup clearing its token on fallback.
+      assigner1.setReplyType(createRedirectReply(Some(assigner1.localUri), redirectTokenOpt = None))
       assigner2.setReplyType(AssignerReplyType.Error())
 
       // Verify that the lookup enters backoff.
@@ -737,6 +786,15 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
         )
       AssertionWaiter("Lookup falls back to original Assigner").await {
         assert(lookup.generationOpt.get == defaultAsn2.generation)
+        // Verify: After the fallback, the lookup has cleared its redirect token, so watch requests
+        // to the original Assigner do not carry one.
+        val (_, latestRequest): (RequestHeaders, ClientRequest) = assigner1
+          .getLatestClerkWatchRequest(target)
+          .getOrElse(throw new AssertionError("No watch request received by original Assigner"))
+        assert(
+          latestRequest.redirectTokenOpt.isEmpty,
+          "Fallback request should have cleared the redirect token"
+        )
       }
 
       // Verify that the lookup exits backoff.
@@ -758,7 +816,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
     val assigner1: TestAssigner = multiAssignerTestEnv.testAssigners(0)
     val assigner2: TestAssigner = multiAssignerTestEnv.testAssigners(1)
 
-    withLookup(assigner1) { (lookup: SliceLookupDriver, _: LoggingStreamCallback[Assignment]) =>
+    withLookup(assigner1) { (lookup: SliceLookupHarness, _: LoggingStreamCallback[Assignment]) =>
       val defaultAsn: Assignment =
         TestUtils.awaitResult(
           assigner1.setAndFreezeAssignment(target, sampleProposal()),
@@ -772,7 +830,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
       // current generation. Set a large `suggestedRpcTimeout` so that the assertion below will
       // run after the first request (rather than second or later), avoiding test flakiness.
 
-      val redirect = Redirect(Some(assigner2.localUri))
+      val redirect = Redirect(Some(assigner2.localUri), redirectTokenOpt = None)
       val response = ClientResponse(
         SyncAssignmentState.KnownGeneration(Generation.EMPTY),
         30.seconds,
@@ -885,14 +943,14 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
       ).toLong
     }
 
-    assigner1.setReplyType(createRedirectReply(Some(assigner2.localUri)))
+    assigner1.setReplyType(createRedirectReply(Some(assigner2.localUri), redirectTokenOpt = None))
     assigner2.setReplyType(AssignerReplyType.Error())
 
     val failureTracker = ChangeTracker(() => getAbortedWatchFailureCount)
     assert(getAbortedWatchFailureCount == 0)
     assert(failureTracker.totalChange() == 0)
 
-    val lookup: SliceLookupDriver =
+    val lookup: SliceLookupHarness =
       createUnstartedSliceLookup(assigner1, clientType = ClientType.Slicelet)
 
     try {
@@ -974,7 +1032,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
     val sumTracker = ChangeTracker[Double](() => getRequestSizeSum)
 
     // Create a lookup with the specified client type
-    val lookup: SliceLookupDriver = createUnstartedSliceLookup(
+    val lookup: SliceLookupHarness = createUnstartedSliceLookup(
       singleAssignerTestEnv.testAssigner,
       clientType = clientType
     )
@@ -1014,7 +1072,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
     // Test Plan: Create a SliceLookup. Set an assignment at the Assigner and check that the lookup
     // receives it. Then look up some keys on it.
     withLookup(singleAssignerTestEnv.testAssigner) {
-      (lookup: SliceLookupDriver, _: LoggingStreamCallback[Assignment]) =>
+      (lookup: SliceLookupHarness, _: LoggingStreamCallback[Assignment]) =>
         val proposal: SliceMap[ProposedSliceAssignment] = createProposal(
           ("" -- fp("Dori")) -> Seq("Pod2"),
           (fp("Dori") -- fp("Fili")) -> Seq("Pod0"),
@@ -1060,7 +1118,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
     val assigner1 = multiAssignerTestEnv.testAssigners(0)
     val assigner2: TestAssigner = multiAssignerTestEnv.testAssigners(1)
 
-    withLookup(assigner1) { (lookup: SliceLookupDriver, _: LoggingStreamCallback[Assignment]) =>
+    withLookup(assigner1) { (lookup: SliceLookupHarness, _: LoggingStreamCallback[Assignment]) =>
       val proposal: SliceMap[ProposedSliceAssignment] = sampleProposal()
       val assignment: Assignment =
         TestUtils.awaitResult(
@@ -1073,7 +1131,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
 
       // Redirect `lookup` to `assigner2`. First ensure that the new Assigner will keep directing
       // requests to itself.
-      val redirectReply = createRedirectReply(Some(assigner2.localUri))
+      val redirectReply = createRedirectReply(Some(assigner2.localUri), redirectTokenOpt = None)
       assigner2.setReplyType(redirectReply)
       assigner1.setReplyType(redirectReply)
 
@@ -1083,7 +1141,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
       // has the expected assignment.
       AssertionWaiter("Assigner2 learning about new assignment").await {
         val numDistributedAssignments = TargetMetricsUtils
-          .getNumDistributedAssignments(target, AssignmentDistributionSource.Clerk.toString)
+          .getNumDistributedAssignments(target, "Clerk")
         assert(numDistributedAssignments > 0)
         val assigner2Assignment: Option[Assignment] =
           TestUtils.awaitResult(assigner2.getAssignment(target), Duration.Inf)
@@ -1122,7 +1180,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
     val initialSum = getHistogramSum(target)
 
     withLookup(singleAssignerTestEnv.testAssigner) {
-      (lookup: SliceLookupDriver, callback: LoggingStreamCallback[Assignment]) =>
+      (lookup: SliceLookupHarness, callback: LoggingStreamCallback[Assignment]) =>
         // Create and send an assignment
         val proposal: SliceMap[ProposedSliceAssignment] = sampleProposal()
         val numInitialElements = callback.numElements
@@ -1144,4 +1202,46 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
     }
   }
 
+}
+
+private[client] object SliceLookupSuiteBase {
+
+  /**
+   * Converts a [[ClientTargetViewP]] into [[ClientTargetSlicezData]] for cross-language SliceLookup
+   * tests.
+   */
+  def clientTargetSlicezDataFromViewProto(proto: ClientTargetViewP): ClientTargetSlicezData = {
+    val clientInfoOpt = proto.clientInfo
+    val target: Target = TargetHelper.parse(proto.getTarget)
+    // TODO(<internal bug>): translate remaining fields as the Rust implementation starts returning them.
+    ClientTargetSlicezData(
+      target = target,
+      sliceletsData = proto.slicelets.map { slicelet =>
+        SliceletSubscriberSlicezData(slicelet.getDebugName, slicelet.getWatchAddress)
+      },
+      clerksData = proto.clerks.map { clerk =>
+        ClerkSubscriberSlicezData(clerk.getDebugName)
+      },
+      assignmentOpt = None,
+      reportedLoadPerResourceOpt = None,
+      reportedLoadPerSliceOpt = None,
+      topKeysOpt = None,
+      squidOpt = None,
+      unattributedLoadBySliceOpt = None,
+      subscriberDebugName = "",
+      watchAddress = clientInfoOpt
+        .flatMap(_.watchAddress)
+        .map(URI.create)
+        .getOrElse(URI.create("")),
+      watchAddressUsedSince = clientInfoOpt
+        .flatMap(_.watchAddressUsedSince)
+        .map(Instant.parse)
+        .getOrElse(Instant.EPOCH),
+      lastSuccessfulHeartbeat = clientInfoOpt
+        .flatMap(_.lastSuccessfulHeartbeat)
+        .map(Instant.parse)
+        .getOrElse(Instant.EPOCH),
+      clientClusterOpt = None
+    )
+  }
 }

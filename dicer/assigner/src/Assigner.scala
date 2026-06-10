@@ -9,25 +9,25 @@ import com.databricks.caching.util.{
   SequentialExecutionContext,
   SequentialExecutionContextPool,
   TickerTime,
-  ValueStreamCallback
-}
-import com.databricks.common.http.Headers.{
-  HEADER_DATABRICKS_APP_INSTANCE_ID,
-  HEADER_DATABRICKS_APP_SPEC_NAME
+  ValueStreamCallback,
+  WatchValueCellPollAdapter
 }
 import com.databricks.common.util.ShutdownHookManager
 import com.databricks.dicer.assigner.Assigner.logger
 import com.databricks.dicer.assigner.AssignmentGenerator.GeneratorTargetSlicezData
-import com.databricks.dicer.assigner.conf.StoreConf.StoreEnum.{ETCD, IN_MEMORY}
 import com.databricks.dicer.assigner.conf.{DicerAssignerConf, HealthConf, LoadWatcherConf}
 import com.databricks.dicer.assigner.config.{
+  Authorizer,
+  AuthorizerMetrics,
   StaticTargetConfigProvider,
   InternalTargetConfig,
   InternalTargetConfigMap,
-  InternalTargetConfigMetrics
+  InternalTargetConfigMetrics,
+  UnauthorizedException
 }
 import com.databricks.dicer.common.TargetName
-import com.databricks.dicer.assigner.TargetMetrics.{GeneratorShutdownReason, WatchError}
+import com.databricks.dicer.assigner.TargetMetrics.GeneratorShutdownReason
+import com.databricks.dicer.assigner.config.AuthorizerMetrics.WatchError
 import com.databricks.dicer.common.SyncAssignmentState.KnownGeneration
 import com.databricks.dicer.common.{
   Assignment,
@@ -44,7 +44,7 @@ import com.databricks.dicer.common.{
 }
 import com.databricks.api.base.DatabricksServiceException
 import com.databricks.ErrorCode
-import com.databricks.dicer.external.{AppTarget, KubernetesTarget, Target}
+import com.databricks.dicer.external.Target
 import com.databricks.rpc.{DatabricksServerWrapper, RPCContext}
 import com.databricks.rpc.tls.TLSOptions
 import java.net.URI
@@ -70,17 +70,18 @@ import scala.util.Random
  *                        operations than threads in the pool.
  * @param sec The [[SequentialExecutionContext]] that protects the state of the [[Assigner]].
  * @param conf assigner configuration
- * @param storeFactory when applied, returns a [[Store]] for assignment storage. For IN_MEMORY
- *                     config each application returns a new [[InMemoryStore]]; for ETCD
- *                     each application returns the same shared store instance.
+ * @param storeFactory when applied, returns a [[Store]] for assignment storage.
  * @param assignerClusterUri The URI of the Assigner cluster. This is used to normalize targets.
- * @param minAssignmentGenerationInterval See remarks for
- *        [[AssignmentGenerator.config.minAssignmentGenerationInterval]]. Will be used for the
- *        assignment generators for all targets. This parameter is lifted here in Assigner's
- *        constructor so we can inject different values for TestAssigner.
+ * @param minAssignmentGenerationInterval See remarks for [[AssignmentGenerator.config.
+ *                                        minAssignmentGenerationInterval]]. Will be used for the
+ *                                        assignment generators for all targets. This parameter is
+ *                                        lifted here in Assigner's constructor so we can inject
+ *                                        different values for TestAssigner.
  * @param dPageNamespace The namespace used for DPage registration. In production this is
- *        "dicer"; in tests each [[Assigner]] instance uses its UUID so that concurrent
- *        instances register under unique DAction names.
+ *                       "dicer"; in tests each [[Assigner]] instance uses its UUID so that
+ *                       concurrent instances register under unique DAction names.
+ * @param targetMigrator Watches the current target migration state and exposes it to
+ *                       consumers that need to react to the active migration.
  */
 @ThreadSafe
 class Assigner private (
@@ -96,7 +97,8 @@ class Assigner private (
     hostName: String,
     assignerClusterUri: URI,
     minAssignmentGenerationInterval: FiniteDuration,
-    dPageNamespace: String)
+    dPageNamespace: String,
+    targetMigrator: TargetMigrator)
     extends AssignerSlicezDataExporter {
   import Assigner.AssignmentGeneratorHandle
 
@@ -109,7 +111,7 @@ class Assigner private (
       suggestedSliceletRpcTimeout = conf.watchServerSuggestedRpcTimeout
     )
 
-  /** A map that keeps track of all generators.  */
+  /** A map that keeps track of all generators. */
   @GuardedBy("sec")
   private val generatorMap = new mutable.HashMap[Target, AssignmentGeneratorHandle]
 
@@ -139,12 +141,34 @@ class Assigner private (
   private[this] var assignerInfo: AssignerInfo = _
 
   /**
+   * The Assigner's watch-request rate limiting strategy, if enabled.
+   *
+   * Initialized in [[createAndStartDatabricksServer()]].
+   */
+  @GuardedBy("sec")
+  private[this] var rateLimitingStrategyOpt: Option[WatchRequestRateLimitingStrategy] = None
+
+  /**
    * The proto logger for Assigner-specific logging events.
    *
    * Initialized in [[start()]] which the factory method ensures is always called.
    */
   @GuardedBy("sec")
   private var assignerProtoLogger: AssignerProtoLogger = _
+
+  /**
+   * A shared thread pool for the SECs used by [[assignerProtoLogger]] and the sample fraction
+   * poller.
+   *
+   * Context propagation is disabled because proto logging runs in the background and is not part of
+   * any user request path.
+   */
+  private val protoLoggerSecPool: SequentialExecutionContextPool =
+    SequentialExecutionContextPool.create(
+      "assigner-proto-logger-pool",
+      numThreads = 2,
+      enableContextPropagation = false
+    )
 
   /**
    * Unmarshaller for [[Target]] protos that are received by the assigner. The unmarshaller is
@@ -154,10 +178,13 @@ class Assigner private (
     TargetUnmarshaller.createAssignerUnmarshaller(assignerClusterUri)
 
   /**
-   * Determines whether this assigner should handle the target locally or redirect to
-   * another assigner.
+   * The latest [[TargetOwnershipResolver]] published by [[targetMigrator]]. Initialized
+   * synchronously from the migrator at construction time (see [[TargetMigrator.getLatestResolver]]
+   * for why this is safe to call immediately) and updated by watching the migrator.
    */
-  private val targetMigrationRouter: TargetMigrationRouter = TargetMigrationRouter.ALWAYS_HANDLE
+  @GuardedBy("sec")
+  private var latestTargetOwnershipResolver: TargetOwnershipResolver =
+    targetMigrator.getLatestResolver
 
   /** The emitter for sending [[AssignmentGenerator.Event]] to Dicer Tee. */
   private val dicerTeeEventEmitter: DicerTeeEventEmitter =
@@ -181,9 +208,13 @@ class Assigner private (
   /**
    * Handles the watch call from a Clerk/Slicelet and returns the relevant response.
    *
-   * @note The [[targetMigrationRouter]] is checked first. If it returns [[Verdict.Redirect]], the
-   *       request is immediately redirected to the specified assigner. Otherwise, routing proceeds
-   *       as per the preferred assigner's role:
+   * @note The [[targetOwnershipResolver]] is checked first. If it returns
+   *       [[RoutingVerdict.Reroute]], the request is immediately rerouted to the specified
+   *       assigner. If the request carries an inbound `redirectTokenOpt` whose
+   *       `targetMigrationConfigVersion` is newer than the local config, the resolver forces a
+   *       [[RoutingVerdict.Handle]] to avoid ping-ponging the client back to the sender while a
+   *       new [[TargetMigrationConfig]] propagates to this Assigner.
+   *       Otherwise, routing proceeds as per the preferred assigner's role:
    *        - If the current assigner is a standby, it redirects to the preferred assigner.
    *        - If the current assigner is preferred, it handles the request and responds with a
    *          redirect to be [[Redirect.EMPTY]] if the preferred assigner mode is disabled, or a
@@ -193,17 +224,42 @@ class Assigner private (
     sec.flatCall {
       val request = ClientRequest.fromProto(targetUnmarshaller, req)
 
-      // Check the migration router first to determine whether to handle or redirect the target.
-      targetMigrationRouter.getVerdict(request.target) match {
-        case Verdict.Redirect(handlingAssigner: URI) =>
+      // Try to parse the inbound redirect token, transparently treating invalid tokens as absent
+      // (`RedirectToken.tryFromBytes` will fire a DEGRADED alert on parse failure).
+      val inboundRedirectTokenOpt: Option[RedirectToken] =
+        request.redirectTokenOpt.flatMap(RedirectToken.tryFromBytes)
+
+      // Check the target ownership resolver first to determine whether to handle or reroute the
+      // target.
+      latestTargetOwnershipResolver.getRoutingVerdict(
+        TargetName.forTarget(request.target),
+        inboundRedirectTokenOpt
+      ) match {
+        case RoutingVerdict.Reroute(peerAssignerUri: URI, redirectToken: RedirectToken) =>
           Future.successful(
             ClientResponse(
               syncState = KnownGeneration(Generation.EMPTY),
               suggestedRpcTimeout = getSuggestedWatchRpcTimeout(request),
-              redirect = Redirect(Some(handlingAssigner))
+              redirect = Redirect(
+                addressOpt = Some(peerAssignerUri),
+                redirectTokenOpt = Some(redirectToken.toBytes)
+              )
             ).toProto
           )
-        case Verdict.Handle =>
+        case RoutingVerdict.Handle(redirectTokenOpt: Option[RedirectToken]) =>
+          // We still attach the latest known redirect token so that if we redirect to the preferred
+          // assigner, it will see a `targetMigrationConfigVersion` >= the one we received here. In
+          // case the preferred assigner has a stale migration config, this avoids ping-ponging the
+          // client back to the peer cluster.
+          val outboundRedirect: Redirect = preferredAssignerConfig.preferredAssignerUriOpt match {
+            case Some(preferredAssignerUri: URI) =>
+              Redirect(
+                addressOpt = Some(preferredAssignerUri),
+                redirectTokenOpt = redirectTokenOpt.map((_: RedirectToken).toBytes)
+              )
+            case None =>
+              Redirect.EMPTY
+          }
           preferredAssignerConfig.role match {
             case AssignerRole.Preferred =>
               // If the current assigner is preferred, handle the watch request.
@@ -211,7 +267,6 @@ class Assigner private (
               lookupGenerator(request.target) match {
                 case Some(generatorHandle: AssignmentGeneratorHandle) =>
                   val generator: AssignmentGeneratorDriver = generatorHandle.getGeneratorDriver
-                  val redirect: Redirect = preferredAssignerConfig.redirect
                   generator.onWatchRequest(request)
 
                   // Track the last activity time for the target.
@@ -222,7 +277,7 @@ class Assigner private (
                     rpcContext,
                     request,
                     generator.getGeneratorCell,
-                    redirect,
+                    outboundRedirect,
                     currentTime
                   )
                 case None =>
@@ -230,7 +285,12 @@ class Assigner private (
                     s"Received watch request for unknown target: ${request.target}",
                     every = 10.seconds
                   )
-                  TargetMetrics.incrementNumTargetWatchErrors(request.target, WatchError.NO_CONFIG)
+                  // To avoid circular dependencies, the target watch errors live in
+                  // `AuthorizerMetrics`.
+                  AuthorizerMetrics.incrementNumTargetWatchErrors(
+                    request.target,
+                    WatchError.NO_CONFIG
+                  )
                   Future.failed(
                     DatabricksServiceException(
                       ErrorCode.NOT_FOUND,
@@ -245,7 +305,7 @@ class Assigner private (
                 ClientResponse(
                   syncState = KnownGeneration(Generation.EMPTY),
                   suggestedRpcTimeout = getSuggestedWatchRpcTimeout(request),
-                  redirect = preferredAssignerConfig.redirect
+                  redirect = outboundRedirect
                 ).toProto
               )
           }
@@ -354,27 +414,34 @@ class Assigner private (
       serviceBuilder,
       (req: HeartbeatRequestP) => this.handleHeartbeat(req)
     )
+
+    if (conf.enableWatchRequestRateLimiting) {
+      // We allocate a dedicated SEC for the rate limiting strategy to asynchronously process config
+      // updates without blocking the Assigner's SEC.
+      val rateLimitingSec: SequentialExecutionContext =
+        assignerSecPool.createExecutionContext("watch-rate-limiting")
+      rateLimitingStrategyOpt = Some(
+        new WatchRequestRateLimitingStrategy(
+          sec = rateLimitingSec,
+          initialConfigMap = configProvider.getLatestTargetConfigMap,
+          allowDefaultConfigForExperimentalTargets =
+            conf.allowDefaultTargetConfigForExperimentalTargets,
+          clock = rateLimitingSec.getClock
+        )
+      )
+    }
+
     val server: DatabricksServerWrapper = WatchServerHelper.createWatchServer(
       conf,
       conf.dicerAssignerRpcPort,
       conf.loopbackRpcPortOpt,
-      serviceBuilder
+      serviceBuilder,
+      rateLimitingStrategyOpt = rateLimitingStrategyOpt
     )
     server.start()
-    assignerInfo = AssignerInfo(uuid, URI.create(s"https://$hostName:${server.activePort()}"))
-    // Dedicated SEC for proto logging operations to avoid blocking the main SEC.
-    // Note: Context propagation is disabled because proto logging is asynchronous and not part of a
-    // user request path, so there is no request context to propagate.
-    val protoLoggerSec: SequentialExecutionContext =
-      SequentialExecutionContext.createWithDedicatedPool(
-        "assigner-proto-logger",
-        enableContextPropagation = false
-      )
-    assignerProtoLogger = AssignerProtoLogger.create(
-      assignerInfo,
-      conf.protoLoggerGenerationSampleFraction,
-      protoLoggerSec
-    )
+    assignerInfo =
+      AssignerInfo(uuid, AssignerUri(host = hostName, port = server.activePort()).toUri)
+    assignerProtoLogger = createAssignerProtoLogger()
     preferredAssignerDriver.start(assignerInfo, assignerProtoLogger)
 
     // Initially, we don't know who the preferred is, but `preferredAssignerDriver` will tell us.
@@ -401,6 +468,42 @@ class Assigner private (
     server
   }
 
+  /**
+   * Creates the [[AssignerProtoLogger]] backed by a [[WatchValueCellPollAdapter]] that periodically
+   * polls the [[DicerAssignerConf.protoLoggerGenerationSampleFractionFlag]] SAFE flag for the
+   * sample fraction.
+   *
+   * Intended to be called exactly once, from [[createAndStartDatabricksServer()]] during Assigner
+   * startup.
+   *
+   * PRECONDITION: [[assignerInfo]] must be initialized.
+   */
+  private[this] def createAssignerProtoLogger(): AssignerProtoLogger = {
+    sec.assertCurrentContext()
+
+    // Dedicated SEC for proto logging operations to avoid blocking the main SEC.
+    val loggingSec: SequentialExecutionContext =
+      protoLoggerSecPool.createExecutionContext("assigner-proto-logger")
+
+    // Dedicated SEC for polling the sample-fraction SAFE flag, separate from the logging SEC so a
+    // slow SAFE call cannot block log submission.
+    val pollSec: SequentialExecutionContext =
+      protoLoggerSecPool.createExecutionContext("assigner-proto-logger-poller")
+    // We initialize the sample fraction to 0.0, so no logs will be emitted until the first poll
+    // completes and the SAFE flag value is observed.
+    val sampleFractionPollAdapter: WatchValueCellPollAdapter[Double, Double] =
+      new WatchValueCellPollAdapter[Double, Double](
+        initialValueOpt = Some(0.0),
+        poller = () => conf.protoLoggerGenerationSampleFractionFlag.getCurrentValue(),
+        transform = identity,
+        pollInterval = conf.protoLoggerGenerationSampleFractionPollInterval,
+        sec = pollSec
+      )
+    sampleFractionPollAdapter.start()
+
+    AssignerProtoLogger.create(assignerInfo, sampleFractionPollAdapter, loggingSec)
+  }
+
   /** Shuts down all the generators if the current assigner is a standby. */
   private[this] def onPreferredAssignerConfigChange(newConfig: PreferredAssignerConfig): Unit = {
     sec.assertCurrentContext()
@@ -423,7 +526,10 @@ class Assigner private (
     preferredAssignerConfig = newConfig
   }
 
-  /** Starts watching config value changes, e.g., from SAFE. */
+  /**
+   * Starts watching config value changes from SAFE for per-target config, and updates to target
+   * migrator resulting in an updated [[TargetOwnershipResolver]].
+   */
   private[this] def startWatchingConfig(): Unit = {
     val configUpdatedCallback: ValueStreamCallback[InternalTargetConfigMap] = {
       new ValueStreamCallback[InternalTargetConfigMap](sec) {
@@ -435,11 +541,26 @@ class Assigner private (
             // Update the metrics with the new config value.
             InternalTargetConfigMetrics.exportAssignerConfigStats(targetName, config)
           }
+          // Forward the update to the rate limiting strategy if enabled. The strategy schedules
+          // the update on its own SEC, so this does not block the Assigner's SEC.
+          for (strategy: WatchRequestRateLimitingStrategy <- rateLimitingStrategyOpt) {
+            strategy.updateTargetConfigMapAsync(configMap)
+          }
         }
       }
     }
     // Start watching config changes.
     configProvider.watch(configUpdatedCallback)
+
+    // Subscribe to TargetOwnershipResolver updates from the migrator.
+    targetMigrator.watch(
+      new ValueStreamCallback[TargetOwnershipResolver](sec) {
+        override protected def onSuccess(resolver: TargetOwnershipResolver): Unit = {
+          sec.assertCurrentContext()
+          latestTargetOwnershipResolver = resolver
+        }
+      }
+    )
   }
 
   /**
@@ -640,33 +761,15 @@ class Assigner private (
   }
 
   /**
-   * Validates that the given `target` is allowed to be specified by a request with the given
-   * `rpcContext` and `clientType`.
+   * Validates that the given `target` is allowed to be specified by a watch request with the
+   * given `rpcContext` and `clientType`.
    *
-   * If target validation is disabled, this method immediately returns without an error. Otherwise,
-   * validation proceeds as follows:
-   *   1. If the request does not contain App Identifier headers AND the client is a
-   *      Clerk, we waive validation for backwards compatibility with non-Clerk callers.
-   *   2. If the request does not contain App Identifier headers AND the client is a
-   *      Slicelet, `target` is invalid.
-   *   3. If the request contains App Identifier headers and the client's App
-   *      Name is part of a trusted set of services, `target` is valid.
-   *   4. Otherwise, if the target is a KubernetesTarget, `target` is invalid
-   *      (KubernetesTargets can't be validated with App Identifiers).
-   *   5. Otherwise, if the target is an AppTarget and the client's App Name and 
-   *      App Instance ID match the AppTarget's name and instanceId, the target is valid.
-   *   6. Otherwise, the target is invalid.
-   *
-   * Note: Step 1 is a temporary compatibility path for Clerk callers that cannot yet supply
-   * headers (e.g. dp-apiproxy). In the current setup, DP requests can reach the Assigner
-   * only after passing authz in:
-   *   1. S2SProxy configuration, which only forwards watch requests from restricted and validated
-   *      access patterns.
-   *   2. Assigner's S2S authz policy, which restricts communication to control-plane clients
-   *       (in this case, via S2SProxy).
-   * Together, these mechanisms ensure that only trusted DP → CP callers can reach the Assigner.
+   * The validation policy is implemented by [[Authorizer]]. This method only applies the feature
+   * gate, and selects the configured or default authorizer.
    */
-  @throws[IllegalArgumentException]("if the target is invalid in the given context")
+  @throws[IllegalArgumentException](
+    "if the target is invalid or not authorized in the given context"
+  )
   private[this] def validateTarget(
       target: Target,
       rpcContext: RPCContext,
@@ -675,58 +778,25 @@ class Assigner private (
       return
     }
 
-    // Attempt to read the App Identifier headers from the request context.
-    // Waive validation if the headers are missing AND the client is a Clerk to support
-    // non-Clerk callers.
-    val (appName, appInstanceId): (String, String) = (for {
-      appName <- rpcContext.httpRequest.getHeader(HEADER_DATABRICKS_APP_SPEC_NAME)
-      appInstanceId <- rpcContext.httpRequest.getHeader(HEADER_DATABRICKS_APP_INSTANCE_ID)
-    } yield (appName, appInstanceId))
-      .getOrElse {
-        TargetMetrics.incrementNumTargetWatchErrors(target, WatchError.INVALID_TARGET_NO_HEADERS)
-        clientType match {
-          case ClientType.Clerk =>
-            // TODO(<internal bug>): Throw exception on missing headers once all trusted
-            //                    services use compatible certs.
-            return
-          case ClientType.Slicelet =>
-            throw new IllegalArgumentException(
-              s"Request is missing required App Identifier header."
-            )
-        }
-      }
+    val authorizerOpt: Option[Authorizer] =
+      configProvider.getLatestTargetConfigMap
+        .get(TargetName.forTarget(target))
+        .map((_: InternalTargetConfig).authorizer)
 
-    if (conf.trustedWatchAnyTargetServices.contains(appName)) {
-      // The request is from a service that is allowed to send requests for any `target`, so no
-      // further validation is needed.
-      return
-    }
-
-    target match {
-      case _: KubernetesTarget =>
-        TargetMetrics.incrementNumTargetWatchErrors(target, WatchError.INVALID_TARGET_NOT_APP)
-        throw new IllegalArgumentException(
-          "AppTarget must be specified for request with App Identifier headers."
+    // If we don't have a target config, don't do any validation. In practice the request will fail
+    // later due to missing target config, and this behavior preserves the better error message.
+    for (authorizer: Authorizer <- authorizerOpt) {
+      try {
+        authorizer.checkAuthorized(
+          target,
+          rpcContext,
+          clientType,
+          conf.trustedWatchAnyTargetServices
         )
-      case appTarget: AppTarget =>
-        if (appTarget.name != appName) {
-          TargetMetrics.incrementNumTargetWatchErrors(
-            target,
-            WatchError.INVALID_TARGET_NAME_MISMATCH
-          )
-          throw new IllegalArgumentException(
-            s"$appTarget name does not match App Name header $appName"
-          )
-        }
-        if (appTarget.instanceId != appInstanceId) {
-          TargetMetrics.incrementNumTargetWatchErrors(
-            target,
-            WatchError.INVALID_TARGET_INSTANCE_ID_MISMATCH
-          )
-          throw new IllegalArgumentException(
-            s"$appTarget instanceId does not match App Instance ID header $appInstanceId"
-          )
-        }
+      } catch {
+        case e: UnauthorizedException =>
+          throw new IllegalArgumentException(e.getMessage, e)
+      }
     }
   }
 
@@ -833,7 +903,6 @@ object Assigner {
    */
   trait StoreFactory {
 
-    /** Returns a new [[Store]] when called. */
     def getStore(): Store
   }
 
@@ -863,14 +932,8 @@ object Assigner {
     def getLastWatchTime: TickerTime = lastWatchTime
   }
 
-  // Preferred assigner and durable assignments are given separate etcd namespaces so avoid
-  // any potential collisions between their keys.
-
   /** The [[EtcdClient]] namespace suffix in which preferred Assigner records are written. */
   private[dicer] val PREFERRED_ASSIGNER_ETCD_NAMESPACE_SUFFIX = "preferred-assigner"
-
-  /** The [[EtcdClient]] namespace suffix in which assignments are written. */
-  private[dicer] val ASSIGNMENTS_ETCD_NAMESPACE_SUFFIX = "assignments"
 
   /**
    * The priority at which to register the Assigner shutdown hook, which triggers the Assigner to
@@ -909,7 +972,8 @@ object Assigner {
       hostName: String,
       assignerClusterUri: URI,
       minAssignmentGenerationInterval: FiniteDuration,
-      dPageNamespaceOpt: Option[String])
+      dPageNamespaceOpt: Option[String],
+      targetMigrator: TargetMigrator)
       extends Assigner(
         assignerSecPool,
         sec,
@@ -923,7 +987,8 @@ object Assigner {
         hostName,
         assignerClusterUri,
         minAssignmentGenerationInterval,
-        dPageNamespace = dPageNamespaceOpt.getOrElse(uuid.toString)
+        dPageNamespace = dPageNamespaceOpt.getOrElse(uuid.toString),
+        targetMigrator = targetMigrator
       )
 
   /**
@@ -938,12 +1003,11 @@ object Assigner {
       assignerClusterUri: URI,
       kubernetesTargetWatcherFactory: KubernetesTargetWatcher.Factory,
       membershipCheckerFactory: KubernetesMembershipChecker.Factory): Assigner = {
-    // How do we choose the number of threads? Resilience to long-running commands requires us to
-    // have more threads than cores, but we don't want lots of preemption (we prefer a cooperative
-    // concurrency model after all, see <internal link>) or the overhead cost of
-    // running lots of threads. Given that the Assigner is currently a small server, we go with 8!
-    val assignerSecPool = SequentialExecutionContextPool.create("Assigner", numThreads = 8)
+    val assignerSecPool =
+      SequentialExecutionContextPool.create("Assigner", numThreads = conf.secPoolThreadCount)
     val assignerSec = SequentialExecutionContext.createWithDedicatedPool("assigner-main")
+    val targetMigratorSec: SequentialExecutionContext =
+      assignerSecPool.createExecutionContext("target-migrator")
     val assigner: Assigner = new Assigner(
       assignerSecPool,
       assignerSec,
@@ -957,48 +1021,34 @@ object Assigner {
       hostName,
       assignerClusterUri,
       MIN_ASSIGNMENT_GENERATION_INTERVAL,
-      dPageNamespace = "dicer"
+      dPageNamespace = "dicer",
+      targetMigrator = TargetMigrator.create(
+        targetMigratorSec,
+        conf,
+        TargetMigrator.DEFAULT_INITIAL_TARGET_OWNERSHIP_RESOLVER_AWAIT_TIMEOUT
+      )
     )
     assigner.start()
     assigner
   }
 
   /**
-   * Returns a [[StoreFactory]] that, when applied, returns a new [[InMemoryStore]] per call if
-   * `conf.store` is IN_MEMORY, or the same shared store instance if ETCD.
-   *
-   * @param conf the assigner configuration.
-   * @return a [[StoreFactory]] that, when applied, returns a new [[Store]]
+   * Returns a [[StoreFactory]] for the given `conf` producing a fresh [[InMemoryStore]] per call.
    */
   private[assigner] def createStoreFactory(conf: DicerAssignerConf): StoreFactory = {
-    conf.store match {
-      case IN_MEMORY =>
-        // For IN_MEMORY, stores share a [[SequentialExecutionContextPool]]; each store gets a new
-        // [[SequentialExecutionContext]] from that pool.
-        val inMemoryStoreSecPool: SequentialExecutionContextPool =
-          SequentialExecutionContextPool.create("assigner-in-memory-store", numThreads = 8)
-        new StoreFactory {
+    // Stores share a [[SequentialExecutionContextPool]]; each store gets a new
+    // [[SequentialExecutionContext]] from that pool.
+    val inMemoryStoreSecPool: SequentialExecutionContextPool =
+      SequentialExecutionContextPool.create("assigner-in-memory-store", numThreads = 8)
+    new StoreFactory {
 
-          override def getStore(): Store = {
-            val sec: SequentialExecutionContext =
-              inMemoryStoreSecPool.createExecutionContext("assigner-store")
-            val storeIncarnation: Incarnation = conf.storeIncarnation
-            logger.info(s"Initializing InMemoryStore with store incarnation [$storeIncarnation].")
-            InMemoryStore(sec, storeIncarnation)
-          }
-        }
-      case ETCD =>
+      override def getStore(): Store = {
         val sec: SequentialExecutionContext =
-          SequentialExecutionContext.createWithDedicatedPool("assigner-store")
+          inMemoryStoreSecPool.createExecutionContext("assigner-store")
         val storeIncarnation: Incarnation = conf.storeIncarnation
-        val etcdClient: EtcdClient = createEtcdClient(conf, getAssignmentsEtcdNamespace(conf))
-
-        logger.info(s"Initializing EtcdStore with store incarnation [$storeIncarnation].")
-        val sharedStore: Store =
-          EtcdStore.create(sec, etcdClient, EtcdStoreConfig.create(storeIncarnation), new Random)
-        new StoreFactory {
-          override def getStore(): Store = sharedStore
-        }
+        logger.info(s"Initializing InMemoryStore with store incarnation [$storeIncarnation].")
+        InMemoryStore(sec, storeIncarnation)
+      }
     }
   }
 
@@ -1034,7 +1084,17 @@ object Assigner {
     )
   }
 
-  /** Creates a [[PreferredAssignerDriver]] with the given Dicer and driver configurations. */
+  /**
+   * Creates a [[PreferredAssignerDriver]] with the given configurations and membership checker
+   * factory. When the preferred assigner is enabled and a membership checker factory is provided,
+   * the returned driver is a [[MigrationPreferredAssignerDriver]] that shadows a
+   * [[ConsistentHashingPreferredAssignerDriver]] alongside the [[EtcdPreferredAssignerDriver]].
+   *
+   * [[MigrationPreferredAssignerDriver.MigrationMode.ConsistentHashingNominatedEtcdReadMode]] is
+   * also defined and forwards consistent-hashing picks into the etcd driver. Today this factory
+   * hardcodes `ShadowMode`; the eventual flip to `ConsistentHashingNominatedEtcdReadMode` is a
+   * follow-up that will be conf-gated.
+   */
   private[dicer] def createPreferredAssignerDriver(
       conf: DicerAssignerConf,
       membershipCheckerFactory: KubernetesMembershipChecker.Factory,
@@ -1044,13 +1104,32 @@ object Assigner {
       val store: EtcdPreferredAssignerStore = createPreferredAssignerStore(conf)
       // Use `getDicerClientTlsOptions` so it can send heartbeats to the preferred assigner.
       val tlsOptions: Option[TLSOptions] = conf.getDicerClientTlsOptions
-      val sec = SequentialExecutionContext.createWithDedicatedPool("etcd-preferred-assigner-driver")
-      new EtcdPreferredAssignerDriver(
-        sec,
+      // REQUIRED: `etcdDriver`, `chDriver`, and the wrapping `MigrationPreferredAssignerDriver`
+      // must all run on the same `SequentialExecutionContext` — see the class scaladoc on
+      // `MigrationPreferredAssignerDriver`. Today this factory hardcodes `ShadowMode`, which on
+      // its own does not require SEC-sharing, but constructing all three drivers with a single
+      // SEC here preempts the precondition for the eventual flip to
+      // `ConsistentHashingNominatedEtcdReadMode`. Any future construction site MUST preserve
+      // this property.
+      val driverSec: SequentialExecutionContext =
+        SequentialExecutionContext.createWithDedicatedPool("preferred-assigner-driver")
+      val etcdDriver: EtcdPreferredAssignerDriver = new EtcdPreferredAssignerDriver(
+        driverSec,
         tlsOptions,
         store,
-        driverConfig,
-        membershipCheckerFactory
+        driverConfig
+      )
+      // The factory is passed (rather than a constructed checker) because
+      // KubernetesMembershipChecker requires AssignerInfo, which is only available at start() time.
+      val chDriver: ConsistentHashingPreferredAssignerDriver =
+        new ConsistentHashingPreferredAssignerDriver(driverSec, membershipCheckerFactory)
+      val migrationMode: MigrationMode = conf.preferredAssignerMigrationMode
+      logger.info(s"Constructing MigrationPreferredAssignerDriver in mode: ${migrationMode.name}")
+      new MigrationPreferredAssignerDriver(
+        driverSec,
+        migrationMode = migrationMode,
+        oldDriver = etcdDriver,
+        newDriver = chDriver
       )
     } else {
       val preferredAssignerStoreIncarnation = Incarnation(conf.preferredAssignerStoreIncarnation)
@@ -1060,16 +1139,6 @@ object Assigner {
       )
       new DisabledPreferredAssignerDriver(preferredAssignerStoreIncarnation)
     }
-  }
-
-  /** Returns the etcd namespace in which the assigner for the given `conf` stores assignments. */
-  private[dicer] def getAssignmentsEtcdNamespace(
-      conf: DicerAssignerConf): EtcdClient.KeyNamespace = {
-    val prefixSeparator: String = if (conf.storeNamespacePrefix.isEmpty) "" else "-"
-    EtcdClient.KeyNamespace(
-      s"${conf.storeNamespacePrefix}$prefixSeparator" +
-      ASSIGNMENTS_ETCD_NAMESPACE_SUFFIX
-    )
   }
 
   /**

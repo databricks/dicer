@@ -40,27 +40,27 @@ class SliceLookupCacheSuite extends DatabricksTest with TestName {
         minRetryDelay = minRetryDelay,
         maxRetryDelay = maxRetryDelay,
         enableRateLimiting = false
-      )
+      ),
+      subscriberDebugName = s"test-lookup-${target.name}"
     )
   }
 
   /** Creates a SliceLookup using SliceLookup.createUnstarted. */
-  private def createSliceLookup(config: SliceLookupConfig): SliceLookup = {
-    val subscriberDebugName: String = s"test-lookup-${config.target.name}"
+  private def createSliceLookup(config: InternalClientConfig): SliceLookup = {
+    val sliceLookupConfig: SliceLookupConfig = config.sliceLookupConfig
     val sec: SequentialExecutionContext =
       SequentialExecutionContext.createWithDedicatedPool(
-        s"SliceLookupCacheSuite-${config.target.name}",
+        s"SliceLookupCacheSuite-${sliceLookupConfig.target.name}",
         enableContextPropagation = false
       )
     val protoLogger: DicerClientProtoLogger = DicerClientProtoLogger.create(
-      clientType = config.clientType,
+      clientType = sliceLookupConfig.clientType,
       conf = TestClientUtils.createTestProtoLoggerConf(sampleFraction = 0.0),
-      ownerName = subscriberDebugName
+      ownerName = config.subscriberDebugName
     )
     SliceLookup.createUnstarted(
       sec = sec,
       config = config,
-      subscriberDebugName = subscriberDebugName,
       protoLogger = protoLogger,
       serviceBuilderOpt = None
     )
@@ -74,8 +74,7 @@ class SliceLookupCacheSuite extends DatabricksTest with TestName {
       cache: SliceLookupCache,
       config: InternalClientConfig
   ): SliceLookup = {
-    val sliceLookupConfig: SliceLookupConfig = config.sliceLookupConfig
-    cache.getOrElseCreate(sliceLookupConfig, createSliceLookup(sliceLookupConfig))
+    cache.getOrElseCreate(config.sliceLookupConfig, createSliceLookup(config))
   }
 
   /** Creates a ChangeTracker for the cache hit metric (configMatched=true or false). */

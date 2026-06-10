@@ -8,8 +8,8 @@ import com.databricks.dicer.assigner.conf.DicerAssignerConf
  * A provider that serves static configuration for each sharded target.
  *
  * This provider always returns the same static configuration map that was provided during
- * construction. It does not poll for dynamic updates and the `watch` method is a no-op.
- * Dynamic configuration is always disabled for this provider.
+ * construction. It does not poll for dynamic updates; `watch` delivers the current value once and
+ * never fires again. Dynamic configuration is always disabled for this provider.
  *
  * @param staticTargetConfigMap the static config map constructed on textprotos that will
  *                              be returned by all calls to getLatestTargetConfigMap.
@@ -33,11 +33,14 @@ class StaticTargetConfigProvider(staticTargetConfigMap: InternalTargetConfigMap)
   override def getLatestTargetConfigMap: InternalTargetConfigMap = staticTargetConfigMap
 
   /**
-   * Returns a no-op cancellable: this is a no-op since the configuration never changes for the
-   * static config provider.
+   * Delivers the current [[InternalTargetConfigMap]] to `callback` once and returns a no-op
+   * cancellable. The configuration never changes for the static provider, so there are no further
+   * updates.
    */
-  override def watch(callback: ValueStreamCallback[InternalTargetConfigMap]): Cancellable =
+  override def watch(callback: ValueStreamCallback[InternalTargetConfigMap]): Cancellable = {
+    callback.executeOnSuccess(staticTargetConfigMap)
     Cancellable.NO_OP_CANCELLABLE
+  }
 }
 
 object StaticTargetConfigProvider {

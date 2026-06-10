@@ -20,13 +20,33 @@ import com.databricks.caching.util.{
   ServerTestUtils,
   Severity
 }
+import com.databricks.caching.util.TestUtils.TestName
 import java.util.UUID
+import java.util.concurrent.TimeUnit
 
+import scala.concurrent.Await
+import scala.concurrent.duration._
+
+import io.prometheus.client.CollectorRegistry
 import com.databricks.dicer.assigner.PreferredAssignerValue.SomeAssigner
 import com.databricks.rpc.DatabricksObjectMapper
 
-class AssignerMainSuite extends DatabricksTest {
+class AssignerMainSuite extends DatabricksTest with TestName {
   val etcd: EtcdTestEnvironment = EtcdTestEnvironment.create()
+
+  /**
+   * Tracks the Assigner started by [[startAssignerService]] so that [[afterEach]] can stop it
+   * and clear DPage state. Only one Assigner per test is supported.
+   */
+  private var assignerOpt: Option[Assigner] = None
+
+  /** Factory that returns [[None]], disabling the [[KubernetesMembershipChecker]]. */
+  private val noOpMembershipCheckerFactory: KubernetesMembershipChecker.Factory =
+    new KubernetesMembershipChecker.Factory {
+      override def create(
+          assignerInfo: AssignerInfo,
+          assignerProtoLogger: AssignerProtoLogger): Option[KubernetesMembershipChecker] = None
+    }
 
   /** A [[LocationConf]] that includes cluster location. */
   private val LOCATION_CONFIG_WITH_CLUSTER_LOCATION: LocationConf =
@@ -50,15 +70,28 @@ class AssignerMainSuite extends DatabricksTest {
     etcd.deleteAll()
   }
 
-  test("etcd bootstrapper initializes all namespaces for the Assigner") {
-    // Test plan: verify that running AssignerMain in etcd_bootstrapper mode initializes the
-    // preferred assigner and durable assignments EtcdClient namespaces with their corresponding
-    // incarnations.
+  /**
+   * Starts an Assigner via [[AssignerMain]] and stores it in [[assignerOpt]] so that [[afterEach]]
+   * can stop it cleanly. Only supports one Assigner per test — calling this twice in the same test
+   * will overwrite the previous reference, leaking the first Assigner.
+   */
+  private def startAssignerService(
+      conf: DicerAssignerConf,
+      factory: KubernetesMembershipChecker.Factory
+  ): Unit = {
+    AssignerMain.staticForTest.wrappedMainInternalWithCheckerFactory(conf, factory) match {
+      case Left(assigner: Assigner) => assignerOpt = Some(assigner)
+      case Right(statusCode: Int) => fail(s"Expected Assigner, got exit code: $statusCode")
+    }
+  }
+
+  test("etcd bootstrapper initializes the preferred-assigner namespace") {
+    // Test plan: Verify that running AssignerMain in etcd_bootstrapper mode initializes the
+    // preferred-assigner EtcdClient namespace with its corresponding incarnation.
     val conf = new DicerAssignerConf(
       Configs.parseMap(
         Map(
           "databricks.dicer.assigner.executionMode" -> "etcd_bootstrapper",
-          "databricks.dicer.assigner.storeIncarnation" -> 43,
           "databricks.dicer.assigner.preferredAssigner.storeIncarnation" -> 42,
           "databricks.dicer.assigner.preferredAssigner.etcd.sslEnabled" -> false,
           "databricks.dicer.assigner.preferredAssigner.etcd.endpoints" ->
@@ -69,20 +102,11 @@ class AssignerMainSuite extends DatabricksTest {
       )
     )
 
-    val statusCodeOpt: Option[Int] = AssignerMain.staticForTest.wrappedMainInternal(conf)
-    assert(statusCodeOpt.contains(EtcdBootstrapper.ExitCode.SUCCESS.id))
+    val result: Either[Assigner, Int] =
+      AssignerMain.staticForTest
+        .wrappedMainInternalWithCheckerFactory(conf, noOpMembershipCheckerFactory)
+    assert(result == Right(EtcdBootstrapper.ExitCode.SUCCESS.value))
 
-    assert(
-      etcd
-        .getKey(
-          EtcdKeyValueMapper.ForTest
-            .getVersionHighWatermarkKeyString(Assigner.getAssignmentsEtcdNamespace(conf))
-        )
-        .contains(
-          EtcdKeyValueMapper.ForTest
-            .toVersionValueString(EtcdClient.Version(43, UnixTimeVersion.MIN))
-        )
-    )
     assert(
       etcd
         .getKey(
@@ -116,8 +140,10 @@ class AssignerMainSuite extends DatabricksTest {
       )
     )
 
-    val statusCodeOpt: Option[Int] = AssignerMain.staticForTest.wrappedMainInternal(conf)
-    assert(statusCodeOpt.contains(EtcdBootstrapper.ExitCode.RETRYABLE_FAILURE.id))
+    val result: Either[Assigner, Int] =
+      AssignerMain.staticForTest
+        .wrappedMainInternalWithCheckerFactory(conf, noOpMembershipCheckerFactory)
+    assert(result == Right(EtcdBootstrapper.ExitCode.RETRYABLE_FAILURE.value))
   }
 
   test("Assigner sources POD_UID and POD_IP environment variables correctly") {
@@ -137,7 +163,7 @@ class AssignerMainSuite extends DatabricksTest {
           DatabricksObjectMapper.toJson(
             Seq(etcd.endpoint)
           ),
-          "databricks.dicer.assigner.rpc.port" -> 0
+          "databricks.dicer.assigner.rpc.port" -> 0 // Do not overlap with other tests.
         )
       )
     ) {
@@ -148,7 +174,7 @@ class AssignerMainSuite extends DatabricksTest {
     etcd.initializeStore(Assigner.getPreferredAssignerEtcdNamespace(conf))
 
     withLocationConfSingleton(LOCATION_CONFIG_WITH_CLUSTER_LOCATION) {
-      AssignerMain.staticForTest.wrappedMainInternal(conf)
+      startAssignerService(conf, noOpMembershipCheckerFactory)
     }
 
     val paStore: EtcdPreferredAssignerStore = Assigner.createPreferredAssignerStore(conf)
@@ -159,7 +185,7 @@ class AssignerMainSuite extends DatabricksTest {
           assert(assignerInfo.uuid == UUID.fromString("67a738a6-0f47-49ab-97db-b3e9858f196f"))
           // We don't know what port the assigner started on, so we just check that the host matches
           // expectations.
-          assert(assignerInfo.uri.getHost == "192.168.0.1")
+          assert(assignerInfo.uri.getHost == "127.0.0.1")
         case _ => fail("Expected preferred assigner value with UUID and IP.")
       }
     }

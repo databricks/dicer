@@ -1,9 +1,11 @@
 package com.databricks.caching.util
 
 import java.time.Instant
+import java.util.concurrent.CompletableFuture
 
 import scala.collection.JavaConverters._
 import scala.concurrent.duration._
+import scala.util.control.NonFatal
 
 import com.databricks.caching.util.CachingErrorCode.ETCD_CLIENT_UNEXPECTED_WATCH_FAILURE
 import com.google.protobuf.ByteString
@@ -146,8 +148,12 @@ class EtcdWatcher private (
         knownVersion.copy(lowBits = knownVersion.lowBits.value + 1L)
       case None => Version.MIN
     }
-    jetcd
-      .get(
+    // The underlying jetcd client can throw synchronously (e.g. `ClosedClientException` once the
+    // client has been closed during pod shutdown). Convert any synchronous throw into a failed
+    // future so it flows through the same handler as an asynchronous failure rather than escaping
+    // into the StateMachineDriver as an UNCAUGHT_STATE_MACHINE_ERROR.
+    val getFuture: CompletableFuture[GetResponse] = try {
+      jetcd.get(
         EtcdKeyValueMapper.getVersionedKeyKeyBytes(scopedKey, inclusiveStartVersion),
         GetOption
           .newBuilder()
@@ -157,6 +163,14 @@ class EtcdWatcher private (
           .withLimit(pageReadLimit)
           .build()
       )
+    } catch {
+      case NonFatal(t: Throwable) =>
+        logger.warn(s"jetcd.get threw synchronously: $t")
+        val failed: CompletableFuture[GetResponse] = new CompletableFuture[GetResponse]()
+        failed.completeExceptionally(t)
+        failed
+    }
+    getFuture
       .whenComplete(
         (response: GetResponse, throwable: Throwable) =>
           // Clear context because the code initially runs on non-instrumented threads from the etcd
@@ -192,53 +206,69 @@ class EtcdWatcher private (
         knownVersion.copy(lowBits = knownVersion.lowBits.value + 1L)
       case None => Version.MIN
     }
-    this.watcherOpt = Some(
-      jetcd.watch(
-        EtcdKeyValueMapper.getVersionedKeyKeyBytes(scopedKey, inclusiveStartVersion),
-        WatchOption
-          .newBuilder()
-          .withRange(EtcdKeyValueMapper.toVersionedKeyExclusiveLimitBytes(scopedKey))
-          .withNoDelete(true) // we only care about PUTs
-          .withRevision(knownRevision + 1) // skip past the revision we already know about
-          .build(),
-        new Listener {
-          override def onNext(watchResponse: WatchResponse): Unit = {
-            // Clear context because the code initially runs on non-instrumented threads from the
-            // etcd library, and nothing needs to be propagated by the SequentialExecutionContext.
-            withAttributionContext(AttributionContext.background) {
-              sec.run {
-                logger.debug(s"onNext")
-                baseDriver.handleEvent(Event.EtcdWatchEvent(watchResponse))
+    // The underlying jetcd client can throw synchronously (e.g. `ClosedClientException` once the
+    // watch client has been closed during pod shutdown). Route any synchronous throw through the
+    // same failure path as an `onError`/`onCompleted` callback rather than letting it escape into
+    // the StateMachineDriver as an UNCAUGHT_STATE_MACHINE_ERROR.
+    this.watcherOpt = try {
+      Some(
+        jetcd.watch(
+          EtcdKeyValueMapper.getVersionedKeyKeyBytes(scopedKey, inclusiveStartVersion),
+          WatchOption
+            .newBuilder()
+            .withRange(EtcdKeyValueMapper.toVersionedKeyExclusiveLimitBytes(scopedKey))
+            .withNoDelete(true) // we only care about PUTs
+            .withRevision(knownRevision + 1) // skip past the revision we already know about
+            .build(),
+          new Listener {
+            override def onNext(watchResponse: WatchResponse): Unit = {
+              // Clear context because the code initially runs on non-instrumented threads from the
+              // etcd library, and nothing needs to be propagated by the SequentialExecutionContext.
+              withAttributionContext(AttributionContext.background) {
+                sec.run {
+                  logger.debug(s"onNext")
+                  baseDriver.handleEvent(Event.EtcdWatchEvent(watchResponse))
+                }
               }
             }
-          }
 
-          override def onError(throwable: Throwable): Unit = {
-            // Clear context because the code initially runs on non-instrumented threads from the
-            // etcd library, and nothing needs to be propagated by the SequentialExecutionContext.
-            withAttributionContext(AttributionContext.background) {
-              sec.run {
-                logger.warn(s"onError($throwable)")
-                // An error has occurred which breaks the underlying etcd watch stream. Record the
-                // error so that we can report it to the state machine when we get the onCompleted
-                // event.
-                errorOpt = Some(StatusUtils.convertExceptionToStatus(throwable))
+            override def onError(throwable: Throwable): Unit = {
+              // Clear context because the code initially runs on non-instrumented threads from the
+              // etcd library, and nothing needs to be propagated by the SequentialExecutionContext.
+              withAttributionContext(AttributionContext.background) {
+                sec.run {
+                  logger.warn(s"onError($throwable)")
+                  // An error has occurred which breaks the underlying etcd watch stream. Record the
+                  // error so that we can report it to the state machine when we get the onCompleted
+                  // event.
+                  errorOpt = Some(StatusUtils.convertExceptionToStatus(throwable))
+                }
               }
             }
-          }
 
-          override def onCompleted(): Unit = {
-            // Clear context because the code initially runs on non-instrumented threads from the
-            // etcd library, and nothing needs to be propagated by the SequentialExecutionContext.
-            withAttributionContext(AttributionContext.background) {
-              sec.run {
-                handleWatchFailure()
+            override def onCompleted(): Unit = {
+              // Clear context because the code initially runs on non-instrumented threads from the
+              // etcd library, and nothing needs to be propagated by the SequentialExecutionContext.
+              withAttributionContext(AttributionContext.background) {
+                sec.run {
+                  handleWatchFailure()
+                }
               }
             }
           }
-        }
+        )
       )
-    )
+    } catch {
+      case NonFatal(t: Throwable) =>
+        logger.warn(s"jetcd.watch threw synchronously: $t")
+        errorOpt = Some(StatusUtils.convertExceptionToStatus(t))
+        // Defer to a fresh SEC tick so we don't re-enter the state machine while still inside the
+        // current `performAction` invocation.
+        sec.run {
+          handleWatchFailure()
+        }
+        None
+    }
   }
 
   /** Reports a watch failure to the state machine. */

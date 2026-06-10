@@ -54,7 +54,7 @@ object SequentialExecutionContextPool {
    * @param enableContextPropagation whether to propagate the context object to runnables submitted
    *                                 to execution contexts created by this pool
    * @param alertOwnerTeam the team's registered alert routing name, e.g.
-   *                       [[AlertOwnerTeam.CachingTeam.toString]] for Caching-owned pools,
+   *                       [[AlertOwnerTeam.CACHING_TEAM_NAME]] for Caching-owned pools,
    *                       or "eng-my-team" for pools owned by other teams. For alert routing to
    *                       work correctly, this must be used as the `owner_team_name` for some
    *                       Dicer target config.
@@ -62,14 +62,41 @@ object SequentialExecutionContextPool {
   def create(
       poolName: String,
       numThreads: Int,
-      enableContextPropagation: Boolean = true,
-      // TODO(<internal bug>): Make alertOwnerTeam required once all call sites are updated.
-      alertOwnerTeam: String = AlertOwnerTeam.CachingTeam.toString)
-      : SequentialExecutionContextPool = {
+      alertOwnerTeam: String,
+      enableContextPropagation: Boolean = true): SequentialExecutionContextPool = {
     val exceptionHandler =
       new ExceptionHandler(poolName, AlertOwnerTeam.createFromString(alertOwnerTeam))
     createInternal(poolName, numThreads, exceptionHandler, enableContextPropagation)
   }
+
+  /** Use [[create]] with an explicit `alertOwnerTeam` instead. */
+  @deprecated(
+    "Provide alertOwnerTeam explicitly; the CachingTeam default is only correct for " +
+    "Caching-owned pools (<internal bug>)."
+  )
+  def create(poolName: String, numThreads: Int): SequentialExecutionContextPool =
+    create(
+      poolName,
+      numThreads,
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+      enableContextPropagation = true
+    )
+
+  /** Use [[create]] with an explicit `alertOwnerTeam` instead. */
+  @deprecated(
+    "Provide alertOwnerTeam explicitly; the CachingTeam default is only correct for " +
+    "Caching-owned pools (<internal bug>)."
+  )
+  def create(
+      poolName: String,
+      numThreads: Int,
+      enableContextPropagation: Boolean): SequentialExecutionContextPool =
+    create(
+      poolName,
+      numThreads,
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+      enableContextPropagation = enableContextPropagation
+    )
 
   private def createInternal(
       poolName: String,
@@ -133,7 +160,7 @@ object SequentialExecutionContextPool {
 
     /** Handles an uncaught exception (see class docs for more information). */
     def handleUncaughtException(
-        source: UncaughtExceptionSource.UncaughtExceptionSource,
+        source: UncaughtExceptionSource,
         debugName: String,
         e: Throwable): Unit = {
       val stackTrace = e.getStackTrace.mkString("Array(\n    ", "\n    ", ")")
@@ -164,9 +191,12 @@ object SequentialExecutionContextPool {
    *    we don't really know.
    *  - `Command`: an exception thrown from a command added to the [[SequentialExecutionContext]].
    */
-  private[util] object UncaughtExceptionSource extends Enumeration {
-    type UncaughtExceptionSource = Value
-    val Thread, ExecutionContext, Command = Value
+  private[util] sealed trait UncaughtExceptionSource
+
+  private[util] object UncaughtExceptionSource {
+    case object Thread extends UncaughtExceptionSource
+    case object ExecutionContext extends UncaughtExceptionSource
+    case object Command extends UncaughtExceptionSource
   }
 
   private[util] object Metrics {

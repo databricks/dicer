@@ -8,9 +8,6 @@ import com.databricks.dicer.assigner.conf.DicerAssignerConf
 import scala.concurrent.duration._
 import scala.concurrent.{Await, Future}
 
-import io.grpc.{ClientInterceptor, Metadata}
-import io.grpc.stub.MetadataUtils
-
 import com.databricks.common.web.InfoService
 import com.databricks.rpc.DatabricksObjectMapper
 import io.grpc.Deadline
@@ -35,7 +32,7 @@ import com.databricks.dicer.assigner.config.InternalTargetConfig.{
   LoadBalancingConfig,
   LoadBalancingMetricConfig
 }
-import com.databricks.dicer.common.TestSliceUtils.{createTestSquid, sampleProposal}
+import com.databricks.dicer.common.TestSliceUtils.sampleProposal
 import com.databricks.dicer.common.Version.LATEST_VERSION
 import com.databricks.dicer.common.{
   Assignment,
@@ -64,10 +61,8 @@ import io.grpc.StatusRuntimeException
 import io.prometheus.client.CollectorRegistry
 
 import com.databricks.caching.util.WhereAmITestUtils.withLocationConfSingleton
-import com.databricks.common.http.Headers
 import com.databricks.conf.trusted.LocationConf
 import com.databricks.conf.trusted.LocationConfTestUtils
-import com.databricks.dicer.assigner.TargetMetrics.WatchError
 import com.databricks.dicer.assigner.AssignerSuite.{
   ASSIGNER_CLUSTER_LOCATION_CONF,
   DP1_CLUSTER_LOCATION_CONF,
@@ -237,7 +232,8 @@ class AssignerSuite extends DatabricksTest with TestName {
       "main-subscriber",
       WATCH_RPC_TIMEOUT,
       ClerkData,
-      supportsSerializedAssignment = true
+      supportsSerializedAssignment = true,
+      redirectTokenOpt = None
     )
     val asnResponse: ClientResponse = performWatchCallSync(stub, request)
     assert(
@@ -245,39 +241,20 @@ class AssignerSuite extends DatabricksTest with TestName {
     )
   }
 
-  test("IN_MEMORY store factory returns a new store instance for each call") {
-    // Test plan: create a store factory with IN_MEMORY config, apply it multiple times, and
-    // verify that each call returns a distinct store instance (not shared).
+  test("Store factory returns a new store instance for each call") {
+    // Test plan: create a store factory, apply it multiple times, and verify that each call
+    // returns a distinct store instance (not shared).
     val conf: DicerAssignerConf = new DicerAssignerConf(
-      Configs.parseMap("databricks.dicer.assigner.store.type" -> "in_memory")
+      Configs.parseMap("databricks.dicer.assigner.storeIncarnation" -> 1L)
     )
     val factory = Assigner.createStoreFactory(conf)
     val store1 = factory.getStore()
     val store2 = factory.getStore()
     val store3 = factory.getStore()
-    assert(store1 ne store2, "IN_MEMORY factory should return different store instances per call")
-    assert(store1 ne store3, "IN_MEMORY factory should return different store instances per call")
-    assert(store2 ne store3, "IN_MEMORY factory should return different store instances per call")
-  }
-
-  test("ETCD store factory returns the same store instance for each call") {
-    // Test plan: verify that calling an ETCD store factory multiple times returns the same shared
-    // store instance.
-    val endpointsConfigString: String = DatabricksObjectMapper.toJson(
-      Seq("http://dicer-etcd-service.test-env-test.svc.cluster.local:2379")
-    )
-    val etcdConf: DicerAssignerConf = new DicerAssignerConf(
-      Configs.parseMap(
-        "databricks.dicer.assigner.store.type" -> "etcd",
-        "databricks.dicer.assigner.preferredAssigner.etcd.endpoints" -> endpointsConfigString,
-        "databricks.dicer.assigner.storeIncarnation" -> 2
-      )
-    )
-    val etcdFactory = Assigner.createStoreFactory(etcdConf)
-    assert(
-      etcdFactory.getStore() eq etcdFactory.getStore(),
-      "ETCD factory should return the same store instance"
-    )
+    val distinctStoresClue = "Factory should return different store instances per call"
+    assert(store1 ne store2, distinctStoresClue)
+    assert(store1 ne store3, distinctStoresClue)
+    assert(store2 ne store3, distinctStoresClue)
   }
 
   test("Test two clients") {
@@ -303,7 +280,8 @@ class AssignerSuite extends DatabricksTest with TestName {
       "second-sub",
       shortTimeout,
       ClerkData,
-      supportsSerializedAssignment = true
+      supportsSerializedAssignment = true,
+      redirectTokenOpt = None
     )
     log.info(s"Starting watch call from AssignmentWatcher: $target")
     val response2: ClientResponse = performWatchCallSync(stub2, request2)
@@ -322,7 +300,8 @@ class AssignerSuite extends DatabricksTest with TestName {
       "two-clients",
       WATCH_RPC_TIMEOUT,
       ClerkData,
-      supportsSerializedAssignment = true
+      supportsSerializedAssignment = true,
+      redirectTokenOpt = None
     )
     val asn: ClientResponse = performWatchCallSync(stub, request1)
     assert(
@@ -363,7 +342,8 @@ class AssignerSuite extends DatabricksTest with TestName {
       "asn1",
       WATCH_RPC_TIMEOUT,
       ClerkData,
-      supportsSerializedAssignment = true
+      supportsSerializedAssignment = true,
+      redirectTokenOpt = None
     )
     val request2 = ClientRequest(
       target2,
@@ -371,7 +351,8 @@ class AssignerSuite extends DatabricksTest with TestName {
       "asn2",
       WATCH_RPC_TIMEOUT,
       ClerkData,
-      supportsSerializedAssignment = true
+      supportsSerializedAssignment = true,
+      redirectTokenOpt = None
     )
 
     // Send the requests and wait for their respective assignments.
@@ -529,8 +510,17 @@ class AssignerSuite extends DatabricksTest with TestName {
     // target eventually see the same assignment, and that the expected two slicelets are the
     // complete set of resources for that target (i.e. no other slicelets from other targets somehow
     // find their way into the assignment).
+    //
+    // Additionally, for the control plane target, verify that we can refer to it just the same with
+    // or without the cluster URI, as Target identifiers without cluster URIs are assumed to be in
+    // the same cluster as the Assigner.
     for ((target, slicelet1, slicelet2) <- Vector(
         (Target(getSafeName), cpSlicelet1, cpSlicelet2),
+        (
+          Target.createKubernetesTarget(ASSIGNER_CLUSTER_URI, getSafeName),
+          cpSlicelet1,
+          cpSlicelet2
+        ),
         (Target.createKubernetesTarget(DP1_CLUSTER_URI, getSafeName), dp1Slicelet1, dp1Slicelet2),
         (Target.createKubernetesTarget(DP2_CLUSTER_URI, getSafeName), dp2Slicelet1, dp2Slicelet2)
       )) {
@@ -557,19 +547,6 @@ class AssignerSuite extends DatabricksTest with TestName {
         )
       }
     }
-
-    // Verify: Lastly, check that the assigner does not have an assignment for a local target
-    // identifier that includes the cluster URI (since we expect the assigner to canonicalize such
-    // identifiers to be cluster-URI-less).
-    assert(
-      TestUtils
-        .awaitResult(
-          testAssigner
-            .getAssignment(Target.createKubernetesTarget(ASSIGNER_CLUSTER_URI, getSafeName)),
-          Duration.Inf
-        )
-        .isEmpty
-    )
 
     cpSlicelet1.forTest.stop()
     cpSlicelet2.forTest.stop()
@@ -758,7 +735,8 @@ class AssignerSuite extends DatabricksTest with TestName {
       "test-clerk",
       timeout = 1.second,
       ClerkData,
-      supportsSerializedAssignment = true
+      supportsSerializedAssignment = true,
+      redirectTokenOpt = None
     )
     val sliceletRequest = ClientRequest(
       target,
@@ -772,7 +750,8 @@ class AssignerSuite extends DatabricksTest with TestName {
         attributedLoads = Vector.empty,
         unattributedLoadOpt = None
       ),
-      supportsSerializedAssignment = true
+      supportsSerializedAssignment = true,
+      redirectTokenOpt = None
     )
 
     // Verify: The assigner returns the default suggested RPC timeout.
@@ -982,4 +961,5 @@ class AssignerSuite extends DatabricksTest with TestName {
     configuredSlicelet.forTest.stop()
     unconfiguredSlicelet.forTest.stop()
   }
+
 }

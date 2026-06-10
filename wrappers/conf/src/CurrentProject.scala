@@ -21,7 +21,8 @@ object CurrentProject {
   /**
    * REQUIRES: Must only be called once.
    *
-   * Initialize the project (called by DatabricksMain).
+   * Initialize the project (called by DatabricksMain). Also populates [[CurrentProjectInfo]]
+   * with the project name.
    */
   @throws[IllegalStateException]("if the project has already been initialized")
   def initializeProject(project: Project.Project): Unit = withLock(lock) {
@@ -32,6 +33,7 @@ object CurrentProject {
       )
     }
     projectInternal = Some(project)
+    CurrentProjectInfo.set(project.name)
   }
 
   /** Returns the project name, or "NoServiceName" if not initialized. */

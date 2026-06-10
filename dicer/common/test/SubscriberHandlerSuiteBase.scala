@@ -47,7 +47,7 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
     )
 
   /**
-   * Creates a SubscriberHandlerDriver for testing. The driver manages the handler lifecycle
+   * Creates a SubscriberHandlerHarness for testing. The driver manages the handler lifecycle
    * and provides methods to interact with it.
    *
    * @param handlerLocation The location of the handler.
@@ -56,7 +56,7 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
    */
   protected def createDriver(
       handlerLocation: Location,
-      handlerTarget: Target): SubscriberHandlerDriver
+      handlerTarget: Target): SubscriberHandlerHarness
 
   /**
    * Reads a Prometheus metric from the test infrastructure.
@@ -94,6 +94,7 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
       TIMEOUT,
       data,
       supportsSerializedAssignment = true,
+      redirectTokenOpt = None,
       version = version
     )
   }
@@ -237,7 +238,7 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
       data1: SubscriberData,
       data2: SubscriberData): Unit = {
     val testTarget: Target = target
-    val driver: SubscriberHandlerDriver = createDriver(handlerLocation, testTarget)
+    val driver: SubscriberHandlerHarness = createDriver(handlerLocation, testTarget)
     val generation: Generation = Generation(Incarnation(4), 42)
 
     // Track the number of handleWatch calls made for the target, used for draining to make sure
@@ -301,7 +302,7 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
     )
     // Sleep a short period here, since Rust code is running in a sub-process and the response is
     // sent asynchronously.
-    TestUtils.shamefullyAwaitForNonEventInAsyncTest()
+    TestUtils.shamefullyAwait200msForNonEventInAsyncTest()
     assert(!fut2.isCompleted)
 
     // After the timeout is up, the second subscriber should receive a response indicating that the
@@ -383,6 +384,93 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
     runSubscriberLifetimeTest(Location.Slicelet, createSliceletData("pod0"), ClerkData)
   }
 
+  test("Slicez data tracking") {
+    // Test plan: Verify that active Clerks/Slicelets is tracked in slicez data as expected.
+    // This is done by:
+    //  1. Sending watches from 3 Clerks and 2 Slicelets with distinct debug names.
+    //  2. Verifying that `getSlicezData` returns 3 Clerk entries and 2 Slicelet entries.
+    //  3. Refreshing only 2 Clerks and 1 Slicelet with new watch requests.
+    //  4. Advancing fake time beyond `SubscriberHandlerMetrics.EXPIRE_AFTER`.
+    //  5. Verifying that `getSlicezData` now returns only the refreshed 2 Clerks and 1 Slicelet.
+    val testTarget: Target = target
+    val driver: SubscriberHandlerHarness = createDriver(Location.Assigner, testTarget)
+
+    // Create watch requests for 3 Clerks and 2 Slicelets with distinct debug names.
+    val initialWatchRequests: Seq[ClientRequest] = Seq(
+      createClientRequest(Generation.EMPTY, ClerkData, debugName = "clerk1", testTarget),
+      createClientRequest(Generation.EMPTY, ClerkData, debugName = "clerk2", testTarget),
+      createClientRequest(Generation.EMPTY, ClerkData, debugName = "clerk3", testTarget),
+      createClientRequest(
+        Generation.EMPTY,
+        createSliceletData("slicelet-1"),
+        debugName = "slicelet1",
+        testTarget
+      ),
+      createClientRequest(
+        Generation.EMPTY,
+        createSliceletData("slicelet-2"),
+        debugName = "slicelet2",
+        testTarget
+      )
+    )
+
+    // Inject an assignment so the response are sent to all subscribers.
+    val assignment: Assignment = createRandomAssignment(
+      generation = Generation(Incarnation(1), 42),
+      Vector("pod0", "pod1")
+    )
+    driver.setAssignment(assignment)
+
+    // Send the watch requests to the handler and wait for the responses to complete.
+    initialWatchRequests.map { request: ClientRequest =>
+      TestUtils.awaitResult(driver.handleWatch(request, redirectOpt = None), Duration.Inf)
+    }
+
+    // Verify that the slicez data is updated as expected.
+    AssertionWaiter("Initial slicez data", pollInterval = METRICS_ASSERTION_POLL_INTERVAL).await {
+      val (initialSlicelets, initialClerks) = driver.getSlicezData()
+      assert(initialClerks.map(_.debugName).toSet == Set("clerk1", "clerk2", "clerk3"))
+      assert(initialSlicelets.map(_.debugName).toSet == Set("slicelet1", "slicelet2"))
+    }
+
+    // Track the number of handle watch calls such that the time advancement happens after all
+    // handle watch calls have registered their timeout sleeps if it's the rust driver.
+    var handleWatchCount: Int = initialWatchRequests.size
+    for (_ <- 0 until 4) {
+      // Keep two clerks and one slicelet alive by repeatedly issuing watch requests.
+      val refreshedClerkWatch1: Future[ClientResponseP] = driver.handleWatch(
+        createClientRequest(Generation.EMPTY, ClerkData, "clerk1", testTarget),
+        redirectOpt = None
+      )
+      val refreshedClerkWatch2: Future[ClientResponseP] = driver.handleWatch(
+        createClientRequest(Generation.EMPTY, ClerkData, "clerk2", testTarget),
+        redirectOpt = None
+      )
+      val refreshedSliceletWatch: Future[ClientResponseP] = driver.handleWatch(
+        createClientRequest(
+          Generation.EMPTY,
+          createSliceletData("slicelet-1"),
+          "slicelet1",
+          testTarget
+        ),
+        redirectOpt = None
+      )
+      handleWatchCount += 3
+      driver.waitForSubscriberHandler(testTarget, handleWatchCount)
+      driver.advanceTime(SubscriberHandlerMetrics.EXPIRE_AFTER / 2)
+      TestUtils.awaitResult(refreshedClerkWatch1, Duration.Inf)
+      TestUtils.awaitResult(refreshedClerkWatch2, Duration.Inf)
+      TestUtils.awaitResult(refreshedSliceletWatch, Duration.Inf)
+    }
+
+    // Verify that the slicez data is updated as expected.
+    AssertionWaiter("Refreshed slicez data", pollInterval = METRICS_ASSERTION_POLL_INTERVAL).await {
+      val (refreshedSlicelets, refreshedClerks) = driver.getSlicezData()
+      assert(refreshedClerks.map(_.debugName).toSet == Set("clerk1", "clerk2"))
+      assert(refreshedSlicelets.map(_.debugName).toSet == Set("slicelet1"))
+    }
+  }
+
   test("Subscriber version metrics") {
     // Test plan: Verify that the subscriber version metrics are updated as expected. Send a clerk
     // watch with the default version, and verify that it is recorded in the metrics. Then change
@@ -390,7 +478,7 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
     // the version 0 metric is incremented.
     val testTarget: Target = target
     val handlerLocation: Location = Location.Slicelet
-    val driver: SubscriberHandlerDriver = createDriver(handlerLocation, testTarget)
+    val driver: SubscriberHandlerHarness = createDriver(handlerLocation, testTarget)
 
     // Track the number of handleWatch calls for drain synchronization.
     var handleWatchCount: Int = 0
@@ -680,7 +768,8 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
       "subscriber-structured",
       TIMEOUT,
       ClerkData,
-      supportsSerializedAssignment = false
+      supportsSerializedAssignment = false,
+      redirectTokenOpt = None
     )
     assert(!structuredRequest.supportsSerializedAssignment)
     val structuredResponseP: ClientResponseP =
@@ -707,7 +796,7 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
     // 2. `dicer_serialized_assignment_size_bytes` - serialized assignment state size.
     // We test with two requests: one with no known generation, one with a known generation.
     val location = Location.Assigner
-    val driver: SubscriberHandlerDriver = createDriver(location, target)
+    val driver: SubscriberHandlerHarness = createDriver(location, target)
 
     // Track the known generation.
     var knownGeneration: Generation = Generation.EMPTY
@@ -784,7 +873,7 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
     // its start time, which is needed before advancing the fake clock. We could add an explicit
     // event to the handler to signal when it has captured its start time, but the benefits are
     // marginal, so we use a sleep instead.
-    TestUtils.shamefullyAwaitForNonEventInAsyncTest()
+    TestUtils.shamefullyAwait200msForNonEventInAsyncTest()
     // Load shedding metric should not be incremented yet, and the future should not be completed.
     assert(loadShedTracker.totalChange() == 0)
     assertResult(false)(fut.isCompleted)
@@ -839,7 +928,7 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
     // its start time, which is needed before advancing the fake clock. We could add an explicit
     // event to the handler to signal when it has captured its start time, but the benefits are
     // marginal, so we use a sleep instead.
-    TestUtils.shamefullyAwaitForNonEventInAsyncTest()
+    TestUtils.shamefullyAwait200msForNonEventInAsyncTest()
     // Verify that the future should not be completed.
     assertResult(false)(fut.isCompleted)
 
@@ -854,7 +943,7 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
 
     // Sleep briefly, because the actual implementation may be running in a separate process, and
     // we need sometime for the handler to process the request and update the future.
-    TestUtils.shamefullyAwaitForNonEventInAsyncTest()
+    TestUtils.shamefullyAwait200msForNonEventInAsyncTest()
     assertResult(false)(fut.isCompleted)
 
     // Advance the clock by less than the remaining processing timeout. The future should remain
@@ -863,7 +952,7 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
       WatchServerHelper.getWatchProcessingTimeout(request.timeout)
     val remainingTimeout: FiniteDuration = processingTimeout - queueDelay
     driver.advanceTime(remainingTimeout - 1.seconds)
-    TestUtils.shamefullyAwaitForNonEventInAsyncTest()
+    TestUtils.shamefullyAwait200msForNonEventInAsyncTest()
     assertResult(false)(fut.isCompleted)
 
     // Now advance by 1 second to exceed the expected processing timeout (assuming the queue delay

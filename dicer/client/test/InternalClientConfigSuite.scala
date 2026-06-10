@@ -31,7 +31,8 @@ class InternalClientConfigSuite extends DatabricksTest {
           minRetryDelay = 1.second,
           maxRetryDelay = 10.seconds,
           enableRateLimiting = false
-        )
+        ),
+        subscriberDebugName = "test-subscriber"
       )
 
       assert(config.sliceLookupConfig.watchRpcTimeout == timeout)
@@ -58,7 +59,8 @@ class InternalClientConfigSuite extends DatabricksTest {
             minRetryDelay = 1.second,
             maxRetryDelay = 10.seconds,
             enableRateLimiting = false
-          )
+          ),
+          subscriberDebugName = "test-subscriber"
         )
       }
     }

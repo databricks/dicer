@@ -56,4 +56,8 @@ class DisabledPreferredAssignerDriver(storeIncarnation: Incarnation)
     val heartbeatResponse = HeartbeatResponse(request.opId, DISABLED_PREFERRED_ASSIGNER_VALUE)
     Future.successful(heartbeatResponse)
   }
+
+  // No eligibility factors; the driver is always eligible.
+  override private[assigner] def selectionEligibilityWatchCell: WatchValueCell.Consumer[Boolean] =
+    PreferredAssignerDriver.ALWAYS_ELIGIBLE
 }

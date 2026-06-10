@@ -15,7 +15,7 @@ import "scalapb.proto";
 
 option java_package = "com.databricks.api.proto.dicer.assigner";
 option java_generate_equals_and_hash = true;
-option java_outer_classname = "AssignerDpageProto";
+
 option java_multiple_files = true;
 option (scalapb.options) = {
   package_name: "com.databricks.api.proto.dicer.assigner",
@@ -41,6 +41,35 @@ message PreferredAssignerStateViewP {
   // UUID of the current preferred assigner, "Self" when this assigner is preferred,
   // or "N/A" when no preferred assigner exists.
   optional string pa_uuid = 4;
+}
+
+// View data for the consistent-hashing preferred assigner state in DPage output.
+// Present only when the CH preferred-assigner driver is active.
+message ConsistentHashingStateViewP {
+  // State of the Kubernetes API connection as tracked by the membership checker's
+  // hysteresis monitor. Nested and unprefixed per <internal link> since it is used only here.
+  enum K8sConnectionHealthP {
+    // Default value; used when the connection-health state is unset or unknown.
+    K8S_CONNECTION_HEALTH_P_UNSPECIFIED = 0;
+    // Membership checker has not yet observed a poll result; the hysteresis monitor's
+    // initial state.
+    INIT = 1;
+    // The membership checker currently considers the Kubernetes API connection healthy.
+    HEALTHY = 2;
+    // The membership checker currently considers the Kubernetes API connection unhealthy.
+    UNHEALTHY = 3;
+  }
+  // This Assigner instance's own identity (UUID + URI), so DPages of different assigners
+  // can be compared.
+  optional AssignerInfoViewP local_assigner = 1;
+  // The consistent-hashing-elected preferred assigner (UUID + URI), or unset when no
+  // assigner is currently elected.
+  optional AssignerInfoViewP preferred_assigner = 2;
+  // Number of healthy assigner pods currently considered eligible for election.
+  optional int32 eligible_pod_count = 3;
+  // Whether the Kubernetes API connection is currently considered healthy by the
+  // membership checker's hysteresis monitor.
+  optional K8sConnectionHealthP k8s_connection_health = 4;
 }
 
 // View data for assignment churn statistics in DPage output.
@@ -81,10 +110,38 @@ message AssignerTargetViewP {
 
 // Top-level response for the Assigner DPage endpoint.
 message AssignerSliceViewP {
+  // Migration mode for the preferred-assigner election during the staged etcd ->
+  // consistent-hashing migration. Nested and unprefixed per <internal link> since it is used
+  // only here.
+  // (-- TODO(<internal bug>): Remove this enum once the migration to consistent-hashing PA
+  // is complete and there is no longer a split view with the etcd
+  // preferred-assigner. --)
+  enum PreferredAssignerMigrationModeP {
+    // Default value; used when the migration mode is unset or unknown.
+    PREFERRED_ASSIGNER_MIGRATION_MODE_P_UNSPECIFIED = 0;
+    // Shadow mode: the consistent-hashing driver runs alongside etcd but etcd is
+    // authoritative.
+    SHADOW = 1;
+    // CH nominates / etcd reads: the consistent-hashing driver writes its pick to
+    // etcd; etcd remains authoritative for reads.
+    CH_NOMINATED_ETCD_READ = 2;
+  }
   // Identity of this Assigner instance.
   optional AssignerInfoViewP assigner_info = 1;
   // Current preferred assigner state as seen by this Assigner.
   optional PreferredAssignerStateViewP preferred_assigner_state = 2;
   // Per-target assignment state for all targets managed by this Assigner.
   repeated AssignerTargetViewP targets = 3;
+  // Consistent-hashing preferred-assigner state; present only when the CH driver is
+  // active.
+  // (-- TODO(<internal bug>): Remove once the migration to consistent-hashing PA is
+  // complete and we no longer need a split view with the etcd
+  // preferred-assigner. --)
+  optional ConsistentHashingStateViewP consistent_hashing = 4;
+  // Current migration mode for the preferred-assigner election; present only when
+  // the migration driver is active.
+  // (-- TODO(<internal bug>): Remove once the migration to consistent-hashing PA is
+  // complete and we no longer need a split view with the etcd
+  // preferred-assigner. --)
+  optional PreferredAssignerMigrationModeP migration_mode = 5;
 }

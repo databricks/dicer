@@ -1,28 +1,36 @@
 package com.databricks.dicer.client
 
 import java.net.{InetAddress, URI}
+import java.nio.ByteBuffer
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
 
 import scala.concurrent.duration._
 import scala.concurrent.{Future, Promise}
+import scala.collection.immutable
 
 import javax.annotation.concurrent.ThreadSafe
 
 import com.databricks.caching.util.AssertMacros.iassert
 import com.databricks.caching.util.{
   AlertOwnerTeam,
+  ConsistentHashRing,
   PrefixLogger,
   SequentialExecutionContext,
   SequentialExecutionContextPool,
   ValueStreamCallback,
+  WatchValueCell,
   WhereAmIHelper
 }
+import com.google.protobuf.ByteString
+import com.databricks.dicer.client.ClerkMetrics.ClerkFactoryContext
 import com.databricks.dicer.common.{
   Assignment,
   AssignmentMetricsSource,
   ClerkData,
   ClientType,
+  Generation,
+  SliceAssignment,
   Version
 }
 import com.databricks.dicer.external.{
@@ -30,10 +38,13 @@ import com.databricks.dicer.external.{
   ClerkConf,
   KubernetesTarget,
   ResourceAddress,
+  Slice,
   SliceKey,
   Target
 }
+import com.databricks.dicer.friend.Squid
 import com.databricks.rpc.tls.TLSOptions
+import javax.annotation.concurrent.GuardedBy
 
 /**
  * The implementation for the Clerk.
@@ -41,6 +52,8 @@ import com.databricks.rpc.tls.TLSOptions
  * @param sec                 Execution context used to run the callbacks when the Clerk receives an
  *                            assignment.
  * @param target              See [[Clerk.create]].
+ * @param factoryContext      Identifies the entry point used to create this Clerk. Used as a
+ *                            low-cardinality label on Clerk metrics for usage attribution.
  * @param lookup              The [[SliceLookup]] that queries and caches the assignment for the
  *                            Clerk.
  * @param subscriberDebugName The debug name shown in the log and string representation of the
@@ -51,14 +64,24 @@ import com.databricks.rpc.tls.TLSOptions
 private[dicer] class ClerkImpl[Stub <: AnyRef] private (
     sec: SequentialExecutionContext,
     target: Target,
+    factoryContext: ClerkFactoryContext,
     lookup: SliceLookup,
     subscriberDebugName: String,
     stubFactory: ResourceAddress => Stub) {
 
   private val logger = PrefixLogger.create(getClass, subscriberDebugName)
 
-  // For capturing metrics for this target.
-  private val clerkMetrics = new ClerkMetrics(target)
+  // For capturing metrics for this target and creation context.
+  private val clerkMetrics = new ClerkMetrics(target, factoryContext)
+  clerkMetrics.incrementClerkCreatedCount()
+
+  /**
+   * Cell holding the latest [[ClerkAssignment]], populated on the Clerk's [[sec]] from
+   * [[ClerkWatchCallback]] each time a new assignment is reported. Empty until the first
+   * assignment is received.
+   */
+  private val clerkAssignmentCell: WatchValueCell[ClerkAssignment] =
+    new WatchValueCell[ClerkAssignment]
 
   /**
    * ResourceRouter for caching the mapping from resource addresses to application-defined stubs
@@ -66,7 +89,7 @@ private[dicer] class ClerkImpl[Stub <: AnyRef] private (
    */
   private val resourceRouter =
     new ResourceRouter[Stub](
-      lookup.cellConsumer,
+      clerkAssignmentCell,
       logPrefix = s"Router-$target",
       stubFactory,
       stubCacheLifetime = 1.hour
@@ -75,20 +98,52 @@ private[dicer] class ClerkImpl[Stub <: AnyRef] private (
   /** A promise that is set when the initial assignment is received. */
   private val assignmentReceived = Promise[Unit]
 
+  /**
+   * Whether [[stop]] has been called. Used to prevent [[ClerkWatchCallback.onSuccess]] from
+   * re-adding per-target metric gauge samples after [[stop]] has removed them.
+   */
+  @GuardedBy("sec")
+  private var isStopped: Boolean = false
+
   /** Callback methods for the Clerk. */
   private object ClerkWatchCallback extends ValueStreamCallback[Assignment](sec) {
 
     protected override def onSuccess(assignment: Assignment): Unit = {
-      // An initial assignment (at least!) has been received. Make sure the assignmentReceived
-      // promise is completed.
-      if (assignmentReceived.trySuccess(())) {
-        logger.info(s"Initial clerk assignment received: ${assignment.generation}")
+      // Suppress known spurious wakeups where the recorded ClerkAssignment is at least as new as
+      // the new `assignment`.
+      val latestKnownGeneration: Generation = clerkAssignmentCell.getLatestValueOpt
+        .map(
+          (clerkAssignment: ClerkAssignment) => clerkAssignment.assignment.generation
+        )
+        .getOrElse(Generation.EMPTY)
+      if (assignment.generation <= latestKnownGeneration) {
+        logger.debug(
+          s"Spurious wakeup for ClerkAssignment: " +
+          s"${assignment.generation} <= ${latestKnownGeneration}"
+        )
+      } else {
+        // Given this new assignment, create and remember a new ClerkAssignment that computes the
+        // two-level sharding hash rings up-front for each slice that is assigned to more than one
+        // resource. Publish before completing `assignmentReceived` so any caller awaiting
+        // [[ready]] observes a populated cell.
+        val clerkAssignment: ClerkAssignment = ClerkAssignment.create(assignment)
+        clerkAssignmentCell.setValue(clerkAssignment)
+        // An initial assignment (at least!) has been received. Make sure the assignmentReceived
+        // promise is completed.
+        if (assignmentReceived.trySuccess(())) {
+          logger.info(s"Initial clerk assignment received: ${assignment.generation}")
+        }
+        if (!isStopped) {
+          // When the Clerk is stopped, we avoid exporting the metrics to cause alert and monitoring
+          // noise. Note that we still allow the stopped Clerk to incorporate new assignments if it
+          // receives one even after stop() is called.
+          ClientMetrics.updateOnNewAssignment(
+            assignment.generation,
+            target,
+            AssignmentMetricsSource.Clerk
+          )
+        }
       }
-      ClientMetrics.updateOnNewAssignment(
-        assignment.generation,
-        target,
-        AssignmentMetricsSource.Clerk
-      )
     }
   }
 
@@ -111,13 +166,29 @@ private[dicer] class ClerkImpl[Stub <: AnyRef] private (
   }
 
   /**
+   * Two-level sharding variant of [[getStubForKey]]. See specs for
+   * [[com.databricks.dicer.friend.external.TwoLevelShardingClerkAccessor.getStubForKey]]. If it is
+   * called after [[stop]], the returned stub may not be to the most recently assigned resource.
+   */
+  def getStubForKey(primaryKey: SliceKey, secondaryKey: SliceKey): Option[Stub] = {
+    clerkMetrics.incrementClerkGetStubForKeyCallCount()
+    resourceRouter.getStubForKey(primaryKey, secondaryKey)
+  }
+
+  /**
    * Stops all the asynchronous activities (e.g., cancels the [[SliceLookup]] that communicates with
    * the remote service to obtain assignments and incorporates new assignments). Also unregisters
-   * Slicez. Note that this method stops the Clerk asynchronously. Although other methods may still
-   * be called after [[stop]], the Clerk becomes inert and no longer receives assignment updates.
+   * Slicez and removes the per-target Prometheus gauges so the stopped Clerk does not leave stale
+   * samples behind. Note that this method stops the Clerk asynchronously. Although other methods
+   * may still be called after [[stop]], the Clerk becomes inert and no longer receives assignment
+   * updates.
    */
-  def stop(): Unit = {
+  def stop(): Unit = sec.run {
     lookup.cancel()
+    // Set isStopped to true to prevent the metrics being resurrected by any pending callbacks
+    // scheduled on `sec`.
+    isStopped = true
+    ClientMetrics.removeGaugesForTarget(target, AssignmentMetricsSource.Clerk)
     logger.info("Stopped Clerk")
   }
 
@@ -136,7 +207,19 @@ private[dicer] class ClerkImpl[Stub <: AnyRef] private (
 
     /** Returns the latest assignment known to the Clerk. */
     def getLatestAssignmentOpt: Option[Assignment] =
-      lookup.cellConsumer.getLatestValueOpt
+      clerkAssignmentCell.getLatestValueOpt.map(
+        (clerkAssignment: ClerkAssignment) => clerkAssignment.assignment
+      )
+
+    /**
+     * Verifies invariants on the latest [[ClerkAssignment]] derived from the latest assignment.
+     * No-op until the first assignment has been received.
+     */
+    def checkInvariants(): Unit = {
+      for (clerkAssignment: ClerkAssignment <- clerkAssignmentCell.getLatestValueOpt) {
+        clerkAssignment.forTest.checkInvariants()
+      }
+    }
 
     /** Injects an assignment in the Clerk. */
     def injectAssignment(assignment: Assignment): Unit = {
@@ -201,7 +284,8 @@ private[dicer] object ClerkImpl {
         watchFromDataPlane = false,
         // TODO(<internal bug>): Use client side feature flag to gradually rollout rate limiting.
         enableRateLimiting = false
-      )
+      ),
+      subscriberDebugName = clerkDebugName
     )
 
     createInternal(
@@ -210,7 +294,7 @@ private[dicer] object ClerkImpl {
         DicerClientProtoLogger.create(ClientType.Clerk, clerkConf, ownerName = clerkDebugName),
       config,
       clerkIndex,
-      clerkDebugName,
+      factoryContext = "clerk",
       stubFactory,
       reuseLookups
     )
@@ -238,6 +322,7 @@ private[dicer] object ClerkImpl {
       target,
       assignerAddress,
       stubFactory,
+      factoryContext = "dataPlaneDirectClerk",
       reuseLookups = clerkConf.allowMultipleClerksShareLookupPerTarget
     )
   }
@@ -266,6 +351,7 @@ private[dicer] object ClerkImpl {
       target,
       assignerAddress,
       stubFactory,
+      factoryContext = "multiClerk",
       // MultiClerk doesn't support lookup reuse, as it can arbitrarily stop Clerks.
       reuseLookups = false
     )
@@ -307,7 +393,8 @@ private[dicer] object ClerkImpl {
         watchFromDataPlane = false,
         // TODO(<internal bug>): Use client side feature flag to gradually rollout rate limiting.
         enableRateLimiting = false
-      )
+      ),
+      subscriberDebugName = clerkDebugName
     )
     createInternal(
       secPoolOpt = None,
@@ -315,7 +402,7 @@ private[dicer] object ClerkImpl {
         .create(ClientType.Clerk, protoLoggerConf, ownerName = clerkDebugName),
       config,
       clerkIndex,
-      clerkDebugName,
+      factoryContext = "shardedStub",
       stubFactory = (resourceAddress: ResourceAddress) => resourceAddress,
       // TODO(<internal bug>): Enable lookup reuse for sharded stubs, once rolled out to all clusters.
       reuseLookups = false
@@ -360,11 +447,12 @@ private[dicer] object ClerkImpl {
       protoLogger: DicerClientProtoLogger,
       config: InternalClientConfig,
       clerkIndex: Int,
-      subscriberDebugName: String,
+      factoryContext: ClerkFactoryContext,
       stubFactory: ResourceAddress => Stub,
       reuseLookups: Boolean): ClerkImpl[Stub] = {
 
     val sliceLookupConfig: SliceLookupConfig = config.sliceLookupConfig
+    val subscriberDebugName: String = config.subscriberDebugName
     // Note: This SEC (and the proto logger created by the caller) are allocated unconditionally,
     // even when the lookup cache below returns a hit. Our intent for lookup caching is to protect
     // servers from being overloaded by misbehaving clients that create too many Clerks, but each
@@ -387,15 +475,16 @@ private[dicer] object ClerkImpl {
       //    ClerkImpl code must not depend on running in the same concurrency domain as the lookup.
       lookupCache.getOrElseCreate(
         sliceLookupConfig,
-        createLookup(sec, sliceLookupConfig, subscriberDebugName, protoLogger)
+        createLookup(sec, config, protoLogger)
       )
     } else {
-      createLookup(sec, sliceLookupConfig, subscriberDebugName, protoLogger)
+      createLookup(sec, config, protoLogger)
     }
 
     val clerk = new ClerkImpl[Stub](
       sec,
       sliceLookupConfig.target,
+      factoryContext,
       lookup,
       subscriberDebugName,
       stubFactory
@@ -408,26 +497,22 @@ private[dicer] object ClerkImpl {
   /**
    * Creates an unstarted [[SliceLookup]] instance for the given configuration.
    *
-   * @param sec                 The [[SequentialExecutionContext]] for the lookup's async
-   *                            operations. Note that [[SliceLookup]] is independently
-   *                            thread-safe and makes no assumptions about the caller's
-   *                            concurrency domain; cached lookups may be used by multiple Clerks
-   *                            in different SECs.
-   * @param sliceLookupConfig   The client configuration containing target and watch address.
-   * @param subscriberDebugName Debug name for logging and z-pages.
-   * @param protoLogger         The Clerk's proto logger.
+   * @param sec         The [[SequentialExecutionContext]] for the lookup's async operations. Note
+   *                    that [[SliceLookup]] is independently thread-safe and makes no assumptions
+   *                    about the caller's concurrency domain; cached lookups may be used by
+   *                    multiple Clerks in different SECs.
+   * @param config      The client configuration containing target and watch address.
+   * @param protoLogger The Clerk's proto logger.
    * @return An unstarted [[SliceLookup]] instance.
    */
   private def createLookup(
       sec: SequentialExecutionContext,
-      sliceLookupConfig: SliceLookupConfig,
-      subscriberDebugName: String,
+      config: InternalClientConfig,
       protoLogger: DicerClientProtoLogger
   ): SliceLookup = {
     SliceLookup.createUnstarted(
       sec,
-      sliceLookupConfig,
-      subscriberDebugName,
+      config,
       protoLogger,
       serviceBuilderOpt = None
     )
@@ -459,7 +544,8 @@ private[dicer] object ClerkImpl {
         // the overhead of unnecessarily copying the context to background threads.
         SequentialExecutionContext.createWithDedicatedPool(
           secName,
-          enableContextPropagation = false
+          enableContextPropagation = false,
+          alertOwnerTeam = AlertOwnerTeam.CachingTeam.toString
         )
     }
   }
@@ -475,6 +561,8 @@ private[dicer] object ClerkImpl {
    * @param target          The target to create the Clerk for.
    * @param assignerAddress The address of the assigner to create the Clerk for.
    * @param stubFactory     The factory to create the stub for the Clerk.
+   * @param factoryContext Identifies the entry point used to create this Clerk, surfaced as a
+   *                        label on Clerk metrics.
    * @param reuseLookups    If true, the [[SliceLookup]] instance for the given config is
    *                        reused from the cache. If false, a new [[SliceLookup]] instance
    *                        is created.
@@ -486,6 +574,7 @@ private[dicer] object ClerkImpl {
       target: Target,
       assignerAddress: URI,
       stubFactory: ResourceAddress => Stub,
+      factoryContext: ClerkFactoryContext,
       reuseLookups: Boolean): ClerkImpl[Stub] = {
     target match {
       case kubernetesTarget: KubernetesTarget =>
@@ -515,7 +604,8 @@ private[dicer] object ClerkImpl {
         watchFromDataPlane = true,
         // TODO(<internal bug>): Use client side feature flag to gradually rollout rate limiting.
         enableRateLimiting = false
-      )
+      ),
+      subscriberDebugName = clerkDebugName
     )
 
     Version.recordClientVersion(target, AssignmentMetricsSource.Clerk, clerkConf.branch)
@@ -524,7 +614,7 @@ private[dicer] object ClerkImpl {
       protoLogger,
       config,
       clerkIndex,
-      clerkDebugName,
+      factoryContext,
       stubFactory,
       reuseLookups
     )
@@ -563,4 +653,106 @@ private[dicer] object ClerkImpl {
    */
   private val nextClerkIndex = new AtomicInteger()
 
+}
+
+/**
+ * An [[Assignment]] augmented with precomputed [[ConsistentHashRing]]s for multi-replica slices,
+ * used for efficiently serving two-level sharding lookups. The primary key identifies the slice
+ * and the set of resources it is assigned to, and the secondary key picks a specific resource
+ * among those using the corresponding hash ring.
+ *
+ * @param assignment        the underlying Dicer assignment.
+ * @param hashRingsBySlice  per-slice consistent hash rings, populated only for slices with more
+ *                          than one indexed resource.
+ */
+private class ClerkAssignment private (
+    val assignment: Assignment,
+    val hashRingsBySlice: immutable.Map[Slice, ConsistentHashRing[Squid, SliceKey]]) {
+
+  object forTest {
+
+    /**
+     * Checks that [[hashRingsBySlice]] contains entries for only the multi-replica slices in
+     * [[assignment]] and that the nodes on a hash ring are the same as the resources for the
+     * corresponding slice in the assignment.
+     */
+    def checkInvariants(): Unit = {
+      val multipleReplicaSliceAssignments: Vector[SliceAssignment] =
+        assignment.sliceMap.entries.filter { sliceAssignment: SliceAssignment =>
+          sliceAssignment.indexedResources.size > 1
+        }
+
+      // Only multi-replica slices should have hash rings.
+      val multipleReplicaSlices: Set[Slice] =
+        multipleReplicaSliceAssignments
+          .map(
+            (sliceAssignment: SliceAssignment) => sliceAssignment.slice
+          )
+          .toSet
+      iassert(
+        hashRingsBySlice.keySet == multipleReplicaSlices,
+        s"hashRingsBySlice keys ${hashRingsBySlice.keySet} do not match multi-replica slices " +
+        s"$multipleReplicaSlices"
+      )
+
+      // The nodes on the hash rings should be the same as the resources for that slice in the
+      // assignment.
+      for (sliceAssignment: SliceAssignment <- multipleReplicaSliceAssignments) {
+        val ring: ConsistentHashRing[Squid, SliceKey] = hashRingsBySlice(sliceAssignment.slice)
+        val expectedNodes: Vector[Squid] = sliceAssignment.indexedResources
+        iassert(
+          ring.nodes == expectedNodes,
+          s"ring nodes ${ring.nodes} do not match resources $expectedNodes"
+        )
+      }
+    }
+  }
+}
+
+private object ClerkAssignment {
+
+  /** Default number of virtual nodes per physical node on the two-level sharding ring. */
+  private val VNODES_PER_RESOURCE: Int = 128
+
+  /**
+   * Maps [[Squid]] and [[SliceKey]] to their respective byte representations that the
+   * [[ConsistentHashRing]] hashes.
+   */
+  private object RingTypeMapper extends ConsistentHashRing.TypeMapper[Squid, SliceKey] {
+
+    /** Maps a [[Squid]] to its 16-byte big-endian encoding of its [[Squid.resourceUuid]]. */
+    override def mapNode(node: Squid): ByteString = {
+      val uuid: UUID = node.resourceUuid
+      ByteString.copyFrom(
+        ByteBuffer
+          .allocate(16)
+          .putLong(uuid.getMostSignificantBits)
+          .putLong(uuid.getLeastSignificantBits)
+          .array()
+      )
+    }
+
+    /** Maps a [[SliceKey]] to its raw bytes. */
+    override def mapKey(key: SliceKey): ByteString = key.toRawBytes
+  }
+
+  /**
+   * Builds a [[ClerkAssignment]] wrapping `assignment` together with the consistent hash rings
+   * precomputed for each multi-replica slice.
+   */
+  def create(assignment: Assignment): ClerkAssignment = {
+    val sliceToRingBuilder = Map.newBuilder[Slice, ConsistentHashRing[Squid, SliceKey]]
+    for (sliceAssignment: SliceAssignment <- assignment.sliceMap.entries) {
+      if (sliceAssignment.indexedResources.size > 1) {
+        val ring: ConsistentHashRing[Squid, SliceKey] =
+          ConsistentHashRing.create[Squid, SliceKey](
+            nodes = sliceAssignment.indexedResources,
+            vnodesPerNode = VNODES_PER_RESOURCE,
+            typeMapper = RingTypeMapper
+          )
+        sliceToRingBuilder += (sliceAssignment.slice -> ring)
+      }
+    }
+    new ClerkAssignment(assignment, sliceToRingBuilder.result())
+  }
 }

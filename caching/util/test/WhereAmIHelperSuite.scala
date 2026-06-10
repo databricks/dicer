@@ -188,6 +188,97 @@ class WhereAmIHelperSuite extends DatabricksTest {
     }
   }
 
+  test("getEnvironment without LocationConf singleton is None") {
+    // Test plan: Verify that the environment is empty when the LocationConf singleton isn't set
+    // and that getEnvironment does not throw an exception. Verify this by calling getEnvironment
+    // and checking that the result is None.
+    val environment: Option[String] = WhereAmIHelper.getEnvironment
+    assert(environment.isEmpty)
+  }
+
+  gridTest("getEnvironment returns the expected strings for each known Kind")(
+    Seq("dev", "staging", "prod")
+  ) { lowerCaseEnvironment: String =>
+    // Test plan: Verify that getEnvironment maps each known Environment.Kind to its resource-ID
+    // component name (e.g., DEV -> "dev"). Verify this by setting the LocationConf singleton to a
+    // config carrying the given Environment.Kind and asserting the returned string is the expected
+    // lowercase name.
+
+    // The upper case environment string is the proto make of the corresponding Environment.Kind
+    // that should be embedded in WhereAmI json.
+    val upperCaseEnvironment: String = lowerCaseEnvironment.toUpperCase
+    val locationJson: String =
+      s"""
+         |{
+         | "cloud_provider": "AWS",
+         | "cloud_provider_region": "AWS_US_WEST_2",
+         | "environment": "$upperCaseEnvironment",
+         | "kubernetes_cluster_type": "GENERAL_CLASSIC",
+         | "kubernetes_cluster_uri":
+         |   "kubernetes-cluster:${lowerCaseEnvironment}/cloud1/public/region1/clustertype2/01",
+         | "region_uri": "region:dev/cloud1/public/region1",
+         | "regulatory_domain": "PUBLIC"
+         |}
+         |""".stripMargin
+    val locationConf: LocationConf = LocationConfTestUtils.newTestLocationConfig(
+      envMap = Map("LOCATION" -> locationJson)
+    )
+    withLocationConfSingleton(locationConf) {
+      assertResult(Some(lowerCaseEnvironment))(WhereAmIHelper.getEnvironment)
+    }
+  }
+
+  test("getEnvironment returns None when LocationConf singleton has no environment field") {
+    // Test plan: Verify that getEnvironment returns None when the LocationConf singleton omits the
+    // `environment` field (so the proto defaults to KIND_UNSPECIFIED). Verify this by omitting
+    // `environment` from the LOCATION JSON and asserting that getEnvironment returns None.
+    val noEnvironmentLocationConfJson: String =
+      s"""
+         |{
+         | "cloud_provider": "AWS",
+         | "cloud_provider_region": "AWS_US_WEST_2",
+         | "kubernetes_cluster_type": "GENERAL_CLASSIC",
+         | "kubernetes_cluster_uri": "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01",
+         | "region_uri": "region:dev/cloud1/public/region1",
+         | "regulatory_domain": "PUBLIC"
+         |}
+         |""".stripMargin
+
+    val noEnvironmentLocationConf: LocationConf = LocationConfTestUtils.newTestLocationConfig(
+      envMap = Map("LOCATION" -> noEnvironmentLocationConfJson)
+    )
+    withLocationConfSingleton(noEnvironmentLocationConf) {
+      val environment: Option[String] = WhereAmIHelper.getEnvironment
+      assert(environment.isEmpty)
+    }
+  }
+
+  test("getEnvironment returns None when LocationConf singleton has malformed environment field") {
+    // Test plan: Verify that getEnvironment returns None when the LocationConf singleton has a
+    // malformed environment field (not dev, staging or prod).
+    val noEnvironmentLocationConfJson: String =
+      s"""
+         |{
+         | "environment": "malformed",
+         | "cloud_provider": "AWS",
+         | "cloud_provider_region": "AWS_US_WEST_2",
+         | "kubernetes_cluster_type": "GENERAL_CLASSIC",
+         | "kubernetes_cluster_uri": "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01",
+         | "region_uri": "region:dev/cloud1/public/region1",
+         | "regulatory_domain": "PUBLIC"
+         |}
+         |""".stripMargin
+
+    val malformedEnvironmentLocationConf: LocationConf =
+      LocationConfTestUtils.newTestLocationConfig(
+        envMap = Map("LOCATION" -> noEnvironmentLocationConfJson)
+      )
+    withLocationConfSingleton(malformedEnvironmentLocationConf) {
+      val environment: Option[String] = WhereAmIHelper.getEnvironment
+      assert(environment.isEmpty)
+    }
+  }
+
   test("getRegionUri with LocationConf singleton is set to an invalid value") {
     // Test plan: Verify that the region URI is empty when the LocationConf singleton is set to
     // an invalid value and that getRegionUri does not throw an exception. Verify this by setting
@@ -235,6 +326,93 @@ class WhereAmIHelperSuite extends DatabricksTest {
     withLocationConfSingleton(noRegionUriConf) {
       val regionUri: Option[String] = WhereAmIHelper.getRegionUri
       assert(regionUri.isEmpty)
+    }
+  }
+
+  test("getLegacyKubeContext without LocationConf singleton is None") {
+    // Test plan: Verify that the legacy kubeContext is empty when the LocationConf singleton
+    // isn't set and that getLegacyKubeContext does not throw an exception. Verify this by
+    // calling getLegacyKubeContext and checking that the result is None.
+    val ctx: Option[String] = WhereAmIHelper.getLegacyKubeContext
+    assert(ctx.isEmpty)
+  }
+
+  test("getLegacyKubeContext with LocationConf singleton is set to the expected value") {
+    // Test plan: Verify that the legacy kubeContext is set to the value of the LocationConf
+    // location. Verify this by setting the LocationConf singleton with a populated
+    // legacy_kube_context and calling getLegacyKubeContext.
+    val locationJson =
+      s"""
+         |{
+         | "cloud_provider": "AWS",
+         | "cloud_provider_region": "AWS_US_WEST_2",
+         | "environment": "DEV",
+         | "kubernetes_cluster_type": "GENERAL_CLASSIC",
+         | "kubernetes_cluster_uri": "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01",
+         | "legacy_kube_context": "dev-cloud1-region1",
+         | "region_uri": "region:dev/cloud1/public/region1",
+         | "regulatory_domain": "PUBLIC"
+         |}
+         |""".stripMargin
+
+    val locationConf: LocationConf = LocationConfTestUtils.newTestLocationConfig(
+      envMap = Map("LOCATION" -> locationJson)
+    )
+    withLocationConfSingleton(locationConf) {
+      val ctx: Option[String] = WhereAmIHelper.getLegacyKubeContext
+      assertResult(Some("dev-cloud1-region1"))(ctx)
+    }
+  }
+
+  test("getLegacyKubeContext with LocationConf singleton is set to an invalid value") {
+    // Test plan: Verify that the legacy kubeContext is empty when the LocationConf singleton is
+    // set to an invalid value and that getLegacyKubeContext does not throw an exception. Verify
+    // this by setting the LocationConf singleton to have an empty legacy_kube_context or no
+    // legacy_kube_context, and calling getLegacyKubeContext in each case.
+
+    // Set the LocationConf singleton to have an empty legacy_kube_context.
+    val emptyCtxJson =
+      s"""
+         |{
+         | "cloud_provider": "AWS",
+         | "cloud_provider_region": "AWS_US_WEST_2",
+         | "environment": "DEV",
+         | "kubernetes_cluster_type": "GENERAL_CLASSIC",
+         | "kubernetes_cluster_uri": "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01",
+         | "legacy_kube_context": "",
+         | "region_uri": "region:dev/cloud1/public/region1",
+         | "regulatory_domain": "PUBLIC"
+         |}
+         |""".stripMargin
+
+    val emptyCtxConf: LocationConf = LocationConfTestUtils.newTestLocationConfig(
+      envMap = Map("LOCATION" -> emptyCtxJson)
+    )
+    withLocationConfSingleton(emptyCtxConf) {
+      val ctx: Option[String] = WhereAmIHelper.getLegacyKubeContext
+      assert(ctx.isEmpty)
+    }
+
+    // Set the LocationConf singleton to have no legacy_kube_context field at all.
+    val noCtxJson =
+      s"""
+         |{
+         | "cloud_provider": "AWS",
+         | "cloud_provider_region": "AWS_US_WEST_2",
+         | "environment": "DEV",
+         | "kubernetes_cluster_type": "GENERAL_CLASSIC",
+         | "kubernetes_cluster_uri": "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01",
+         | "region_uri": "region:dev/cloud1/public/region1",
+         | "regulatory_domain": "PUBLIC"
+         |}
+         |""".stripMargin
+
+    val noCtxConf: LocationConf = LocationConfTestUtils.newTestLocationConfig(
+      envMap = Map("LOCATION" -> noCtxJson)
+    )
+    withLocationConfSingleton(noCtxConf) {
+      val ctx: Option[String] = WhereAmIHelper.getLegacyKubeContext
+      assert(ctx.isEmpty)
     }
   }
 }

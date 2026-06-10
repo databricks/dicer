@@ -134,7 +134,7 @@ class BaseHybridConcurrencyDomainSuite(enableContextPropagation: Boolean)
     val token: Cancellable = domain.schedule("delayed-task", 100.millis, () => latch.countDown())
     token.cancel()
     fakeClock.advanceBy(1.second)
-    TestUtils.shamefullyAwaitForNonEventInAsyncTest()
+    TestUtils.shamefullyAwait200msForNonEventInAsyncTest()
     assert(latch.getCount == 1)
   }
 

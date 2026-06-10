@@ -140,6 +140,20 @@ invalid_cases: [
     expected_error_message: "" # Invalid URI
   },
   {
+    case_name: "Redirect token without address"
+    client_response: {
+      sync_assignment_state: {
+        known_generation: { incarnation: 123 number: 456 }
+      }
+      suggested_rpc_timeout_millis: 1000
+      redirect: {
+        # No address, but a token is set.
+        redirect_token: "\x01\x02\x03\x04"
+      }
+    }
+    expected_error_message: "Redirect token must not be set without a redirect address"
+  },
+  {
     case_name: "Empty sync assignment state"
     client_response: {
       sync_assignment_state: { }
@@ -187,6 +201,20 @@ round_tripping_cases: [
       suggested_rpc_timeout_millis: 1000
       redirect: {
         address: "http://localhost:1234"
+      }
+    }
+  },
+
+  {
+    case_name: "Redirect with opaque token"
+    client_response: {
+      sync_assignment_state: {
+        known_generation: { incarnation: 123 number: 456 }
+      }
+      suggested_rpc_timeout_millis: 1000
+      redirect: {
+        address: "http://localhost:1234"
+        redirect_token: "\x01\x02\x03\x04"
       }
     }
   },

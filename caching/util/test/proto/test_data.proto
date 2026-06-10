@@ -6,7 +6,7 @@ import "scalapb.proto";
 
 option java_package = "com.databricks.caching.util.test";
 option java_generate_equals_and_hash = true;
-option java_outer_classname = "TestDataProto";
+
 option java_multiple_files = true;
 option (scalapb.options) = {
   package_name: "com.databricks.caching.util.test",

@@ -2,6 +2,8 @@ package com.databricks.dicer.external
 
 import java.net.URI
 
+import scala.concurrent.duration._
+
 import com.databricks.conf.DbConf
 import com.databricks.conf.trusted.{LocationConf, RPCPortConf}
 import com.databricks.dicer.client.DicerClientProtoLoggerConf
@@ -41,6 +43,18 @@ trait SliceletConf extends DicerClientConf with WatchServerConf {
   /** This is only for internal Databricks compatibility and is not supported in open source. */
   private[dicer] final val watchFromDataPlane: Boolean =
     configure("databricks.dicer.client.watchFromDataPlane", false)
+
+  /**
+   * Fallback delay before attempting to start the Slicelet's assignment lookup, if the readiness
+   * poller is blocked. See [[SliceletSliceLookup]] for more details.
+   *
+   * **IMPORTANT**: This value should be set by Caching team only.
+   */
+  private[dicer] final val blockedReadinessCheckStartDelay: FiniteDuration =
+    configure[Long](
+      "databricks.dicer.internal.cachingteamonly.blockedReadinessCheckStartDelayMillis",
+      5000
+    ).millis
 }
 
 /**

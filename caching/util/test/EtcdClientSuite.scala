@@ -239,7 +239,7 @@ class EtcdClientSuite extends DatabricksTest {
       operation: String,
       keyNamespace: EtcdClient.KeyNamespace,
       status: String,
-      operationResult: OperationResult.Value): Int = {
+      operationResult: OperationResult): Int = {
     MetricUtils.getHistogramCount(
       CollectorRegistry.defaultRegistry,
       "dicer_etcd_client_op_latency",
@@ -1588,6 +1588,74 @@ class EtcdClientSuite extends DatabricksTest {
     AssertionWaiter("Wait for watch failure").await {
       assert(callback.getLog.last.status.getCode == Status.UNAVAILABLE.getCode)
       assert(callback.getLog.last.status.getDescription == "foo")
+    }
+  }
+
+  test("Watch with synchronous throw from jetcd.get during initial read") {
+    // Test plan: Verify that a synchronous exception from `jetcd.get(...)` during the initial read
+    // (which can happen when the underlying etcd client is closed during pod shutdown) is routed
+    // through the watch callback as a `Status` error rather than escaping into the
+    // StateMachineDriver and triggering an `UNCAUGHT_STATE_MACHINE_ERROR` alert. Inject the
+    // synchronous throw via `InterposingJetcdWrapper`, start a watch, and verify the callback sees
+    // the failure with the expected `Status` code and description.
+
+    val (client, jetcdWrapper): (EtcdClient, InterposingJetcdWrapper) =
+      etcd.createEtcdClientWithInterposingJetcdWrapper(
+        new FakeTypedClock,
+        EtcdClient.Config(NAMESPACE)
+      )
+    Await.result(
+      client.initializeVersionHighWatermarkUnsafe(Version(ARBITRARY_NON_NEGATIVE_VALUE, 0)),
+      Duration.Inf
+    )
+    val error = JetcdStatus.UNAVAILABLE.withDescription("client closed")
+    jetcdWrapper.startThrowingFromGets(new StatusRuntimeException(error))
+
+    // Start watching. The synchronous throw must surface as a normal failure callback.
+    val callback = new LoggingStreamCallback[WatchEvent](sec)
+    client.watch(WatchArgs("key"), callback)
+    AssertionWaiter("Wait for the synchronous throw to surface as a callback failure").await {
+      val log: Vector[StatusOr[WatchEvent]] = callback.getLog
+      assert(log.size == 1)
+      assert(log.head.status.getCode == Status.Code.UNAVAILABLE)
+      assert(log.head.status.getDescription == "client closed")
+    }
+  }
+
+  test("Watch with synchronous throw from jetcd.watch") {
+    // Test plan: Verify that a synchronous exception from `jetcd.watch(...)` (which is the path
+    // jetcd takes when the watch client is closed: it throws `ClosedWatchClientException` rather
+    // than reporting via `onError`/`onCompleted`) is routed through the watch callback as a
+    // `Status` error rather than escaping into the StateMachineDriver and triggering an
+    // `UNCAUGHT_STATE_MACHINE_ERROR` alert. Inject the synchronous throw via
+    // `InterposingJetcdWrapper` so it triggers only after the initial read succeeds, start a
+    // watch, and verify the callback sees the failure with the expected `Status` code and
+    // description.
+
+    val (client, jetcdWrapper): (EtcdClient, InterposingJetcdWrapper) =
+      etcd.createEtcdClientWithInterposingJetcdWrapper(
+        new FakeTypedClock,
+        EtcdClient.Config(NAMESPACE)
+      )
+    Await.result(
+      client.initializeVersionHighWatermarkUnsafe(Version(ARBITRARY_NON_NEGATIVE_VALUE, 0)),
+      Duration.Inf
+    )
+    val error = JetcdStatus.UNAVAILABLE.withDescription("watch client closed")
+    jetcdWrapper.startThrowingFromWatches(new StatusRuntimeException(error))
+
+    // Start watching. The initial read returns no rows, the state machine then attempts to start
+    // the underlying etcd watch, and the synchronous throw must surface as a failure callback.
+    val callback = new LoggingStreamCallback[WatchEvent](sec)
+    client.watch(WatchArgs("key"), callback)
+    AssertionWaiter("Wait for the synchronous throw to surface as a callback failure").await {
+      val log: Vector[StatusOr[WatchEvent]] = callback.getLog
+      // The state machine emits a `Causal` event after the successful initial read, then attempts
+      // to start the watch, which throws and surfaces as a failure.
+      assert(log.size == 2)
+      assert(log.head == StatusOr.success(WatchEvent.Causal))
+      assert(log.last.status.getCode == Status.Code.UNAVAILABLE)
+      assert(log.last.status.getDescription == "watch client closed")
     }
   }
 

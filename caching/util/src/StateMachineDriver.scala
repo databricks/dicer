@@ -67,7 +67,7 @@ sealed class StateMachineDriver[
    * Creates a new [[StateMachineDriver]] in the sequential domain defined by `sec`.
    *
    * @param alertOwnerTeam the team's registered alert routing name, e.g.
-   *                       [[AlertOwnerTeam.CachingTeam.toString]] for Caching-owned state machines,
+   *                       [[AlertOwnerTeam.CACHING_TEAM_NAME]] for Caching-owned state machines,
    *                       or "eng-my-team" for state machines owned by other teams. For alert
    *                       routing to work correctly, this must be used as the `owner_team_name`
    *                       for some Dicer target config.
@@ -76,14 +76,25 @@ sealed class StateMachineDriver[
       sec: SequentialExecutionContext,
       stateMachine: MachineT,
       performAction: ActionT => Unit,
-      // TODO(<internal bug>): Make alertOwnerTeam required once all call sites are updated.
-      alertOwnerTeam: String = AlertOwnerTeam.CachingTeam.toString) = {
+      alertOwnerTeam: String) = {
     this(
       sequentialDomain(sec),
       stateMachine,
       performAction,
       AlertOwnerTeam.createFromString(alertOwnerTeam)
     )
+  }
+
+  /** Use [[StateMachineDriver]] with an explicit `alertOwnerTeam` instead. */
+  @deprecated(
+    "Provide alertOwnerTeam explicitly; the CachingTeam default is only correct for " +
+    "Caching-owned state machines (<internal bug>)."
+  )
+  def this(
+      sec: SequentialExecutionContext,
+      stateMachine: MachineT,
+      performAction: ActionT => Unit) = {
+    this(sec, stateMachine, performAction, AlertOwnerTeam.CACHING_TEAM_NAME)
   }
 
   private val logger = PrefixLogger.create(getClass, "")
@@ -264,7 +275,7 @@ object StateMachineDriver {
    * Creates a new [[StateMachineDriver]] to be used in a hybrid concurrency domain.
    *
    * @param alertOwnerTeam the team's registered alert routing name, e.g.
-   *                       [[AlertOwnerTeam.CachingTeam.toString]] for Caching-owned state machines,
+   *                       [[AlertOwnerTeam.CACHING_TEAM_NAME]] for Caching-owned state machines,
    *                       or "eng-my-team" for state machines owned by other teams. For alert
    *                       routing to work correctly, this must be used as the `owner_team_name`
    *                       for some Dicer target config.
@@ -275,8 +286,7 @@ object StateMachineDriver {
       hybrid: HybridConcurrencyDomain,
       stateMachine: MachineT,
       performAction: ActionT => Unit,
-      // TODO(<internal bug>): Make alertOwnerTeam required once all call sites are updated.
-      alertOwnerTeam: String = AlertOwnerTeam.CachingTeam.toString
+      alertOwnerTeam: String
   ): StateMachineDriver[EventT, ActionT, MachineT] = {
     new StateMachineDriver(
       hybridDomain(hybrid),
@@ -285,6 +295,23 @@ object StateMachineDriver {
       AlertOwnerTeam.createFromString(alertOwnerTeam)
     )
   }
+
+  /** Use [[inHybridDomain]] with an explicit `alertOwnerTeam` instead. */
+  @deprecated(
+    "Provide alertOwnerTeam explicitly; the CachingTeam default is only correct for " +
+    "Caching-owned state machines (<internal bug>)."
+  )
+  def inHybridDomain[EventT, ActionT, MachineT <: StateMachine[EventT, ActionT]](
+      hybrid: HybridConcurrencyDomain,
+      stateMachine: MachineT,
+      performAction: ActionT => Unit
+  ): StateMachineDriver[EventT, ActionT, MachineT] =
+    inHybridDomain(
+      hybrid,
+      stateMachine,
+      performAction,
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+    )
 
   /**
    * [[StateMachineDriver]]-internal trait that allows the internals to abstract over

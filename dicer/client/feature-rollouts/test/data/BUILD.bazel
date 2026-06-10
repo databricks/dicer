@@ -1,0 +1,7 @@
+
+filegroup(
+    name = "data",
+    srcs = ["scope_test_data.textproto"],
+    testonly = True,
+    visibility = ["//dicer:internal"],
+)

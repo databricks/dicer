@@ -301,7 +301,7 @@ private[dicer] object ClientSlicez {
     CLIENT_COMPONENT_NAME,
     new HasDebugString {
       @SuppressWarnings(
-        Array("AwaitError", "AwaitWarning", "reason:servlet registry requires synchronous result")
+        Array("AwaitError", "reason:servlet registry requires synchronous result")
       )
       override def debugHtml: String = {
         // Await the result because the registry requires us to return a String synchronously.
@@ -313,7 +313,7 @@ private[dicer] object ClientSlicez {
        * Implemented this method since there is a link on the debug page that displays this text.
        */
       @SuppressWarnings(
-        Array("AwaitError", "AwaitWarning", "reason:servlet registry requires synchronous result")
+        Array("AwaitError", "reason:servlet registry requires synchronous result")
       )
       override def toString: String = {
         val clientsDataFut: Future[Seq[ClientTargetSlicezData]] = clientSlicez.getData

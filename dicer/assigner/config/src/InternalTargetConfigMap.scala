@@ -49,6 +49,14 @@ object InternalTargetConfigMap {
     override def get(targetName: TargetName): Option[InternalTargetConfig] =
       configMap.get(targetName)
 
+    override def equals(other: Any): Boolean = other match {
+      case that: InternalTargetConfigMapImpl =>
+        configScopeOpt == that.configScopeOpt && configMap == that.configMap
+      case _ => false
+    }
+
+    override def hashCode(): Int = (configScopeOpt, configMap).hashCode()
+
     override def toString: String = {
       s"InternalTargetConfigMap(configScopeOpt=$configScopeOpt, ${configMap.values.mkString(", ")})"
     }

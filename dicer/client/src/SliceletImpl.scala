@@ -67,7 +67,6 @@ private[dicer] class SliceletImpl private (
     sec: SequentialExecutionContext,
     sliceletConf: SliceletConf,
     config: InternalClientConfig,
-    subscriberDebugName: String,
     sliceletHostName: String,
     sliceletUuid: UUID,
     server: DatabricksServerWrapper,
@@ -76,6 +75,7 @@ private[dicer] class SliceletImpl private (
     lookup: SliceletSliceLookup) {
 
   private val sliceLookupConfig: SliceLookupConfig = config.sliceLookupConfig
+  private val subscriberDebugName: String = config.subscriberDebugName
 
   private val logger = PrefixLogger.create(getClass, subscriberDebugName)
 
@@ -392,7 +392,8 @@ private[dicer] object SliceletImpl {
       // TODO(<internal bug>): Use client side feature flag to gradually rollout rate limiting.
       enableRateLimiting = false
     )
-    val config: InternalClientConfig = InternalClientConfig(sliceLookupConfig)
+    val config: InternalClientConfig =
+      InternalClientConfig(sliceLookupConfig, subscriberDebugName = sliceletDebugName)
 
     // Create a service builder on which the SliceLookup can register a watch handler.
     val serviceBuilder: GenericRpcServiceBuilder = GenericRpcServiceBuilder.create()
@@ -408,8 +409,11 @@ private[dicer] object SliceletImpl {
     // isReady() calls an external API on the ReadinessProbeTracker. This is currently a
     // non-blocking call, but there is no guarantee it will remain non-blocking. We don't want to
     // risk blocking the main Slicelet thread, which handles assignment updates and client requests.
-    val readinessProviderSec: SequentialExecutionContext =
-      SequentialExecutionContext.createWithDedicatedPool("Slicelet-ReadinessProvider")
+    val readinessProviderSec: SequentialExecutionContext = {
+      // Include host name for thread pool name uniqueness and debugging efficiency.
+      SequentialExecutionContext.createWithDedicatedPool(s"Slicelet-ReadinessProvider-$hostName")
+    }
+
     val readinessPoller =
       new WatchValueCellPollAdapter[Boolean, Boolean](
         initialValueOpt = None,
@@ -425,14 +429,14 @@ private[dicer] object SliceletImpl {
     val lookup =
       new SliceletSliceLookup(
         sec,
-        sliceLookupConfig,
+        config,
         readinessPoller,
         serviceBuilder,
         loadAccumulator,
         kubernetesNamespace,
         metrics,
         protoLogger,
-        sliceletDebugName
+        sliceletConf.blockedReadinessCheckStartDelay
       )
 
     // Create the server, which will be started in start().
@@ -442,14 +446,15 @@ private[dicer] object SliceletImpl {
       // Never enable <internal link> for the Slicelet's watch server, as it is not the primary
       // server.
       localPort = None,
-      serviceBuilder
+      serviceBuilder,
+      // Watch-request rate limiting is applied only at the Assigner.
+      rateLimitingStrategyOpt = None
     )
 
     new SliceletImpl(
       sec,
       sliceletConf,
       config,
-      sliceletDebugName,
       hostName,
       uuid,
       server,
@@ -489,7 +494,8 @@ private[dicer] object SliceletImpl {
     // the overhead of unnecessarily copying the context to background threads.
     val sec = SequentialExecutionContext.createWithDedicatedPool(
       "SliceletExecutor",
-      enableContextPropagation = false
+      enableContextPropagation = false,
+      alertOwnerTeam = AlertOwnerTeam.CachingTeam.toString
     )
     // The Target carrying the information for the assigner to distinguish the Slicelets from
     // different clusters or app instances.
@@ -651,33 +657,32 @@ object SliceletAssignment {
  * lookup MUST be started using [[start()]] before use.
  *
  * @param protoLogger Logger for assignment propagation latency events.
+ * @param blockedReadinessCheckStartDelay Fallback delay before attempting to start the lookup, if
+ *   the readiness poller is blocked. This ensures the lookup starts even if readiness checking
+ *   encounters issues.
  */
 private[client] final class SliceletSliceLookup(
     sec: SequentialExecutionContext,
-    config: SliceLookupConfig,
+    config: InternalClientConfig,
     readinessPoller: WatchValueCellPollAdapter[Boolean, Boolean],
     serviceBuilder: GenericRpcServiceBuilder,
     loadAccumulator: SliceletLoadAccumulator,
     kubernetesNamespace: String,
     metrics: SliceletMetrics,
     protoLogger: DicerClientProtoLogger,
-    subscriberDebugName: String) {
+    blockedReadinessCheckStartDelay: FiniteDuration) {
   import SliceletSliceLookup.StateEnum
 
-  private val logger = PrefixLogger.create(this.getClass, subscriberDebugName)
+  private val sliceLookupConfig: SliceLookupConfig = config.sliceLookupConfig
+  private val subscriberDebugName: String = config.subscriberDebugName
 
-  /**
-   * The delay before attempting to start the lookup if the readiness poller is blocked. This
-   * ensures the lookup starts even if readiness checking encounters issues.
-   */
-  private val BLOCKED_READINESS_CHECK_START_DELAY: FiniteDuration = 5.seconds
+  private val logger = PrefixLogger.create(this.getClass, subscriberDebugName)
 
   /** The wrapped [[SliceLookup]] instance. */
   private val baseLookup =
     SliceLookup.createUnstarted(
       sec,
       config,
-      subscriberDebugName,
       protoLogger,
       serviceBuilderOpt = Some(serviceBuilder)
     )
@@ -739,7 +744,7 @@ private[client] final class SliceletSliceLookup(
             ClientMetrics
               .updateOnNewAssignment(
                 assignment.generation,
-                config.target,
+                sliceLookupConfig.target,
                 AssignmentMetricsSource.Slicelet
               )
             cell.setValue(SliceletAssignment(Some(squid), Some(assignment)))
@@ -778,7 +783,7 @@ private[client] final class SliceletSliceLookup(
       // watch.
       sec.schedule(
         name = "lookup-start",
-        delay = BLOCKED_READINESS_CHECK_START_DELAY,
+        delay = blockedReadinessCheckStartDelay,
         () => baseLookup.start(() => createSliceletData())
       )
     }
@@ -837,7 +842,7 @@ private[client] final class SliceletSliceLookup(
 
     SliceletData(
       squid,
-      SliceletState.fromProto(stateP, config.target),
+      SliceletState.fromProto(stateP, sliceLookupConfig.target),
       kubernetesNamespace,
       attributedLoads,
       Some(unattributedLoad)

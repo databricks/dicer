@@ -156,7 +156,9 @@ class InMemoryStore private (sec: SequentialExecutionContext, val storeIncarnati
             AssignmentConsistencyMode.Affinity,
             generation
           )
-        logger.info(s"Committed assignment: $assignment")
+        assignment.toChunkedString().foreach { chunk: String =>
+          logger.info(s"Committed assignment: $chunk")
+        }
 
         // Cache the new assignment and inform all watchers via the assignment cell.
         cell.setValue(assignment)
@@ -185,7 +187,9 @@ class InMemoryStore private (sec: SequentialExecutionContext, val storeIncarnati
           10.seconds
         )
       } else if (latestGeneration < assignment.generation) {
-        logger.info(s"Caching read assignment: $assignment")
+        assignment.toChunkedString().foreach { chunk: String =>
+          logger.info(s"Caching read assignment: $chunk")
+        }
 
         // Cache the new assignment and inform all watchers via the assignment cell.
         cell.setValue(assignment)

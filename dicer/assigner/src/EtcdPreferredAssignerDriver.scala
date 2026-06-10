@@ -5,7 +5,6 @@ import javax.annotation.concurrent.GuardedBy
 import scala.concurrent.duration._
 import scala.concurrent.{Future, Promise}
 import scala.util.{Failure, Success, Try}
-import scala.util.control.NonFatal
 import io.grpc.Deadline
 import com.databricks.api.proto.dicer.assigner.HeartbeatResponseP
 import com.databricks.api.proto.dicer.assigner.PreferredAssignerServiceGrpc.PreferredAssignerServiceStub
@@ -30,8 +29,7 @@ class EtcdPreferredAssignerDriver(
     sec: SequentialExecutionContext,
     assignerTlsOptionsOpt: Option[TLSOptions],
     store: EtcdPreferredAssignerStore,
-    config: EtcdPreferredAssignerDriver.Config,
-    membershipCheckerFactory: KubernetesMembershipChecker.Factory
+    config: EtcdPreferredAssignerDriver.Config
 ) extends PreferredAssignerDriver {
 
   /** The timeout for the heartbeat RPC call. */
@@ -100,23 +98,27 @@ class EtcdPreferredAssignerDriver(
       )
       baseDriver.start()
       watchPreferredAssignerValueChanges()
-
-      // Start the Kubernetes membership checker, recording a metric on both success and
-      // failure so oncall can monitor rollout health.
-      try {
-        membershipCheckerFactory.create(assignerInfo, assignerProtoLogger) match {
-          case Some(checker) =>
-            checker.start()
-            KubernetesMembershipChecker.recordInitSuccess()
-          case None =>
-          // Checker intentionally disabled by the factory.
-        }
-      } catch {
-        case NonFatal(ex) =>
-          KubernetesMembershipChecker.recordInitFailure()
-          logger.warn(s"Failed to create KubernetesMembershipChecker: $ex")
-      }
     }
+
+  /**
+   * Pass `None` to clear the pick; the state machine then falls back to writing
+   * `selfAssignerInfo`. This implementation forwards onto [[sec]] for processing, so it
+   * accepts calls from any thread.
+   *
+   * Today, only `MigrationPreferredAssignerDriver` in `ConsistentHashingNominatedEtcdReadMode`
+   * calls this.
+   *
+   * PRECONDITION: [[start]] has been called.
+   */
+  override private[assigner] def updateExternalPick(externalPickOpt: Option[AssignerInfo]): Unit =
+    sec.run {
+      iassert(baseDriver != null, "must not be called before start().")
+      baseDriver.handleEvent(Event.ExternalPickReceived(externalPickOpt))
+    }
+
+  // No eligibility factors; the driver is always eligible.
+  override private[assigner] def selectionEligibilityWatchCell: WatchValueCell.Consumer[Boolean] =
+    PreferredAssignerDriver.ALWAYS_ELIGIBLE
 
   /**
    * Performs the heartbeat RPC call against the preferred assigner. Exposed as protected to allow
@@ -174,7 +176,9 @@ class EtcdPreferredAssignerDriver(
     sec.assertCurrentContext()
     logger.info("Received preferred assigner value: " + preferredAssignerValue)
 
-    assignerProtoLogger.logPreferredAssignerChange(preferredAssignerValue)
+    assignerProtoLogger.logPreferredAssignerChange(
+      preferredAssignerValue,
+    )
 
     baseDriver.handleEvent(Event.PreferredAssignerReceived(preferredAssignerValue))
   }

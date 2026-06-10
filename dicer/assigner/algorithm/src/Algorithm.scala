@@ -590,10 +590,13 @@ private[assigner] object HomomorphicAssignmentAlgorithm {
       }
 
     // In order from hottest to coldest, replace each of the unhealthy resources with the new,
-    // healthy resources.
+    // healthy resources. We dequeue elements from the priority queue rather than calling
+    // `toVector`, since `toVector` iterates the priority queue's internal heap-array order which
+    // is not the same as priority order.
+    val sortedUnhealthyResourcesByLoad: Vector[ResourceWithLoad] =
+      Vector.fill(sortedUnhealthyResources.size)(sortedUnhealthyResources.dequeue())
     val resourceReplacements: Vector[(ResourceWithLoad, Squid)] =
-      sortedUnhealthyResources.toVector
-        .zip(unusedHealthyResources)
+      sortedUnhealthyResourcesByLoad.zip(unusedHealthyResources)
     for (resourceReplacement: (ResourceWithLoad, Squid) <- resourceReplacements) {
       val (oldResourceWithLoad, newResource): (ResourceWithLoad, Squid) = resourceReplacement
       val oldResource: Squid = oldResourceWithLoad.squid

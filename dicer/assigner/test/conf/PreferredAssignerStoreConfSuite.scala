@@ -4,7 +4,7 @@ import com.databricks.conf.Configs
 import com.databricks.dicer.assigner.{
   Assigner,
   DisabledPreferredAssignerDriver,
-  EtcdPreferredAssignerDriver,
+  MigrationPreferredAssignerDriver,
   PreferredAssignerTestHelper
 }
 import com.databricks.dicer.common.Incarnation
@@ -93,9 +93,10 @@ class PreferredAssignerStoreConfSuite extends DatabricksTest {
   }
 
   test("Create PreferredAssignerDriver based on the config") {
-    // Test plan: verify that when the preferred assigner mode is enabled, an
-    // `EtcdPreferredAssignerDriver` instance is created, and when the preferred assigner mode is
-    // disabled, a `DisabledPreferredAssignerDriver` instance is created.
+    // Test plan: verify that when the preferred assigner mode is enabled, a
+    // `MigrationPreferredAssignerDriver` instance is created (wrapping etcd + consistent-hashing
+    // drivers), and when the preferred assigner mode is disabled, a
+    // `DisabledPreferredAssignerDriver` instance is created.
     val preferredAssignerConfMap: Map[String, Any] = generateConfigMap(
       preferredAssignerEnabled = true,
       preferredAssignerStoreIncarnation = NON_LOOSE_INCARNATION,
@@ -107,8 +108,8 @@ class PreferredAssignerStoreConfSuite extends DatabricksTest {
       preferredAssignerConf,
       PreferredAssignerTestHelper.noOpMembershipCheckerFactory
     ) match {
-      case _: EtcdPreferredAssignerDriver => assert(true)
-      case driver => fail(s"expected `EtcdPreferredAssignerDriver` but got $driver")
+      case _: MigrationPreferredAssignerDriver => assert(true)
+      case driver => fail(s"expected `MigrationPreferredAssignerDriver` but got $driver")
     }
 
     val disabledPreferredAssignerConfMap: Map[String, Any] = generateConfigMap(

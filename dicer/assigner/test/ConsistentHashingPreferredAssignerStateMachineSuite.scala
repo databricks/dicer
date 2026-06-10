@@ -1,6 +1,7 @@
 package com.databricks.dicer.assigner
 
 import java.net.URI
+import java.nio.charset.StandardCharsets
 import java.time.Instant
 import java.util.UUID
 
@@ -27,19 +28,19 @@ class ConsistentHashingPreferredAssignerStateMachineSuite extends DatabricksTest
 
   /** AssignerInfo for the state machine's own assigner. */
   private val selfAssignerInfo: AssignerInfo = AssignerInfo(
-    uuid = UUID.fromString("11111111-1234-5678-abcd-000000000001"),
+    uuid = UUID.fromString("11111111-1234-5678-0000-000000000001"),
     uri = new URI("https://self-assigner:8080")
   )
 
   /** AssignerInfo for another assigner. */
   private val otherAssignerInfo: AssignerInfo = AssignerInfo(
-    uuid = UUID.fromString("22222222-1234-5678-abcd-000000000002"),
+    uuid = UUID.fromString("22222222-1234-5678-0000-000000000001"),
     uri = new URI("https://other-assigner:8080")
   )
 
   /** AssignerInfo for a third assigner. */
   private val thirdAssignerInfo: AssignerInfo = AssignerInfo(
-    uuid = UUID.fromString("33333333-1234-5678-abcd-000000000003"),
+    uuid = UUID.fromString("33333333-1234-5678-0000-000000000002"),
     uri = new URI("https://third-assigner:8080")
   )
 
@@ -88,7 +89,8 @@ class ConsistentHashingPreferredAssignerStateMachineSuite extends DatabricksTest
 
     /**
      * Delivers `eventOpt` at `timeOffset` and asserts `actions` and `nextTimeOffset` were
-     * requested. If `eventOpt` is None, the state machine is advanced instead.
+     * requested. If `eventOpt` is None, the state machine is advanced instead. At each step,
+     * validate the state machine's invariants.
      */
     private def deliver(
         timeOffset: FiniteDuration,
@@ -111,6 +113,7 @@ class ConsistentHashingPreferredAssignerStateMachineSuite extends DatabricksTest
         s"Output mismatch at t=$timeOffset. Expected actions=$actions, nextTime=$nextTimeOffset. " +
         s"Got actions=${output.actions}, nextTime=${output.nextTickerTime}"
       )
+      stateMachine.forTest.checkInvariants()
     }
   }
 
@@ -129,7 +132,104 @@ class ConsistentHashingPreferredAssignerStateMachineSuite extends DatabricksTest
           PreferredAssignerConfig.create(
             PreferredAssignerValue.SomeAssigner(selfAssignerInfo, EXPECTED_DUMMY_GENERATION),
             selfAssignerInfo
-          )
+          ),
+          eligibleAssigners = Seq(selfAssignerInfo)
+        )
+      ),
+      nextTimeOffset = Duration.Inf
+    )
+  }
+
+  test("ResourceSetReceived with self selected but different URI transitions to Preferred") {
+    // Test plan: Verify that when the resource set contains an AssignerInfo with the same
+    // UUID as self but a different URI (e.g. different scheme), the SM still recognizes
+    // self and transitions to Preferred. The resource watcher may construct AssignerInfo
+    // with a URI scheme that differs from the locally-constructed selfAssignerInfo, so
+    // self-recognition must rely on UUID alone.
+    val stateMachine: ConsistentHashingPreferredAssignerStateMachine = createStateMachine()
+    val harness: TestHarness = new TestHarness(stateMachine)
+
+    val selfWithUriMismatch: AssignerInfo = AssignerInfo(
+      uuid = selfAssignerInfo.uuid,
+      uri = new URI("//self-assigner:8080")
+    )
+    assert(selfWithUriMismatch != selfAssignerInfo) // Make sure the values don't match.
+
+    harness.advance(0.seconds, actions = Seq.empty, nextTimeOffset = Duration.Inf)
+    harness.event(
+      1.second,
+      Event.ResourceSetReceived(
+        ResourceVersion("1"),
+        toResourceMap(selfWithUriMismatch)
+      ),
+      actions = Seq(
+        DriverAction.UsePreferredAssignerConfig(
+          PreferredAssignerConfig.create(
+            PreferredAssignerValue
+              .SomeAssigner(selfWithUriMismatch, EXPECTED_DUMMY_GENERATION),
+            selfAssignerInfo
+          ),
+          eligibleAssigners = Seq(selfWithUriMismatch)
+        )
+      ),
+      nextTimeOffset = Duration.Inf
+    )
+  }
+
+  test("ResourceSetReceived with same UUIDs but different URIs does not emit config") {
+    // Test plan: Verify that a resource set update with unchanged UUIDs but a different URI
+    // for a non-preferred assigner does not emit a config (the selected AssignerInfo is
+    // unchanged), and that [[latestResources]] is nonetheless updated with the new URI.
+    val stateMachine: ConsistentHashingPreferredAssignerStateMachine = createStateMachine()
+    val harness: TestHarness = new TestHarness(stateMachine)
+
+    harness.advance(0.seconds, actions = Seq.empty, nextTimeOffset = Duration.Inf)
+
+    // Establish preferred = other.
+    harness.event(
+      1.second,
+      Event.ResourceSetReceived(
+        ResourceVersion("1"),
+        toResourceMap(selfAssignerInfo, otherAssignerInfo)
+      ),
+      actions = Seq(
+        DriverAction.UsePreferredAssignerConfig(
+          PreferredAssignerConfig.create(
+            PreferredAssignerValue.SomeAssigner(otherAssignerInfo, EXPECTED_DUMMY_GENERATION),
+            selfAssignerInfo
+          ),
+          eligibleAssigners = Seq(selfAssignerInfo, otherAssignerInfo)
+        )
+      ),
+      nextTimeOffset = Duration.Inf
+    )
+
+    // Same UUIDs, new URI for self. Selected preferred remains other, so no config is emitted.
+    val selfWithNewUri: AssignerInfo = AssignerInfo(
+      uuid = selfAssignerInfo.uuid,
+      uri = new URI("https://self-assigner-new:9090")
+    )
+    harness.event(
+      2.seconds,
+      Event.ResourceSetReceived(
+        ResourceVersion("2"),
+        toResourceMap(selfWithNewUri, otherAssignerInfo)
+      ),
+      actions = Seq.empty,
+      nextTimeOffset = Duration.Inf
+    )
+
+    // Remove other, so that preferred = self. Use this to verify that the URI change took place.
+    harness.event(
+      3.seconds,
+      Event.ResourceSetReceived(ResourceVersion("3"), toResourceMap(selfWithNewUri)),
+      actions = Seq(
+        DriverAction.UsePreferredAssignerConfig(
+          PreferredAssignerConfig.create(
+            PreferredAssignerValue.SomeAssigner(selfWithNewUri, EXPECTED_DUMMY_GENERATION),
+            selfAssignerInfo
+          ),
+          eligibleAssigners = Seq(selfWithNewUri)
         )
       ),
       nextTimeOffset = Duration.Inf
@@ -151,7 +251,8 @@ class ConsistentHashingPreferredAssignerStateMachineSuite extends DatabricksTest
           PreferredAssignerConfig.create(
             PreferredAssignerValue.SomeAssigner(otherAssignerInfo, EXPECTED_DUMMY_GENERATION),
             selfAssignerInfo
-          )
+          ),
+          eligibleAssigners = Seq(otherAssignerInfo)
         )
       ),
       nextTimeOffset = Duration.Inf
@@ -175,7 +276,8 @@ class ConsistentHashingPreferredAssignerStateMachineSuite extends DatabricksTest
           PreferredAssignerConfig.create(
             PreferredAssignerValue.SomeAssigner(selfAssignerInfo, EXPECTED_DUMMY_GENERATION),
             selfAssignerInfo
-          )
+          ),
+          eligibleAssigners = Seq(selfAssignerInfo)
         )
       ),
       nextTimeOffset = Duration.Inf
@@ -188,7 +290,8 @@ class ConsistentHashingPreferredAssignerStateMachineSuite extends DatabricksTest
       actions = Seq(
         DriverAction.UsePreferredAssignerConfig(
           PreferredAssignerConfig
-            .create(PreferredAssignerValue.NoAssigner(EXPECTED_DUMMY_GENERATION), selfAssignerInfo)
+            .create(PreferredAssignerValue.NoAssigner(EXPECTED_DUMMY_GENERATION), selfAssignerInfo),
+          eligibleAssigners = Seq.empty
         )
       ),
       nextTimeOffset = Duration.Inf
@@ -200,15 +303,6 @@ class ConsistentHashingPreferredAssignerStateMachineSuite extends DatabricksTest
     // The hash ring deterministically picks otherAssignerInfo when both are present.
     val stateMachine: ConsistentHashingPreferredAssignerStateMachine = createStateMachine()
     val harness: TestHarness = new TestHarness(stateMachine)
-
-    // Confirm our assumption about the hash ring ordering for these UUIDs.
-    val selectedOpt: Option[UUID] = PreferredAssignerSelector.selectPreferredAssigner(
-      Set(selfAssignerInfo.uuid, otherAssignerInfo.uuid)
-    )
-    assert(
-      selectedOpt.contains(otherAssignerInfo.uuid),
-      "Test assumes hash ring selects otherAssignerInfo; update UUIDs if this fails"
-    )
 
     harness.advance(0.seconds, actions = Seq.empty, nextTimeOffset = Duration.Inf)
 
@@ -224,7 +318,8 @@ class ConsistentHashingPreferredAssignerStateMachineSuite extends DatabricksTest
           PreferredAssignerConfig.create(
             PreferredAssignerValue.SomeAssigner(otherAssignerInfo, EXPECTED_DUMMY_GENERATION),
             selfAssignerInfo
-          )
+          ),
+          eligibleAssigners = Seq(selfAssignerInfo, otherAssignerInfo)
         )
       ),
       nextTimeOffset = Duration.Inf
@@ -239,7 +334,8 @@ class ConsistentHashingPreferredAssignerStateMachineSuite extends DatabricksTest
           PreferredAssignerConfig.create(
             PreferredAssignerValue.SomeAssigner(selfAssignerInfo, EXPECTED_DUMMY_GENERATION),
             selfAssignerInfo
-          )
+          ),
+          eligibleAssigners = Seq(selfAssignerInfo)
         )
       ),
       nextTimeOffset = Duration.Inf
@@ -257,7 +353,8 @@ class ConsistentHashingPreferredAssignerStateMachineSuite extends DatabricksTest
           PreferredAssignerConfig.create(
             PreferredAssignerValue.SomeAssigner(otherAssignerInfo, EXPECTED_DUMMY_GENERATION),
             selfAssignerInfo
-          )
+          ),
+          eligibleAssigners = Seq(selfAssignerInfo, otherAssignerInfo)
         )
       ),
       nextTimeOffset = Duration.Inf
@@ -270,14 +367,6 @@ class ConsistentHashingPreferredAssignerStateMachineSuite extends DatabricksTest
     // third should still pick other.
     val stateMachine: ConsistentHashingPreferredAssignerStateMachine = createStateMachine()
     val harness: TestHarness = new TestHarness(stateMachine)
-
-    val selectedWithThird: Option[UUID] = PreferredAssignerSelector.selectPreferredAssigner(
-      Set(selfAssignerInfo.uuid, otherAssignerInfo.uuid, thirdAssignerInfo.uuid)
-    )
-    assert(
-      selectedWithThird.contains(otherAssignerInfo.uuid),
-      "Test assumes hash ring still selects otherAssignerInfo with all three; update UUIDs if fails"
-    )
 
     harness.advance(0.seconds, actions = Seq.empty, nextTimeOffset = Duration.Inf)
 
@@ -293,7 +382,8 @@ class ConsistentHashingPreferredAssignerStateMachineSuite extends DatabricksTest
           PreferredAssignerConfig.create(
             PreferredAssignerValue.SomeAssigner(otherAssignerInfo, EXPECTED_DUMMY_GENERATION),
             selfAssignerInfo
-          )
+          ),
+          eligibleAssigners = Seq(selfAssignerInfo, otherAssignerInfo)
         )
       ),
       nextTimeOffset = Duration.Inf
@@ -351,7 +441,8 @@ class ConsistentHashingPreferredAssignerStateMachineSuite extends DatabricksTest
           PreferredAssignerConfig.create(
             PreferredAssignerValue.SomeAssigner(selfAssignerInfo, EXPECTED_DUMMY_GENERATION),
             selfAssignerInfo
-          )
+          ),
+          eligibleAssigners = Seq(selfAssignerInfo)
         )
       ),
       nextTimeOffset = Duration.Inf
@@ -363,7 +454,8 @@ class ConsistentHashingPreferredAssignerStateMachineSuite extends DatabricksTest
       actions = Seq(
         DriverAction.UsePreferredAssignerConfig(
           PreferredAssignerConfig
-            .create(PreferredAssignerValue.NoAssigner(EXPECTED_DUMMY_GENERATION), selfAssignerInfo)
+            .create(PreferredAssignerValue.NoAssigner(EXPECTED_DUMMY_GENERATION), selfAssignerInfo),
+          eligibleAssigners = Seq.empty
         )
       ),
       nextTimeOffset = Duration.Inf
@@ -386,7 +478,8 @@ class ConsistentHashingPreferredAssignerStateMachineSuite extends DatabricksTest
           PreferredAssignerConfig.create(
             PreferredAssignerValue.SomeAssigner(selfAssignerInfo, EXPECTED_DUMMY_GENERATION),
             selfAssignerInfo
-          )
+          ),
+          eligibleAssigners = Seq(selfAssignerInfo)
         )
       ),
       nextTimeOffset = Duration.Inf
@@ -397,7 +490,8 @@ class ConsistentHashingPreferredAssignerStateMachineSuite extends DatabricksTest
       actions = Seq(
         DriverAction.UsePreferredAssignerConfig(
           PreferredAssignerConfig
-            .create(PreferredAssignerValue.NoAssigner(EXPECTED_DUMMY_GENERATION), selfAssignerInfo)
+            .create(PreferredAssignerValue.NoAssigner(EXPECTED_DUMMY_GENERATION), selfAssignerInfo),
+          eligibleAssigners = Seq.empty
         )
       ),
       nextTimeOffset = Duration.Inf
@@ -412,7 +506,8 @@ class ConsistentHashingPreferredAssignerStateMachineSuite extends DatabricksTest
           PreferredAssignerConfig.create(
             PreferredAssignerValue.SomeAssigner(selfAssignerInfo, EXPECTED_DUMMY_GENERATION),
             selfAssignerInfo
-          )
+          ),
+          eligibleAssigners = Seq(selfAssignerInfo)
         )
       ),
       nextTimeOffset = Duration.Inf
@@ -435,7 +530,8 @@ class ConsistentHashingPreferredAssignerStateMachineSuite extends DatabricksTest
           PreferredAssignerConfig.create(
             PreferredAssignerValue.SomeAssigner(selfAssignerInfo, EXPECTED_DUMMY_GENERATION),
             selfAssignerInfo
-          )
+          ),
+          eligibleAssigners = Seq(selfAssignerInfo)
         )
       ),
       nextTimeOffset = Duration.Inf
@@ -446,7 +542,8 @@ class ConsistentHashingPreferredAssignerStateMachineSuite extends DatabricksTest
       actions = Seq(
         DriverAction.UsePreferredAssignerConfig(
           PreferredAssignerConfig
-            .create(PreferredAssignerValue.NoAssigner(EXPECTED_DUMMY_GENERATION), selfAssignerInfo)
+            .create(PreferredAssignerValue.NoAssigner(EXPECTED_DUMMY_GENERATION), selfAssignerInfo),
+          eligibleAssigners = Seq.empty
         )
       ),
       nextTimeOffset = Duration.Inf
@@ -469,7 +566,8 @@ class ConsistentHashingPreferredAssignerStateMachineSuite extends DatabricksTest
           PreferredAssignerConfig.create(
             PreferredAssignerValue.SomeAssigner(otherAssignerInfo, EXPECTED_DUMMY_GENERATION),
             selfAssignerInfo
-          )
+          ),
+          eligibleAssigners = Seq(otherAssignerInfo)
         )
       ),
       nextTimeOffset = Duration.Inf
@@ -490,7 +588,8 @@ class ConsistentHashingPreferredAssignerStateMachineSuite extends DatabricksTest
           PreferredAssignerConfig.create(
             PreferredAssignerValue.SomeAssigner(selfAssignerInfo, EXPECTED_DUMMY_GENERATION),
             selfAssignerInfo
-          )
+          ),
+          eligibleAssigners = Seq(selfAssignerInfo)
         )
       ),
       nextTimeOffset = Duration.Inf
@@ -520,7 +619,8 @@ class ConsistentHashingPreferredAssignerStateMachineSuite extends DatabricksTest
           PreferredAssignerConfig.create(
             PreferredAssignerValue.SomeAssigner(selfAssignerInfo, EXPECTED_DUMMY_GENERATION),
             selfAssignerInfo
-          )
+          ),
+          eligibleAssigners = Seq(selfAssignerInfo)
         )
       ),
       nextTimeOffset = Duration.Inf
@@ -533,7 +633,8 @@ class ConsistentHashingPreferredAssignerStateMachineSuite extends DatabricksTest
       actions = Seq(
         DriverAction.UsePreferredAssignerConfig(
           PreferredAssignerConfig
-            .create(PreferredAssignerValue.NoAssigner(EXPECTED_DUMMY_GENERATION), selfAssignerInfo)
+            .create(PreferredAssignerValue.NoAssigner(EXPECTED_DUMMY_GENERATION), selfAssignerInfo),
+          eligibleAssigners = Seq.empty
         )
       ),
       nextTimeOffset = Duration.Inf
@@ -565,7 +666,8 @@ class ConsistentHashingPreferredAssignerStateMachineSuite extends DatabricksTest
           PreferredAssignerConfig.create(
             PreferredAssignerValue.SomeAssigner(selfAssignerInfo, EXPECTED_DUMMY_GENERATION),
             selfAssignerInfo
-          )
+          ),
+          eligibleAssigners = Seq(selfAssignerInfo)
         )
       ),
       nextTimeOffset = Duration.Inf
@@ -588,10 +690,53 @@ class ConsistentHashingPreferredAssignerStateMachineSuite extends DatabricksTest
           PreferredAssignerConfig.create(
             PreferredAssignerValue.SomeAssigner(otherAssignerInfo, EXPECTED_DUMMY_GENERATION),
             selfAssignerInfo
-          )
+          ),
+          eligibleAssigners = Seq(otherAssignerInfo)
         )
       ),
       nextTimeOffset = Duration.Inf
     )
+  }
+
+  test("preferred assigner selection is stable across code changes") {
+    // Test plan: Verify with a golden test that the state machine picks the same preferred
+    // assigner across code versions, using 1000 iterations to increase confidence. This matters
+    // because during rolling deploys, pods running different binaries must agree on the same
+    // preferred assigner to avoid split brain and thrashing.
+    val stateMachine: ConsistentHashingPreferredAssignerStateMachine = createStateMachine()
+    val harness: TestHarness = new TestHarness(stateMachine)
+    harness.advance(0.seconds, actions = Seq.empty, nextTimeOffset = Duration.Inf)
+
+    for (i: Int <- 0 until 1000) {
+      // Each iteration uses a distinct set of 7 assigners to ensure that we have 1000 independent
+      // runs.
+      val assigners: Seq[AssignerInfo] = (0 until 7).map { j: Int =>
+        val assignerIndex: Int = i * 7 + j
+        AssignerInfo(
+          uuid = UUID.nameUUIDFromBytes(
+            s"assigner-$assignerIndex".getBytes(StandardCharsets.UTF_8)
+          ),
+          uri = new URI(s"https://assigner-$j:8080")
+        )
+      }
+      val expectedAssigner: AssignerInfo = assigners(
+        ConsistentHashingPreferredAssignerStateMachineGoldenData.EXPECTED_PREFERRED_INDICES(i)
+      )
+
+      harness.event(
+        (i + 1).seconds,
+        Event.ResourceSetReceived(ResourceVersion(s"$i"), toResourceMap(assigners: _*)),
+        actions = Seq(
+          DriverAction.UsePreferredAssignerConfig(
+            PreferredAssignerConfig.create(
+              PreferredAssignerValue.SomeAssigner(expectedAssigner, EXPECTED_DUMMY_GENERATION),
+              selfAssignerInfo
+            ),
+            eligibleAssigners = assigners.sortBy((a: AssignerInfo) => a.uuid)
+          )
+        ),
+        nextTimeOffset = Duration.Inf
+      )
+    }
   }
 }

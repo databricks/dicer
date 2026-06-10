@@ -37,7 +37,7 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
         .readScopeConfigMapFromDirectories(
           configScopeOpt = None,
           targetConfigDirectory = new File(
-            "dicer/external/config/dev/softstore-storelet.textproto"
+            "dicer/external/config/dev/softstore-storelet/softstore-storelet.textproto"
           ),
           advancedTargetConfigDirectory = new File("dicer/assigner/advanced_config/dev")
         )
@@ -703,4 +703,260 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
       )
     )
   }
+
+  test("authorizer is DEFAULT_AUTHORIZER when the authorizer field is absent from textproto") {
+    // Test plan: Verify that readScopeConfigMapFromDirectories yields an InternalTargetConfig
+    // whose `authorizer` is DEFAULT_AUTHORIZER when the textproto omits the `authorizer` field.
+    // We do this by writing a config with only a default_config (no authorizer), reading it, and
+    // asserting the resulting InternalTargetConfig has the default authorizer.
+    val configWriter = new ConfigWriter
+    val targetName: TargetName = TargetName("my-target")
+    configWriter.writeConfig(
+      s"$targetName.textproto",
+      """default_config {
+        |  primary_rate_metric_config {
+        |    max_load_hint: 1000
+        |  }
+        |}
+        |""".stripMargin
+    )
+    val configMap: Map[TargetName, InternalTargetConfig] =
+      TargetConfigReader.readScopeConfigMapFromDirectories(
+        configScopeOpt = None,
+        configWriter.getTargetConfigDirectory,
+        configWriter.getAdvancedTargetConfigDirectory
+      )
+    assertResult(AuthorizerHelper.DEFAULT_AUTHORIZER)(configMap(targetName).authorizer)
+  }
+
+  test("Discovers textprotos in nested subdirectories") {
+    // Test plan: Verify a textproto under <root>/<service>/<service>.textproto is returned.
+    val configWriter = new ConfigWriter
+    val targetName: TargetName = TargetName("snappy-matcher")
+    configWriter.writeConfigInDirectory(
+      targetName.toString,
+      s"$targetName.textproto",
+      """default_config {
+        |  primary_rate_metric_config {
+        |    max_load_hint: 1000
+        |  }
+        |}
+        |""".stripMargin
+    )
+    val configMap: Map[TargetName, InternalTargetConfig] =
+      TargetConfigReader.readScopeConfigMapFromDirectories(
+        configScopeOpt = None,
+        configWriter.getTargetConfigDirectory,
+        configWriter.getAdvancedTargetConfigDirectory
+      )
+    assertResult(Set(targetName))(configMap.keySet)
+  }
+
+  test("Discovers configs in a mixed flat and nested layout") {
+    // Test plan: Verify that a flat textproto and a nested textproto under the same root both
+    // appear in the result map (the migration window where some configs have moved and some
+    // have not).
+    val configWriter = new ConfigWriter
+    val flatTarget: TargetName = TargetName("flat-service")
+    val nestedTarget: TargetName = TargetName("nested-service")
+    val body: String =
+      """default_config {
+        |  primary_rate_metric_config {
+        |    max_load_hint: 1000
+        |  }
+        |}
+        |""".stripMargin
+    configWriter.writeConfig(s"$flatTarget.textproto", body)
+    configWriter.writeConfigInDirectory(nestedTarget.toString, s"$nestedTarget.textproto", body)
+    val configMap: Map[TargetName, InternalTargetConfig] =
+      TargetConfigReader.readScopeConfigMapFromDirectories(
+        configScopeOpt = None,
+        configWriter.getTargetConfigDirectory,
+        configWriter.getAdvancedTargetConfigDirectory
+      )
+    assertResult(Set(flatTarget, nestedTarget))(configMap.keySet)
+  }
+
+  test("Reads owners from textprotos in nested subdirectories") {
+    // Test plan: Verify readConfigOwners returns the owner from a textproto in a child
+    // subdirectory (the path OwnerTeamMappingsGenerator relies on for alert routing).
+    val configWriter = new ConfigWriter
+    val targetName: TargetName = TargetName("nested-owner-service")
+    configWriter.writeConfigInDirectory(
+      targetName.toString,
+      s"$targetName.textproto",
+      """owner_team_name: "platform-team"
+        |""".stripMargin
+    )
+    assertResult(Map(targetName -> "platform-team"))(
+      TargetConfigReader.readConfigOwners(configWriter.getTargetConfigDirectory)
+    )
+  }
+
+  test("Ignores files whose name does not end in .textproto, including in subdirectories") {
+    // Test plan: Place an OWNERS file (no extension) and a README.md alongside a valid textproto in
+    // a nested layout, and verify only the textproto is parsed. This prevents the reader from
+    // tripping on OWNERS files that the per-service-subdir layout introduces.
+    val configWriter = new ConfigWriter
+    val targetName: TargetName = TargetName("owners-coexist")
+    configWriter.writeConfigInDirectory(
+      targetName.toString,
+      "OWNERS",
+      "file://eng-teams/platform-team/all.OWNERS\n"
+    )
+    configWriter.writeConfigInDirectory(targetName.toString, "README.md", "# notes\n")
+    configWriter.writeConfigInDirectory(
+      targetName.toString,
+      s"$targetName.textproto",
+      """default_config {
+        |  primary_rate_metric_config {
+        |    max_load_hint: 1000
+        |  }
+        |}
+        |""".stripMargin
+    )
+    val configMap: Map[TargetName, InternalTargetConfig] =
+      TargetConfigReader.readScopeConfigMapFromDirectories(
+        configScopeOpt = None,
+        configWriter.getTargetConfigDirectory,
+        configWriter.getAdvancedTargetConfigDirectory
+      )
+    assertResult(Set(targetName))(configMap.keySet)
+  }
+
+  test("Ignores textprotos nested deeper than the per-service-subdir layout allows") {
+    // Test plan: Write a textproto two directories deep (<root>/a/b/too-deep.textproto), beyond the
+    // supported flat (<root>/foo.textproto) and per-service-subdir (<root>/foo/foo.textproto)
+    // layouts, and verify the reader does not register it. Bounding the walk depth keeps a stray
+    // textproto nested deeper than the layout allows from being silently picked up as a target.
+    val configWriter = new ConfigWriter
+    val deepTarget: TargetName = TargetName("too-deep")
+    configWriter.writeConfigInDirectory(
+      "a/b",
+      s"$deepTarget.textproto",
+      """default_config {
+        |  primary_rate_metric_config {
+        |    max_load_hint: 1000
+        |  }
+        |}
+        |""".stripMargin
+    )
+    val configMap: Map[TargetName, InternalTargetConfig] =
+      TargetConfigReader.readScopeConfigMapFromDirectories(
+        configScopeOpt = None,
+        configWriter.getTargetConfigDirectory,
+        configWriter.getAdvancedTargetConfigDirectory
+      )
+    assert(configMap.isEmpty)
+  }
+
+  test("Throws if a flat textproto and a nested textproto share a target name") {
+    // Test plan: Verify that a flat textproto (<root>/foo.textproto) and a nested textproto
+    // (<root>/foo/foo.textproto) resolving to the same target name cause a throw, and that the
+    // error names both colliding paths so the duplicate is locatable.
+    val configWriter = new ConfigWriter
+    val targetName: TargetName = TargetName("snappy-matcher")
+    val body: String =
+      """default_config {
+        |  primary_rate_metric_config {
+        |    max_load_hint: 1000
+        |  }
+        |}
+        |""".stripMargin
+    configWriter.writeConfig(s"$targetName.textproto", body)
+    configWriter.writeConfigInDirectory(targetName.toString, s"$targetName.textproto", body)
+    val ex: IllegalArgumentException = assertThrow[IllegalArgumentException](
+      s"Duplicate target configuration for $targetName"
+    ) {
+      TargetConfigReader.readScopeConfigMapFromDirectories(
+        configScopeOpt = None,
+        configWriter.getTargetConfigDirectory,
+        configWriter.getAdvancedTargetConfigDirectory
+      )
+    }
+    // Both colliding paths must appear in the message: the flat file directly under the root and
+    // the nested file under the same-named subdirectory.
+    val flatPath: String = s"${configWriter.getTargetConfigDirectory.getPath}/$targetName.textproto"
+    val nestedPath: String =
+      s"${configWriter.getTargetConfigDirectory.getPath}/$targetName/$targetName.textproto"
+    assert(
+      ex.getMessage.contains(flatPath),
+      s"expected message to name $flatPath: ${ex.getMessage}"
+    )
+    assert(
+      ex.getMessage.contains(nestedPath),
+      s"expected message to name $nestedPath: ${ex.getMessage}"
+    )
+  }
+
+  test("Throws if two service subdirectories share a target name") {
+    // Test plan: Verify that the same target name in two different service subdirectories
+    // (foo/snappy-matcher.textproto and bar/snappy-matcher.textproto) causes a throw, and that the
+    // error names both colliding paths. This collision is new to the per-service-subdir layout:
+    // the flat layout structurally could not produce two files with the same name.
+    val configWriter = new ConfigWriter
+    val targetName: TargetName = TargetName("snappy-matcher")
+    val body: String =
+      """default_config {
+        |  primary_rate_metric_config {
+        |    max_load_hint: 1000
+        |  }
+        |}
+        |""".stripMargin
+    configWriter.writeConfigInDirectory("foo", s"$targetName.textproto", body)
+    configWriter.writeConfigInDirectory("bar", s"$targetName.textproto", body)
+    val ex: IllegalArgumentException = assertThrow[IllegalArgumentException](
+      s"Duplicate target configuration for $targetName"
+    ) {
+      TargetConfigReader.readScopeConfigMapFromDirectories(
+        configScopeOpt = None,
+        configWriter.getTargetConfigDirectory,
+        configWriter.getAdvancedTargetConfigDirectory
+      )
+    }
+    // Both colliding paths must appear in the message, regardless of which subdir the walk visited
+    // first (Files.walk ordering is unspecified).
+    val fooPath: String =
+      s"${configWriter.getTargetConfigDirectory.getPath}/foo/$targetName.textproto"
+    val barPath: String =
+      s"${configWriter.getTargetConfigDirectory.getPath}/bar/$targetName.textproto"
+    assert(ex.getMessage.contains(fooPath), s"expected message to name $fooPath: ${ex.getMessage}")
+    assert(ex.getMessage.contains(barPath), s"expected message to name $barPath: ${ex.getMessage}")
+  }
+
+  test("readScopeConfigMapFromDirectories throws on an unknown authorizer type URL") {
+    // Test plan: Verify that an unrecognized type URL in the authorizer Any field causes
+    // readScopeConfigMapFromDirectories to throw IllegalArgumentException. We do this by writing
+    // a config whose `default_config.authorizer` field references an unknown [type.url] { ... }
+    // and asserting the error message indicates a textproto parse failure:
+    // TEXT_FORMAT_PROTO_ANY_PARSER only resolves type URLs registered in its TypeRegistry;
+    // unrecognized URLs cause the Java TextFormat.Parser to fail at parse time.
+    val configWriter = new ConfigWriter
+    val targetName: TargetName = TargetName("my-target")
+    configWriter.writeConfig(
+      s"$targetName.textproto",
+      """default_config {
+        |  primary_rate_metric_config {
+        |    max_load_hint: 1000
+        |  }
+        |  authorizer {
+        |    [type.googleapis.com/unknown.AuthorizerType] {
+        |      some_field: "value"
+        |    }
+        |  }
+        |}
+        |""".stripMargin
+    )
+    val ex: IllegalArgumentException = assertThrow[IllegalArgumentException](
+      "Unable to parse Any of type: type.googleapis.com/unknown.AuthorizerType"
+    ) {
+      TargetConfigReader.readScopeConfigMapFromDirectories(
+        configScopeOpt = None,
+        configWriter.getTargetConfigDirectory,
+        configWriter.getAdvancedTargetConfigDirectory
+      )
+    }
+    assert(ex.getMessage.contains("Bad textproto format"))
+  }
+
 }

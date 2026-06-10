@@ -18,7 +18,7 @@ import com.databricks.rpc.RequestHeaders
 import io.prometheus.client.CollectorRegistry
 
 import com.databricks.caching.util.TestUtils
-import com.databricks.caching.util.TestUtils.{TestName, shamefullyAwaitForNonEventInAsyncTest}
+import com.databricks.caching.util.TestUtils.{TestName, shamefullyAwait200msForNonEventInAsyncTest}
 import com.databricks.caching.util.{
   AssertionWaiter,
   FakeSequentialExecutionContextPool,
@@ -80,7 +80,7 @@ class ClerkImplSuite extends DatabricksTest with TestName {
     // watch request if it remains active. Note that sleeping is highly discouraged in tests, but
     // here we are checking for a *non-event*, and in such cases we have no other option than to
     // wait a little time to leave room for the undesired event to occur.
-    shamefullyAwaitForNonEventInAsyncTest()
+    shamefullyAwait200msForNonEventInAsyncTest()
     assert(
       testEnv.testAssigner.getLatestClerkWatchRequest(target) == latestReceivedWatchRequestOpt
     )
@@ -117,11 +117,26 @@ class ClerkImplSuite extends DatabricksTest with TestName {
     // stopped.
     val target = Target(getSafeName)
 
-    // Returns the latest generation number for the `target` with `AssignmentMetricsSource.Clerk`.
-    def getLatestGenerationNumber: Double = {
-      MetricUtils.getMetricValue(
+    // Returns the latest generation number sample for the `target`, or `None` if there is no
+    // sample (i.e. the label was never set or has been removed).
+    def getLatestGenerationNumberOpt: Option[Double] = {
+      MetricUtils.getMetricValueOpt(
         CollectorRegistry.defaultRegistry,
         "dicer_assignment_latest_generation_number",
+        Map(
+          "targetCluster" -> target.getTargetClusterLabel,
+          "targetName" -> target.getTargetNameLabel,
+          "source" -> AssignmentMetricsSource.Clerk.toString
+        )
+      )
+    }
+
+    // Returns the latest store incarnation sample for the `target`, or `None` if there is no
+    // sample (i.e. the label was never set or has been removed).
+    def getLatestStoreIncarnationOpt: Option[Double] = {
+      MetricUtils.getMetricValueOpt(
+        CollectorRegistry.defaultRegistry,
+        "dicer_assignment_latest_store_incarnation",
         Map(
           "targetCluster" -> target.getTargetClusterLabel,
           "targetName" -> target.getTargetNameLabel,
@@ -168,6 +183,11 @@ class ClerkImplSuite extends DatabricksTest with TestName {
           clientSlicezData.target == target
       }
 
+    // Verify: While the clerk is running, the generation-number and store-incarnation gauges are
+    // populated for it.
+    assert(getLatestGenerationNumberOpt.exists((_: Double) > 0.0))
+    assert(getLatestStoreIncarnationOpt.isDefined)
+
     // Setup: Stop the clerk. Also wait for the SliceLookup to be cancelled.
     clerk.impl.stop()
     AssertionWaiter("Wait for the lookup metric to be decremented").await {
@@ -184,9 +204,16 @@ class ClerkImplSuite extends DatabricksTest with TestName {
       assert(numClientSlicezDataForTargetAfterStop == (numClientSlicezDataForTargetBeforeStop - 1))
     }
 
-    // Setup: Record the clerk's current assignment and the latest generation number.
+    // Verify: After stop, the per-target gauge labels are removed so the stopped clerk does not
+    // leave a stale sample in the scrape (which would cause `DicerClientNotReceivingAssignments`
+    // alerts to fire indefinitely against a clerk that is no longer running).
+    AssertionWaiter("Wait for the gauge labels to be removed").await {
+      assert(getLatestGenerationNumberOpt.isEmpty)
+      assert(getLatestStoreIncarnationOpt.isEmpty)
+    }
+
+    // Setup: Record the clerk's current assignment.
     val initialAssignmentOpt: Option[Assignment] = clerk.impl.forTest.getLatestAssignmentOpt
-    val initialLatestGenerationNumber: Double = getLatestGenerationNumber
 
     // Setup: Set and freeze a new assignment after the clerk is stopped.
     val newAssignment: Assignment =
@@ -202,10 +229,12 @@ class ClerkImplSuite extends DatabricksTest with TestName {
       verifyEventuallyNoWatchRequestsReceivedAfterStop(target)
     }
 
-    // Verify: Even if the assigner has a new assignment, the clerk's latest assignment and
-    // generation number should stay unchanged because it has been stopped.
+    // Verify: Even if the assigner has a new assignment, the clerk's latest assignment should stay
+    // unchanged and the gauge labels should remain removed (i.e. a stopped clerk does not
+    // resurrect its metric labels in response to assigner-side activity).
     assert(clerk.impl.forTest.getLatestAssignmentOpt == initialAssignmentOpt)
-    assert(getLatestGenerationNumber == initialLatestGenerationNumber)
+    assert(getLatestGenerationNumberOpt.isEmpty)
+    assert(getLatestStoreIncarnationOpt.isEmpty)
   }
 
   test("Multi-thread ClerkImpl.stop") {
@@ -340,6 +369,26 @@ class ClerkImplSuite extends DatabricksTest with TestName {
     )
   }
 
+  /** Creates a Clerk via [[ClerkImpl.createForMultiClerk]] (multi-clerk path). */
+  private def createViaMultiClerk(
+      target: Target,
+      status: ClientUuidStatus): ClerkImpl[ResourceAddress] = {
+    val clerkConf: ClerkConf = createClientUuidTestClerkConf(status)
+    val protoLogger: DicerClientProtoLogger = DicerClientProtoLogger.create(
+      clientType = ClientType.Clerk,
+      conf = clerkConf,
+      ownerName = s"multi-clerk-test-${target.name}"
+    )
+    ClerkImpl.createForMultiClerk(
+      secPoolOpt = None,
+      protoLogger = protoLogger,
+      clerkConf,
+      target,
+      DUMMY_WATCH_ADDRESS,
+      identity[ResourceAddress]
+    )
+  }
+
   // TODO(<internal bug>): Once all Dicer client deployments are confirmed to set POD_UID, this test can be
   // retired. Absence of client UUID should trigger an exception at creation time.
   namedGridTest("Client UUID status metric tracks status correctly")(
@@ -391,5 +440,51 @@ class ClerkImplSuite extends DatabricksTest with TestName {
     val clerkMalformed: ClerkImpl[ResourceAddress] = factory(target, ClientUuidStatus.Malformed)
     assert(malformedTracker.totalChange() == 1.0, "malformed metric should increment")
     clerkMalformed.stop()
+  }
+
+  namedGridTest("ClerkImpl factory tags Clerks with the right factoryContext")(
+    // Each entry: name -> (expected factoryContext label, factory function).
+    // The "clerk" factory context (the public ClerkImpl.create path) is covered by
+    // ClerkSuiteBase; this test covers the remaining entry points.
+    Map[String, (String, ClerkImplFactory)](
+      "createForDataPlaneDirectClerk" -> (("dataPlaneDirectClerk", createViaDataPlaneDirect)),
+      "createForMultiClerk" -> (("multiClerk", createViaMultiClerk)),
+      "createForShardedStub" -> (("shardedStub", createViaShardedStub))
+    )
+  ) {
+    case (expectedFactoryContext: String, factory: ClerkImplFactory) =>
+      // Test plan: Verify that each non-default ClerkImpl factory method tags the created Clerk
+      // with the correct factoryContext label on dicer_clerk_created_total. Open a ChangeTracker
+      // on the creation counter for the (target, expectedFactoryContext), create a Clerk via
+      // the factory, then assert the tracker observed exactly one increment.
+      val target: Target = Target.createKubernetesTarget(
+        URI.create("kubernetes-cluster:test-env/cloud2/public/region4/clustertype2/01"),
+        getSafeName
+      )
+
+      val creationCountTracker: ChangeTracker[Double] = ChangeTracker { () =>
+        MetricUtils.getMetricValue(
+          CollectorRegistry.defaultRegistry,
+          "dicer_clerk_created_total",
+          Map(
+            "targetCluster" -> target.getTargetClusterLabel,
+            "targetName" -> target.getTargetNameLabel,
+            "targetInstanceId" -> target.getTargetInstanceIdLabel,
+            "factoryContext" -> expectedFactoryContext
+          )
+        )
+      }
+
+      // Setup: Create the Clerk via the factory.
+      val clerk: ClerkImpl[ResourceAddress] = factory(target, ClientUuidStatus.Valid)
+
+      // Verify: Exactly one Clerk creation was recorded under the expected factoryContext.
+      assert(
+        creationCountTracker.totalChange() == 1.0,
+        s"Expected creation count for factoryContext=$expectedFactoryContext to increase by 1, " +
+        s"but totalChange was ${creationCountTracker.totalChange()}"
+      )
+
+      clerk.stop()
   }
 }

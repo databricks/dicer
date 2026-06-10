@@ -20,6 +20,7 @@ scala_proto_library(
 proto_library(
     name = "preferred_assigner_proto_library",
     srcs = ["preferred_assigner.proto"],
+    visibility = ["//visibility:public"],
     deps = [
         "//dicer/common/proto:common_proto",
         "//wrappers/rpc:scalapb_proto",

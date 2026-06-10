@@ -1,52 +1,40 @@
 package com.databricks.dicer.client.featurerollouts
 
-import com.databricks.api.proto.dicer.client.featurerollouts.DicerClientFeatureRolloutScopeP
+import com.databricks.api.proto.dicer.client.featurerollouts.test.DicerClientFeatureRolloutScopeTestDataP
+import com.databricks.api.proto.dicer.client.featurerollouts.test.DicerClientFeatureRolloutScopeTestDataP.{
+  InvalidScopeTestCaseP,
+  ValidScopeTestCaseP
+}
+import com.databricks.caching.util.TestUtils
 import com.databricks.caching.util.TestUtils.assertThrow
 import com.databricks.testing.DatabricksTest
 
 class DicerClientFeatureRolloutScopeSuite extends DatabricksTest {
 
-  test("DicerClientFeatureRolloutScope fromProto with valid region URI") {
-    // Test plan: Verify that fromProto produces the correct scope when given a valid proto with a
-    // region URI. Do this by constructing a proto with a known valid region URI and asserting the
-    // resulting scope has the expected regionUri field.
-    val proto: DicerClientFeatureRolloutScopeP =
-      DicerClientFeatureRolloutScopeP(regionUri = Some("region:prod/cloud1/public/region2"))
-    val scope: DicerClientFeatureRolloutScope = DicerClientFeatureRolloutScope.fromProto(proto)
-    assert(scope.regionUri == "region:prod/cloud1/public/region2")
-  }
-
-  test("DicerClientFeatureRolloutScope fromProto throws when regionUri is absent") {
-    // Test plan: Verify that fromProto throws IllegalArgumentException when the regionUri field
-    // is not set. Do this by calling fromProto with an empty proto and asserting on the exception.
-    assertThrow[IllegalArgumentException]("regionUri must be set") {
-      DicerClientFeatureRolloutScope.fromProto(DicerClientFeatureRolloutScopeP())
-    }
-  }
-
-  gridTest("DicerClientFeatureRolloutScope throws for invalid region URIs")(
-    Seq(
-      // Strings that bear no resemblance to a region URI.
-      "",
-      "hello",
-      "foo bar",
-      "123",
-      // Wrong scheme (not "region:").
-      "kubernetes-cluster:prod/cloud1/public/region2/clustertype2/01",
-      // Right scheme, wrong path structure (not exactly four non-empty segments).
-      "region:",
-      "region:prod/cloud1/public",
-      "region:prod/cloud1/public/region2/clustertype2/01",
-      "region:prod//public/region2"
+  private val TEST_DATA: DicerClientFeatureRolloutScopeTestDataP =
+    TestUtils.loadTestData[DicerClientFeatureRolloutScopeTestDataP](
+      "dicer/client/feature-rollouts/test/data/scope_test_data.textproto"
     )
-  ) { regionUri: String =>
-    // Test plan: Verify that constructing a DicerClientFeatureRolloutScope with a regionUri that
-    // does not match the expected format throws IllegalArgumentException. Do this by calling
-    // fromProto with each invalid URI and asserting on the exception message.
-    val proto: DicerClientFeatureRolloutScopeP =
-      DicerClientFeatureRolloutScopeP(regionUri = Some(regionUri))
-    assertThrow[IllegalArgumentException]("regionUri must match format") {
-      DicerClientFeatureRolloutScope.fromProto(proto)
+
+  namedGridTest("DicerClientFeatureRolloutScope fromProto accepts valid scope protos")(
+    TEST_DATA.validScopeTestCases.map((c: ValidScopeTestCaseP) => c.getDescription -> c).toMap
+  ) { testCase: ValidScopeTestCaseP =>
+    // Test plan: Verify that fromProto accepts every valid scope proto from the shared textproto.
+    // Do this by iterating over each `valid_scope_test_cases` entry, calling fromProto, and
+    // asserting the returned scope's regionUri matches the input proto's regionUri.
+    val scope: DicerClientFeatureRolloutScope =
+      DicerClientFeatureRolloutScope.fromProto(testCase.getScopeProto)
+    assert(scope.regionUri == testCase.getScopeProto.getRegionUri)
+  }
+
+  namedGridTest("DicerClientFeatureRolloutScope fromProto rejects invalid scope protos")(
+    TEST_DATA.invalidScopeTestCases.map((c: InvalidScopeTestCaseP) => c.getDescription -> c).toMap
+  ) { testCase: InvalidScopeTestCaseP =>
+    // Test plan: Verify that fromProto rejects every invalid scope proto from the shared
+    // textproto. Do this by iterating over each `invalid_scope_test_cases` entry and asserting
+    // fromProto throws IllegalArgumentException whose message contains the expected substring.
+    assertThrow[IllegalArgumentException](testCase.getExpectedErrorSubstring) {
+      DicerClientFeatureRolloutScope.fromProto(testCase.getScopeProto)
     }
   }
 }

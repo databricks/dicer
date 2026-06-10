@@ -13,20 +13,23 @@ import scala.concurrent.duration.FiniteDuration
  *                              will not have a value until the first poll completes.
  * @param poller                A code function that polls the watched value.
  * @param transform             The code function that transforms the raw value to the parsed one.
- * @param pollInterval          The finite duration of the interval between each value poll.
+ * @param pollInterval          The finite duration of the interval between each value poll. Must
+ *                              be strictly positive.
  * @param sec                   A sequential execution context for scheduling and protecting mutable
  *                              state. Blocking work may be performed on this execution context.
  *
  * @tparam T                The type for the raw value.
  * @tparam R                The type for the parsed value.
  *
- * The producer starts to poll the raw value every `pollInterval` using `poller` at startup.
+ * Once `start()` is called, the producer polls the raw value every `pollInterval` using `poller`.
  * Once it gets the value, it applies `transform` to get the parsed value. The periodical poll
  * will be canceled if `cancel()` is called.
  * The consumer can register its callback by calling the `watch()` function.
+ *
+ * @throws IllegalArgumentException If `pollInterval` is not strictly positive.
  */
 @ThreadSafe
-sealed class WatchValueCellPollAdapter[T, R](
+sealed class WatchValueCellPollAdapter[T, R] @throws[IllegalArgumentException]()(
     initialValueOpt: Option[R],
     poller: () => T,
     transform: T => R,
@@ -34,6 +37,8 @@ sealed class WatchValueCellPollAdapter[T, R](
     sec: SequentialExecutionContext)
     extends WatchValueCell.Consumer[R]
     with Cancellable {
+
+  require(pollInterval.toNanos > 0, "pollInterval must be strictly positive")
 
   /** The cell to watch the value. */
   private val cell = new WatchValueCell[R]

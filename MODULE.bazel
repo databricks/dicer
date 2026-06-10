@@ -97,7 +97,7 @@ use_repo(etcd_extension, "etcd_release")
 # Maven Dependencies
 # ========================================
 
-bazel_dep(name = "rules_jvm_external", version = "6.7")
+bazel_dep(name = "rules_jvm_external", version = "7.0")
 
 maven = use_extension("@rules_jvm_external//:extensions.bzl", "maven")
 maven.install(

@@ -5,6 +5,7 @@ package dicer.friend;
 
 import "scalapb.proto";
 
+
 option java_package = "com.databricks.api.proto.dicer.friend";
 option java_generate_equals_and_hash = true;
 option (scalapb.options) = {

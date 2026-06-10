@@ -27,12 +27,12 @@ abstract class DatabricksTest extends AnyFunSuite with BeforeAndAfterAll with Be
   }
 
   /**
-   * Runs a test for each named parameter in the map, appending the parameter name to the test
-   * name.
+   * Runs a test for each named parameter in the collection, appending the parameter name to the
+   * test name.
    */
-  protected def namedGridTest[A](testNamePrefix: String, testTags: Tag*)(params: Map[String, A])(
-      testFun: A => Unit
-  ): Unit = {
+  protected def namedGridTest[A](testNamePrefix: String, testTags: Tag*)(
+      params: Traversable[(String, A)]
+  )(testFun: A => Unit): Unit = {
     for ((paramName, param) <- params) {
       test(testNamePrefix + s" ($paramName)", testTags: _*)(testFun(param))
     }

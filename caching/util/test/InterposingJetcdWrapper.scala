@@ -41,6 +41,14 @@ final class InterposingJetcdWrapper private (
   @GuardedBy("lock")
   private var getFailureOpt: Option[Throwable] = None
 
+  /** Synchronous throw for [[get()]] operations, simulating a jetcd shutdown race. */
+  @GuardedBy("lock")
+  private var getSynchronousThrowOpt: Option[Throwable] = None
+
+  /** Synchronous throw for [[watch()]] operations, simulating a jetcd shutdown race. */
+  @GuardedBy("lock")
+  private var watchSynchronousThrowOpt: Option[Throwable] = None
+
   /** Latest watch listener. */
   @GuardedBy("lock")
   private var latestWatchListenerOpt: Option[PausableWatchListener] = None
@@ -77,6 +85,35 @@ final class InterposingJetcdWrapper private (
   /** Stops failing gets. */
   def stopFailingGets(): Unit = withLock(lock) {
     getFailureOpt = None
+  }
+
+  /**
+   * Registers an exception that all subsequent [[JetcdWrapper.get()]] requests will throw
+   * synchronously, until [[stopThrowingFromGets()]] is called. This simulates the jetcd client
+   * throwing during pod shutdown (e.g. because the underlying gRPC channel has already been
+   * closed).
+   */
+  def startThrowingFromGets(throwable: Throwable): Unit = withLock(lock) {
+    getSynchronousThrowOpt = Some(throwable)
+  }
+
+  /** Stops throwing synchronously from gets. */
+  def stopThrowingFromGets(): Unit = withLock(lock) {
+    getSynchronousThrowOpt = None
+  }
+
+  /**
+   * Registers an exception that all subsequent [[JetcdWrapper.watch()]] requests will throw
+   * synchronously, until [[stopThrowingFromWatches()]] is called. This simulates the jetcd watch
+   * client throwing `ClosedWatchClientException` during pod shutdown.
+   */
+  def startThrowingFromWatches(throwable: Throwable): Unit = withLock(lock) {
+    watchSynchronousThrowOpt = Some(throwable)
+  }
+
+  /** Stops throwing synchronously from watches. */
+  def stopThrowingFromWatches(): Unit = withLock(lock) {
+    watchSynchronousThrowOpt = None
   }
 
   /**
@@ -177,6 +214,10 @@ final class InterposingJetcdWrapper private (
   override def get(key: ByteSequence, getOption: GetOption): CompletableFuture[GetResponse] =
     withLock(lock) {
       getCallTimesBuffer += clock.tickerTime()
+      for (throwable: Throwable <- getSynchronousThrowOpt) {
+        logger.info(s"Injecting synchronous get throw $throwable")
+        throw throwable
+      }
       getFailureOpt match {
         case Some(getFailure) =>
           logger.info(s"Injecting get failure #$getFailure")
@@ -196,6 +237,11 @@ final class InterposingJetcdWrapper private (
       key: ByteSequence,
       option: WatchOption,
       listener: Watch.Listener): Watch.Watcher = withLock(lock) {
+
+    for (throwable: Throwable <- watchSynchronousThrowOpt) {
+      logger.info(s"Injecting synchronous watch throw $throwable")
+      throw throwable
+    }
 
     // Update the latest watcher and listener to support `failCurrentWatch`, `pauseCurrentWatch`,
     // and `resumeCurrentWatch`.

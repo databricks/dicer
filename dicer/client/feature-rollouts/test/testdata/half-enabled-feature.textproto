@@ -1,0 +1,7 @@
+# proto-file: dicer/client/feature-rollouts/proto/dicer_client_feature_rollout_config.proto
+# proto-message: DicerClientFeatureRolloutConfigP
+
+# Exactly half of targets are enabled based on a deterministic hash.
+default_rule {
+  target_instance_enable_fraction: 0.5
+}

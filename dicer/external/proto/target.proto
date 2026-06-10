@@ -3,12 +3,13 @@ syntax = "proto2";
 package dicer;
 
 import "caching/external/proto/config_scope_specification.proto";
+import "google/protobuf/any.proto";
 
 import "scalapb.proto";
 
 option java_package = "com.databricks.api.proto.dicer.external";
 option java_generate_equals_and_hash = true;
-option java_outer_classname = "TargetProto";
+
 option java_multiple_files = true;
 option (scalapb.options) = {
   package_name: "com.databricks.api.proto.dicer.external",
@@ -38,6 +39,8 @@ message TargetConfigP {
   // `optional LoadBalancingMetricConfigP primary_rate_metric_config`: moved under `default_config`
   // to support overrides.
   reserved 2;
+
+  // Next ID: 6.
 }
 
 // Contents of a Dicer target configuration. This message is used to represent both the default
@@ -48,6 +51,17 @@ message TargetConfigFieldsP {
 
   // OPTIONAL: If unset, defaults to single replica (min_replicas == max_replicas == 1).
   optional KeyReplicationConfigP key_replication_config = 2;
+
+  // OPTIONAL: An additional authorization policy for this target to determine which service's
+  // Slicelets can identify as this target. When set, the policy is consulted for watch requests
+  // whose App Name does not match the target name; if the policy accepts the request, the
+  // request is permitted. When absent, only requests whose App Name matches the target
+  // name are accepted. Databricks-internal targets may use AppIdentifierWorkloadAuthorizerConfigP to
+  // restrict registration to a specific App. Does not apply to Clerk-Assigner or
+  // Clerk-Slicelet communication.
+  optional google.protobuf.Any authorizer = 3;
+
+  // Next ID: 4.
 }
 
 // Override of a Dicer target configuration that applies to specific k8s clusters.

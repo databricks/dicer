@@ -13,4 +13,12 @@ object Project extends Enumeration {
 
   /** Project for unit tests. */
   val TestProject = ProjectDetails("test")
+
+  /** Returns the project registered with the given name. */
+  @throws[NoSuchElementException]("if no project with the given name exists")
+  def fromName(name: String): Project = {
+    // `withName` method is provided by the Enumeration trait, but it returns a `Value` object.
+    // For this enum, `Value` is `ProjectDetails`.
+    withName(name).asInstanceOf[ProjectDetails]
+  }
 }

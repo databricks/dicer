@@ -3,12 +3,15 @@ package com.databricks.caching.util
 import com.databricks.testing.DatabricksTest
 import com.databricks.caching.util.TestUtils.TestName
 import io.grpc.Status
+import com.databricks.caching.util.Lock.withLock
 import java.util.concurrent.{ConcurrentHashMap, Executors}
+import java.util.concurrent.locks.ReentrantLock
 
 import scala.concurrent.duration._
 import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.collection.mutable
 import scala.collection.JavaConverters._
+import scala.util.{Failure, Success, Try}
 
 class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
 
@@ -402,7 +405,7 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
 
     // Verify: After waiting, the subscriber should NOT have received the new value, confirming
     // that a single cancel() stopped all polling (i.e., there was only one poller).
-    TestUtils.shamefullyAwaitForNonEventInAsyncTest()
+    TestUtils.shamefullyAwait200msForNonEventInAsyncTest()
     assert(subscriber.getLatestKeyValueMap == INITIAL_MAP_VALUE_PARSED)
   }
 
@@ -471,6 +474,220 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
     }
 
     watchValueCellAdapter.cancel()
+  }
+
+  test("Test periodic polling continues when a scheduled poll throws an exception") {
+    // Test plan: Verify that when the `poller` function throws during a scheduled poll, the
+    // cell retains its value from the previous successful poll, an alert fires, and periodic
+    // polling continues. Do this by toggling the poller's outcome from "return a valid raw
+    // value" to "throw" once the initial poll has completed, simulating a scheduled poll, and
+    // asserting the served value still matches our expectation and the alert counter is
+    // incremented. Then toggle the poller's outcome back to "return an updated raw value",
+    // simulate another scheduled poll, and assert the cell observes the new value.
+
+    // Setup: create the underlying SEC pool on a throwaway thread so uncaught exceptions
+    // (i.e. from a poll that throws) interrupt the throwaway thread instead of the test thread.
+    // The pool's exception handler interrupts the pool's creator thread when a worker throws.
+    val poolName: String = s"pool-$getSafeName"
+    val poolFuture: Future[SequentialExecutionContextPool] = Future {
+      SequentialExecutionContextPool.create(
+        poolName = poolName,
+        numThreads = 1
+      )
+    }(ExecutionContext.fromExecutor(Executors.newSingleThreadExecutor()))
+    val pool: SequentialExecutionContextPool = Await.result(poolFuture, Duration.Inf)
+
+    val fakeSec: FakeSequentialExecutionContext =
+      FakeSequentialExecutionContext.create(
+        name = "watch-value-cell-poll-adapter-suite-fake-sec",
+        pool = pool
+      )
+
+    // Track UNCAUGHT_SEC_POOL_ERROR alerts; the SEC pool fires this CRITICAL alert when a
+    // task on its worker throws.
+    val uncaughtSecPoolErrorAlerts: MetricUtils.ChangeTracker[Int] = MetricUtils.ChangeTracker {
+      () =>
+        MetricUtils.getPrefixLoggerErrorCount(
+          Severity.CRITICAL,
+          CachingErrorCode.UNCAUGHT_SEC_POOL_ERROR(AlertOwnerTeam.CachingTeam),
+          prefix = poolName
+        )
+    }
+
+    // Setup: Drives each poll's outcome. The test will toggle it between `Success` (i.e. actually
+    // returning a valid raw value) and `Failure` (i.e. throwing an exception).
+    val pollerOutcomeLock: ReentrantLock = new ReentrantLock()
+    var pollerOutcome: Try[RawValueType] = Success(INITIAL_MAP_VALUE_RAW)
+
+    val watchValueCellAdapter = new WatchValueCellPollAdapter[RawValueType, ParsedValueMap](
+      initialValueOpt = Some(INITIAL_MAP_VALUE_PARSED),
+      poller = () => withLock(pollerOutcomeLock) { pollerOutcome }.get,
+      transform = transformation,
+      pollInterval = TEST_POLL_INTERVAL,
+      sec = fakeSec
+    )
+
+    val subscriber = new TestSubscriber(0)
+    watchValueCellAdapter.watch(subscriber.valueStreamCallback)
+    watchValueCellAdapter.start()
+
+    // Drain the fake SEC by awaiting a no-op enqueued behind the initial poll. This ensures
+    // the initial poll actually occurred on the fake SEC before we then observe the
+    // adapter's state.
+    Await.result(fakeSec.call { () }, Duration.Inf)
+
+    // Validates that the cell observes the initial mock value via a successful poll.
+    assertResult(Some(INITIAL_MAP_VALUE_PARSED))(watchValueCellAdapter.getLatestValueOpt)
+    assertResult(INITIAL_MAP_VALUE_PARSED)(subscriber.getLatestKeyValueMap)
+
+    // Arm the poller to throw on its next invocation.
+    withLock(pollerOutcomeLock) {
+      pollerOutcome = Failure(new RuntimeException("Poll intentionally fails"))
+    }
+
+    // Simulate a scheduled poll.
+    // Drain the fake SEC by awaiting a no-op enqueued behind the scheduled poll. This
+    // ensures the scheduled poll actually occurred on the fake SEC before we then observe
+    // the adapter's state.
+    fakeSec.advanceBySync(TEST_POLL_INTERVAL)
+    Await.result(fakeSec.call { () }, Duration.Inf)
+
+    // Validates that the cell retained its value from the prior successful poll, and that
+    // the UNCAUGHT_SEC_POOL_ERROR alert fired exactly once.
+    assertResult(Some(INITIAL_MAP_VALUE_PARSED))(watchValueCellAdapter.getLatestValueOpt)
+    assertResult(INITIAL_MAP_VALUE_PARSED)(subscriber.getLatestKeyValueMap)
+    assertResult(1)(uncaughtSecPoolErrorAlerts.totalChange())
+
+    // Apply a real value update. The next scheduled poll should pick this up, confirming
+    // periodic polling was never canceled by the earlier throw.
+    val updatedRawValue: RawValueType = INITIAL_MAP_VALUE_RAW + ("raw-key-2" -> "raw-value-2-1")
+    withLock(pollerOutcomeLock) {
+      pollerOutcome = Success(updatedRawValue)
+    }
+    val expectedAfterUpdate: ParsedValueMap =
+      INITIAL_MAP_VALUE_PARSED + ("parsed-key-2" -> ParsedValue("raw-value-2-1"))
+
+    // Simulate another scheduled poll.
+    fakeSec.advanceBySync(TEST_POLL_INTERVAL)
+    Await.result(fakeSec.call { () }, Duration.Inf)
+
+    // Validates that the cell and subscriber observe the post-update value.
+    assertResult(Some(expectedAfterUpdate))(watchValueCellAdapter.getLatestValueOpt)
+    assertResult(expectedAfterUpdate)(subscriber.getLatestKeyValueMap)
+
+    watchValueCellAdapter.cancel()
+  }
+
+  test("Test periodic polling continues when `transform` throws during a scheduled poll") {
+    // Test plan: Verify that when the `transform` function throws during a scheduled poll,
+    // the cell retains its value from the previous successful poll, an alert fires, and
+    // periodic polling continues. Do this by toggling the transform's outcome from "return a
+    // valid parsed value" to "throw" once the initial poll has completed, simulating a
+    // scheduled poll, and asserting the served value still matches our expectation and the
+    // alert counter incremented. Then toggle the transform's outcome back to "return an
+    // updated parsed value", simulate another scheduled poll, and assert the cell observes
+    // the new value.
+
+    // Setup: create the underlying SEC pool on a throwaway thread so uncaught exceptions
+    // (from a transform that throws) interrupt that throwaway thread instead of the test
+    // thread. The pool's exception handler interrupts the pool's creator thread when a
+    // worker throws.
+    val poolName: String = s"pool-$getSafeName"
+    val poolFuture: Future[SequentialExecutionContextPool] = Future {
+      SequentialExecutionContextPool.create(poolName = poolName, numThreads = 1)
+    }(ExecutionContext.fromExecutor(Executors.newSingleThreadExecutor()))
+    val pool: SequentialExecutionContextPool = Await.result(poolFuture, Duration.Inf)
+    val fakeSec: FakeSequentialExecutionContext =
+      FakeSequentialExecutionContext.create(name = s"fakeSec-$getSafeName", pool = pool)
+
+    // Track UNCAUGHT_SEC_POOL_ERROR alerts; the SEC pool fires this CRITICAL alert when a
+    // task on its worker throws.
+    val uncaughtSecPoolErrorAlerts: MetricUtils.ChangeTracker[Int] = MetricUtils.ChangeTracker {
+      () =>
+        MetricUtils.getPrefixLoggerErrorCount(
+          Severity.CRITICAL,
+          CachingErrorCode.UNCAUGHT_SEC_POOL_ERROR(AlertOwnerTeam.CachingTeam),
+          prefix = poolName
+        )
+    }
+
+    // Setup: Drives each transform's outcome. The test will toggle it between `Success`
+    // (i.e. returning a valid parsed value) and `Failure` (i.e. throwing an exception).
+    val transformOutcomeLock: ReentrantLock = new ReentrantLock()
+    var transformOutcome: Try[ParsedValueMap] = Success(INITIAL_MAP_VALUE_PARSED)
+
+    val watchValueCellAdapter = new WatchValueCellPollAdapter[RawValueType, ParsedValueMap](
+      initialValueOpt = Some(INITIAL_MAP_VALUE_PARSED),
+      poller = () => INITIAL_MAP_VALUE_RAW,
+      transform = _ => withLock(transformOutcomeLock) { transformOutcome }.get,
+      pollInterval = TEST_POLL_INTERVAL,
+      sec = fakeSec
+    )
+
+    val subscriber = new TestSubscriber(0)
+    watchValueCellAdapter.watch(subscriber.valueStreamCallback)
+    watchValueCellAdapter.start()
+
+    // Drain the fake SEC by awaiting a no-op enqueued behind the initial poll. This ensures
+    // the initial poll actually occurred on the fake SEC before we then observe the
+    // adapter's state.
+    Await.result(fakeSec.call { () }, Duration.Inf)
+
+    // Validates that the cell observes the initial mock value via a successful poll.
+    assertResult(Some(INITIAL_MAP_VALUE_PARSED))(watchValueCellAdapter.getLatestValueOpt)
+    assertResult(INITIAL_MAP_VALUE_PARSED)(subscriber.getLatestKeyValueMap)
+
+    // Arm the `transform` function to throw on its next invocation.
+    withLock(transformOutcomeLock) {
+      transformOutcome = Failure(new RuntimeException("Transform intentionally fails"))
+    }
+
+    // Simulate a scheduled poll.
+    // Drain the fake SEC by awaiting a no-op enqueued behind the scheduled poll. This
+    // ensures the scheduled poll actually occurred on the fake SEC before we then observe
+    // the adapter's state.
+    fakeSec.advanceBySync(TEST_POLL_INTERVAL)
+    Await.result(fakeSec.call { () }, Duration.Inf)
+
+    // Validates that the cell retained its value from the prior successful poll, and that
+    // the UNCAUGHT_SEC_POOL_ERROR alert fired exactly once.
+    assertResult(Some(INITIAL_MAP_VALUE_PARSED))(watchValueCellAdapter.getLatestValueOpt)
+    assertResult(INITIAL_MAP_VALUE_PARSED)(subscriber.getLatestKeyValueMap)
+    assertResult(1)(uncaughtSecPoolErrorAlerts.totalChange())
+
+    // Apply a real value update. The next scheduled poll should pick this up, confirming
+    // periodic polling was never canceled by the earlier throw.
+    val expectedAfterUpdate: ParsedValueMap =
+      INITIAL_MAP_VALUE_PARSED + ("parsed-key-2" -> ParsedValue("raw-value-2-1"))
+    withLock(transformOutcomeLock) {
+      transformOutcome = Success(expectedAfterUpdate)
+    }
+
+    // Simulate another scheduled poll.
+    fakeSec.advanceBySync(TEST_POLL_INTERVAL)
+    Await.result(fakeSec.call { () }, Duration.Inf)
+
+    // Validates that the cell and subscriber observe the post-update value.
+    assertResult(Some(expectedAfterUpdate))(watchValueCellAdapter.getLatestValueOpt)
+    assertResult(expectedAfterUpdate)(subscriber.getLatestKeyValueMap)
+
+    watchValueCellAdapter.cancel()
+  }
+
+  test("Test require fails for non-positive pollInterval") {
+    // Test plan: Verify that constructing the adapter with a zero pollInterval throws an
+    // IllegalArgumentException. A zero pollInterval would result in a busy-loop with no time
+    // between successive polls.
+    val sec = SequentialExecutionContext.createWithDedicatedPool(s"ec-$getSafeName")
+    intercept[IllegalArgumentException] {
+      new WatchValueCellPollAdapter[RawValueType, ParsedValueMap](
+        Some(INITIAL_MAP_VALUE_PARSED),
+        () => INITIAL_MAP_VALUE_RAW,
+        transformation,
+        Duration.Zero,
+        sec
+      )
+    }
   }
 
   test("Test that initial value is set from first poll when initialValueOpt is None") {

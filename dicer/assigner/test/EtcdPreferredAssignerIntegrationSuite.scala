@@ -179,7 +179,8 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
 
     // Verify: the new preferred assigner generates assignments.
     val target = Target(getSafeName)
-    val expectedRedirect = Redirect(Some(newPreferredAssigner.getAssignerInfoBlocking().uri))
+    val expectedRedirect =
+      Redirect(Some(newPreferredAssigner.getAssignerInfoBlocking().uri), redirectTokenOpt = None)
     assertAssignerGeneratesAssignmentByDirectWatchRequest(
       newPreferredAssigner,
       target,
@@ -537,7 +538,7 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
     assertAssignerGeneratesAssignmentByDirectWatchRequest(
       preferredAssigner,
       target,
-      expectedRedirect = Redirect(Some(expectedPreferredAssignerUri))
+      expectedRedirect = Redirect(Some(expectedPreferredAssignerUri), redirectTokenOpt = None)
     )
   }
 
@@ -593,7 +594,7 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
     assertAssignerGeneratesAssignmentByDirectWatchRequest(
       preferredAssigner,
       target,
-      expectedRedirect = Redirect(Some(expectedPreferredAssignerUri))
+      expectedRedirect = Redirect(Some(expectedPreferredAssignerUri), redirectTokenOpt = None)
     )
   }
 
@@ -668,7 +669,7 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
     assertAssignerGeneratesAssignmentByDirectWatchRequest(
       newPreferredAssigner,
       target,
-      Redirect(Some(preferredAssignerUri))
+      Redirect(Some(preferredAssignerUri), redirectTokenOpt = None)
     )
   }
 
@@ -865,7 +866,7 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
     assertAssignerGeneratesAssignmentByDirectWatchRequest(
       preferredAssigner,
       target,
-      expectedRedirect = Redirect(Some(expectedPreferredAssignerUri))
+      expectedRedirect = Redirect(Some(expectedPreferredAssignerUri), redirectTokenOpt = None)
     )
 
     // Start a new assigner with a higher loose incarnation and PA disabled.
@@ -934,7 +935,7 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
         .find(_.getAssignerInfoBlocking() == newPreferredAssigner.getAssignerInfoBlocking())
         .get,
       target,
-      expectedRedirect = Redirect(Some(expectedPreferredAssignerUri2))
+      expectedRedirect = Redirect(Some(expectedPreferredAssignerUri2), redirectTokenOpt = None)
     )
   }
 

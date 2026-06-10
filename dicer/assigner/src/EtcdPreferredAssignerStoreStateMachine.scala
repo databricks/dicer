@@ -27,7 +27,6 @@ import scala.concurrent.duration._
 import scala.util.control.NonFatal
 import scala.util.{Failure, Random, Success, Try}
 import com.google.protobuf.ByteString
-import com.databricks.dicer.assigner.EtcdPreferredAssignerStoreStateMachine.StoreErrorCode.StoreErrorCode
 import com.databricks.caching.util.Bytes
 import com.databricks.caching.util.UnixTimeVersion
 
@@ -504,17 +503,18 @@ private[assigner] object EtcdPreferredAssignerStoreStateMachine {
   }
 
   /**
-   * Errors encountered when interacting with etcd. Each of these indicates a bug in [[EtcdStore]]
-   * or data corruption in Etcd and are considered a [CachingErrorCode.Severity.CRITICAL] error.
-   * Use with caution.
+   * Errors encountered when interacting with etcd. Each of these indicates a bug in
+   * [[EtcdPreferredAssignerStore]] or data corruption in Etcd and are considered a
+   * [[Severity.CRITICAL]] error. Use with caution.
    */
-  object StoreErrorCode extends Enumeration {
-    type StoreErrorCode = Value
+  sealed trait StoreErrorCode
+
+  object StoreErrorCode {
 
     /**
      * The watch event received from Etcd client is not parse-able as a [[PreferredAssignerValue]].
      */
-    val WATCH_VALUE_PARSE_ERROR: Value = Value
+    case object WATCH_VALUE_PARSE_ERROR extends StoreErrorCode
   }
 
   /** Encapsulates reason for store error with [[Status]]. */

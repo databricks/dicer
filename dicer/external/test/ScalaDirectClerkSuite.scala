@@ -11,7 +11,7 @@ private class ScalaDirectClerkSuite extends ScalaClerkSuiteBase {
   override protected def createClerkInternal(
       target: Target,
       clerkLocationConfigMap: Option[Map[String, String]],
-      clientBranchOpt: Option[String] = None): ClerkDriver = {
+      clientBranchOpt: Option[String] = None): ClerkHarness = {
     val envMap = clerkLocationConfigMap.getOrElse(Map.empty)
     val locationConf = LocationConfTestUtils.newTestLocationConfig(envMap = envMap)
 
@@ -21,7 +21,7 @@ private class ScalaDirectClerkSuite extends ScalaClerkSuiteBase {
       }
       val clerk: Clerk[ResourceAddress] =
         testEnv.createDirectClerk(target, initialAssignerIndex = 0, clientBranchOpt)
-      ScalaClerkDriver.create(clerk)
+      ScalaClerkHarness.create(clerk)
     }
   }
 
@@ -30,7 +30,7 @@ private class ScalaDirectClerkSuite extends ScalaClerkSuiteBase {
       targetClusterUri: URI,
       slicelet: Slicelet,
       clerkLocationConfigMap: Option[Map[String, String]],
-      clientBranchOpt: Option[String] = None): ClerkDriver = {
+      clientBranchOpt: Option[String] = None): ClerkHarness = {
     // Direct clerks connect to the Assigner, not Slicelets.
     throw new UnsupportedOperationException(
       "createCrossClusterClerk is not supported for direct clerks"

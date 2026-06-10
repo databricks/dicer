@@ -5,9 +5,10 @@ package dicer;
 import "dicer/common/proto/common.proto";
 import "scalapb.proto";
 
+
 option java_package = "com.databricks.api.proto.dicer.assigner";
 option java_generate_equals_and_hash = true;
-option java_outer_classname = "PreferredAssignerProto";
+
 option java_multiple_files = true;
 option (scalapb.options) = {
   package_name: "com.databricks.api.proto.dicer.assigner",
@@ -94,5 +95,7 @@ message HeartbeatResponseP {
 // its health and learn of changes to the preferred assigner.
 service PreferredAssignerService {
   // The heartbeat from a standby assigner to the preferred assigner.
-  rpc Heartbeat(HeartbeatRequestP) returns (HeartbeatResponseP) {}
+  rpc Heartbeat(HeartbeatRequestP) returns (HeartbeatResponseP) {
+
+  }
 }

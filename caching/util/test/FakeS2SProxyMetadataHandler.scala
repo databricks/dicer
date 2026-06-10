@@ -24,6 +24,11 @@ object FakeS2SProxyMetadataHandler extends FakeProxy.MetadataHandler {
   /** The header from which S2S Proxy extracts the base64-encoded upstream host-port string. */
   private val UPSTREAM_HOST_PORT_HEADER: String = "X-Databricks-Upstream-Host-Port"
 
+  override def additionalOutboundHeaders(): Metadata = {
+    // By default, no extra metadata is injected.
+    new Metadata()
+  }
+
   override def extractUpstreamHostAndPort(metadata: Metadata): Option[(String, Int)] = {
     val hostPortHeader: String =
       metadata.get(

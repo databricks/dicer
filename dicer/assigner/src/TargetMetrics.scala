@@ -8,7 +8,7 @@ import com.google.common.math.IntMath
 import io.grpc.Status.Code
 import io.prometheus.client.{Counter, Gauge, Histogram}
 
-import com.databricks.caching.util.{CachingLatencyHistogram, TickerTime}
+import com.databricks.caching.util.{CachingLatencyHistogram, SafeCounter, TickerTime}
 import com.databricks.dicer.assigner.AssignmentGenerator.AssignmentGenerationDecision
 import com.databricks.dicer.assigner.AssignmentStats.{
   AssignmentChangeStats,
@@ -25,48 +25,11 @@ import com.databricks.dicer.friend.Squid
 /** Metrics for each sharded target/sharded resource name. */
 object TargetMetrics {
 
-  /** An error describing why a watch failed. */
-  object WatchError extends Enumeration {
-    type WatchError = Value
-
-    /**
-     * There was no config known for the target.
-     */
-    val NO_CONFIG: Value = Value
-
-    /**
-     * The target was invalid because the Assigner was configured to validate the request with
-     * App Identifier headers and they were not present.
-     */
-    val INVALID_TARGET_NO_HEADERS: Value = Value
-
-    /**
-     * The target was invalid because the Assigner was configured to validate the request with
-     * App Identifier headers and the target was not an [[AppTarget]], which is the only
-     * [[Target]] type that can be validated against headers.
-     */
-    val INVALID_TARGET_NOT_APP: Value = Value
-
-    /**
-     * The target was invalid because the Assigner was configured to validate the request with
-     * App Identifier headers and the App Name header did not match the target name.
-     */
-    val INVALID_TARGET_NAME_MISMATCH: Value = Value
-
-    /**
-     * The target was invalid because the Assigner was configured to validate the request with
-     * App Identifier headers and the App Instance ID header did not match the target
-     * instance ID.
-     */
-    val INVALID_TARGET_INSTANCE_ID_MISMATCH: Value = Value
-  }
-
-  private val assignmentGenerationDecisions: Counter = Counter
-    .build()
-    .name("dicer_assigner_assignment_generation_decisions_total")
-    .labelNames("targetCluster", "targetName", "targetInstanceId", "decision", "reason")
-    .help("Number of assignment generation decisions made for a target")
-    .register()
+  private val assignmentGenerationDecisions: SafeCounter = SafeCounter.create(
+    metricName = "dicer_assigner_assignment_generation_decisions_total",
+    help = "Number of assignment generation decisions made for a target",
+    labelNames = Seq("targetCluster", "targetName", "targetInstanceId", "decision", "reason")
+  )
 
   def incrementAssignmentGenerationDecisionCount(
       target: Target,
@@ -90,9 +53,16 @@ object TargetMetrics {
       .inc()
   }
 
-  object AssignmentDistributionSource extends Enumeration {
-    type AssignmentDistributionSource = Value
-    val Store, Clerk, Slicelet = Value
+  /** Identifies which component fed an assignment into the assigner state machine. */
+  sealed trait AssignmentDistributionSource
+
+  object AssignmentDistributionSource {
+    case object Store extends AssignmentDistributionSource
+    case object Clerk extends AssignmentDistributionSource
+    case object Slicelet extends AssignmentDistributionSource
+
+    /** All cases of [[AssignmentDistributionSource]], for callers that iterate. */
+    val values: Vector[AssignmentDistributionSource] = Vector(Store, Clerk, Slicelet)
   }
 
   @SuppressWarnings(
@@ -110,7 +80,7 @@ object TargetMetrics {
 
   def incrementNumDistributedAssignments(
       target: Target,
-      source: AssignmentDistributionSource.AssignmentDistributionSource): Unit = {
+      source: AssignmentDistributionSource): Unit = {
     numDistributedAssignments
       .labels(
         target.getTargetClusterLabel,
@@ -155,8 +125,8 @@ object TargetMetrics {
 
   def incrementNumUnusedAssignmentDiffs(
       target: Target,
-      source: AssignmentDistributionSource.AssignmentDistributionSource,
-      reason: DiffUnused.DiffUnused): Unit = {
+      source: AssignmentDistributionSource,
+      reason: DiffUnused): Unit = {
     numUnusedAssignmentDiffs
       .labels(
         target.getTargetClusterLabel,
@@ -172,13 +142,18 @@ object TargetMetrics {
    *  An indicator for the direction of mismatch when the generator encounters an assignment outside
    * of its configured Incarnation.
    */
-  object IncarnationMismatchType extends Enumeration {
+  sealed trait IncarnationMismatchType
+
+  object IncarnationMismatchType {
 
     /** The encountered assignment has a higher incarnation than the generator. */
-    val ASSIGNMENT_HIGHER: Value = Value
+    case object ASSIGNMENT_HIGHER extends IncarnationMismatchType
 
     /** The encountered assignment has a lower incarnation than the generator. */
-    val ASSIGNMENT_LOWER: Value = Value
+    case object ASSIGNMENT_LOWER extends IncarnationMismatchType
+
+    /** All cases of [[IncarnationMismatchType]], for callers that iterate. */
+    val values: Vector[IncarnationMismatchType] = Vector(ASSIGNMENT_HIGHER, ASSIGNMENT_LOWER)
   }
 
   @SuppressWarnings(
@@ -199,7 +174,7 @@ object TargetMetrics {
 
   def incrementNumAssignmentStoreIncarnationMismatch(
       target: Target,
-      mismatchType: IncarnationMismatchType.Value): Unit = {
+      mismatchType: IncarnationMismatchType): Unit = {
     numAssignmentStoreIncarnationMismatch
       .labels(
         target.getTargetClusterLabel,
@@ -494,21 +469,29 @@ object TargetMetrics {
    * The assignment generator operations whose latencies are described in the
    * assignmentGeneratorLatencyHistogram.
    */
-  object AssignmentGeneratorOpType extends Enumeration {
+  sealed trait AssignmentGeneratorOpType
+
+  object AssignmentGeneratorOpType {
 
     /** An operation that generates an assignment from scratch. */
-    val GENERATE_INITIAL_ASSIGNMENT: AssignmentGeneratorOpType.Value = Value(
-      "generateInitialAssignment"
-    )
+    case object GENERATE_INITIAL_ASSIGNMENT extends AssignmentGeneratorOpType {
+      override def toString: String = "generateInitialAssignment"
+    }
 
     /** An operation that generates an assignment from a pre-existing one. */
-    val GENERATE_ASSIGNMENT: AssignmentGeneratorOpType.Value = Value("generateAssignment")
+    case object GENERATE_ASSIGNMENT extends AssignmentGeneratorOpType {
+      override def toString: String = "generateAssignment"
+    }
 
     /** An operation that gets the primary rate load map per slice. */
-    val GET_PRIMARY_RATE_LOAD_MAP: AssignmentGeneratorOpType.Value = Value("getPrimaryRateLoadMap")
+    case object GET_PRIMARY_RATE_LOAD_MAP extends AssignmentGeneratorOpType {
+      override def toString: String = "getPrimaryRateLoadMap"
+    }
 
     /** An operation that records and updates the load reports from a watch request. */
-    val REPORT_LOAD: AssignmentGeneratorOpType.Value = Value("reportLoad")
+    case object REPORT_LOAD extends AssignmentGeneratorOpType {
+      override def toString: String = "reportLoad"
+    }
   }
 
   /**
@@ -516,9 +499,8 @@ object TargetMetrics {
    * operation in the `assignmentGeneratorLatencyHistogram` with the corresponding `operation` and
    * `target` labels. Returns the result of the `thunk`.
    */
-  def recordAssignmentGeneratorLatencySync[T](
-      operation: AssignmentGeneratorOpType.Value,
-      target: Target)(thunk: => T): T = {
+  def recordAssignmentGeneratorLatencySync[T](operation: AssignmentGeneratorOpType, target: Target)(
+      thunk: => T): T = {
     val computeExtraLabels: Try[T] => Seq[String] = { _: Try[T] =>
       Seq(target.getTargetClusterLabel, target.getTargetNameLabel, target.getTargetInstanceIdLabel)
     }
@@ -1002,9 +984,11 @@ object TargetMetrics {
    * maximum load uniformly distributed across all keys. The sum of these two loads is the adjusted
    * load for the resource, which is used by the Assigner to make decisions.
    */
-  object LoadType extends Enumeration {
-    type LoadType = Value
-    val Reported, Reserved = Value
+  sealed trait LoadType
+
+  object LoadType {
+    case object Reported extends LoadType
+    case object Reserved extends LoadType
   }
 
   /**
@@ -1229,24 +1213,6 @@ object TargetMetrics {
         target.getTargetInstanceIdLabel
       )
       .set(cumulativeSliceCount)
-  }
-
-  private val numTargetWatchErrors: Counter = Counter
-    .build()
-    .name("dicer_assigner_num_watch_errors_total")
-    .help("Number of target watch errors due to the labelled reason")
-    .labelNames("targetCluster", "targetName", "targetInstanceId", "reason")
-    .register()
-
-  def incrementNumTargetWatchErrors(target: Target, reason: WatchError.Value): Unit = {
-    numTargetWatchErrors
-      .labels(
-        target.getTargetClusterLabel,
-        target.getTargetNameLabel,
-        target.getTargetInstanceIdLabel,
-        reason.toString
-      )
-      .inc()
   }
 
   /**
@@ -1552,7 +1518,6 @@ object TargetMetrics {
       numUnusedAssignmentDiffs.clear()
       numAssignmentStoreIncarnationMismatch.clear()
       numAssignmentWrites.clear()
-      numTargetWatchErrors.clear()
       generatorsRemovedTotal.clear()
       numCrashedResourcesGauge.clear()
       numCrashedResourcesTotal.clear()

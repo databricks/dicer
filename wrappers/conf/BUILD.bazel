@@ -34,15 +34,22 @@ scala_library(
 )
 
 scala_library(
+    name = "environment",
+    srcs = ["src/Environment.scala"],
+)
+
+scala_library(
     name = "location",
     srcs = [
         "src/LocationConf.scala",
     ],
     exports = [
         ":dbconf",
+        ":environment",
     ],
     deps = [
         ":dbconf",
+        ":environment",
         "@maven//:com_fasterxml_jackson_core_jackson_annotations",
         "@maven//:com_fasterxml_jackson_core_jackson_core",
         "@maven//:com_fasterxml_jackson_core_jackson_databind",
@@ -100,7 +107,10 @@ scala_library(
 
 scala_library(
     name = "current_project",
-    srcs = ["src/CurrentProject.scala"],
+    srcs = [
+        "src/CurrentProject.scala",
+        "src/CurrentProjectInfo.scala",
+    ],
     deps = [
         ":project",
         "//wrappers/util:lock",
@@ -141,5 +151,16 @@ scala_library(
     ],
     deps = [
         ":dbconf",
+    ],
+)
+
+scala_library(
+    name = "kam-client-config",
+    srcs = [
+        "src/KamClientConfig.scala",
+        "src/KamEndpoint.scala",
+    ],
+    deps = [
+        "//wrappers/rpc:rpc_ssl",
     ],
 )

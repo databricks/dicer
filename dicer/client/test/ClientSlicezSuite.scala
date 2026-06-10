@@ -252,7 +252,8 @@ class ClientSlicezSuite extends DatabricksTest with TestName {
           watchStubCacheTime = 20.seconds,
           watchFromDataPlane = false,
           enableRateLimiting = false
-        )
+        ),
+        subscriberDebugName = subscriberDebugName
       )
     val protoLogger: DicerClientProtoLogger = DicerClientProtoLogger.create(
       clientType = ClientType.Clerk,
@@ -262,8 +263,7 @@ class ClientSlicezSuite extends DatabricksTest with TestName {
     val exporter: SliceLookup =
       SliceLookup.createUnstarted(
         sec,
-        config.sliceLookupConfig,
-        subscriberDebugName,
+        config,
         protoLogger,
         serviceBuilderOpt = None
       )

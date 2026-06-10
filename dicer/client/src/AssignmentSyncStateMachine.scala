@@ -31,6 +31,7 @@ import com.databricks.dicer.common.{
   ClientResponse,
   DiffAssignment,
   Generation,
+  Redirect,
   SyncAssignmentState,
   TargetHelper
 }
@@ -56,14 +57,12 @@ import com.databricks.dicer.common.{
  *
  * @param config The internal configuration parameters used by the Clerk/Slicelet.
  * @param random An rng to add jitter to exponential backoff.
- * @param subscriberDebugName The debug name shown in the log and string representation of the
- *                            Clerk/Slicelet.
  */
-class AssignmentSyncStateMachine(
-    config: SliceLookupConfig,
-    random: Random,
-    subscriberDebugName: String)
+class AssignmentSyncStateMachine(config: InternalClientConfig, random: Random)
     extends StateMachine[Event, DriverAction] {
+
+  private val sliceLookupConfig: SliceLookupConfig = config.sliceLookupConfig
+  private val subscriberDebugName: String = config.subscriberDebugName
 
   private val logger = PrefixLogger.create(this.getClass, subscriberDebugName)
 
@@ -103,14 +102,15 @@ class AssignmentSyncStateMachine(
    * Timeout for the Watch RPC. Initialized from the client config and updated every time a response
    * is received from the remote server.
    */
-  private var watchRpcTimeout: FiniteDuration = config.watchRpcTimeout
+  private var watchRpcTimeout: FiniteDuration = sliceLookupConfig.watchRpcTimeout
 
   /**
-   * The address to which the next request should be sent. If empty, we fall back to the default
+   * The redirect to apply to the next request: the address to which the next request should be sent
+   * and an opaque token to echo back. If this is [[Redirect.EMPTY]], we fall back to the default
    * behavior of sending to a random server. This field is set based on `ClientResponse.redirect`
-   * and set to None if the request fails.
+   * and reset to [[Redirect.EMPTY]] if the request fails.
    */
-  private var redirectAddressOpt: Option[URI] = None
+  private var redirect: Redirect = Redirect.EMPTY
 
   /**
    * Scheduler that determines when the next read request can occur, considering both backoff delays
@@ -118,10 +118,10 @@ class AssignmentSyncStateMachine(
    */
   private val readScheduler =
     new AssignmentSyncStateMachine.ReadScheduler(
-      config.enableRateLimiting,
+      sliceLookupConfig.enableRateLimiting,
       random,
-      config.minRetryDelay,
-      config.maxRetryDelay,
+      sliceLookupConfig.minRetryDelay,
+      sliceLookupConfig.maxRetryDelay,
       logger
     )
 
@@ -171,18 +171,18 @@ class AssignmentSyncStateMachine(
       response: ClientResponse,
       outputBuilder: StateMachineOutput.Builder[DriverAction]): Unit = {
     if (response.syncState.isInstanceOf[SyncAssignmentState.KnownGeneration]) {
-      ClientMetrics.incrementEmptyWatchResponses(config.target)
+      ClientMetrics.incrementEmptyWatchResponses(sliceLookupConfig.target)
     }
     val syncSourceDebugName: String = responseAddressOpt
       .map { responseAddress: URI =>
         responseAddress.toString
       }
-      .getOrElse(config.watchAddress.toString)
+      .getOrElse(sliceLookupConfig.watchAddress.toString)
     val isNewAssignment: Boolean =
       incorporateSyncState(response.syncState, syncSourceDebugName, outputBuilder)
 
     // Incorporate the redirect to be applied to the next request.
-    redirectAddressOpt = response.redirect.addressOpt
+    redirect = response.redirect
 
     val responseGeneration: Generation = response.syncState.getKnownGeneration
 
@@ -254,10 +254,10 @@ class AssignmentSyncStateMachine(
   private def onWatchRequest(
       request: ClientRequest,
       outputBuilder: StateMachineOutput.Builder[DriverAction]): Unit = {
-    if (TargetHelper.isFatalTargetMismatch(config.target, request.target)) {
+    if (TargetHelper.isFatalTargetMismatch(sliceLookupConfig.target, request.target)) {
       logger.warn(
-        s"Assignment sync node for target ${config.target} received request for target " +
-        s"${request.target}. Ignoring."
+        s"Assignment sync node for target ${sliceLookupConfig.target} received request for " +
+        s"target ${request.target}. Ignoring."
       )
     } else {
       incorporateSyncState(request.syncAssignmentState, request.subscriberDebugName, outputBuilder)
@@ -284,7 +284,7 @@ class AssignmentSyncStateMachine(
             this.assignmentOpt = Some(newAssignment)
             outputBuilder.appendAction(DriverAction.UseAssignment(newAssignment))
             true
-          case Right(unused: DiffUnused.DiffUnused) =>
+          case Right(unused: DiffUnused) =>
             logger.debug(s"Unable to use diff $unused", every = 10.seconds)
             false
         }
@@ -307,7 +307,7 @@ class AssignmentSyncStateMachine(
   private def setupRetry(now: TickerTime): Unit = {
     latestReadStateOpt = None
     // We hit an error, clear the redirect to fall back to talking to a random watch server.
-    redirectAddressOpt = None
+    redirect = Redirect.EMPTY
     readScheduler.scheduleNextRead(now = now, useBackoff = true)
   }
 
@@ -362,9 +362,9 @@ class AssignmentSyncStateMachine(
       val syncState: SyncAssignmentState = this.assignmentOpt match {
         case Some(assignment: Assignment)
             if assignment.generation > this.remoteServerKnownGeneration.generation &&
-            redirectAddressOpt == this.remoteServerKnownGeneration.addressOpt =>
+            redirect.addressOpt == this.remoteServerKnownGeneration.addressOpt =>
           // Include an assignment diff if the remote server is lagging, and we are sending this
-          // request to the same server. If `redirectAddressOpt` and
+          // request to the same server. If `redirect.addressOpt` and
           // `remoteServerKnownGeneration.addressOpt` are both None, we are sending the request to a
           // random server, but there is some stickiness because we maintain an open stub, so we
           // still want to send an assignment diff.
@@ -383,7 +383,7 @@ class AssignmentSyncStateMachine(
           SyncAssignmentState.KnownGeneration(knownGeneration)
       }
       outputBuilder.appendAction(
-        DriverAction.SendRequest(redirectAddressOpt, opId, syncState, watchRpcTimeout)
+        DriverAction.SendRequest(redirect, opId, syncState, watchRpcTimeout)
       )
       outputBuilder.ensureAdvanceBy(deadline)
     } else {
@@ -452,9 +452,10 @@ object AssignmentSyncStateMachine {
      * known assignment generation (if any).
      *
      * Asks the driver to sync with the remote server, using the given sync state and optionally to
-     * the given address. If `addressOpt` is defined, it indicates that the request should be sent
-     * to that address. If it is empty, we should fall back to the default behavior, which sends it
-     * to a random server.
+     * the given address. If `redirect.addressOpt` is defined, it indicates that the request should
+     * be sent to that address and that `redirect.redirectTokenOpt` should be echoed back to the
+     * server in the request. If `redirect` is [[Redirect.EMPTY]], we should fall back to the
+     * default behavior, which sends the request to a random server.
      *
      * The supplied `opId` (and `addressOpt` for [[Event.ReadSuccess]]) should be passed back in the
      * [[Event.ReadSuccess]] or [[Event.ReadFailure]] event.
@@ -472,7 +473,7 @@ object AssignmentSyncStateMachine {
      * The `watchRpcTimeout` should be used as the timeout for the watch RPC.
      */
     case class SendRequest(
-        addressOpt: Option[URI],
+        redirect: Redirect,
         opId: Long,
         syncState: SyncAssignmentState,
         watchRpcTimeout: FiniteDuration)
@@ -605,8 +606,10 @@ object AssignmentSyncStateMachine {
   }
 
   /**
-   * Indicates the assignment generation known at the given address (with the same semantics for
-   * `addressOpt` as in [[DriverAction.SendRequest]]).
+   * Indicates the assignment generation known at the given address. `addressOpt` mirrors the
+   * `redirect.addressOpt` of the [[DriverAction.SendRequest]] used to obtain the response: if the
+   * request was sent to a redirected address, this is `Some(<address>)`; if it was sent to the
+   * default server, this is `None`.
    */
   case class RemoteKnownGeneration(addressOpt: Option[URI], generation: Generation)
 

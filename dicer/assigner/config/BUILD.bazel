@@ -5,18 +5,56 @@ package(
 )
 
 scala_library(
+    name = "authorizer",
+    srcs = [
+        "src/Authorizer.scala",
+        "src/AuthorizerHelper.scala",
+        "src/AuthorizerMetrics.scala",
+        "src/UnauthorizedException.scala",
+    ],
+    visibility = ["//dicer:internal"],
+    deps = [
+        "//dicer/common:client_type",
+        "//dicer/common:target_helper",
+        "//dicer/external/proto",
+        "//dicer/external:conf",
+        "//wrappers/rpc:rpc_context",
+        "@maven//:io_prometheus_simpleclient",
+    ],
+)
+
+scala_library(
+    name = "internal_target_config_json_converter",
+    srcs = ["src/InternalTargetConfigJsonConverter.scala"],
+    visibility = ["//dicer:internal"],
+    deps = [
+        "//dicer/assigner/config/proto:internal_target_config_scala_lib",
+        "//dicer/external/proto",
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_guava_guava",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
+    ],
+)
+
+scala_library(
     name = "internal_target_config",
     srcs = [
         "src/ChurnConfig.scala",
         "src/InternalTargetConfig.scala",
     ],
     exports = [
+        ":authorizer",
         "//caching/util:config_provider_trait",
         "//dicer/common:target_name",
         "//dicer/external/proto",
     ],
     visibility = ["//dicer:internal"],
     deps = [
+        ":authorizer",
+        ":internal_target_config_json_converter",
         "//caching/util:assert_macros",
         "//caching/util:config_provider_trait",
         "//dicer/assigner/config/proto:advanced_target_config_scala_lib",
@@ -30,13 +68,13 @@ scala_library(
         "//dicer/external:external_common",
         "//dicer/friend:squid",
         "//wrappers/logging",
-        "//wrappers/util:jsonutil",
     ],
 )
 
 scala_library(
     name = "target_migration_config",
     srcs = ["src/TargetMigrationConfig.scala"],
+    visibility = ["//dicer:internal"],
     deps = [
         "//dicer/assigner/config/proto:target_migration_config_scala_lib",
         "//dicer/common:target_name",
@@ -92,6 +130,7 @@ scala_library(
     srcs = ["test/ConfigTestUtil.scala"],
     testonly = True,
     deps = [
+        ":authorizer",
         ":internal_target_config",
         "//caching/util:metric_utils",
         "//caching/util:prefix_logger",
@@ -120,6 +159,7 @@ scala_library(
         "src/DicerConfigProvider.scala",
         "src/InternalTargetConfigMetrics.scala",
         "src/StaticTargetConfigProvider.scala",
+        "src/StaticTargetMigrationConfigProvider.scala",
         "src/TargetConfigProvider.scala",
     ],
     deps = [
@@ -140,6 +180,7 @@ scala_library(
         "//dicer/assigner:assigner_conf",
         "//dicer/assigner/config:internal_target_config",
         "//dicer/assigner/config:internal_target_config_map",
+        "//dicer/assigner/config:target_migration_config",
         "//dicer/external:conf",
         "@maven//:io_prometheus_simpleclient",
         "@scala_proto_rules_grpc_api",
@@ -156,6 +197,7 @@ scala_test(
         ":config_test_util",
         "//caching/util:sequential_execution_context",
         "//caching/util:server_conf",
+        "//caching/util:test_util",
         "//caching/util:watch_cell",
         "//wrappers/conf:core",
         "//wrappers/conf:project-conf",
@@ -163,6 +205,29 @@ scala_test(
         "//dicer/assigner:assigner_conf",
         "//dicer/assigner/config:internal_target_config_map",
         "//dicer/assigner:testable_assigner_conf",
+        "//dicer/external:conf",
+        "//dicer/external/proto:proto",
+    ],
+)
+
+scala_test(
+    name = "static_target_migration_config_provider_suite",
+    srcs = [
+        "test/StaticTargetMigrationConfigProviderSuite.scala",
+    ],
+    deps = [
+        ":config_provider",
+        "//caching/util:sequential_execution_context",
+        "//caching/util:server_conf",
+        "//caching/util:test_util",
+        "//caching/util:watch_cell",
+        "//wrappers/conf:core",
+        "//wrappers/conf:project-conf",
+        "//wrappers/util:databricks-test",
+        "//dicer/assigner:assigner_conf",
+        "//dicer/assigner:testable_assigner_conf",
+        "//dicer/assigner/config:target_migration_config",
+        "//dicer/common:target_name",
         "//dicer/external:conf",
         "//dicer/external/proto:proto",
     ],
@@ -178,6 +243,7 @@ scala_test(
     ],
     timeout = "short",
     deps = [
+        ":authorizer",
         ":config_reader",
         ":config_test_util",
         ":internal_target_config",
@@ -198,6 +264,7 @@ scala_test(
     srcs = ["test/InternalTargetConfigSuite.scala"],
     timeout = "short",
     deps = [
+        ":authorizer",
         ":internal_target_config",
         "//caching/util:test_util",
         "//caching/util:unix_time_version",
@@ -242,10 +309,34 @@ scala_test(
     data = ["//dicer/external/config:target_config"],
     timeout = "short",
     deps = [
+        ":authorizer",
         ":internal_target_config_map",
         "//caching/util:config_scope",
         "//dicer/external:conf",
         "//wrappers/util:async_test_helpers",
         "//wrappers/util:databricks-test",
+    ],
+)
+
+scala_test(
+    name = "authorizer_helper_test",
+    srcs = ["test/AuthorizerHelperSuite.scala"],
+    timeout = "short",
+    deps = [
+        ":authorizer",
+        "//caching/util:test_util",
+        "//dicer/common:client_type",
+        "//dicer/external/proto",
+        "//dicer/external:conf",
+        "//wrappers/rpc:rpc_context",
+        "//wrappers/rpc:rpc_testing",
+        "//wrappers/util:async_test_helpers",
+        "//wrappers/util:databricks-test",
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_guava_guava",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
     ],
 )

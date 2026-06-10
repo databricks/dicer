@@ -56,6 +56,30 @@ class PrefixLogger private (className: String, prefix: String, clock: TypedClock
     }
   }
 
+  /**
+   * Logs `message` along with `throwable`'s stack trace (including any cause chain) at the error
+   * level. See class specs for specs on `every`.
+   */
+  @SuppressWarnings(
+    Array("ConsoleLogWithoutLogInterpolator", "reason:exception_logging_overload")
+  )
+  @inline final def error(message: => Any, throwable: Throwable, every: FiniteDuration)(
+      implicit file: File,
+      line: Line): Unit = {
+    if (isLoggable(file, line, every)) {
+      logger.log.error(makeMessage(file, line, message, every), throwable)
+    }
+  }
+
+  /** Convenience overload of [[error]] with `every = Duration.Zero`. */
+  // Scala disallows multiple overloads of the same method declaring default values for the same
+  // positional parameter (the compiler-generated `error$default$N` accessors collide), so the
+  // 3-arg overload above can't carry `every = Duration.Zero`. This convenience overload supplies
+  // that default explicitly.
+  @inline final def error(message: => Any, throwable: Throwable)(
+      implicit file: File,
+      line: Line): Unit = error(message, throwable, Duration.Zero)
+
   /** Logs the `message` at the warn level. See class specs for specs on `every`. */
   @SuppressWarnings(
     Array("ConsoleLogWithoutLogInterpolator", "reason:grandfathered-5478df0533909425")
@@ -142,7 +166,7 @@ class PrefixLogger private (className: String, prefix: String, clock: TypedClock
    * whereas [[Severity.CRITICAL]] logs at error level.
    */
   @inline def alert(
-      severity: Severity.Value,
+      severity: Severity,
       errorCode: CachingErrorCode,
       message: String,
       every: FiniteDuration = Duration.Zero)(implicit file: File, line: Line): Unit = {

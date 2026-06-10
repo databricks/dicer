@@ -112,6 +112,7 @@ scala_library(
         "//dicer/friend:slice_map",
         "//dicer/friend:squid",
         "//wrappers/conf:core",
+        "//wrappers/conf:project",
         "//wrappers/conf:project-conf",
         "//wrappers/rpc:client",
         "@com_google_protobuf_protobuf_java",
@@ -205,7 +206,7 @@ scala_library(
     testonly = True,
     deps = [
         ":clerk",
-        ":clerk_driver",
+        ":clerk_harness",
         ":external_common",
         ":slicelet",
         "//caching/util:metric_utils",
@@ -245,7 +246,7 @@ scala_test(
     timeout = "short",
     deps = [
         ":clerk",
-        ":clerk_driver",
+        ":clerk_harness",
         ":clerk_suite_base",
         ":external_common",
         ":slicelet",
@@ -276,7 +277,7 @@ scala_test(
     timeout = "short",
     deps = [
         ":clerk",
-        ":clerk_driver",
+        ":clerk_harness",
         ":clerk_suite_base",
         ":external_common",
         ":slicelet",
@@ -289,6 +290,7 @@ scala_test(
         "//wrappers/conf:core",
         "//wrappers/conf:location",
         "//wrappers/conf:location_test",
+        "//wrappers/conf:project",
         "//wrappers/conf:project-conf",
         "//wrappers/rpc:rpc_testing",
         "//wrappers/util:async_test_helpers",
@@ -298,8 +300,8 @@ scala_test(
 )
 
 scala_library(
-    name = "clerk_driver",
-    srcs = ["test/ClerkDriver.scala"],
+    name = "clerk_harness",
+    srcs = ["test/ClerkHarness.scala"],
     testonly = True,
     deps = [
         ":clerk",
@@ -307,7 +309,7 @@ scala_library(
         "//caching/util:test_util",
         "//dicer/client:clerk_impl",
         "//dicer/common/proto:common_proto_scala_lib",
-        "//dicer/common/test/proto:clerk_test_driver_proto_scala_lib",
+        "//dicer/common/test/proto:clerk_test_harness_proto_scala_lib",
         "//dicer/common:target_helper",
         "@com_google_protobuf_protobuf_java",
         "@maven//:com_google_guava_guava",
@@ -319,8 +321,8 @@ scala_library(
 )
 
 scala_library(
-    name = "slicelet_driver",
-    srcs = ["test/SliceletDriver.scala"],
+    name = "slicelet_harness",
+    srcs = ["test/SliceletHarness.scala"],
     testonly = True,
     deps = [
         ":external_common",
@@ -330,7 +332,7 @@ scala_library(
         "//dicer/client:slicelet_impl",
         "//dicer/client:test_client",
         "//dicer/common/proto:common_proto_scala_lib",
-        "//dicer/common/test/proto:slicelet_test_driver_proto_scala_lib",
+        "//dicer/common/test/proto:slicelet_test_harness_proto_scala_lib",
         "//dicer/common:assignment_core",
         "//dicer/common:slice_helper",
         "//dicer/common:target_helper",
@@ -355,7 +357,7 @@ scala_library(
         ":clerk",
         ":external_common",
         ":slicelet",
-        ":slicelet_driver",
+        ":slicelet_harness",
         ":slicelet_listener",
         "//caching/util:config_scope",
         "//caching/util:fake_sequential_execution_context",

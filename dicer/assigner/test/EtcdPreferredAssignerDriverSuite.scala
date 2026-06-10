@@ -93,8 +93,7 @@ class EtcdPreferredAssignerDriverSuite extends DatabricksTest with TestName {
       fakeSec,
       TestTLSOptions.clientTlsOptionsOpt,
       store,
-      driverConfig,
-      PreferredAssignerTestHelper.noOpMembershipCheckerFactory
+      driverConfig
     )
   }
 
@@ -348,6 +347,17 @@ class EtcdPreferredAssignerDriverSuite extends DatabricksTest with TestName {
     fakeSec.run {
       store.blockWrites()
       fakeClock.advanceBy(driverConfig.initialPreferredAssignerTimeout)
+    }
+
+    // Sanity check that we eventually see 2 blocked writes before proceeding. This
+    // is already guaranteed by fakeSec ordering: driver.start() synchronously enqueues
+    // a task that schedules each driver's write, and the clock advance above runs
+    // after those tasks on the same fakeSec, leaving both writes scheduled at 'now'.
+    // SEC fairness then ensures the unblockWrites task enqueued below runs after
+    // the already-scheduled writes. Asserting it here makes that assumption explicit
+    // and will cause this test to break more obviously if these assumptions are broken.
+    AssertionWaiter("Both writes are blocked").await {
+      assert(Await.result(store.getNumBlockedWrites(), Duration.Inf) == 2)
     }
 
     // Unblock the writes - one will commit, one will get OCC failure.

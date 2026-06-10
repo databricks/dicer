@@ -6,19 +6,21 @@ package com.databricks.caching.util
  * create alerts if called in other services. Alerts are created based on every unique combination
  * of error code and prefix.
  */
-object Severity extends Enumeration {
+sealed trait Severity
+
+object Severity {
 
   /**
    * Degraded severity, system will continue to work albeit in degraded state. This should though be
    * investigated. Pages SEV1 i.e. only during business hours.
    */
-  val DEGRADED: Value = Value
+  case object DEGRADED extends Severity
 
   /**
    * Critical severity, an invariant is violated and the system may not be working correctly. We
    * don't expect this to happen. Pages SEV0 i.e. at all hours.
    */
-  val CRITICAL: Value = Value
+  case object CRITICAL extends Severity
 }
 
 /**
@@ -67,6 +69,16 @@ object CachingErrorCode {
   }
 
   /**
+   * The Assigner failed to parse an inbound `redirect_token` sent by a previous Assigner redirect
+   * and echoed by the client. This likely indicates there was a backwards-incompatible change to
+   * the `RedirectToken` proto that should be fixed. The token is treated as absent so routing falls
+   * back to the local target migration config.
+   */
+  case object ASSIGNER_INVALID_REDIRECT_TOKEN extends CachingErrorCode {
+    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
+  }
+
+  /**
    * The Dicer Assigner produced an assignment with too many Slices given the number of available
    * resources in the sharded service.
    */
@@ -105,17 +117,6 @@ object CachingErrorCode {
   }
 
   /**
-   * The Dicer Assigner attempted to write an assignment to a durable store based on a previous
-   * assignment with a generation that is greater than the latest one known to the store. Since
-   * assignments must be persisted before being distributed in the system, this indicates either
-   * data loss in the store, or that an assignment was externalized before being made durable.
-   */
-  case object ASSIGNER_KNOWS_GREATER_ASSIGNMENT_GENERATION_THAN_DURABLE_STORE
-      extends CachingErrorCode {
-    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
-  }
-
-  /**
    * The Dicer assigner attempted to write an preferred assigner value to a durable store based on
    * a previous preferred assigner value with a generation that is greater than the latest one
    * known to the store. Since preferred assigner values must be persisted before being distributed
@@ -133,11 +134,6 @@ object CachingErrorCode {
    * is unexpected.
    */
   case object ETCD_CLIENT_UNEXPECTED_WATCH_FAILURE extends CachingErrorCode {
-    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
-  }
-
-  /** The Dicer assignment data stored in etcd is corrupted. */
-  case object ETCD_ASSIGNMENT_STORE_CORRUPTION extends CachingErrorCode {
     override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
   }
 
@@ -238,6 +234,50 @@ object CachingErrorCode {
   }
 
   /**
+   * The dynamic target migration config from SAFE is unexpectedly empty. A default fallback must
+   * always be defined.
+   */
+  case object MISSING_DYNAMIC_TARGET_MIGRATION_CONFIG extends CachingErrorCode {
+    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
+  }
+
+  /**
+   * The dynamic target migration config from SAFE could not be parsed as a valid
+   * `TargetMigrationConfigP`. Indicates malformed JSON or a value that violates the proto schema.
+   */
+  case object MALFORMED_DYNAMIC_TARGET_MIGRATION_CONFIG extends CachingErrorCode {
+    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
+  }
+
+  /**
+   * The Assigner's initial blocking poll for the dynamic target migration config from SAFE failed
+   * (the SAFE call threw or the poll timed out). Distinct from `MISSING_*` (empty value) and
+   * `MALFORMED_*` (unparseable value) — this signals a SAFE availability/error issue at startup.
+   */
+  case object DYNAMIC_TARGET_MIGRATION_CONFIG_INITIAL_POLL_FAILED extends CachingErrorCode {
+    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
+  }
+
+  /**
+   * The Assigner received a target migration config requesting an active migration, but active
+   * target migrations are not yet supported. The migrator falls back to a no-op (no active
+   * migration) so routing continues to handle every target locally. Investigate why an active
+   * migration config was published.
+   */
+  case object UNSUPPORTED_ACTIVE_TARGET_MIGRATION_CONFIG extends CachingErrorCode {
+    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
+  }
+
+  /**
+   * The Assigner's [[TargetMigrator]] did not produce its initial [[TargetOwnershipResolver]]
+   * within the startup await timeout. The Assigner cannot start without a valid resolver, so this
+   * blocks startup and should be investigated (e.g. SAFE availability or migrator wiring).
+   */
+  case object INITIAL_TARGET_OWNERSHIP_RESOLVER_CREATION_TIMED_OUT extends CachingErrorCode {
+    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
+  }
+
+  /**
    * In the context of state transfer, the state provider is requested to start providing
    * application state before it has received the requested Slice. This is a violation of our
    * invariants and indicates a code bug to be investigated.
@@ -283,6 +323,14 @@ object CachingErrorCode {
   }
 
   /**
+   * A negative amount was passed to [[SafeCounter.Child.inc]] and suppressed (treated as an
+   * increment of 0).
+   */
+  case object SAFE_COUNTER_SUPPRESSED_NEGATIVE_INCREMENT extends CachingErrorCode {
+    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
+  }
+
+  /**
    * Indicates that [[SubscriberHandler]] received an assignment that is older than its cached
    * assignment. The subscriber handler will continue using the newer cached assignment, but this
    * indicates an issue with assignment distribution, likely a bug in the [[AssignmentGenerator]].
@@ -313,6 +361,23 @@ object CachingErrorCode {
     // $COVERAGE-ON$
   }
 
+  /**
+   * The proto logging sample fraction supplied to [[com.databricks.dicer.common.DicerProtoLogger]]
+   * is outside the valid range [0, 1].
+   */
+  case object DICER_PROTO_LOGGER_INVALID_SAMPLE_FRACTION extends CachingErrorCode {
+    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
+  }
+
+  /**
+   * `DicerClientFeatureRolloutFlag.isEnabled` was called with a feature name that does not match
+   * any feature loaded for the current deployment environment, indicating either a typo at the
+   * call site or a missing config file.
+   */
+  case object DICER_CLIENT_FEATURE_ROLLOUT_FLAG_NOT_FOUND extends CachingErrorCode {
+    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
+  }
+
 }
 
 /**
@@ -325,6 +390,9 @@ object AlertOwnerTeam {
   case object CachingTeam extends AlertOwnerTeam {
     override def toString: String = "platform-team"
   }
+
+  /** The alert routing name for [[CachingTeam]], as a plain string. */
+  val CACHING_TEAM_NAME: String = CachingTeam.toString
 
   /**
    * An [[AlertOwnerTeam]] for teams not represented by a named case object.

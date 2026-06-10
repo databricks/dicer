@@ -11,7 +11,9 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on:
+      group: databricks-protected-runner-group
+      labels: linux-ubuntu-latest
     steps:
       # Pin all GitHub Actions to commit SHAs rather than mutable tags, so that it is immune to
       # upstream tag rewrites in case of compromise.

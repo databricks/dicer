@@ -35,16 +35,16 @@ object TestUtils {
    * Helper reading test data from a textproto format data dependency.
    *
    * To use, add a data dependency to the build target, e.g., `data = ["//dicer/common/test/data"]`,
-   * and read a particular input file by specifying the universe relative path, e.g.,:
+   * and read a particular input file by specifying the workspace-relative path, e.g.,:
    *
    * ```
    * val generationTestData: GenerationTestDataP =
    *     TestUtils.loadTestData("dicer/common/test/data/generation_test_data.textproto")
    * ```
    */
-  def loadTestData[T <: GeneratedMessage with Message[T]](universeRelativePath: String)(
+  def loadTestData[T <: GeneratedMessage with Message[T]](workspaceRelativePath: String)(
       implicit companion: GeneratedMessageCompanion[T]): T = {
-    val path = Paths.get(sys.env("TEST_SRCDIR"), sys.env("TEST_WORKSPACE"), universeRelativePath)
+    val path = Paths.get(sys.env("TEST_SRCDIR"), sys.env("TEST_WORKSPACE"), workspaceRelativePath)
     val contents = Files.readAllLines(path).asScala.mkString("\n")
     val result: Either[TextFormatError, T] = TextFormat.fromAscii(companion, contents)
     if (result.isLeft) {
@@ -492,7 +492,7 @@ object TestUtils {
    * (see <internal link>), where time can be explicitly controlled and events be
    * explicitly observed in a test.
    */
-  def shamefullyAwaitForNonEventInAsyncTest(): Unit = {
+  def shamefullyAwait200msForNonEventInAsyncTest(): Unit = {
     Thread.sleep(200)
   }
 
@@ -508,7 +508,7 @@ object TestUtils {
    * @return The result of the awaitable
    */
   @SuppressWarnings(
-    Array("AwaitError", "AwaitWarning", "reason:blocking is acceptable in tests")
+    Array("AwaitError", "reason:blocking is acceptable in tests")
   )
   def awaitResult[T](awaitable: scala.concurrent.Awaitable[T], timeout: Duration): T = {
     scala.concurrent.Await.result(awaitable, timeout)
@@ -525,7 +525,7 @@ object TestUtils {
    * @return The awaitable after it has completed
    */
   @SuppressWarnings(
-    Array("AwaitError", "AwaitWarning", "reason:blocking is acceptable in tests")
+    Array("AwaitError", "reason:blocking is acceptable in tests")
   )
   def awaitReady[T](awaitable: scala.concurrent.Awaitable[T], timeout: Duration): awaitable.type = {
     scala.concurrent.Await.ready(awaitable, timeout)

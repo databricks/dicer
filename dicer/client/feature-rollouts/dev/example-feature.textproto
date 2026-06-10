@@ -58,7 +58,7 @@ override_rules: [
     override_scopes: [
       { region_uri: "region:prod/cloud1/public/region1" }
     ]
-    override_config {
+    override_rule {
       target_instance_enable_fraction: 1.0
     }
   },
@@ -83,7 +83,7 @@ override_rules: [
     override_scopes: [
       { region_uri: "region:prod/cloud1/public/region2" }
     ]
-    override_config {
+    override_rule {
       force_enable_target_names: ["target3"]
       force_disable_target_names: ["target2"]
       target_instance_enable_fraction: 0.5

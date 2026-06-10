@@ -1,0 +1,50 @@
+syntax = "proto2";
+
+package dicer.client.featurerollouts.test;
+
+import "dicer/client/feature-rollouts/proto/dicer_client_feature_rollout_config.proto";
+import "scalapb.proto";
+
+option java_package = "com.databricks.api.proto.dicer.client.featurerollouts.test";
+option java_generate_equals_and_hash = true;
+
+option java_multiple_files = true;
+option (scalapb.options) = {
+  package_name: "com.databricks.api.proto.dicer.client.featurerollouts.test",
+  flat_package: true,
+};
+
+// Test data for `DicerClientFeatureRolloutScopeSuite` (Scala) and
+// `dicer_client_feature_rollout_scope_test` (Rust). The two suites load this same textproto so
+// that input cases stay in sync across languages.
+//
+// Next ID: 3.
+message DicerClientFeatureRolloutScopeTestDataP {
+  // Scope protos that should pass `from_proto`. Each entry's `description` identifies the case.
+  //
+  // PRECONDITION: Every field below is required despite being declared `optional` (proto2
+  // limitation); the test suites panic if any is unset.
+  //
+  // Next ID: 3.
+  message ValidScopeTestCaseP {
+    optional string description = 1;
+    optional DicerClientFeatureRolloutScopeP scope_proto = 2;
+  }
+  repeated ValidScopeTestCaseP valid_scope_test_cases = 1;
+
+  // Scope protos that should fail `from_proto` with an error containing
+  // `expected_error_substring`. Each entry's `description` identifies the case.
+  //
+  // PRECONDITION: Every field below is required despite being declared `optional` (proto2
+  // limitation); the test suites panic if any is unset, except for `scope_proto`'s nested
+  // `region_uri`, which is allowed to be absent in order to exercise the absent-`region_uri`
+  // failure path.
+  //
+  // Next ID: 4.
+  message InvalidScopeTestCaseP {
+    optional string description = 1;
+    optional DicerClientFeatureRolloutScopeP scope_proto = 2;
+    optional string expected_error_substring = 3;
+  }
+  repeated InvalidScopeTestCaseP invalid_scope_test_cases = 2;
+}

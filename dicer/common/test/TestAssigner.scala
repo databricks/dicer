@@ -1,7 +1,7 @@
 package com.databricks.dicer.common
 
 import com.databricks.api.proto.dicer.assigner.{HeartbeatRequestP, HeartbeatResponseP}
-
+import com.databricks.dicer.common.TargetHelper.TargetOps
 import java.net.URI
 import java.time.Instant
 import java.util.UUID
@@ -29,8 +29,7 @@ import com.databricks.conf.Configs
 import com.databricks.dicer.assigner.InterposingEtcdPreferredAssignerDriver.ShutdownOption
 import com.databricks.dicer.assigner.Store.WriteAssignmentResult
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
-import com.databricks.dicer.assigner.conf.StoreConf.StoreEnum.{ETCD, IN_MEMORY}
-import com.databricks.dicer.assigner.config.StaticTargetConfigProvider
+import com.databricks.dicer.assigner.config.{StaticTargetConfigProvider, TargetMigrationConfig}
 import com.databricks.dicer.assigner.{
   Assigner,
   AssignerInfo,
@@ -39,8 +38,6 @@ import com.databricks.dicer.assigner.{
   DisabledPreferredAssignerDriver,
   EtcdPreferredAssignerDriver,
   EtcdPreferredAssignerStore,
-  EtcdStore,
-  EtcdStoreConfig,
   FakeKubernetesTargetWatcherFactory,
   HealthWatcher,
   InMemoryStore,
@@ -48,6 +45,7 @@ import com.databricks.dicer.assigner.{
   InterposingEtcdPreferredAssignerStore,
   PreferredAssignerDriver,
   Store,
+  TargetMigrator,
   TestableDicerAssignerConf
 }
 import com.databricks.dicer.common.TestAssigner.AssignerReplyType
@@ -85,7 +83,8 @@ class TestAssigner private (
     hostName: String = "localhost",
     assignerClusterUri: URI,
     minAssignmentGenerationInterval: FiniteDuration,
-    dPageNamespaceOpt: Option[String])
+    dPageNamespaceOpt: Option[String],
+    private[common] val targetMigrator: TargetMigrator)
     extends Assigner.BaseForTest(
       secPool,
       sec,
@@ -99,7 +98,8 @@ class TestAssigner private (
       hostName,
       assignerClusterUri,
       minAssignmentGenerationInterval,
-      dPageNamespaceOpt
+      dPageNamespaceOpt,
+      targetMigrator = targetMigrator
     ) {
 
   /**
@@ -114,22 +114,25 @@ class TestAssigner private (
   private val lock = new ReentrantLock()
 
   /**
-   * The latest, valid Clerk watch request, together with its headers, received for
-   * each [[Target]].
+   * The latest, valid Clerk watch request, together with its headers, received for each [[Target]]
+   * (where [[Target]] is the Assigner normalized representation of the target identifier, see
+   * [[getAssignerNormalizedTarget]]).
    */
   private val latestValidClerkWatchRequestsByTarget =
     mutable.Map[Target, (RequestHeaders, ClientRequest)]()
 
   /**
-   * The latest, valid slicelet watch request, together with its headers, received for
-   * each [[Target]].
+   * The latest, valid Slicelet watch request, together with its headers, received for each
+   * [[Target]] (where [[Target]] is the Assigner normalized representation of the target
+   * identifier, see [[getAssignerNormalizedTarget]]).
    */
   private val latestValidSliceletWatchRequestsByTarget =
     mutable.Map[Target, (RequestHeaders, ClientRequest)]()
 
   /**
-   * The latest, valid slicelet watch request, together with its headers, received for each
-   * [[Target]], by target and squid.
+   * The latest, valid Slicelet watch request, together with its headers, received for each
+   * [[Target]], by target and squid (where [[Target]] is the Assigner normalized representation of
+   * the target identifier, see [[getAssignerNormalizedTarget]]).
    */
   private val latestValidSliceletWatchRequests =
     mutable.Map[(Target, Squid), (RequestHeaders, ClientRequest)]()
@@ -284,7 +287,7 @@ class TestAssigner private (
    */
   def getLatestClerkWatchRequest(target: Target): Option[(RequestHeaders, ClientRequest)] =
     withLock(lock) {
-      latestValidClerkWatchRequestsByTarget.get(target)
+      latestValidClerkWatchRequestsByTarget.get(getAssignerNormalizedTarget(target))
     }
 
   /**
@@ -293,7 +296,7 @@ class TestAssigner private (
    */
   def getLatestSliceletWatchRequest(target: Target): Option[(RequestHeaders, ClientRequest)] =
     withLock(lock) {
-      latestValidSliceletWatchRequestsByTarget.get(target)
+      latestValidSliceletWatchRequestsByTarget.get(getAssignerNormalizedTarget(target))
     }
 
   /**
@@ -304,7 +307,7 @@ class TestAssigner private (
       target: Target,
       squid: Squid): Option[(RequestHeaders, ClientRequest)] =
     withLock(lock) {
-      latestValidSliceletWatchRequests.get((target, squid))
+      latestValidSliceletWatchRequests.get((getAssignerNormalizedTarget(target), squid))
     }
 
   /**
@@ -313,8 +316,9 @@ class TestAssigner private (
    * has no assignment.
    */
   def unfreezeAssignment(target: Target): Future[Option[Assignment]] = {
+    val normalizedTarget: Target = getAssignerNormalizedTarget(target)
     interceptableStore
-      .getLatestKnownAssignment(target)
+      .getLatestKnownAssignment(normalizedTarget)
       .flatMap {
         case Some(latestAssignment: Assignment) =>
           if (latestAssignment.isFrozen) {
@@ -334,7 +338,7 @@ class TestAssigner private (
             val proposal = ProposedAssignment(Some(latestAssignment), sliceAssignments)
             interceptableStore
               .writeAssignment(
-                target,
+                normalizedTarget,
                 shouldFreeze = false,
                 proposal
               )
@@ -342,11 +346,11 @@ class TestAssigner private (
                 case WriteAssignmentResult.OccFailure(actualGeneration: Generation) =>
                   // Retry! Another assignment write conflicted with the current write attempt.
                   logger.warn(
-                    s"Retrying unfreeze for $target after OCC failure: " +
+                    s"Retrying unfreeze for $normalizedTarget after OCC failure: " +
                     s"actualGeneration=$actualGeneration, " +
                     s"expectedGeneration=${latestAssignment.generation}"
                   )
-                  unfreezeAssignment(target)
+                  unfreezeAssignment(normalizedTarget)
                 case WriteAssignmentResult.Committed(assignment: Assignment) =>
                   Future.successful(Some(assignment))
               }(sec)
@@ -371,13 +375,14 @@ class TestAssigner private (
   def setAndFreezeAssignment(
       target: Target,
       proposal: SliceMap[ProposedSliceAssignment]): Future[Assignment] = {
+    val normalizedTarget: Target = getAssignerNormalizedTarget(target)
     interceptableStore
-      .getLatestKnownAssignment(target)
+      .getLatestKnownAssignment(normalizedTarget)
       .flatMap { predecessorOpt: Option[Assignment] =>
         val proposedAssignment = ProposedAssignment(predecessorOpt, proposal)
         interceptableStore
           .writeAssignment(
-            target,
+            normalizedTarget,
             shouldFreeze = true,
             proposedAssignment
           )
@@ -385,11 +390,11 @@ class TestAssigner private (
             case WriteAssignmentResult.OccFailure(actualGeneration: Generation) =>
               // Retry! Another assignment write conflicted with the current write attempt.
               logger.warn(
-                s"Retrying assignment write for $target after OCC failure: " +
+                s"Retrying assignment write for $normalizedTarget after OCC failure: " +
                 s"actualGeneration=$actualGeneration, " +
                 s"expectedPredecessor=$predecessorOpt"
               )
-              setAndFreezeAssignment(target, proposal)
+              setAndFreezeAssignment(normalizedTarget, proposal)
             case WriteAssignmentResult.Committed(assignment: Assignment) =>
               Future.successful(assignment)
           }(sec)
@@ -398,12 +403,12 @@ class TestAssigner private (
 
   /** Blocks assignment writes for the given target. */
   def blockAssignment(target: Target): Future[Unit] = interceptableStore.sec.call {
-    interceptableStore.blockAssignmentWrites(target)
+    interceptableStore.blockAssignmentWrites(getAssignerNormalizedTarget(target))
   }
 
   /** Unblocks assignment writes for the given target. */
   def unblockAssignment(target: Target): Future[Unit] = interceptableStore.sec.call {
-    interceptableStore.unblockAssignmentWrites(target)
+    interceptableStore.unblockAssignmentWrites(getAssignerNormalizedTarget(target))
   }
 
   /**
@@ -412,7 +417,7 @@ class TestAssigner private (
    */
   def getAssignment(target: Target): Future[Option[Assignment]] = {
     forTest
-      .getGeneratorFromMap(target)
+      .getGeneratorFromMap(getAssignerNormalizedTarget(target))
       .map { generatorOpt: Option[AssignmentGeneratorDriver] =>
         generatorOpt.flatMap { generator: AssignmentGeneratorDriver =>
           generator.getGeneratorCell.getLatestValueOpt
@@ -431,7 +436,7 @@ class TestAssigner private (
    */
   def getAssignmentCreatingGeneratorDeprecated(target: Target): Future[Option[Assignment]] = {
     forTest
-      .lookupOrCreateGenerator(target)
+      .lookupOrCreateGenerator(getAssignerNormalizedTarget(target))
       .map { generatorOpt: Option[AssignmentGeneratorDriver] =>
         generatorOpt.flatMap { generator: AssignmentGeneratorDriver =>
           generator.getGeneratorCell.getLatestValueOpt
@@ -474,6 +479,14 @@ class TestAssigner private (
   def resumeHeartbeatResponse(): Unit = withLock(lock) {
     pauseHandlingHeartbeat = false
   }
+
+  /**
+   * Returns the normalized representation of the target identifier that the Assigner uses
+   * internally to identify `target`. See [[TargetUnmarshaller]].
+   */
+  private def getAssignerNormalizedTarget(target: Target): Target = {
+    forTest.getTargetUnmarshaller.fromProto(target.toProto)
+  }
 }
 
 /** Companion object for [[TestAssigner]]. */
@@ -493,14 +506,21 @@ object TestAssigner {
    * Configuration for the test assigner.
    *
    * @param assignerConf Assigner configuration.
-   * @param preferredAssignerDriverConfig Preferred assigner driver configuration.
-   * It provides tests the ability to provide faster timeouts and intervals to speed up scenarios
-   * like testing preferred assigner failovers, for example. By default, it will use the production
-   * config found in [[EtcdPreferredAssignerDriver.Config]].
+   * @param preferredAssignerDriverConfig Preferred assigner driver configuration. It provides tests
+   *                                      the ability to provide faster timeouts and intervals to
+   *                                      speed up scenarios like testing preferred assigner
+   *                                      failovers, for example. By default, it will use the
+   *                                      production config found in
+   *                                      [[EtcdPreferredAssignerDriver.Config]].
+   * @param targetMigratorOpt a [[TargetMigrator]] to inject into the constructed [[TestAssigner]].
+   *                          Tests exercising a behavior the real migrator cannot serve yet (e.g.
+   *                          an active migration) inject one here. Otherwise, a real
+   *                          [[TargetMigrator]] is built against the no-op migration config.
    */
   class Config private (
       val assignerConf: TestableDicerAssignerConf,
-      val preferredAssignerDriverConfig: EtcdPreferredAssignerDriver.Config)
+      val preferredAssignerDriverConfig: EtcdPreferredAssignerDriver.Config,
+      val targetMigratorOpt: Option[TargetMigrator])
 
   /** Companion object for [[Config]]. */
   object Config {
@@ -514,7 +534,8 @@ object TestAssigner {
         designatedDicerAssignerRpcPort: Option[Int] = None,
         expectRequestsThroughS2SProxy: Boolean = false,
         preferredAssignerDriverConfig: EtcdPreferredAssignerDriver.Config =
-          EtcdPreferredAssignerDriver.Config()): Config = {
+          EtcdPreferredAssignerDriver.Config(),
+        targetMigratorOpt: Option[TargetMigrator] = None): Config = {
       // This is needed because Scala anonymous classes are not able to capture and refer to
       // variables with the same name as a method in the class.
       val expectRequestsThroughS2SProxyVar: Boolean = expectRequestsThroughS2SProxy
@@ -535,7 +556,24 @@ object TestAssigner {
 
         override val expectRequestsThroughS2SProxy: Boolean = expectRequestsThroughS2SProxyVar
       }
-      new Config(testConf, preferredAssignerDriverConfig)
+
+      // This is a temporary workaround until the real TargetMigrator implementation is complete.
+      // For now, an injected `targetMigratorOpt` is always a [[FakeTargetMigrator]] used to
+      // exercise a specific behavior (e.g. an active migration) that the real migrator cannot serve
+      // yet. When no migrator is injected, we seed the SAFE value with a no-op target migration
+      // config and let [[TestAssigner.createAndStart]] build the real migrator (which only supports
+      // no-op migrations for now).
+      //
+      // TODO(<internal bug>): Once the real TargetMigrator supports active migrations, remove the
+      // `targetMigratorOpt` parameter and instead accept a `TargetMigrationConfig` to seed here, so
+      // tests drive both no-op and active migrations through the real migrator.
+      if (targetMigratorOpt.isEmpty) {
+        testConf.putDynamicTargetMigrationConfig(
+          TargetMigrationConfig.toJsonString(TargetMigrationConfig.NO_MIGRATION)
+        )
+      }
+
+      new Config(testConf, preferredAssignerDriverConfig, targetMigratorOpt)
     }
   }
 
@@ -598,11 +636,10 @@ object TestAssigner {
    * @param config The configuration for this test Assigner. See [[DicerAssignerConf]] for supported
    *               configurations.
    * @param configProvider The provider of target configurations for this test Assigner.
-   * @param dockerizedEtcdOpt When specified and the Assigner is configured to use etcd, this test
-   *                          Assigner uses the etcd instance contained within for durable storage.
-   *                          See [[DicerAssignerConf.store]] and
-   *                          [[DicerAssignerConf.preferredAssignerEnabled]] for configurations
-   *                          which use etcd.
+   * @param dockerizedEtcdOpt When specified and the Assigner is configured to use preferred
+   *                          assigner mode, this test Assigner uses the etcd instance contained
+   *                          within for the preferred assigner store. See
+   *                          [[DicerAssignerConf.preferredAssignerEnabled]].
    * @param assignerClusterUri The URI of the kubernetes cluster that the assigner will be running
    *                           in (see <internal link>).
    */
@@ -610,13 +647,13 @@ object TestAssigner {
       secPool: SequentialExecutionContextPool,
       config: Config,
       configProvider: StaticTargetConfigProvider,
-      dockerizedEtcdOpt: Option[EtcdTestEnvironment],
+      dockerizedEtcdOpt: Option[EtcdTestEnvironment] = None,
       assignerClusterUri: URI,
       dPageNamespaceOpt: Option[String] = None): TestAssigner = {
     logger.info(s"Starting TestAssigner")
     val sec: SequentialExecutionContext = secPool.createExecutionContext("test-assigner-store")
     val assignerSec: SequentialExecutionContext = secPool.createExecutionContext("test-assigner")
-    val store: Store = createStore(sec, config.assignerConf, dockerizedEtcdOpt)
+    val store: Store = InMemoryStore(sec, config.assignerConf.storeIncarnation)
 
     val paSec: SequentialExecutionContext =
       secPool.createExecutionContext("test-preferred-assigner-sec")
@@ -639,6 +676,24 @@ object TestAssigner {
         50.milliseconds
     }
 
+    // This is a temporary workaround until the real TargetMigrator implementation is complete.
+    // For now, an injected `targetMigratorOpt` is always a [[FakeTargetMigrator]] used to exercise
+    // a specific behavior (e.g. an active migration) that the real migrator cannot serve yet. When
+    // no migrator is injected, we build the real migrator against the no-op migration config that
+    // `Config.create` seeded into SAFE.
+    //
+    // TODO(<internal bug>): Once the real TargetMigrator supports active migrations, we will always build
+    // the real migrator here (see the corresponding TODO in `Config.create`).
+    val targetMigrator: TargetMigrator = config.targetMigratorOpt.getOrElse {
+      val targetMigratorSec: SequentialExecutionContext =
+        secPool.createExecutionContext("test-target-migrator")
+      TargetMigrator.create(
+        targetMigratorSec,
+        config.assignerConf,
+        TargetMigrator.DEFAULT_INITIAL_TARGET_OWNERSHIP_RESOLVER_AWAIT_TIMEOUT
+      )
+    }
+
     val interceptableStore: InterceptableStore = new InterceptableStore(sec, store)
     val storeFactory: TestAssigner.InterceptableStoreFactory =
       new TestAssigner.InterceptableStoreFactory(interceptableStore)
@@ -654,42 +709,11 @@ object TestAssigner {
       configProvider,
       assignerClusterUri = assignerClusterUri,
       minAssignmentGenerationInterval = minAssignmentGenerationInterval,
-      dPageNamespaceOpt = dPageNamespaceOpt
+      dPageNamespaceOpt = dPageNamespaceOpt,
+      targetMigrator = targetMigrator
     )
     testAssigner.start()
     testAssigner
-  }
-
-  /**
-   * REQUIRES: When the config specifies the Assigner to use etcd mode,
-   * `dockerizedEtcdOpt` must be defined.
-   *
-   * Returns a store running on `sec` with the configuration specified in `conf`.
-   */
-  private def createStore(
-      sec: SequentialExecutionContext,
-      conf: DicerAssignerConf,
-      dockerizedEtcdOpt: Option[EtcdTestEnvironment]): Store = {
-    conf.store match {
-      case IN_MEMORY =>
-        logger.info("Initializing InMemoryStore.")
-        InMemoryStore(
-          sec,
-          conf.storeIncarnation
-        )
-      case ETCD =>
-        logger.info("Initializing EtcdStore.")
-        require(
-          dockerizedEtcdOpt.isDefined,
-          "dockerizedEtcdOpt must be defined for assigner using etcd store mode. Please check if " +
-          "allowEtcdMode is set to true if you are using InternalDicerTestEnvironment."
-        )
-        val etcdClient: EtcdClient = dockerizedEtcdOpt.get.createEtcdClient(
-          EtcdClient.Config(Assigner.getAssignmentsEtcdNamespace(conf))
-        )
-        val etcdStoreConfig = EtcdStoreConfig.create(conf.storeIncarnation)
-        EtcdStore.create(sec, etcdClient, etcdStoreConfig, new Random)
-    }
   }
 
   /**

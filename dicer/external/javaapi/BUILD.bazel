@@ -50,6 +50,7 @@ java_library(
         ":slice",
         ":slicekey",
         ":target",
+        "//dicer/client/javaapi:clerk_conf_impl",
         "//dicer/external:clerk",
         "//dicer/external:conf",
         "//dicer/external:external_common",
@@ -72,6 +73,7 @@ java_library(
     srcs = [
         "src/SliceKeyHandle.java",
         "src/Slicelet.java",
+        "src/SliceletConfig.java",
         "src/SliceletListener.java",
     ],
     visibility = ["//visibility:public"],
@@ -82,8 +84,10 @@ java_library(
         "//dicer/client/javaapi:slicelet_conf_impl",
         "//dicer/external:slicelet",
         "//dicer/external:slicelet_listener",
+        "//wrappers/java:jtls",
         "@maven//:com_google_code_findbugs_jsr305",
         "@maven//:com_google_guava_guava",
+        "@maven//:com_typesafe_config",
         "@maven//:org_scala_lang_modules_scala_java8_compat_2_12",
         "@maven//:org_scala_lang_scala_library",
     ],
@@ -102,7 +106,10 @@ java_library(
         ":target",
         "//dicer/client/javaapi:clerk_conf_impl",
         "//dicer/external:clerk",
+        "//wrappers/java:jtls",
+        "@maven//:com_google_code_findbugs_jsr305",
         "@maven//:com_google_guava_guava",
+        "@maven//:com_typesafe_config",
         "@maven//:org_scala_lang_modules_scala_java8_compat_2_12",
         "@maven//:org_scala_lang_scala_library",
     ],
@@ -178,15 +185,12 @@ java_library(
     visibility = ["//visibility:public"],
     deps = [
         ":clerk",
-        ":dicer_client_conf_test_factory",
         ":resource_address",
         ":slice",
         ":slicekey",
         ":slicelet",
         ":target",
         ":test_interop",
-        "//dicer/client/javaapi:clerk_conf_impl",
-        "//dicer/client/javaapi:slicelet_conf_impl",
         "//dicer/external:dicer_test_env",
         "//dicer/external:slicelet",
         "//wrappers/conf:raw_config_singleton",
@@ -213,17 +217,16 @@ scala_library(
 )
 
 scala_library(
-    name = "dicer_client_conf_test_factory",
-    srcs = ["test/DicerClientConfTestFactory.scala"],
+    name = "dicer_client_config_test_interop",
+    srcs = ["test/DicerClientConfigTestInterop.scala"],
     testonly = True,
     visibility = ["//dicer:internal"],
     deps = [
+        ":clerk",
+        ":slicelet",
         "//dicer/client/javaapi:clerk_conf_impl",
         "//dicer/client/javaapi:slicelet_conf_impl",
         "//dicer/external:conf",
-        "//wrappers/conf:core",
-        "//wrappers/conf:current_project",
-        "//wrappers/conf:dbconf",
         "//wrappers/conf:project",
         "//wrappers/conf:project-conf",
     ],
@@ -285,7 +288,7 @@ java_junit5_test(
     size = "small",
     test_class = "com.databricks.dicer.external.javaapi.SliceletTest",
     deps = [
-        ":dicer_client_conf_test_factory",
+        ":dicer_client_config_test_interop",
         ":dicer_test_environment",
         ":slice",
         ":slicekey",
@@ -296,11 +299,10 @@ java_junit5_test(
         "//dicer/client/javaapi:slicelet_conf_impl",
         "//wrappers/conf:current_project",
         "//wrappers/conf:project",
-        "//wrappers/conf:raw_config_singleton",
         "//wrappers/java:databricks_java_test",
-        "@maven//:com_typesafe_config",
+        "//wrappers/java:jtls",
         "@maven//:org_assertj_assertj_core",
-        "@maven//:org_scala_lang_modules_scala_java8_compat_2_12",
+        "@maven//:org_scala_lang_scala_library",
     ],
 )
 
@@ -316,7 +318,7 @@ java_junit5_test(
     test_class = "com.databricks.dicer.external.javaapi.ClerkTest",
     deps = [
         ":clerk",
-        ":dicer_client_conf_test_factory",
+        ":dicer_client_config_test_interop",
         ":dicer_test_environment",
         ":resource_address",
         ":slice",
@@ -328,6 +330,7 @@ java_junit5_test(
         "//wrappers/conf:current_project",
         "//wrappers/conf:project",
         "//wrappers/java:databricks_java_test",
+        "//wrappers/java:jtls",
         "@maven//:org_assertj_assertj_core",
     ],
 )
@@ -355,6 +358,25 @@ java_junit5_test(
         "//wrappers/conf:project",
         "//wrappers/java:databricks_java_test",
         "@maven//:com_google_guava_guava",
+        "@maven//:org_assertj_assertj_core",
+    ],
+)
+
+java_junit5_test(
+    name = "dicer_client_config_uninitialized_test",
+    srcs = ["test/DicerClientConfigUninitializedTest.java"],
+    runtime_deps = [
+        "@contrib_rules_jvm_deps//:org_junit_jupiter_junit_jupiter_engine",
+        "@contrib_rules_jvm_deps//:org_junit_platform_junit_platform_launcher",
+        "@contrib_rules_jvm_deps//:org_junit_platform_junit_platform_reporting",
+    ],
+    size = "small",
+    test_class = "com.databricks.dicer.external.javaapi.DicerClientConfigUninitializedTest",
+    deps = [
+        ":clerk",
+        ":slicelet",
+        "//wrappers/java:databricks_java_test",
+        "@contrib_rules_jvm_deps//:org_junit_jupiter_junit_jupiter_api",
         "@maven//:org_assertj_assertj_core",
     ],
 )

@@ -15,19 +15,12 @@ class InterposingEtcdPreferredAssignerDriver(
     sec: SequentialExecutionContext,
     assignerTlsOptionsOpt: Option[TLSOptions],
     val store: InterposingEtcdPreferredAssignerStore,
-    config: EtcdPreferredAssignerDriver.Config,
-    membershipCheckerFactory: KubernetesMembershipChecker.Factory =
-      new KubernetesMembershipChecker.Factory {
-        override def create(
-            assignerInfo: AssignerInfo,
-            assignerProtoLogger: AssignerProtoLogger): Option[KubernetesMembershipChecker] = None
-      }
+    config: EtcdPreferredAssignerDriver.Config
 ) extends EtcdPreferredAssignerDriver(
       sec,
       assignerTlsOptionsOpt,
       store,
-      config,
-      membershipCheckerFactory
+      config
     ) {
 
   private val logger = PrefixLogger.create(getClass, "")

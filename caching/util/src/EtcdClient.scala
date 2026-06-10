@@ -1430,7 +1430,7 @@ object EtcdClient {
    * @return         The canonical code to be used as a label for a write latency observation.
    */
   private def computeOperationResultFromWriteResponse(
-      response: Try[WriteResponse]): OperationResult.Value = {
+      response: Try[WriteResponse]): OperationResult = {
     response match {
       case scala.util.Success(writeResponse: WriteResponse) =>
         writeResponse match {

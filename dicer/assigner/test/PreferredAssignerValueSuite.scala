@@ -9,7 +9,7 @@ import com.databricks.api.proto.dicer.assigner.{
   PreferredAssignerValueP
 }
 import com.databricks.caching.util.TestUtils.assertThrow
-import com.databricks.dicer.common.{Generation, Incarnation, Redirect}
+import com.databricks.dicer.common.{Generation, Incarnation}
 
 import java.util.UUID
 import java.net.URI
@@ -253,35 +253,35 @@ class PreferredAssignerValueSuite extends DatabricksTest {
         thisAssignerInfo
       )
       assert(config.role == AssignerRole.Preferred)
-      assert(config.redirect == Redirect.EMPTY)
+      assert(config.preferredAssignerUriOpt.isEmpty)
     }
 
-    // - For `PreferredAssignerValue.NoAssigner`, always not preferred and redirect to empty.
+    // - For `PreferredAssignerValue.NoAssigner`, always not preferred and no known preferred URI.
     for (value: PreferredAssignerValue <- Seq(noAssignerValue, noAssignerValue2)) {
       val config = PreferredAssignerConfig.create(
         value,
         thisAssignerInfo
       )
       assert(config.role == AssignerRole.Standby)
-      assert(config.redirect == Redirect.EMPTY)
+      assert(config.preferredAssignerUriOpt.isEmpty)
     }
 
     // - For `PreferredAssignerValue.SomeAssigner`, should be preferred if the assigner has the
-    // same `AssignerInfo` as the current assigner, and redirect to the assigner's URI.
+    // same `AssignerInfo` as the current assigner, and exposes the preferred assigner's URI.
 
     val config1 = PreferredAssignerConfig.create(
       thisAssignerPreferredValue,
       thisAssignerInfo
     )
     assert(config1.role == AssignerRole.Preferred)
-    assert(config1.redirect == Redirect(Some(thisAssignerInfo.uri)))
+    assert(config1.preferredAssignerUriOpt.contains(thisAssignerInfo.uri))
 
     val config2 = PreferredAssignerConfig.create(
       otherAssignerPreferredValue,
       thisAssignerInfo
     )
     assert(config2.role == AssignerRole.Standby)
-    assert(config2.redirect == Redirect(Some(otherAssignerInfo.uri)))
+    assert(config2.preferredAssignerUriOpt.contains(otherAssignerInfo.uri))
 
     // Special case: value is a `PreferredAssignerValue.SomeAssigner` where the assigner info has
     // the same URI but different UUID. This should be considered as not preferred.
@@ -295,7 +295,7 @@ class PreferredAssignerValueSuite extends DatabricksTest {
       thisAssignerInfo
     )
     assert(config3.role == AssignerRole.Standby)
-    assert(config3.redirect == Redirect(Some(thisAssignerInfo.uri)))
+    assert(config3.preferredAssignerUriOpt.contains(thisAssignerInfo.uri))
   }
 
 }

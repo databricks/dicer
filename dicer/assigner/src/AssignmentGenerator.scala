@@ -572,7 +572,7 @@ class AssignmentGenerator(
       instant: Instant,
       outputBuilder: StateMachineOutput.Builder[DriverAction],
       request: ClientRequest): Unit = {
-    val source: AssignmentDistributionSource.AssignmentDistributionSource =
+    val source: AssignmentDistributionSource =
       request.subscriberData match {
         case sliceletData: SliceletData =>
           val resource: Squid = sliceletData.squid
@@ -854,13 +854,13 @@ class AssignmentGenerator(
       tickerTime: TickerTime,
       instant: Instant,
       syncState: SyncAssignmentState,
-      source: AssignmentDistributionSource.AssignmentDistributionSource,
+      source: AssignmentDistributionSource,
       outputBuilder: StateMachineOutput.Builder[DriverAction]): Unit = {
     val healthWatcherEvent: HealthWatcher.Event.AssignmentSyncObserved = syncState match {
       case SyncAssignmentState.KnownAssignment(diffAssignment: DiffAssignment) =>
         val diffIncarnation: Incarnation = diffAssignment.generation.incarnation
         if (diffIncarnation != config.storeIncarnation) {
-          val mismatchType: IncarnationMismatchType.Value =
+          val mismatchType: IncarnationMismatchType =
             if (diffIncarnation < config.storeIncarnation) {
               logger.info(s"Got assignment from lower incarnation $diffIncarnation")
               IncarnationMismatchType.ASSIGNMENT_LOWER
@@ -878,7 +878,9 @@ class AssignmentGenerator(
           diffAssignment
         ) match {
           case Left(newerAssignment: Assignment) =>
-            logger.info(s"Distributing from $source: $newerAssignment")
+            newerAssignment.toChunkedString().foreach { chunk: String =>
+              logger.info(s"Distributing from $source: $chunk")
+            }
             // Update the metrics that are deterministic only by the new assignment itself. Metrics
             // for stats related to churn (need a previous assignment) are exported in
             // `handleAssignmentWriteSuccess` during slicez data computation, and ones related to
@@ -892,7 +894,7 @@ class AssignmentGenerator(
             outputBuilder.appendAction(DriverAction.DistributeAssignment(newerAssignment))
             HealthWatcher.Event.AssignmentSyncObserved
               .AssignmentObserved(source, newerAssignment)
-          case Right(reason: DiffUnused.DiffUnused) =>
+          case Right(reason: DiffUnused) =>
             // We'll find DIFF_MATCHES_KNOWN from the Store as a matter of course when we write
             // assignments because we learn about the written assignment from the ack to the write
             // _and_ on the Store's watch stream. Avoid polluting the logs in this case.

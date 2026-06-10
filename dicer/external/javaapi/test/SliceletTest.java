@@ -5,12 +5,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.databricks.backend.common.util.CurrentProject;
 import com.databricks.backend.common.util.Project;
+import com.databricks.rpc.tls.JTLSOptions;
 import com.databricks.testing.DatabricksJavaTest;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import scala.Option;
 
 final class SliceletTest extends DatabricksJavaTest {
 
@@ -124,6 +126,31 @@ final class SliceletTest extends DatabricksJavaTest {
     // Clean up slicelets.
     testEnv.stopSlicelet(slicelet1);
     testEnv.stopSlicelet(slicelet2);
+  }
+
+  @Test
+  public void testBuilderWithTlsOptions() {
+    // Test plan: Verify that setTlsOptions on the Java builder propagates through to the
+    // underlying SliceletConfImpl. Build with a known JTLSOptions and confirm
+    // sliceletTlsOptions returns the equivalent Scala TLSOptions.
+    JTLSOptions jTlsOptions = JTLSOptions.builder().build();
+    SliceletConfig.Builder builder = SliceletConfig.builder();
+    SliceletConfig config = builder.setTlsOptions(jTlsOptions).build();
+    assertThat(DicerClientConfigTestInterop.sliceletTlsOptions(config).get())
+        .isEqualTo(jTlsOptions.toTLSOptions());
+  }
+
+  @Test
+  public void testBuilderWithoutTlsOptions() {
+    // Test plan: Verify that building a SliceletConfig without calling setTlsOptions results
+    // in no TLS options on the underlying SliceletConfImpl. Also verify that reusing the same
+    // builder produces distinct config instances.
+    SliceletConfig.Builder builder = SliceletConfig.builder();
+    SliceletConfig config1 = builder.build();
+    SliceletConfig config2 = builder.build();
+    assertThat(DicerClientConfigTestInterop.sliceletTlsOptions(config1)).isEqualTo(Option.empty());
+    assertThat(DicerClientConfigTestInterop.sliceletTlsOptions(config2)).isEqualTo(Option.empty());
+    assertThat(config1).isNotSameAs(config2);
   }
 
   @AfterAll

@@ -20,17 +20,17 @@ public class TestUtils {
    * Reads test data from a textproto into the provided builder. Callers should invoke {@code
    * builder.build()} after this returns to obtain the message.
    *
-   * @param universeRelativePath The path relative to the "universe" directory.
+   * @param workspaceRelativePath The path relative to the Bazel workspace root.
    * @param builder A builder instance for the message type to populate.
    * @throws java.io.IOException if the file cannot be read.
    * @throws com.google.protobuf.TextFormat.ParseException if the textproto cannot be
    *     parsed.
    */
-  public static void loadTestData(String universeRelativePath, Message.Builder builder)
+  public static void loadTestData(String workspaceRelativePath, Message.Builder builder)
       throws IOException {
     Path path =
         Paths.get(
-            System.getenv("TEST_SRCDIR"), System.getenv("TEST_WORKSPACE"), universeRelativePath);
+            System.getenv("TEST_SRCDIR"), System.getenv("TEST_WORKSPACE"), workspaceRelativePath);
     String contents = String.join("\n", Files.readAllLines(path));
     TextFormat.merge(contents, builder);
   }
