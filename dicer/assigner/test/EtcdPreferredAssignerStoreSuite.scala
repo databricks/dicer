@@ -83,11 +83,7 @@ class EtcdPreferredAssignerStoreSuite extends DatabricksTest with TestName {
   )
   private val ASSIGNERS = Seq(ASSIGNER0, ASSIGNER1, ASSIGNER2, ASSIGNER3)
 
-  /**
-   * Creates an etcd client and store connecting to [[etcd]].
-   *
-   * Ensures that the returned [[EtcdStore]] is initialized.
-   */
+  /** Creates an etcd client for `etcd` after initializing its store metadata. */
   private def createClientWithInitializedStoreMetadata(): EtcdClient = {
     val client = etcd.createEtcdClient(EtcdClient.Config(NAMESPACE))
     ensureStoreMetadataInitialized(client)

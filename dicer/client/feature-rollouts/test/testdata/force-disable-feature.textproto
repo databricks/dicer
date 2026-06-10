@@ -1,0 +1,8 @@
+# proto-file: dicer/client/feature-rollouts/proto/dicer_client_feature_rollout_config.proto
+# proto-message: DicerClientFeatureRolloutConfigP
+
+# Fraction is 1.0 (all enabled by default), but "my-service" is force-disabled.
+default_rule {
+  force_disable_target_names: ["my-service"]
+  target_instance_enable_fraction: 1.0
+}

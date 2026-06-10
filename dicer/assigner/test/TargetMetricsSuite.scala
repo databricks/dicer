@@ -4,7 +4,7 @@ import scala.concurrent.duration._
 
 import com.databricks.api.proto.dicer.external.LoadBalancingMetricConfigP.ReservationHintP
 import com.databricks.caching.util.MetricUtils
-import com.databricks.caching.util.TestUtils.TestName
+import com.databricks.caching.util.TestUtils.{TestName, getAllVariantsOfEnumLikeTrait}
 import com.databricks.dicer.assigner.AssignmentStats.{
   AssignmentLoadStats,
   ReassignmentChurnAndLoadStats
@@ -16,7 +16,11 @@ import com.databricks.dicer.assigner.config.InternalTargetConfig.{
 }
 import com.databricks.dicer.assigner.algorithm.{Algorithm, LoadMap, Resources}
 import com.databricks.dicer.assigner.algorithm.LoadMap.Entry
-import com.databricks.dicer.assigner.TargetMetrics.LoadType
+import com.databricks.dicer.assigner.TargetMetrics.{
+  AssignmentDistributionSource,
+  IncarnationMismatchType,
+  LoadType
+}
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.common.TestSliceUtils._
 import com.databricks.dicer.common.{Assignment, AssignmentConsistencyMode}
@@ -178,7 +182,11 @@ abstract class TargetMetricsSuiteBase extends DatabricksTest with TestName {
   private def getRealTimePerResourceLoadGauge(
       target: Target,
       resourceHash: Int,
-      loadType: LoadType.Value): Double = {
+      loadType: LoadType): Double = {
+    val loadTypeLabel: String = loadType match {
+      case LoadType.Reported => "Reported"
+      case LoadType.Reserved => "Reserved"
+    }
     MetricUtils.getMetricValue(
       registry,
       "dicer_assigner_real_time_load_per_resource",
@@ -187,7 +195,7 @@ abstract class TargetMetricsSuiteBase extends DatabricksTest with TestName {
         "targetName" -> target.getTargetNameLabel,
         "targetInstanceId" -> target.getTargetInstanceIdLabel,
         "resourceHash" -> resourceHash.toString,
-        "loadType" -> loadType.toString
+        "loadType" -> loadTypeLabel
       )
     )
   }
@@ -716,6 +724,28 @@ abstract class TargetMetricsSuiteBase extends DatabricksTest with TestName {
     // not pass empty resources to this method.
     val emptyResources: Resources = Resources.empty
     TargetMetrics.clearTerminatedGeneratorFromMetrics(defaultTarget, emptyResources)
+  }
+
+  test("AssignmentDistributionSource.values contains all sealed trait variants") {
+    // Test plan: Verify that AssignmentDistributionSource.values stays in sync with the
+    // sealed trait. Use reflection to enumerate every case object extending the trait and
+    // assert that values contains exactly that set, so a newly added case object that
+    // someone forgets to register in values will fail this test.
+    assert(
+      AssignmentDistributionSource.values.toSet ==
+      getAllVariantsOfEnumLikeTrait[AssignmentDistributionSource]
+    )
+  }
+
+  test("IncarnationMismatchType.values contains all sealed trait variants") {
+    // Test plan: Verify that IncarnationMismatchType.values stays in sync with the sealed
+    // trait. Use reflection to enumerate every case object extending the trait and assert
+    // that values contains exactly that set, so a newly added case object that someone
+    // forgets to register in values will fail this test.
+    assert(
+      IncarnationMismatchType.values.toSet ==
+      getAllVariantsOfEnumLikeTrait[IncarnationMismatchType]
+    )
   }
 }
 

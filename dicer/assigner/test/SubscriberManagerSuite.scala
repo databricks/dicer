@@ -67,7 +67,8 @@ class SubscriberManagerSuite extends DatabricksTest {
       subscriberDebugName = s"test-subscriber-$target",
       timeout = 1.second,
       subscriberData = sliceletData,
-      supportsSerializedAssignment = true
+      supportsSerializedAssignment = true,
+      redirectTokenOpt = None
     )
     val cell: AssignmentValueCell = new AssignmentValueCell
     // The Future will not complete because no assignment is published to the cell. Failures

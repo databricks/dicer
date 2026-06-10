@@ -13,13 +13,15 @@ class InternalTargetConfigMapSuite extends DatabricksTest {
 
   private val AWS_US_WEST_2_SCOPE = ConfigScope("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01")
 
-  test("InternalTargetConfigMap.contains checks existence of configs correctly") {
-    // Test plain: Verify that [[InternalTargetConfigMap]]'s `contains` method returns whether
-    // it contains the config for a target.
+  test(
+    "InternalTargetConfigMap.get returns Some for targets that exist in config " +
+    "directory and None for those that don't"
+  ) {
+    // Test plan: Verify that [[InternalTargetConfigMap]]'s `get` method returns the config for a
+    // target if present in the config directory and `None` otherwise.
     // Check this by creating InternalTargetConfigMap from a directory with target config files and
-    // a directory with advanced target config files, verifying that `contains` returns `true` for
-    // the targets that exists under these directories and returns `false` for the non existing
-    // ones.
+    // a directory with advanced target config files, verifying that `get` returns `Some` for the
+    // targets that exist under these directories and returns `None` for the non existing ones.
     val targetConfigMap =
       InternalTargetConfigMap.create(
         Some(AWS_US_WEST_2_SCOPE),
@@ -34,10 +36,13 @@ class InternalTargetConfigMapSuite extends DatabricksTest {
     assert(targetConfigMap.get(nonExistentTargetName).isEmpty)
   }
 
-  test("InternalTargetConfigMap fallbacks to default configuration for test environment") {
-    // Test plan: Create InternalTargetConfigMap.forTest with a specified map of configuration.
-    // Expect it to load configuration from the specified map and fallback to default configuration
-    // for targets that do not exist.
+  test(
+    "InternalTargetConfigMap.create from a map returns Some for supplied configs " +
+    "and None otherwise"
+  ) {
+    // Test plan: Verify that an InternalTargetConfigMap built from an explicit
+    // (TargetName -> InternalTargetConfig) map returns the supplied config via `get` for known
+    // targets, and returns `None` for targets absent from the map.
 
     // Create custom target config, something other than default.
     val customTargetConfig = InternalTargetConfig.forTest.DEFAULT

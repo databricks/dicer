@@ -31,7 +31,9 @@ object DicerClientFeatureRolloutScope {
   // Matches "region:{environment}/{cloud_provider}/{regulatory_domain}/{cloud_provider_region}".
   // Each segment is non-empty and contains no slashes. See <internal link> for the authoritative
   // format. Used with Matcher.matches() which anchors to the full input; do not use with find().
+  // LINT.IfChange
   private val REGION_URI_PATTERN: Regex = "region:[a-z0-9-]+/[a-z0-9-]+/[a-z0-9-]+/[a-z0-9-]+".r
+  // LINT.ThenChange(dicer/rust/client/feature-rollouts/src/dicer_client_feature_rollout_scope.rs)
 
   /** Returns a [[DicerClientFeatureRolloutScope]] from `proto`. */
   @throws[IllegalArgumentException]("if regionUri is not set in proto")

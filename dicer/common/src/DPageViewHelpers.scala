@@ -16,7 +16,7 @@ import com.databricks.dicer.friend.Squid
 /**
  * Pure helper functions that convert Dicer domain objects to DPage view protos.
  *
- * These conversions are shared across Dicer components (assigner, storelet, etc.) and are
+ * These conversions are shared across Dicer components (assigner, slicelet, etc.) and are
  * intentionally kept free of component-specific logic.
  */
 object DPageViewHelpers {
@@ -40,7 +40,8 @@ object DPageViewHelpers {
    * @param assignmentOpt the assignment to convert, or None if no assignment exists
    * @param reportedLoadPerResourceOpt the reported load per resource to include in the resource
    *                                   table
-   * @param reportedLoadPerSliceOpt overrides the recorded load per slice in the slice table
+   * @param reportedLoadPerSliceOpt Local per-slice load values to prefer over the assignment's
+   *                                recorded primary rate load.
    * @param topKeysOpt the top keys to include in each slice's topKeys list
    */
   def getAssignmentViewProto(

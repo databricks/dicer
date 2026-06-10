@@ -53,29 +53,73 @@ object AssignerMain extends DatabricksMain(Project.DicerAssigner) {
    *   code depending on the result of the initialization.
    */
   override def wrappedMain(args: Array[String]): Unit = {
-    val statusCodeOpt: Option[Int] = wrappedMainInternal(new DicerAssignerConf(rawConfig))
-    for (statusCode: Int <- statusCodeOpt) {
-      // Only exit eagerly when wrappedMainInternal returns a non-zero value. Under normal
-      // circumstances, we want the DatabricksMain.main implementation to handle the exit.
-      sys.exit(statusCode)
+    val conf: DicerAssignerConf = new DicerAssignerConf(rawConfig)
+    wrappedMainInternal(conf) match {
+      case Right(statusCode: Int) =>
+        // Only exit eagerly when wrappedMainInternal returns a status code. Under normal
+        // circumstances, we want the DatabricksMain.main implementation to handle the exit.
+        sys.exit(statusCode)
+      case _ =>
     }
   }
 
   /**
-   * See [[wrappedMain]]. Extracted into its own method for testing. Optionally returns a status
-   * code to indicate failure, in which case the caller should [[sys.exit()]] with that status code.
+   * See [[wrappedMain]]. Extracted into its own method for testing. Reads the env-driven inputs
+   * (NAMESPACE / APP_NAME), builds the production
+   * [[KubernetesMembershipChecker.DefaultFactory]] from them, and dispatches to
+   * [[wrappedMainInternalWithCheckerFactory]]. Tests that need to inject a fake/no-op checker
+   * factory should call [[wrappedMainInternalWithCheckerFactory]] directly.
    */
-  private def wrappedMainInternal(conf: DicerAssignerConf): Option[Int] = {
+  private def wrappedMainInternal(conf: DicerAssignerConf): Either[Assigner, Int] = {
+    // Build the membership checker factory from environment variables. Always use DefaultFactory
+    // so that missing env vars surface through the Assigner's error handling and monitoring
+    // (initResultGauge) rather than silently disabling the checker via NoOpFactory.
+    val membershipCheckerNamespace: String = Option(System.getenv("NAMESPACE")).getOrElse("")
+    val membershipCheckerAppName: String = Option(System.getenv("APP_NAME")).getOrElse("")
+    if (membershipCheckerNamespace.isEmpty || membershipCheckerAppName.isEmpty) {
+      prefixLogger.warn(
+        s"Membership checker env vars not set: NAMESPACE='$membershipCheckerNamespace', " +
+        s"APP_NAME='$membershipCheckerAppName'. Checker creation will fail gracefully."
+      )
+    }
+    val membershipCheckerFactory: KubernetesMembershipChecker.Factory =
+      KubernetesMembershipChecker.DefaultFactory.create(
+        membershipCheckerNamespace,
+        membershipCheckerAppName,
+        pollingInterval = KubernetesMembershipChecker.DEFAULT_POLLING_INTERVAL,
+        rpcPort = conf.dicerAssignerRpcPort
+      )
+    wrappedMainInternalWithCheckerFactory(conf, membershipCheckerFactory)
+  }
+
+  /**
+   * See [[wrappedMainInternal]]. Extracted into its own method for testing. Returns [[Left]]
+   * with the [[Assigner]] when starting the assigner service, or [[Right]] with a status code
+   * to indicate failure in bootstrapper mode, in which case the caller should [[sys.exit()]]
+   * with that code.
+   *
+   * @param conf the assigner configuration.
+   * @param membershipCheckerFactory factory for creating a [[KubernetesMembershipChecker]] that
+   *                                 discovers assigner pods via the Kubernetes API. In production,
+   *                                 this is a [[KubernetesMembershipChecker.DefaultFactory]]; in
+   *                                 tests, a no-op or fake-backed factory.
+   */
+  private def wrappedMainInternalWithCheckerFactory(
+      conf: DicerAssignerConf,
+      membershipCheckerFactory: KubernetesMembershipChecker.Factory
+  ): Either[Assigner, Int] = {
     conf.executionMode match {
       case DicerAssignerConf.ExecutionMode.ASSIGNER_SERVICE =>
-        startAssignerService(conf)
-        None
+        Left(startAssignerService(conf, membershipCheckerFactory))
       case DicerAssignerConf.ExecutionMode.ETCD_BOOTSTRAPPER =>
-        Some(bootstrapAllEtcdNamespacesBlocking(conf).id)
+        Right(bootstrapPreferredAssignerEtcdNamespaceBlocking(conf).value)
     }
   }
 
-  private def startAssignerService(conf: DicerAssignerConf): Unit = {
+  private def startAssignerService(
+      conf: DicerAssignerConf,
+      membershipCheckerFactory: KubernetesMembershipChecker.Factory
+  ): Assigner = {
     // The main function factored in such a way that startServer can be called from here and tests.
 
     // Initialize and start the dynamic target config provider.
@@ -98,25 +142,6 @@ object AssignerMain extends DatabricksMain(Project.DicerAssigner) {
     )
     val hostName: String = Option(System.getenv("POD_IP"))
       .getOrElse(throw new IllegalStateException("Environment variable POD_IP is not set."))
-
-    // Build the membership checker factory from environment variables. Always use DefaultFactory
-    // so that missing env vars surface through the Assigner's error handling and monitoring
-    // (initResultGauge) rather than silently disabling the checker via NoOpFactory.
-    val membershipCheckerNamespace: String = Option(System.getenv("NAMESPACE")).getOrElse("")
-    val membershipCheckerAppName: String = Option(System.getenv("APP_NAME")).getOrElse("")
-    if (membershipCheckerNamespace.isEmpty || membershipCheckerAppName.isEmpty) {
-      prefixLogger.warn(
-        s"Membership checker env vars not set: NAMESPACE='$membershipCheckerNamespace', " +
-        s"APP_NAME='$membershipCheckerAppName'. Checker creation will fail gracefully."
-      )
-    }
-    val membershipCheckerFactory: KubernetesMembershipChecker.Factory =
-      KubernetesMembershipChecker.DefaultFactory.create(
-        membershipCheckerNamespace,
-        membershipCheckerAppName,
-        pollingInterval = KubernetesMembershipChecker.DEFAULT_POLLING_INTERVAL,
-        rpcPort = conf.dicerAssignerRpcPort
-      )
 
     // Get the cluster URI from the environment. WhereAmIHelper requires the cluster URI to be set
     // in the LOCATION environment variable of the pod. If the cluster URI is not set, the assigner
@@ -163,18 +188,21 @@ object AssignerMain extends DatabricksMain(Project.DicerAssigner) {
   }
 
   /**
-   * Runs the task to initialize version high watermark to the etcd cluster. The etcd cluster is
-   * specified in config "databricks.dicer.assigner.preferredAssigner.etcd.endpoints", and the
-   * high bits of the version high watermark is specified by `conf.storeIncarnation`.
+   * Runs the task to initialize the preferred-assigner version high watermark in etcd. The etcd
+   * cluster is specified in config "databricks.dicer.assigner.preferredAssigner.etcd.endpoints",
+   * and the high bits of the version high watermark are specified by
+   * `conf.preferredAssignerStoreIncarnation`.
    *
-   * After trying to write the initial metadata to the etcd cluster, this function will make the
-   * scala application exit with different exit code, based on the result of the initialization,
-   * so that the bootstrap kubernetes job can act properly (succeed, fail, or retry) based on the
-   * exit code. See specs for [[EtcdBootstrapper.ExitCode]] for more details.
+   * After trying to write the initial metadata to etcd, this function returns an exit code that
+   * the caller propagates to `sys.exit` so the bootstrap kubernetes job can act properly
+   * (succeed, fail, or retry). See specs for [[EtcdBootstrapper.ExitCode]] for more details.
+   *
+   * @param conf The assigner configuration supplying etcd endpoints, TLS options, and the
+   *             preferred-assigner store incarnation used to initialize the watermark.
    */
-  private def bootstrapAllEtcdNamespacesBlocking(
-      conf: DicerAssignerConf): EtcdBootstrapper.ExitCode.ExitCode = {
-    val preferredAssignerBootstrapRequest = EtcdBootstrapper.BootstrapRequest(
+  private def bootstrapPreferredAssignerEtcdNamespaceBlocking(
+      conf: DicerAssignerConf): EtcdBootstrapper.ExitCode = {
+    val bootstrapRequest: EtcdBootstrapper.BootstrapRequest = EtcdBootstrapper.BootstrapRequest(
       client = EtcdClient.create(
         conf.preferredAssignerEtcdEndpoints,
         if (conf.preferredAssignerEtcdSslEnabled) conf.dicerTlsOptions else None,
@@ -182,23 +210,18 @@ object AssignerMain extends DatabricksMain(Project.DicerAssigner) {
       ),
       incarnation = Incarnation(conf.preferredAssignerStoreIncarnation)
     )
-    val durableAssignmentsBootstrapRequest = EtcdBootstrapper.BootstrapRequest(
-      client = EtcdClient.create(
-        conf.preferredAssignerEtcdEndpoints,
-        if (conf.preferredAssignerEtcdSslEnabled) conf.dicerTlsOptions else None,
-        EtcdClient.Config(Assigner.getAssignmentsEtcdNamespace(conf))
-      ),
-      incarnation = conf.storeIncarnation
-    )
-
-    EtcdBootstrapper.bootstrapEtcdBlocking(
-      Seq(preferredAssignerBootstrapRequest, durableAssignmentsBootstrapRequest)
-    )
+    EtcdBootstrapper.bootstrapEtcdBlocking(Seq(bootstrapRequest))
   }
 
   private[assigner] object staticForTest {
-    def wrappedMainInternal(conf: DicerAssignerConf): Option[Int] = {
+    def wrappedMainInternal(conf: DicerAssignerConf): Either[Assigner, Int] = {
       AssignerMain.wrappedMainInternal(conf)
+    }
+    def wrappedMainInternalWithCheckerFactory(
+        conf: DicerAssignerConf,
+        membershipCheckerFactory: KubernetesMembershipChecker.Factory
+    ): Either[Assigner, Int] = {
+      AssignerMain.wrappedMainInternalWithCheckerFactory(conf, membershipCheckerFactory)
     }
   }
 }

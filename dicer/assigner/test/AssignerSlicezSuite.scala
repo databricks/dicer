@@ -11,6 +11,7 @@ import com.databricks.api.proto.dicer.assigner.{
   AssignerSliceViewP,
   AssignerTargetViewP,
   ChurnViewP,
+  ConsistentHashingStateViewP,
   PreferredAssignerStateViewP
 }
 import com.databricks.api.proto.dicer.dpage.{
@@ -20,7 +21,6 @@ import com.databricks.api.proto.dicer.dpage.{
   SliceViewP
 }
 import com.databricks.dicer.assigner.AssignerTargetSlicezData.TargetConfigMethod
-import com.databricks.dicer.assigner.AssignerTargetSlicezData.TargetConfigMethod.TargetConfigMethod
 import com.databricks.dicer.assigner.AssignmentGenerator.GeneratorTargetSlicezData
 import com.databricks.dicer.assigner.AssignmentStats.AssignmentChangeStats
 
@@ -565,6 +565,124 @@ class AssignerSlicezSuite extends DatabricksTest {
     assert(result.assignerInfo.isDefined)
     assert(result.preferredAssignerState.isDefined)
     assert(result.targets.isEmpty)
+  }
+
+  test("Consistent-hashing state renders as HTML and view proto when populated") {
+    // Test plan: Verify that an AssignerSlicezData carrying a non-empty chState renders the
+    // CH UUID, eligible pod count, and connection health on the ZPage HTML and emits the
+    // corresponding ConsistentHashingStateViewP on the view proto. Covers the populated path
+    // (chState=Some) only; the chState=None placeholder is exercised by every other test in
+    // this suite via the default-None constructor.
+    val localInfo: AssignerInfo =
+      AssignerInfo(UUID.randomUUID(), new java.net.URI("http://localhost:11111"))
+    val preferredInfo: AssignerInfo =
+      AssignerInfo(UUID.randomUUID(), new java.net.URI("http://localhost:22222"))
+    val chState: ConsistentHashingState = ConsistentHashingState(
+      localAssignerInfo = localInfo,
+      preferredAssignerInfoOpt = Some(preferredInfo),
+      eligiblePodCount = 3,
+      k8sConnectionHealth = ConsistentHashingState.K8sConnectionHealth.Healthy
+    )
+    val data: AssignerSlicezData = AssignerSlicezData(
+      FAKE_ASSIGNER_INFO,
+      PreferredAssignerValue.NoAssigner(GENERATION),
+      Seq.empty,
+      chState = Some(chState)
+    )
+
+    val html: String = data.getHtml.render
+    assert(html.contains("<h4>Consistent Hash based Preferred Assigner</h4>"))
+    assert(
+      html.contains(s"<th>Local assigner</th><td>${localInfo.uuid} (${localInfo.uri})</td>")
+    )
+    assert(
+      html.contains(
+        s"<th>Preferred assigner</th><td>${preferredInfo.uuid} (${preferredInfo.uri})</td>"
+      )
+    )
+    assert(html.contains("<th>Eligible pod count</th><td>3</td>"))
+    assert(html.contains("<th>K8s connection health</th><td>HEALTHY</td>"))
+
+    val viewProto: AssignerSliceViewP = data.toViewProto
+    assert(viewProto.consistentHashing.isDefined)
+    val chProto: ConsistentHashingStateViewP = viewProto.consistentHashing.get
+    assert(chProto.localAssigner.exists(_.uuid.contains(localInfo.uuid.toString)))
+    assert(chProto.localAssigner.exists(_.uri.contains(localInfo.uri.toString)))
+    assert(chProto.preferredAssigner.exists(_.uuid.contains(preferredInfo.uuid.toString)))
+    assert(chProto.preferredAssigner.exists(_.uri.contains(preferredInfo.uri.toString)))
+    assert(chProto.eligiblePodCount.contains(3))
+    assert(
+      chProto.k8SConnectionHealth.contains(ConsistentHashingStateViewP.K8sConnectionHealthP.HEALTHY)
+    )
+  }
+
+  test("Consistent-hashing state omitted from view proto when chState is empty") {
+    // Test plan: Verify that an AssignerSlicezData with chState=None (the default) produces a
+    // ConsistentHashingStateViewP-less proto and the ZPage HTML renders the "not active"
+    // placeholder.
+    val data: AssignerSlicezData = AssignerSlicezData(
+      FAKE_ASSIGNER_INFO,
+      PreferredAssignerValue.NoAssigner(GENERATION),
+      Seq.empty
+    )
+
+    val html: String = data.getHtml.render
+    assert(html.contains("Consistent hash based preferred assigner: not active"))
+
+    val viewProto: AssignerSliceViewP = data.toViewProto
+    assert(viewProto.consistentHashing.isEmpty)
+  }
+
+  test("Migration mode renders as HTML and view proto when populated") {
+    // Test plan: Verify that an AssignerSlicezData carrying a non-empty migrationModeOpt
+    // renders the mode's display name on the ZPage HTML and emits the corresponding
+    // PreferredAssignerMigrationModeP on the view proto. Covers both supported migration
+    // modes so the proto mapping is exercised end-to-end.
+    val shadowData: AssignerSlicezData = AssignerSlicezData(
+      FAKE_ASSIGNER_INFO,
+      PreferredAssignerValue.NoAssigner(GENERATION),
+      Seq.empty,
+      migrationModeOpt = Some(MigrationMode.ShadowMode)
+    )
+    val shadowHtml: String = shadowData.getHtml.render
+    assert(shadowHtml.contains("<h4>Migration Mode</h4>"))
+    assert(shadowHtml.contains("<th>Mode</th><td>Shadow (etcd authoritative)</td>"))
+    assertResult(
+      Some(AssignerSliceViewP.PreferredAssignerMigrationModeP.SHADOW)
+    )(shadowData.toViewProto.migrationMode)
+
+    val nominatedData: AssignerSlicezData = AssignerSlicezData(
+      FAKE_ASSIGNER_INFO,
+      PreferredAssignerValue.NoAssigner(GENERATION),
+      Seq.empty,
+      migrationModeOpt = Some(MigrationMode.ConsistentHashingNominatedEtcdReadMode)
+    )
+    val nominatedHtml: String = nominatedData.getHtml.render
+    assert(
+      nominatedHtml.contains(
+        "<th>Mode</th><td>Consistent-hashing nominates / etcd reads</td>"
+      )
+    )
+    assertResult(
+      Some(AssignerSliceViewP.PreferredAssignerMigrationModeP.CH_NOMINATED_ETCD_READ)
+    )(nominatedData.toViewProto.migrationMode)
+  }
+
+  test("Migration mode omitted from view proto when migrationModeOpt is empty") {
+    // Test plan: Verify that an AssignerSlicezData with migrationModeOpt=None (the default)
+    // produces a view proto with no migration_mode field and the ZPage HTML renders the
+    // "not active" placeholder.
+    val data: AssignerSlicezData = AssignerSlicezData(
+      FAKE_ASSIGNER_INFO,
+      PreferredAssignerValue.NoAssigner(GENERATION),
+      Seq.empty
+    )
+
+    val html: String = data.getHtml.render
+    assert(html.contains("Migration driver: not active"))
+
+    val viewProto: AssignerSliceViewP = data.toViewProto
+    assert(viewProto.migrationMode.isEmpty)
   }
 
   test("toJson returns valid JSON containing expected fields") {

@@ -1,5 +1,7 @@
 package com.databricks.dicer.assigner
 
+import java.net.URI
+
 import com.databricks.api.proto.dicer.assigner.PreferredAssignerSpecP.{NoneP, Value}
 import com.databricks.api.proto.dicer.assigner.{
   AssignerInfoP,
@@ -9,10 +11,10 @@ import com.databricks.api.proto.dicer.assigner.{
   PreferredAssignerValueP
 }
 import com.databricks.caching.util.WatchValueCell
-import com.databricks.dicer.common.{Generation, Redirect}
+import com.databricks.dicer.common.Generation
 
 /**
- * The preferred assigner value, which can be [[SomeAssigner]], [[NoAssigner]], or [[Disabled]].
+ * The preferred assigner value, which can be [[SomeAssigner]], [[NoAssigner]], or [[ModeDisabled]].
  *
  * Note that it is possible for no assigner to be preferred, for example when the previous preferred
  * assigner "abdicated" after receiving a termination signal, or for the preferred assigner
@@ -183,12 +185,16 @@ object AssignerRole {
  * When the assigner is preferred, it always generates assignments. When the assigner is not
  * preferred, it redirects the client to the preferred assigner if there is one, or a random
  * assigner if there is no preferred assigner.
+ *
+ * @param preferredAssignerUriOpt URI of the current preferred assigner, or `None` when no
+ *                                preferred assigner is currently known (no current preferred,
+ *                                or PA mode is disabled).
  */
 // TODO(<internal bug>): Consider renaming this to reduce confusion with other Config types which
 // typically encapsulate bundles of human-configurable parameters supplied at service creation time.
 case class PreferredAssignerConfig private (
     role: AssignerRole,
-    redirect: Redirect,
+    preferredAssignerUriOpt: Option[URI],
     knownPreferredAssigner: PreferredAssignerValue) {}
 
 object PreferredAssignerConfig {
@@ -207,21 +213,21 @@ object PreferredAssignerConfig {
           else AssignerRole.Standby
         PreferredAssignerConfig(
           role,
-          Redirect(Some(assignerInfo.uri)),
+          preferredAssignerUriOpt = Some(assignerInfo.uri),
           preferredAssignerValue
         )
       case PreferredAssignerValue.NoAssigner(_) =>
         PreferredAssignerConfig(
           AssignerRole.Standby,
-          Redirect.EMPTY,
+          preferredAssignerUriOpt = None,
           preferredAssignerValue
         )
       case PreferredAssignerValue.ModeDisabled(_) =>
         // When PA is disabled, we always act as the preferred and redirect clients to a random
-        // Assigner via Redirect.EMPTY.
+        // Assigner via an empty URI.
         PreferredAssignerConfig(
           AssignerRole.Preferred,
-          Redirect.EMPTY,
+          preferredAssignerUriOpt = None,
           preferredAssignerValue
         )
     }

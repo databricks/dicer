@@ -433,6 +433,103 @@ to_diff_with_higher_diff_generation_test_case: {
   expected_error: "Diff generation 2#43 (1970-01-01T00:00:00.043Z) must be less than or equal to assignment generation 2#42 (1970-01-01T00:00:00.042Z)"
 }
 
+assigned_resources_test_cases: [
+  {
+    assignment: {
+      generation: { incarnation: 4 number: 67 }
+      slice_assignments: [
+        {
+          slice: { low_inclusive: "" high_exclusive: "Dori" }
+          generation: { incarnation: 4 number: 34 }
+          resources: ["Pod2", "Pod3", "Pod101", "Pod102"]
+        },
+        {
+          slice: { low_inclusive: "Dori" high_exclusive: "Fili" }
+          generation: { incarnation: 4 number: 24 }
+          resources: ["Pod0", "Pod1"]
+        },
+        {
+          slice: { low_inclusive: "Fili" high_exclusive: "Kili" }
+          generation: { incarnation: 4 number: 45 }
+          resources: ["Pod1", "Pod103"]
+        },
+        {
+          slice: { low_inclusive: "Kili" high_exclusive: "Nori" }
+          generation: { incarnation: 4 number: 67 }
+          resources: ["Pod2"]
+        },
+        {
+          slice: { low_inclusive: "Nori" }
+          generation: { incarnation: 4 number: 34 }
+          resources: ["Pod3", "Pod100"]
+        }
+      ]
+    }
+    expected_assigned_resources: [
+      "Pod0",
+      "Pod1",
+      "Pod2",
+      "Pod3",
+      "Pod100",
+      "Pod101",
+      "Pod102",
+      "Pod103"
+    ]
+  },
+  {
+    assignment: {
+      generation: { incarnation: 3 number: 67 }
+      slice_assignments: [
+        {
+          slice: { low_inclusive: "" high_exclusive: "Dori" }
+          generation: { incarnation: 3 number: 34 }
+          resources: ["Pod2"]
+        },
+        {
+          slice: { low_inclusive: "Dori" high_exclusive: "Kili" }
+          generation: { incarnation: 3 number: 45 }
+          resources: ["Pod1"]
+        },
+        {
+          slice: { low_inclusive: "Kili" high_exclusive: "Nori" }
+          generation: { incarnation: 3 number: 67 }
+          resources: ["Pod2"]
+        },
+        {
+          slice: { low_inclusive: "Nori" }
+          generation: { incarnation: 3 number: 34 }
+          resources: ["Pod3", "Pod4", "Pod5", "Pod6"]
+        }
+      ]
+    }
+    expected_assigned_resources: ["Pod1", "Pod2", "Pod3", "Pod4", "Pod5", "Pod6"]
+  },
+  {
+    assignment: {
+      is_consistent: true
+      generation: { incarnation: 2 number: 81 }
+      slice_assignments: [
+        {
+          slice: { low_inclusive: "" high_exclusive: "Dori" }
+          generation: { incarnation: 2 number: 55 }
+          resources: ["Pod2023"]
+        },
+        {
+          slice: { low_inclusive: "Dori" high_exclusive: "Kili" }
+          generation: { incarnation: 2 number: 45 }
+          resources: ["Pod2024", "Pod2025"]
+        },
+        {
+          slice: { low_inclusive: "Kili" }
+          generation: { incarnation: 2 number: 67 }
+          resources: ["Pod2000", "Pod2027"]
+        }
+      ]
+    }
+    expected_assigned_resources: ["Pod2000", "Pod2023", "Pod2024", "Pod2025", "Pod2027"]
+  }
+]
+
 is_assigned_key_test_cases: [
   {
     assignment: {

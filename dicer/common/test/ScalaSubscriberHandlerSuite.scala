@@ -28,7 +28,7 @@ class ScalaSubscriberHandlerSuite extends SubscriberHandlerSuiteBase {
       sec: FakeSequentialExecutionContext,
       handler: SubscriberHandler,
       cell: AssignmentValueCell)
-      extends SubscriberHandlerDriver {
+      extends SubscriberHandlerHarness {
 
     private val lock = new ReentrantLock()
 
@@ -45,6 +45,11 @@ class ScalaSubscriberHandlerSuite extends SubscriberHandlerSuiteBase {
         redirectOpt: Option[Redirect]): Future[ClientResponseP] = {
       val redirect = redirectOpt.getOrElse(Redirect.EMPTY)
       handler.handleWatch(createRPCContext(), request, cell, redirect)
+    }
+
+    override def getSlicezData()
+        : (Seq[SliceletSubscriberSlicezData], Seq[ClerkSubscriberSlicezData]) = {
+      TestUtils.awaitResult(handler.getSlicezData, Duration.Inf)
     }
 
     override def advanceTime(duration: FiniteDuration): Unit = {
@@ -93,7 +98,7 @@ class ScalaSubscriberHandlerSuite extends SubscriberHandlerSuiteBase {
 
   override protected def createDriver(
       handlerLocation: Location,
-      handlerTarget: Target): SubscriberHandlerDriver = {
+      handlerTarget: Target): SubscriberHandlerHarness = {
     val sec = FakeSequentialExecutionContext.create(getSafeName)
     val cell = new AssignmentValueCell
     val handler = new SubscriberHandler(
@@ -474,7 +479,10 @@ class ScalaSubscriberHandlerSuite extends SubscriberHandlerSuiteBase {
     val request = createClientRequest(Generation.EMPTY, ClerkData, "subscriber1")
     val redirectURI = URI.create("example-uri")
     val fut: Future[ClientResponseP] =
-      driver.handleWatch(request, redirectOpt = Some(Redirect(Some(redirectURI))))
+      driver.handleWatch(
+        request,
+        redirectOpt = Some(Redirect(Some(redirectURI), redirectTokenOpt = None))
+      )
 
     val response = ClientResponse.fromProto(TestUtils.awaitResult(fut, Duration.Inf))
     assert(response.redirect.addressOpt.get == redirectURI)

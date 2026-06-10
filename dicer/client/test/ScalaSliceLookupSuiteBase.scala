@@ -66,7 +66,7 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
       ),
       testTarget: Target = target,
       clientIdOpt: Option[UUID] = Some(TEST_CLIENT_UUID))(
-      func: (SliceLookupDriver, LoggingStreamCallback[Assignment]) => Unit): Unit = {
+      func: (SliceLookupHarness, LoggingStreamCallback[Assignment]) => Unit): Unit = {
     fakeS2SProxy.setFallbackUpstreamPorts(Vector(testAssigner.localUri.getPort))
     val subscriberDebugName: String = "test-clerk"
     val config: InternalClientConfig =
@@ -74,14 +74,14 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
         ClientType.Clerk,
         portToConnectTo(testAssigner),
         watchStubCacheTime,
+        subscriberDebugName = subscriberDebugName,
         testTarget = testTarget,
         clientIdOpt = clientIdOpt
       )
     val lookup =
       SliceLookup.createUnstarted(
         sec,
-        config.sliceLookupConfig,
-        subscriberDebugName,
+        config,
         createTestLogger(ClientType.Clerk, protoLoggerConf, subscriberDebugName),
         serviceBuilderOpt = None
       )
@@ -93,10 +93,10 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
           callback.executeOnSuccess(assignment)
         }
       })
-    val driver = new ScalaSliceLookupDriver(lookup, () => ClerkData)
-    driver.start()
+    val harness = new ScalaSliceLookupHarness(lookup, () => ClerkData)
+    harness.start()
     try {
-      func(driver, callback)
+      func(harness, callback)
     } finally {
       lookup.cancel()
       watchHandle.cancel(Status.CANCELLED.withDescription("cleaning up after withLookup"))
@@ -107,19 +107,19 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
       testAssigner: TestAssigner,
       clientType: ClientType,
       watchStubCacheTime: FiniteDuration = 20.seconds,
-      sec: SequentialExecutionContext = sec): SliceLookupDriver = {
+      sec: SequentialExecutionContext = sec): SliceLookupHarness = {
     val subscriberDebugName: String = "test-clerk"
     val config: InternalClientConfig =
       createInternalClientConfig(
         clientType,
         portToConnectTo(testAssigner),
-        watchStubCacheTime
+        watchStubCacheTime,
+        subscriberDebugName = subscriberDebugName
       )
     val lookup =
       SliceLookup.createUnstarted(
         sec,
-        config.sliceLookupConfig,
-        subscriberDebugName,
+        config,
         createTestLogger(
           clientType,
           TestClientUtils.createTestProtoLoggerConf(sampleFraction = 0.0),
@@ -127,7 +127,7 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
         ),
         serviceBuilderOpt = None
       )
-    new ScalaSliceLookupDriver(lookup, () => ClerkData)
+    new ScalaSliceLookupHarness(lookup, () => ClerkData)
   }
 
   override protected def readPrometheusMetric(
@@ -137,25 +137,9 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
   }
 
   // This test case is not exercised for Rust, because the Rust implementation currently (as of
-  // March 2025) does not have z-pages.
-  test("getSlicezData returns appropriate watch address") {
-    // Test plan: Verify that the `watchAddress` from `lookup.getSlicezData` works as expected with
-    // and without EDS. Without EDS, it should be the address of the Assigner. With EDS, it should
-    // indicate EDS is enabled with a `eds://` address. But when the lookup is redirected, it should
-    // show the redirected address.
-    val assigner1: TestAssigner = multiAssignerTestEnv.testAssigners(0)
-
-    withLookup(assigner1) { (lookup: SliceLookupDriver, _: LoggingStreamCallback[Assignment]) =>
-      val data: ClientTargetSlicezData = lookup.getSlicezData
-      val scheme: String = if (useSsl) "https" else "http"
-      assert(
-        data.watchAddress.toString.contains(s"$scheme://localhost:${portToConnectTo(assigner1)}")
-      )
-    }
-  }
-
-  // This test case is not exercised for Rust, because the Rust implementation currently (as of
-  // March 2025) does not have z-pages.
+  // April 2026) does not have z-pages.
+  // TODO(<internal bug>): Move this test to SliceLookupSuiteBase.scala once Rust getSlicezData is fully
+  //  implemented in Rust.
   test("ClientTargetSlicezData is correctly generated based on the SliceLookup") {
     // Test plan: Ensure that the values of ClientTargetSlicezData are correctly generated from
     // SliceLookup. To verify this, populate the SliceLookup with clerk and slicelet data with
@@ -203,13 +187,13 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
     val clerkConfig: InternalClientConfig = createInternalClientConfig(
       ClientType.Clerk,
       portToConnectTo(singleAssignerTestEnv.testAssigner),
-      watchStubCacheTime = 20.seconds
+      watchStubCacheTime = 20.seconds,
+      subscriberDebugName = clerkDebugName
     )
     val clerkSliceLookupConfig: SliceLookupConfig = clerkConfig.sliceLookupConfig
     val clerkSliceLookup = SliceLookup.createUnstarted(
       fakeSec,
-      clerkSliceLookupConfig,
-      clerkDebugName,
+      clerkConfig,
       createTestLogger(
         ClientType.Clerk,
         TestClientUtils.createTestProtoLoggerConf(sampleFraction = 0.0),
@@ -219,12 +203,13 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
     )
 
     clerkSliceLookup.start(() => ClerkData)
-    val slicelet1SliceLookupConfig: SliceLookupConfig =
-      clerkSliceLookupConfig.copy(clientType = ClientType.Slicelet)
+    val slicelet1Config: InternalClientConfig = clerkConfig.copy(
+      sliceLookupConfig = clerkSliceLookupConfig.copy(clientType = ClientType.Slicelet),
+      subscriberDebugName = slicelet1DebugName
+    )
     val slicelet1SliceLookup = SliceLookup.createUnstarted(
       fakeSec,
-      slicelet1SliceLookupConfig,
-      slicelet1DebugName,
+      slicelet1Config,
       createTestLogger(
         ClientType.Slicelet,
         TestClientUtils.createTestProtoLoggerConf(sampleFraction = 0.0),
@@ -312,12 +297,13 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
     )
 
     // Start slicelet2's SliceLookup.
-    val slicelet2SliceLookupConfig: SliceLookupConfig =
-      clerkSliceLookupConfig.copy(clientType = ClientType.Slicelet)
+    val slicelet2Config: InternalClientConfig = clerkConfig.copy(
+      sliceLookupConfig = clerkSliceLookupConfig.copy(clientType = ClientType.Slicelet),
+      subscriberDebugName = slicelet2DebugName
+    )
     val slicelet2SliceLookup = SliceLookup.createUnstarted(
       fakeSec,
-      slicelet2SliceLookupConfig,
-      slicelet2DebugName,
+      slicelet2Config,
       createTestLogger(
         ClientType.Slicelet,
         TestClientUtils.createTestProtoLoggerConf(sampleFraction = 0.0),
@@ -383,8 +369,10 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
     slicelet2SliceLookup.cancel()
   }
 
-  // This test case is not exercised for Rust, because the Rust implementation currently (as of
-  // Oct 2025) does not have z-pages.
+  // This is Scala-only: Scala's SliceLookup.start/cancel owns ClientSlicez registration, so this
+  // test can assert that lifecycle directly on SliceLookup. In Rust, ClientSlicez registration is
+  // performed by the owning Clerk/Slicelet. The cross-language registration coverage is covered
+  // in the Client DPage integration tests.
   test("SliceLookup ClientSlicez.register") {
     // Test plan: Verify that SliceLookup correctly registers to the ClientSlicez upon start, and
     // unregisters upon cancel. Verify it by creating an unstarted SliceLookup, checking it's not
@@ -396,12 +384,12 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
     val config: InternalClientConfig = createInternalClientConfig(
       ClientType.Clerk,
       portToConnectTo(singleAssignerTestEnv.testAssigner),
-      watchStubCacheTime = 20.seconds
+      watchStubCacheTime = 20.seconds,
+      subscriberDebugName = subscriberDebugName
     )
     val lookup: SliceLookup = SliceLookup.createUnstarted(
       sec,
-      config.sliceLookupConfig,
-      subscriberDebugName,
+      config,
       createTestLogger(
         ClientType.Clerk,
         TestClientUtils.createTestProtoLoggerConf(sampleFraction = 0.0),
@@ -449,7 +437,7 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
     // Test plan: Verify that calling start() multiple times is safe and only the first call
     // has any effect. The lookup should continue to work correctly after multiple start() calls.
 
-    val lookup: SliceLookupDriver = createUnstartedSliceLookup(
+    val lookup: SliceLookupHarness = createUnstartedSliceLookup(
       singleAssignerTestEnv.testAssigner,
       ClientType.Clerk
     )

@@ -1,0 +1,301 @@
+# proto-file: dicer/common/test/proto/test_data.proto
+# proto-message: DpageViewHelpersTestDataP
+
+generation_to_view_proto_test_cases: [
+  {
+    description: "populates incarnation, number, and timestamp string"
+    input: { incarnation: 42 number: 639000 } # 10 minutes and 39 seconds after the Unix epoch
+    expected_output: {
+      incarnation: 42
+      number: 639000
+      timestamp_str: "1970-01-01T00:10:39Z"
+    }
+  },
+  {
+    description: "generation number zero"
+    input: { incarnation: 42 number: 0 }
+    expected_output: {
+      incarnation: 42
+      number: 0
+      timestamp_str: "1970-01-01T00:00:00Z"
+    }
+  }
+]
+
+get_assignment_view_proto_test_cases: [
+  {
+    description: "empty assignment"
+    expected_output: {}
+  },
+  {
+    description: "basic assignment metadata, resources, slices and no reported slice loads"
+    input: {
+      assignment: {
+        generation: { incarnation: 42 number: 639000 }
+        slice_assignments: [
+          {
+            slice: { low_inclusive: "" high_exclusive: "M" }
+            generation: { incarnation: 42 number: 639000 }
+            resources: ["Pod0"]
+          },
+          {
+            slice: { low_inclusive: "M" }
+            generation: { incarnation: 42 number: 639000 }
+            resources: ["Pod0"]
+          }
+        ]
+      }
+    }
+    expected_output: {
+      generation: {
+        incarnation: 42
+        number: 639000
+        timestamp_str: "1970-01-01T00:10:39Z"
+      }
+      is_frozen: false
+      consistency_mode: "Affinity"
+      resources: [
+        {
+          address: "Pod0"
+        }
+      ]
+      slices: [
+        {
+          low_key: "\"\""
+          high_key: "M"
+          generation: { incarnation: 42 number: 639000 timestamp_str: "1970-01-01T00:10:39Z" }
+          resources: ["Pod0"]
+        },
+        {
+          low_key: "M"
+          high_key: "∞"
+          generation: { incarnation: 42 number: 639000 timestamp_str: "1970-01-01T00:10:39Z" }
+          resources: ["Pod0"]
+        }
+      ]
+    }
+  },
+  {
+    description: "assignment with reported resource loads"
+    input: {
+      assignment: {
+        generation: { incarnation: 42 number: 639000 }
+        slice_assignments: [
+          {
+            slice: { low_inclusive: "" high_exclusive: "M" }
+            generation: { incarnation: 42 number: 639000 }
+            resources: ["Pod0"]
+          },
+          {
+            slice: { low_inclusive: "M" }
+            generation: { incarnation: 42 number: 635000 }
+            resources: ["Pod0"]
+          }
+        ]
+      }
+      reported_load_per_resource: [
+        {
+          resource: "Pod0"
+          load: 10.0
+        }
+      ]
+    }
+    expected_output: {
+      generation: {
+        incarnation: 42
+        number: 639000
+        timestamp_str: "1970-01-01T00:10:39Z"
+      }
+      is_frozen: false
+      consistency_mode: "Affinity"
+      resources: [
+        {
+          address: "Pod0"
+          attributed_load: 10.0
+        }
+      ]
+      slices: [
+        {
+          low_key: "\"\""
+          high_key: "M"
+          generation: { incarnation: 42 number: 639000 timestamp_str: "1970-01-01T00:10:39Z" }
+          resources: ["Pod0"]
+        },
+        {
+          low_key: "M"
+          high_key: "∞"
+          generation: { incarnation: 42 number: 635000 timestamp_str: "1970-01-01T00:10:35Z" }
+          resources: ["Pod0"]
+        }
+      ]
+    }
+  },
+  {
+    description: "assignment with top keys"
+    input: {
+      assignment: {
+        generation: { incarnation: 42 number: 639000 }
+        slice_assignments: [
+          {
+            slice: { low_inclusive: "" high_exclusive: "M" }
+            generation: { incarnation: 42 number: 639000 }
+            resources: ["Pod0"]
+          },
+          {
+            slice: { low_inclusive: "M" }
+            generation: { incarnation: 42 number: 635000 }
+            resources: ["Pod0"]
+          }
+        ]
+      }
+      top_keys: [ { key: "A" load: 1.1 }, { key: "N" load: 2.2 } ]
+    }
+    expected_output: {
+      generation: {
+        incarnation: 42
+        number: 639000
+        timestamp_str: "1970-01-01T00:10:39Z"
+      }
+      is_frozen: false
+      consistency_mode: "Affinity"
+      resources: [
+        {
+          address: "Pod0"
+        }
+      ]
+      slices: [
+        {
+          low_key: "\"\""
+          high_key: "M"
+          generation: { incarnation: 42 number: 639000 timestamp_str: "1970-01-01T00:10:39Z" }
+          resources: ["Pod0"]
+          top_keys: [ { key: "A" load: 1.1 } ]
+        },
+        {
+          low_key: "M"
+          high_key: "∞"
+          generation: { incarnation: 42 number: 635000 timestamp_str: "1970-01-01T00:10:35Z" }
+          resources: ["Pod0"]
+          top_keys: [ { key: "N" load: 2.2 } ]
+        }
+      ]
+    }
+  },
+  {
+    description: "assignment with subslice annotation transfer"
+    input: {
+      assignment: {
+        generation: { incarnation: 42 number: 100 }
+        slice_assignments: [
+          {
+            slice: { low_inclusive: "" }
+            generation: { incarnation: 42 number: 100 }
+            resources: ["r0"]
+            subslice_annotations: [
+              {
+                resource: "r0"
+                slice: { low_inclusive: "" }
+                generation_number: 50
+                state_transfer: {
+                  id: 1
+                  from_resource: "r1"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+    expected_output: {
+      generation: {
+        incarnation: 42
+        number: 100
+        timestamp_str: "1970-01-01T00:00:00.100Z"
+      }
+      is_frozen: false
+      consistency_mode: "Affinity"
+      resources: [
+        {
+          address: "r0"
+        }
+      ]
+      slices: [
+        {
+          low_key: "\"\""
+          high_key: "∞"
+          generation: { incarnation: 42 number: 100 timestamp_str: "1970-01-01T00:00:00.100Z" }
+          resources: ["r0"]
+          subslice_annotations: [
+            {
+              resource: "r0"
+              low_key: "\"\""
+              high_key: "∞"
+              continuous_generation_number: 50
+              state_provider_address: "r1"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    description: "assignment with reported slice loads"
+    input: {
+      assignment: {
+        generation: { incarnation: 42 number: 639000 }
+        slice_assignments: [
+          {
+            slice: { low_inclusive: "" high_exclusive: "M" }
+            generation: { incarnation: 42 number: 639000 }
+            resources: ["Pod0"]
+          },
+          {
+            slice: { low_inclusive: "M" }
+            generation: { incarnation: 42 number: 635000 }
+            resources: ["Pod0"]
+          }
+        ]
+      }
+      reported_load_per_slice: [
+        {
+          slice: { low_inclusive: "" high_exclusive: "M" }
+          load: 7.7
+        },
+        {
+          slice: { low_inclusive: "M" }
+          load: 8.8
+        }
+      ]
+    }
+    expected_output: {
+      generation: {
+        incarnation: 42
+        number: 639000
+        timestamp_str: "1970-01-01T00:10:39Z"
+      }
+      is_frozen: false
+      consistency_mode: "Affinity"
+      resources: [
+        {
+          address: "Pod0"
+        }
+      ]
+      slices: [
+        {
+          low_key: "\"\""
+          high_key: "M"
+          generation: { incarnation: 42 number: 639000 timestamp_str: "1970-01-01T00:10:39Z" }
+          resources: ["Pod0"]
+          load: 7.7
+        },
+        {
+          low_key: "M"
+          high_key: "∞"
+          generation: { incarnation: 42 number: 635000 timestamp_str: "1970-01-01T00:10:35Z" }
+          resources: ["Pod0"]
+          load: 8.8
+        }
+      ]
+    }
+  }
+]

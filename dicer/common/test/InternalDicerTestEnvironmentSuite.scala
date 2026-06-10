@@ -5,11 +5,7 @@ import java.util.UUID
 import scala.concurrent.duration.{Duration, _}
 
 import com.databricks.caching.util.AssertionWaiter
-import com.databricks.caching.util.TestUtils.{
-  TestName,
-  assertThrow,
-  shamefullyAwaitForNonEventInAsyncTest
-}
+import com.databricks.caching.util.TestUtils.{TestName, assertThrow}
 import com.databricks.conf.Configs
 import com.databricks.dicer.assigner.config.InternalTargetConfig.{
   LoadBalancingConfig,
@@ -39,7 +35,7 @@ import com.databricks.caching.util.TestUtils
 class InternalDicerTestEnvironmentSuite extends DatabricksTest with TestName {
 
   /** The environment and assigner used for the tests. */
-  private val testEnv = InternalDicerTestEnvironment.create(allowEtcdMode = true)
+  private val testEnv = InternalDicerTestEnvironment.create()
 
   private def getGlobalSafeName: String =
     getSuffixedSafeName(s"${UUID.randomUUID().toString.take(5)}")
@@ -83,29 +79,6 @@ class InternalDicerTestEnvironmentSuite extends DatabricksTest with TestName {
           )
         )
       )
-    }
-  }
-
-  test("Assigner store mode should match 'allowEtcdMode' of test env") {
-    // Test plan: Verify that the internal dicer test environment throws when trying to create
-    // assigner in etcd mode while `allowEtcdMode` is not on.
-
-    val etcdAssignerConfig = TestAssigner.Config.create(
-      new DicerAssignerConf(Configs.parseMap("databricks.dicer.assigner.store.type" -> "etcd"))
-    )
-
-    assertThrow[IllegalArgumentException]("dockerizedEtcdOpt must be defined") {
-      InternalDicerTestEnvironment.create(etcdAssignerConfig)
-    }
-
-    val nonEtcdModeEnv = InternalDicerTestEnvironment.create()
-
-    assertThrow[IllegalArgumentException]("dockerizedEtcdOpt must be defined") {
-      nonEtcdModeEnv.addAssigner(etcdAssignerConfig)
-    }
-
-    assertThrow[IllegalArgumentException]("dockerizedEtcdOpt must be defined") {
-      nonEtcdModeEnv.restartAssigner(index = 0, etcdAssignerConfig)
     }
   }
 
@@ -174,7 +147,11 @@ class InternalDicerTestEnvironmentSuite extends DatabricksTest with TestName {
     assert(assigner2.getAssignerInfoBlocking().uri == assigner2.localUri)
 
     // Configure the first assigner to redirect to the second assigner.
-    assigner1.setReplyType(AssignerReplyType.OverwriteRedirect(Redirect(Some(assigner2.localUri))))
+    assigner1.setReplyType(
+      AssignerReplyType.OverwriteRedirect(
+        Redirect(Some(assigner2.localUri), redirectTokenOpt = None)
+      )
+    )
 
     // Create a slicelet that issues its initial watch request against assigner1. Subsequent watch
     // requests should be issued against the assigner2 after the redirect.
@@ -245,7 +222,11 @@ class InternalDicerTestEnvironmentSuite extends DatabricksTest with TestName {
     // Now reverse the redirects so that assigner2 redirects to assigner1 and the slicelets begin
     // watching against assigner1.
     assigner1.setReplyType(AssignerReplyType.Normal)
-    assigner2.setReplyType(AssignerReplyType.OverwriteRedirect(Redirect(Some(assigner1.localUri))))
+    assigner2.setReplyType(
+      AssignerReplyType.OverwriteRedirect(
+        Redirect(Some(assigner1.localUri), redirectTokenOpt = None)
+      )
+    )
 
     // Now assigner1 should have an assignment that includes both pods.
     AssertionWaiter(s"Waiting for assignment from assigner ${assigner1.localUri}").await {
@@ -420,7 +401,6 @@ class InternalDicerTestEnvironmentSuite extends DatabricksTest with TestName {
     val testAssignerConfig0 = TestAssigner.Config.create(
       new DicerAssignerConf(
         Configs.parseMap(
-          "databricks.dicer.assigner.store.type" -> "in_memory",
           "databricks.dicer.assigner.preferredAssigner.etcd.sslEnabled" -> false,
           "databricks.dicer.assigner.storeIncarnation" -> storeIncarnation0.value
         )
@@ -431,7 +411,6 @@ class InternalDicerTestEnvironmentSuite extends DatabricksTest with TestName {
     val testAssignerConfig1 = TestAssigner.Config.create(
       new DicerAssignerConf(
         Configs.parseMap(
-          "databricks.dicer.assigner.store.type" -> "in_memory",
           "databricks.dicer.assigner.preferredAssigner.etcd.sslEnabled" -> false,
           "databricks.dicer.assigner.storeIncarnation" -> storeIncarnation1.value
         )
@@ -453,155 +432,6 @@ class InternalDicerTestEnvironmentSuite extends DatabricksTest with TestName {
 
     // Verify the assigner is correctly configured.
     assert(assigner1.storeIncarnation == storeIncarnation1)
-  }
-
-  test("Assigners share same etcd") {
-    // Test plan: Verify the assigners in the internal dicer test environment can correctly sync
-    // data by etcd. Verify this by dynamically adding two assigners in etcd mode to the test
-    // environment, connecting separate slicelets to them, and verifying the slicelets are aware
-    // of each other.
-
-    val target = Target(getGlobalSafeName)
-    val etcdAssignerConfig = TestAssigner.Config.create(
-      new DicerAssignerConf(
-        Configs.parseMap(
-          "databricks.dicer.assigner.store.type" -> "etcd",
-          "databricks.dicer.assigner.preferredAssigner.etcd.sslEnabled" -> false,
-          "databricks.dicer.assigner.storeIncarnation" -> 2
-        )
-      )
-    )
-
-    var knownHighestGeneration = Generation.EMPTY
-
-    // Add the first assigner, verifying it works normally by connecting a slicelet with it and
-    // checking the assignment received by the slicelet.
-    val (_, index0): (TestAssigner, Int) =
-      testEnv.addAssigner(etcdAssignerConfig)
-    val slicelet0: Slicelet = testEnv
-      .createSlicelet(target, index0, watchFromDataPlane = false)
-      .start(selfPort = 1234, listenerOpt = None)
-    AssertionWaiter("assignment generated by assigner0").await {
-      val slicelet0Generation: Generation =
-        slicelet0.impl.forTest.getLatestAssignmentOpt.get.generation
-      assert(slicelet0Generation > knownHighestGeneration)
-      knownHighestGeneration = slicelet0Generation
-    }
-
-    // Add the second assigner, verifying it works normally by connecting a slicelet
-    // with it and checking the assignment received by the slicelet.
-    val (_, index1): (TestAssigner, Int) =
-      testEnv.addAssigner(etcdAssignerConfig)
-    val slicelet1: Slicelet = testEnv
-      .createSlicelet(target, index1, watchFromDataPlane = false)
-      .start(selfPort = 1234, listenerOpt = None)
-    AssertionWaiter("assignment generated by assigner1").await {
-      val slicelet1Generation: Generation =
-        slicelet1.impl.forTest.getLatestAssignmentOpt.get.generation
-      assert(slicelet1Generation > knownHighestGeneration)
-      knownHighestGeneration = slicelet1Generation
-      // Checking that slicelet1 knows about an assignment containing slicelet0.
-      assert(
-        slicelet1.impl.forTest.getLatestAssignmentOpt.get.assignedResources
-          .contains(slicelet0.impl.squid)
-      )
-    }
-
-    AssertionWaiter("assigner0 knows about the newest assignment").await {
-      assert(slicelet0.impl.forTest.getLatestAssignmentOpt.get.generation >= knownHighestGeneration)
-      // Checking that slicelet0 knows about an assignment containing slicelet1.
-      assert(
-        slicelet0.impl.forTest.getLatestAssignmentOpt.get.assignedResources
-          .contains(slicelet1.impl.squid)
-      )
-    }
-  }
-
-  test("stop and restart assigners") {
-    // Test plan: Verify the assigners in the internal dicer test environment can be stopped and
-    // restarted correctly. Verify this by creating 2 test assigners in etcd mode.
-    // (1) Connect slicelet 0 with assigner 0, verify assigner 0 works by checking
-    //     if assigner 1 knows about slicelet 0.
-    // (2) Stop assigner 0 and try to connect slicelet 1 with stopped assigner 0, verify assigner 0
-    //     is stopped by verifying assigner 1 does not contain slicelet 1 in its assignment.
-    // (3) Restart assigner 0 and connect slicelet 2 with the restarted assigner, verify assigner 1
-    //     knows about slicelet 2.
-
-    val target = Target(getGlobalSafeName)
-
-    val etcdAssignerConfig = TestAssigner.Config.create(
-      new DicerAssignerConf(
-        Configs.parseMap(
-          "databricks.dicer.assigner.store.type" -> "etcd",
-          "databricks.dicer.assigner.preferredAssigner.etcd.sslEnabled" -> false,
-          "databricks.dicer.assigner.storeIncarnation" -> 2
-        )
-      )
-    )
-
-    testEnv.clear()
-    testEnv.addAssigner(etcdAssignerConfig)
-    testEnv.addAssigner(etcdAssignerConfig)
-
-    // Setup: Connect slicelet 0 to assigner 0.
-    val slicelet0 = testEnv
-      .createSlicelet(target, initialAssignerIndex = 0, watchFromDataPlane = false)
-      .start(selfPort = 1234, listenerOpt = None)
-
-    // Verify: Assigner 0 works by checking assigner 1 knows about slicelet 0.
-    AssertionWaiter("").await {
-      assert(
-        TestUtils
-          .awaitResult(
-            testEnv.testAssigners(1).getAssignmentCreatingGeneratorDeprecated(target),
-            Duration.Inf
-          )
-          .get
-          .assignedResources
-          .contains(slicelet0.impl.squid)
-      )
-    }
-
-    // Setup: Stop assigner 0 and try to connect slicelet 1 to the stopped assigner.
-    testEnv.stopAssigner(index = 0)
-    val slicelet1 = testEnv
-      .createSlicelet(target, initialAssignerIndex = 0, watchFromDataPlane = false)
-      .start(selfPort = 1234, listenerOpt = None)
-
-    // Verify: Assigner 0 is stopped by checking assigner 1 does not see slicelet 1. Since we're
-    // testing that something does NOT happen, we wait in test to allow time for propagation
-    // if the assigner were still running.
-    shamefullyAwaitForNonEventInAsyncTest()
-    assert(
-      !TestUtils
-        .awaitResult(
-          testEnv.testAssigners(1).getAssignmentCreatingGeneratorDeprecated(target),
-          Duration.Inf
-        )
-        .get
-        .assignedResources
-        .contains(slicelet1.impl.squid)
-    )
-
-    // Setup: Restart assigner 0 and connect slicelet 2 to the restarted assigner.
-    testEnv.restartAssigner(index = 0, etcdAssignerConfig)
-    val slicelet2 = testEnv
-      .createSlicelet(target, initialAssignerIndex = 0, watchFromDataPlane = false)
-      .start(selfPort = 1234, listenerOpt = None)
-
-    // Verify: Restarted assigner 0 works by checking assigner 1 sees slicelet 2.
-    AssertionWaiter("").await {
-      assert(
-        TestUtils
-          .awaitResult(
-            testEnv.testAssigners(1).getAssignmentCreatingGeneratorDeprecated(target),
-            Duration.Inf
-          )
-          .get
-          .assignedResources
-          .contains(slicelet2.impl.squid)
-      )
-    }
   }
 
   test("Load metric getters report expected value") {

@@ -1,7 +1,7 @@
 package com.databricks.dicer.external.javaapi;
 
 import com.databricks.conf.RawConfigSingleton;
-import com.databricks.dicer.client.javaapi.SliceletConfImpl;
+
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
@@ -43,10 +43,13 @@ import scala.compat.java8.OptionConverters;
  *   @Test
  *   public void testHelloDicer() {
  *     Target target = new Target("hello_dicer_target");
- *     Slicelet slicelet = testEnv.createSlicelet(target);
+ *     SliceletConfig.Builder sliceletConfigBuilder = SliceletConfig.builder();
+ *     testEnv.setConnectionConfigForNewSlicelet(sliceletConfigBuilder);
+ *     // You can also call sliceletConfigBuilder.setTlsOptions(tlsOptions) as in production.
+ *     // However, any custom TLS options provided are not exercised in tests and will
+ *     // have no effect.
+ *     Slicelet slicelet = Slicelet.create(sliceletConfigBuilder.build(), target);
  *     ClerkConfig.Builder clerkConfigBuilder = ClerkConfig.builder();
- *     // Inject connection config into the caller config so that the clerk can communicate with
- *     // the specified slicelet.
  *     testEnv.setConnectionConfigForNewClerk(clerkConfigBuilder, slicelet);
  *     Clerk<ResourceAddress> clerk =
  *       Clerk.create(clerkConfigBuilder.build(), target, "localhost", Function.identity());
@@ -105,17 +108,27 @@ public final class DicerTestEnvironment {
   }
 
   /**
-   * Creates a new Slicelet that communicates with the Assigner in the test environment.
-   *
-   * @param target the Target this Slicelet belongs to.
+   * Injects connection config for a new Slicelet into the caller-provided config builder and
+   * returns that same builder. This allows the Slicelet to talk to the assigner in the test
+   * environment.
+   */
+  public SliceletConfig.Builder setConnectionConfigForNewSlicelet(
+      SliceletConfig.Builder configBuilder) {
+    Config mergedConfig =
+        scalaTestEnv.getConnectionConfigForNewSlicelet().withFallback(RawConfigSingleton.conf());
+    configBuilder.setBaseConfigForTest(mergedConfig);
+    return configBuilder;
+  }
+
+  /**
+   * Convenience method that creates a {@link Slicelet} with default config for the given target,
+   * that talks to the assigner in the test environment. Use {@link
+   * #setConnectionConfigForNewSlicelet} instead if you need to customize the config.
    */
   public Slicelet createSlicelet(Target target) {
-    // Get the test environment connection config for the Assigner and inject it into the Slicelet.
-    // This allows the Slicelet to communicate with the test Assigner.
-    Config testEnvConfig = scalaTestEnv.getConnectionConfigForNewSlicelet();
-    Config mergedConfig = testEnvConfig.withFallback(RawConfigSingleton.conf());
-    SliceletConfImpl sliceletConf = DicerClientConfTestFactory.createSliceletConf(mergedConfig);
-    return Slicelet.createForTest(sliceletConf, target);
+    SliceletConfig.Builder builder = SliceletConfig.builder();
+    setConnectionConfigForNewSlicelet(builder);
+    return Slicelet.create(builder.build(), target);
   }
 
   /**
@@ -124,8 +137,11 @@ public final class DicerTestEnvironment {
    */
   public ClerkConfig.Builder setConnectionConfigForNewClerk(
       ClerkConfig.Builder configBuilder, Slicelet slicelet) {
-    Config testEnvConfig = scalaTestEnv.getConnectionConfigForNewClerk(slicelet.toScala());
-    DicerClientConfTestFactory.setClerkBaseConf(configBuilder.toScalaForTest(), testEnvConfig);
+    Config mergedConfig =
+        scalaTestEnv
+            .getConnectionConfigForNewClerk(slicelet.toScala())
+            .withFallback(RawConfigSingleton.conf());
+    configBuilder.setBaseConfigForTest(mergedConfig);
     return configBuilder;
   }
 

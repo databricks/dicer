@@ -16,24 +16,30 @@ import scala.util.{Failure, Success}
  * of metadata initialization.
  */
 object EtcdBootstrapper {
-  import EtcdBootstrapper.ExitCode.ExitCode
 
   private val logger = PrefixLogger.create(this.getClass, "")
 
   /**
-   * The enumeration indicating different results after trying to write initial metadata to the etcd
-   * cluster. The scala application should exit with one of these exit codes to inform the
-   * kubernetes about the results.
+   * Indicates different results after trying to write initial metadata to the etcd cluster. The
+   * scala application should exit with one of these exit codes to inform the kubernetes about the
+   * results.
    */
-  object ExitCode extends Enumeration {
-    type ExitCode = ExitCode.Value
+  sealed trait ExitCode {
+
+    /** The numeric exit code passed to the kubernetes job. */
+    def value: Int
+  }
+
+  object ExitCode {
 
     /**
      * The metadata is successfully written to etcd, or the data is already in etcd and etcd is in a
      * good state. The kubernetes job will succeed and finish if the scala application quite with
      * this value.
      */
-    val SUCCESS: Value = Value(0)
+    case object SUCCESS extends ExitCode {
+      override val value: Int = 0
+    }
 
     /**
      * The writing fails with some error, e.g. timeout or corrupted data. The kubernetes job will
@@ -41,7 +47,9 @@ object EtcdBootstrapper {
      * with this value. We choose a non zero value 255 so that the kubernetes knows the bootstrapper
      * fails.
      */
-    val RETRYABLE_FAILURE: Value = Value(255)
+    case object RETRYABLE_FAILURE extends ExitCode {
+      override val value: Int = 255
+    }
   }
 
   /** A request to initialize etcd metadata using `client` at the given `incarnation`. */
@@ -55,7 +63,6 @@ object EtcdBootstrapper {
   @SuppressWarnings(
     Array(
       "AwaitError",
-      "AwaitWarning",
       "reason:blocking is acceptable during application bootstrap"
     )
   )

@@ -38,11 +38,11 @@ class EtcdClientLatencyHistogramSuite extends DatabricksTest {
   private def awaitHistogramCounts(
       expectedBucketCounts: Seq[Int],
       registry: CollectorRegistry,
-      operationType: OperationType.Value,
+      operationType: OperationType,
       keyNamespace: KeyNamespace,
       status: String,
       grpcStatusOpt: Option[Status],
-      operationResult: OperationResult.Value,
+      operationResult: OperationResult,
       buckets: Vector[Double] = BUCKETS_SECS
   ): Unit = {
     val labels: Map[String, String] = Map(
@@ -62,7 +62,7 @@ class EtcdClientLatencyHistogramSuite extends DatabricksTest {
     }
   }
 
-  private val OPERATION_GRID: Seq[(OperationType.Value, OperationResult.Value)] =
+  private val OPERATION_GRID: Seq[(OperationType, OperationResult)] =
     for {
       operation <- Seq(OperationType.CREATE, OperationType.UPDATE)
       result <- Seq(
@@ -73,7 +73,7 @@ class EtcdClientLatencyHistogramSuite extends DatabricksTest {
     } yield (operation, result)
 
   gridTest("Latency metrics for successful asynchronous call")(OPERATION_GRID) { operationParams =>
-    val (operationType, operationResult): (OperationType.Value, OperationResult.Value) =
+    val (operationType, operationResult): (OperationType, OperationResult) =
       operationParams
 
     // Test plan: Record latency for a thunk that completes successfully.

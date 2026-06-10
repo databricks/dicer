@@ -33,7 +33,6 @@ import com.databricks.dicer.assigner.HealthWatcher.{
 }
 import com.databricks.dicer.assigner.config.InternalTargetConfig.HealthWatcherTargetConfig
 import com.databricks.dicer.assigner.TargetMetrics.AssignmentDistributionSource
-import com.databricks.dicer.assigner.TargetMetrics.AssignmentDistributionSource.AssignmentDistributionSource
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.assigner.conf.HealthConf
 import com.databricks.dicer.common.{Assignment, Generation, SliceletState}

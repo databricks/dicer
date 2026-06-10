@@ -41,3 +41,79 @@ scala_test(
         "@scala_proto_rules_scalapb_runtime",
     ],
 )
+
+scala_library(
+    name = "two_level_sharding_headers",
+    srcs = ["src/TwoLevelShardingHeaders.scala"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//dicer/external:external_common",
+        "//wrappers/rpc:headers",
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_guava_guava",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
+    ],
+)
+
+scala_test(
+    name = "two_level_sharding_headers_suite",
+    srcs = ["test/TwoLevelShardingHeadersSuite.scala"],
+    timeout = "short",
+    deps = [
+        ":two_level_sharding_headers",
+        "//dicer/external:external_common",
+        "//wrappers/util:async_test_helpers",
+        "//wrappers/util:databricks-test",
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_guava_guava",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
+    ],
+)
+
+scala_library(
+    name = "two_level_sharding_clerk_accessor",
+    srcs = ["src/TwoLevelShardingClerkAccessor.scala"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//dicer/client:clerk_impl",
+        "//dicer/external:clerk",
+    ],
+)
+
+scala_test(
+    name = "two_level_sharding_clerk_accessor_suite",
+    srcs = [
+        "test/TwoLevelShardingClerkAccessorSuite.scala",
+        "test/golden_files/TwoLevelShardingClerkAccessorGoldenData.scala",
+    ],
+    timeout = "short",
+    deps = [
+        ":two_level_sharding_clerk_accessor",
+        "//caching/util:sequential_execution_context",
+        "//caching/util:test_util",
+        "//dicer/assigner/config:internal_target_config_map",
+        "//dicer/assigner:assigner_slicez",
+        "//dicer/client:clerk_impl",
+        "//dicer/common:assignment_core",
+        "//dicer/common:generation",
+        "//dicer/common:test_common",
+        "//dicer/common:test_environment",
+        "//dicer/external:clerk",
+        "//dicer/friend:slice_map",
+        "//dicer/friend:squid",
+        "//wrappers/util:async_test_helpers",
+        "//wrappers/util:databricks-test",
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_guava_guava",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
+    ],
+)

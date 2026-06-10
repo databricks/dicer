@@ -847,18 +847,13 @@ class EtcdPreferredAssignerStoreStateMachineSuite extends DatabricksTest {
     // information in a second attempt to make ASSIGNERS(1) the preferred assigner.
     val nextSafeKeyVersionLowerBoundExclusive =
       Version(STORE_INCARNATION.value, firstPreferredAssigner.generation.number.value + 42)
-    val expectedWriteResult = Failure(
-      new StatusException(
-        Status.INTERNAL.withDescription(
-          s"Write for the initial preferred assigner $firstPreferredAssigner " +
-          s"failed due to use of an insufficiently high version to guarantee " +
-          s"monotonicity. Initial PA writes must currently have a generation of " +
-          s"at least $nextSafeKeyVersionLowerBoundExclusive."
-        )
-      )
-    )
+    val expectedStatusExceptionDescription =
+      s"Write for the initial preferred assigner $firstPreferredAssigner " +
+      s"failed due to use of an insufficiently high version to guarantee " +
+      s"monotonicity. Initial PA writes must currently have a generation of " +
+      s"at least $nextSafeKeyVersionLowerBoundExclusive."
     // Verify: a `DriverAction.CompleteWrite(promise, Failure(...))` action is returned.
-    stateMachine.onEvent(
+    val failureOutput: StateMachineOutput[DriverAction] = stateMachine.onEvent(
       clock.tickerTime(),
       clock.instant(),
       Event.EtcdWriteResponse(
@@ -867,10 +862,15 @@ class EtcdPreferredAssignerStoreStateMachineSuite extends DatabricksTest {
         firstPreferredAssigner,
         Success(WriteResponse.OccFailure(KeyState.Absent(nextSafeKeyVersionLowerBoundExclusive)))
       )
-    ) == StateMachineOutput(
-      TickerTime.MAX,
-      Seq(DriverAction.CompleteWrite(promise, expectedWriteResult))
     )
+    assert(failureOutput.nextTickerTime == TickerTime.MAX)
+    assert(failureOutput.actions.size == 1)
+    failureOutput.actions.head match {
+      case DriverAction.CompleteWrite(actualPromise, Failure(ex: StatusException)) =>
+        assert(actualPromise eq promise)
+        assertResult(expectedStatusExceptionDescription)(ex.getStatus.getDescription)
+      case other => fail(s"expected a CompleteWrite with StatusException Failure, got: $other")
+    }
 
     val preferredAssignerProposal2 = PreferredAssignerProposal(
       predecessorGenerationOpt = None,

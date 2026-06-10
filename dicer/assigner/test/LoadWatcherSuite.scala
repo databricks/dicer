@@ -1328,7 +1328,7 @@ class LoadWatcherSuite extends DatabricksTest {
         watcher.now += timeInterval
         assert(
           // Allow some floating point errors.
-          Math.abs(watcher.getPrimaryRateLoadMap(assignment).get.getLoad(Slice.FULL) - load) < load
+          Math.abs(watcher.getPrimaryRateLoadMap(assignment).get.getLoad(Slice.FULL) - load) < 1e-10
         )
       }
     }

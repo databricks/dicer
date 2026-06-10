@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.{
   ObjectMapper,
   PropertyNamingStrategies
 }
+import com.databricks.api.proto.infra.Environment
 import com.databricks.conf.{DbConf, DbConfSingletonImpl}
 
 /**
@@ -17,16 +18,40 @@ import com.databricks.conf.{DbConf, DbConfSingletonImpl}
  *                             running, or None if not set/unknown.
  * @param regionUri The URI of the region where the current process is running, or None if not
  *                  set/unknown.
+ * @param legacyKubeContext The legacy `kube_context` alias of the Kubernetes cluster where the
+ *                          current process is running, or None if not set/unknown.
+ * @param environment The raw deployment-environment name from the LOCATION env var (the JSON
+ *                    string value of the `environment` field, e.g., `"DEV"`), or None when
+ *                    absent.
  */
 case class KubernetesLocation(
     kubernetesClusterUri: Option[String] = None,
-    regionUri: Option[String] = None) {
+    regionUri: Option[String] = None,
+    legacyKubeContext: Option[String] = None,
+    environment: Option[String] = None) {
 
   /** The URI of the Kubernetes cluster where the current process is running, or null if not set. */
   def getKubernetesClusterUri: String = kubernetesClusterUri.orNull
 
   /** The URI of the region where the current process is running, or null if not set. */
   def getRegionUri: String = regionUri.orNull
+
+  /**
+   * The legacy `kube_context` alias of the cluster where the current process is running, or null
+   * if not set.
+   */
+  def getLegacyKubeContext: String = legacyKubeContext.orNull
+
+  /**
+   * The deployment environment of the cluster where the current process is running. Returns
+   * [[Environment.Kind.KIND_UNSPECIFIED]] when [[environment]] is empty or names an unknown kind.
+   */
+  def getEnvironment: Environment.Kind = environment match {
+    case Some("DEV") => Environment.Kind.DEV
+    case Some("STAGING") => Environment.Kind.STAGING
+    case Some("PROD") => Environment.Kind.PROD
+    case _ => Environment.Kind.KIND_UNSPECIFIED
+  }
 }
 
 /**

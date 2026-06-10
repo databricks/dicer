@@ -2,7 +2,7 @@ package com.databricks.dicer.assigner
 
 import scala.concurrent.duration._
 
-import com.databricks.caching.util.SequentialExecutionContext
+import com.databricks.caching.util.{Cancellable, SequentialExecutionContext, ValueStreamCallback}
 
 /**
  * OSS stub for [[KubernetesMembershipChecker]]. The real implementation polls the Kubernetes
@@ -10,15 +10,27 @@ import com.databricks.caching.util.SequentialExecutionContext
  * surface is provided.
  */
 class KubernetesMembershipChecker private[assigner] (
-    sec: SequentialExecutionContext, // Unused in OSS stub; present for API compatibility.
+    sec: SequentialExecutionContext,
     assignerInfo: AssignerInfo,
     namespace: String,
     appName: String,
     pollingInterval: FiniteDuration,
-    rpcPort: Int) {
+    rpcPort: Int,
+    kubeContextLabelOpt: Option[String])
+    extends ResourceWatcher {
 
   /** Starts polling. No-op in OSS. */
-  def start(): Unit = {}
+  override def start(): Unit = {}
+
+  /** Watches for resource set updates. No-op in OSS. */
+  override def watch(callback: ValueStreamCallback[VersionedResourceSet]): Cancellable = {
+    Cancellable.NO_OP_CANCELLABLE
+  }
+
+  /** Watches connection health. No-op in OSS. */
+  override def watchConnectionHealth(callback: ValueStreamCallback[Boolean]): Cancellable = {
+    Cancellable.NO_OP_CANCELLABLE
+  }
 
   /** Test-only accessors for internal state. */
   private[assigner] object forTest {
@@ -68,10 +80,4 @@ object KubernetesMembershipChecker {
             assignerProtoLogger: AssignerProtoLogger): Option[KubernetesMembershipChecker] = None
       }
   }
-
-  /** Records a successful membership checker initialization. No-op in OSS. */
-  private[assigner] def recordInitSuccess(): Unit = {}
-
-  /** Records a failed membership checker initialization. No-op in OSS. */
-  private[assigner] def recordInitFailure(): Unit = {}
 }

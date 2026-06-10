@@ -34,11 +34,10 @@ import com.databricks.dicer.external.{Clerk, ClerkConf, ResourceAddress, Slicele
 import com.databricks.testing.DatabricksTest
 
 /**
- * Test suite for verifying that multiple assigner instances write to different etcd namespaces.
- *
- * This suite tests the behavior of multiple dicer assigner instances running concurrently,
- * ensuring they properly isolate their data by writing to different etcd namespaces based
- * on their service name configuration.
+ * Test suite for multiple dicer assigner instances running concurrently against a shared etcd
+ * instance used for preferred assigner selection. Verifies that instances configured with distinct
+ * `storeNamespacePrefix` values shard targets independently and elect their own preferred assigner
+ * without interfering with each other.
  */
 private class MultipleAssignerInstancesSuite extends DatabricksTest with TestName {
 
@@ -98,57 +97,6 @@ private class MultipleAssignerInstancesSuite extends DatabricksTest with TestNam
     )
 
     (assignerInstance1, assignerInstance2)
-  }
-
-  test("Multiple assigner instances write to different assignments etcd namespaces") {
-    // Test plan: Verify that assignments for separate assigner instances are correctly written to
-    // separate etcd namespaces. Verify this by creating multiple assigner instances, creating
-    // slicelets in each to trigger assignment writes, and checking that the expected assignment
-    // namespaces contain data for the expected targets.
-
-    // Setup: Create and set up two assigner instances that share an underlying etcd instance.
-    val (assignerInstance1, assignerInstance2) = createAndSetUpAssignerInstances()
-    try {
-      // Setup: Create slicelets with different targets in the different assigner instances.
-      val safeName: String = getSafeName
-      val target1: Target = Target(s"${safeName.substring(0, safeName.length - 2)}-1")
-      assignerInstance1.createSlicelet(target1).start(getNextSliceletPortNumber, listenerOpt = None)
-      val target2: Target = Target(s"${safeName.substring(0, safeName.length - 2)}-2")
-      assignerInstance2.createSlicelet(target2).start(getNextSliceletPortNumber, listenerOpt = None)
-
-      // Verify: Assignment data for the expected target is written to the expected namespace for
-      // each assigner instance.
-      AssertionWaiter("Wait for data in etcd").await {
-        assert(
-          dockerizedEtcd.getPrefix(s"assignments/${target1.toParseableDescription}").nonEmpty
-        )
-        assert(
-          dockerizedEtcd
-            .getPrefix(s"untrusted-assignments/${target2.toParseableDescription}")
-            .nonEmpty
-        )
-      }
-
-      // Verify: Assignment data for each target is not written to the namespace of the assigner
-      // who is not handling the target. For example, verify that `target2` handled by assigner 2
-      // does not have assignment data written to assigner 1's namespace. Note that since we are
-      // verifying that some event does *not* occur, these assertions do not guarantee that at some
-      // later point, an unexpected write does not occur. However, since the `AssertionWaiter` above
-      // waits until assignment data is written to the expected namespaces, this check helps confirm
-      // that unexpected writes did not occur before or during these expected writes.
-      assert(
-        dockerizedEtcd.getPrefix(s"assignments/${target2.toParseableDescription}").isEmpty
-      )
-      assert(
-        dockerizedEtcd
-          .getPrefix(s"untrusted-assignments/${target1.toParseableDescription}")
-          .isEmpty
-      )
-    } finally {
-      assignerInstance1.stop()
-      assignerInstance2.stop()
-      dockerizedEtcd.deleteAll()
-    }
   }
 
   test(
@@ -258,15 +206,13 @@ private object MultipleAssignerInstancesSuite {
    * @param fakeClock controlled clock for time-based testing
    * @param fakeSecPool fake sequential execution context corresponding to [[fakeClock]]
    * @param dynamicConfigProvider provider for dynamic target configurations
-   * @param dockerizedEtcd the dockerized etcd instance used by this assigner instance
    */
   @NotThreadSafe
   class AssignerInstance(
       val testAssigners: IndexedSeq[TestAssigner],
       val fakeClock: FakeTypedClock,
       val fakeSecPool: FakeSequentialExecutionContextPool,
-      val dynamicConfigProvider: StaticTargetConfigProvider,
-      val dockerizedEtcd: EtcdTestEnvironment
+      val dynamicConfigProvider: StaticTargetConfigProvider
   ) {
 
     /** Map from target to slicelets connected to this instance's assigners. */
@@ -355,7 +301,7 @@ private object MultipleAssignerInstancesSuite {
    * - Sets the given `storeNamespacePrefix` for the assigner
    * - Disables SSL
    *
-   * @param storeNamespacePrefix prefix for the store namespaces of the assigner that uses this conf
+   * @param storeNamespacePrefix prefix for the assigner's preferred-assigner etcd namespace
    */
   private def createAssignerConf(storeNamespacePrefix: String): DicerAssignerConf = {
     new DicerAssignerConf(
@@ -365,8 +311,8 @@ private object MultipleAssignerInstancesSuite {
             "databricks.dicer.assigner.preferredAssigner.modeEnabled" -> true,
             "databricks.dicer.assigner.preferredAssigner.storeIncarnation" -> 42,
             "databricks.dicer.assigner.preferredAssigner.etcd.sslEnabled" -> false,
-            "databricks.dicer.assigner.store.type" -> "etcd",
-            "databricks.dicer.assigner.storeIncarnation" -> 42,
+            // InMemoryStore requires a loose incarnation (see Incarnation.isLoose).
+            "databricks.dicer.assigner.storeIncarnation" -> 43,
             "databricks.dicer.assigner.storeNamespacePrefix" -> storeNamespacePrefix
           )
         )
@@ -376,9 +322,9 @@ private object MultipleAssignerInstancesSuite {
   /**
    * Creates a complete assigner instance with the specified configuration.
    *
-   * @param storeNamespacePrefix prefix for this instance's assigners' store namespaces.
+   * @param storeNamespacePrefix prefix for this instance's preferred-assigner etcd namespace.
    * @param numAssigners number of assigner to create
-   * @param dockerizedEtcd the etcd instance to use for storage
+   * @param dockerizedEtcd the etcd instance used for preferred-assigner selection
    */
   def createAssignerInstance(
       storeNamespacePrefix: String,
@@ -409,15 +355,13 @@ private object MultipleAssignerInstancesSuite {
       )
     }
 
-    dockerizedEtcd.initializeStore(Assigner.getAssignmentsEtcdNamespace(assignerConf))
     dockerizedEtcd.initializeStore(Assigner.getPreferredAssignerEtcdNamespace(assignerConf))
 
     new AssignerInstance(
       testAssigners,
       fakeClock,
       fakeSecPool,
-      dynamicConfigProvider,
-      dockerizedEtcd
+      dynamicConfigProvider
     )
   }
 

@@ -5,37 +5,53 @@ import io.prometheus.client.CollectorRegistry
 import com.databricks.caching.util.EtcdClient.KeyNamespace
 
 /** The [[EtcdClient]] operations whose latencies are described in the histogram. */
-object OperationType extends Enumeration {
+sealed trait OperationType
+
+object OperationType {
 
   /** An operation that creates a new versioned key. */
-  val CREATE: OperationType.Value = Value("create")
+  case object CREATE extends OperationType {
+    override def toString: String = "create"
+  }
 
   /** An operation that updates an existing key. */
-  val UPDATE: OperationType.Value = Value("update")
+  case object UPDATE extends OperationType {
+    override def toString: String = "update"
+  }
 }
 
 /** The possible results of an [[EtcdClient]] operation */
-object OperationResult extends Enumeration {
+sealed trait OperationResult
+
+object OperationResult {
 
   /** An operation completed successfully. */
-  val SUCCESS: OperationResult.Value = Value("success")
+  case object SUCCESS extends OperationResult {
+    override def toString: String = "success"
+  }
 
   /**
    * A create or update operation completed successfully and failed to commit a new version because
    * a key was present with an unexpected version.
    */
-  val WRITE_OCC_FAILURE_KEY_PRESENT: OperationResult.Value = Value("write_occ_failure_key_present")
+  case object WRITE_OCC_FAILURE_KEY_PRESENT extends OperationResult {
+    override def toString: String = "write_occ_failure_key_present"
+  }
 
   /**
    * A create or update operation completed successfully and failed to commit a new version because
    * an expected key was absent.
    */
-  val WRITE_OCC_FAILURE_KEY_ABSENT: OperationResult.Value = Value("write_occ_failure_key_absent")
+  case object WRITE_OCC_FAILURE_KEY_ABSENT extends OperationResult {
+    override def toString: String = "write_occ_failure_key_absent"
+  }
 
   /**
    * An operation did not complete successfully.
    */
-  val FAILURE: OperationResult.Value = Value("failure")
+  case object FAILURE extends OperationResult {
+    override def toString: String = "failure"
+  }
 }
 
 object EtcdClientLatencyHistogram {
@@ -86,10 +102,9 @@ class EtcdClientLatencyHistogram private (histogram: CachingLatencyHistogram) {
    * @param thunk Asynchronous thunk to instrument.
    */
   def recordLatencyAsync[T](
-      operation: OperationType.Value,
+      operation: OperationType,
       keyNamespace: KeyNamespace,
-      computeOperationResult: Try[T] => OperationResult.Value)(
-      thunk: => Pipeline[T]): Pipeline[T] = {
+      computeOperationResult: Try[T] => OperationResult)(thunk: => Pipeline[T]): Pipeline[T] = {
     def computeExtraLabels(triedResult: Try[T]): Seq[String] = {
       Seq(computeOperationResult(triedResult).toString, keyNamespace.value)
     }

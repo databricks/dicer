@@ -22,6 +22,7 @@ import com.databricks.dicer.assigner.EtcdPreferredAssignerStore.{
   PreferredAssignerProposal,
   WriteResult
 }
+import com.databricks.dicer.assigner.PreferredAssignerMetrics.ValueSource
 import com.databricks.dicer.common.{Generation, Incarnation}
 import com.databricks.testing.DatabricksTest
 
@@ -491,6 +492,63 @@ class EtcdPreferredAssignerStateMachineSuite extends DatabricksTest {
       )
     )
     awaitPreferredAssignerGenerationMetric(emptyPreferredAssigner.generation)
+  }
+
+  /**
+   * Drives `config.heartbeatFailureThreshold - 1` `onAdvance` calls forward, advancing the
+   * clock by `heartbeatInterval` between each. Each call enqueues a new heartbeat which (in
+   * `withNewHeartbeatRequest`) marks the previous in-flight one as failed; on return, the
+   * state machine's heartbeat-failure count is at `threshold - 1`, primed to issue a takeover
+   * write on the next `onAdvance` past the heartbeat interval. Encapsulates both the loop and
+   * the caller's `nextHeartbeatTime` / `opId` bookkeeping so test bodies don't re-derive the
+   * threshold-1 math.
+   *
+   * @return the updated `(nextHeartbeatTime, opId)` pair after the drive.
+   */
+  private def driveHeartbeatFailuresPrimingTakeover(
+      stateMachine: EtcdPreferredAssignerStateMachine,
+      nextHeartbeatTime: TickerTime,
+      opId: Long): (TickerTime, Long) = {
+    val iterations: Int = config.heartbeatFailureThreshold - 1
+    for (_ <- 0 until iterations) {
+      clock.advanceBy(config.heartbeatInterval)
+      stateMachine.onAdvance(clock.tickerTime(), clock.instant())
+    }
+    (nextHeartbeatTime + config.heartbeatInterval * iterations, opId + iterations)
+  }
+
+  /**
+   * Advances past the initial-preferred-assigner timeout and asserts that the state machine's
+   * resulting `onAdvance` emits a single `DriverAction.Write` proposing `expectedAssignerInfo`.
+   *
+   * The asserted write carries `predecessorGenerationOpt = None`, so this helper is only valid
+   * for tests where the state machine has not yet observed any predecessor — i.e. the
+   * `StandbyWithoutPreferred`-from-`Startup` path. The asserted next-advance time is one
+   * `writeRetryInterval` after the write.
+   *
+   * Note this helper performs an assertion, not just a state advancement: a mismatch on the
+   * write's contents will fail the calling test directly.
+   */
+  private def driveStartupToInitialWrite(
+      stateMachine: EtcdPreferredAssignerStateMachine,
+      expectedAssignerInfo: AssignerInfo): Unit = {
+    clock.advanceBy(config.initialPreferredAssignerTimeout + 1.second)
+    val expectedNextTickerTime = clock.tickerTime() + config.writeRetryInterval
+    assert(
+      stateMachine.onAdvance(clock.tickerTime(), clock.instant()) ==
+      StateMachineOutput(
+        expectedNextTickerTime,
+        Seq(
+          DriverAction.Write(
+            clock.tickerTime(),
+            PreferredAssignerProposal(
+              predecessorGenerationOpt = None,
+              newPreferredAssignerInfoOpt = Some(expectedAssignerInfo)
+            )
+          )
+        )
+      )
+    )
   }
 
   /**
@@ -1119,9 +1177,366 @@ class EtcdPreferredAssignerStateMachineSuite extends DatabricksTest {
     )
   }
 
+  test("StandbyWithoutPreferred writes ExternalPick when a pick is known") {
+    // Test plan: Verify that when an external pick has been delivered to the state
+    // machine before the startup timeout elapses, the resulting "no preferred assigner" write
+    // proposes the pick rather than self. Verify that the
+    // `dicer_assigner_preferred_assigner_writes_total{valueSource="externalPick"}`
+    // counter is incremented exactly once for this write.
+    val stateMachine = createStateMachine()
+    val externalPickTracker: MetricUtils.ChangeTracker[Int] =
+      MetricUtils.ChangeTracker(() => getWriteCount(ValueSource.ExternalPick))
+
+    val externalPick: AssignerInfo = otherAssignerInfo
+
+    val testEpochTime = clock.tickerTime()
+    assert(
+      stateMachine.onAdvance(clock.tickerTime(), clock.instant()) ==
+      StateMachineOutput(testEpochTime + config.initialPreferredAssignerTimeout, Seq.empty)
+    )
+
+    // Deliver the external pick before the startup timeout fires. This must not
+    // trigger a write on its own; only recording the next write's preferred-assigner candidate.
+    assert(
+      stateMachine.onEvent(
+        clock.tickerTime(),
+        clock.instant(),
+        Event.ExternalPickReceived(Some(externalPick))
+      ) ==
+      StateMachineOutput(testEpochTime + config.initialPreferredAssignerTimeout, Seq.empty)
+    )
+
+    // Advance past the startup timeout: the state machine writes the pick, not self.
+    driveStartupToInitialWrite(stateMachine, expectedAssignerInfo = externalPick)
+    assert(externalPickTracker.totalChange() == 1)
+  }
+
+  test("StandbyWithoutPreferred falls back to self when no ExternalPick is known") {
+    // Test plan: Verify that without any external pick, the "no preferred assigner"
+    // write still proposes selfAssignerInfo and that the
+    // `dicer_assigner_preferred_assigner_writes_total{valueSource="self"}` counter is incremented
+    // exactly once. When no external pick has been delivered, the state machine writes
+    // itself as preferred — preserving the pre-migration behavior.
+    val stateMachine = createStateMachine()
+    val selfTracker: MetricUtils.ChangeTracker[Int] =
+      MetricUtils.ChangeTracker(() => getWriteCount(ValueSource.Self))
+
+    val testEpochTime = clock.tickerTime()
+    assert(
+      stateMachine.onAdvance(clock.tickerTime(), clock.instant()) ==
+      StateMachineOutput(testEpochTime + config.initialPreferredAssignerTimeout, Seq.empty)
+    )
+
+    driveStartupToInitialWrite(stateMachine, expectedAssignerInfo = selfAssignerInfo)
+    assert(selfTracker.totalChange() == 1)
+  }
+
+  test("Standby takeover writes ExternalPick when preferred assigner becomes unhealthy") {
+    // Test plan: Drive the state machine into Standby with an external pick recorded, time out
+    // enough heartbeats to trigger a takeover, and verify the takeover write proposes the pick
+    // (not self). Verify the ExternalPick write-counter increment.
+    val stateMachine = createStateMachine()
+    val externalPickTracker: MetricUtils.ChangeTracker[Int] =
+      MetricUtils.ChangeTracker(() => getWriteCount(ValueSource.ExternalPick))
+
+    val externalPick: AssignerInfo = thirdAssignerInfo
+    val incumbentPreferredAssigner =
+      PreferredAssignerValue.SomeAssigner(otherAssignerInfo, generation(clock))
+
+    // Drive Startup, record the pick, then become Standby against the incumbent assigner.
+    stateMachine.onAdvance(clock.tickerTime(), clock.instant())
+    stateMachine.onEvent(
+      clock.tickerTime(),
+      clock.instant(),
+      Event.ExternalPickReceived(Some(externalPick))
+    )
+    var nextHeartbeatTime = clock.tickerTime() + config.heartbeatInterval
+    var opId = 1L
+    stateMachine.onEvent(
+      clock.tickerTime(),
+      clock.instant(),
+      Event.PreferredAssignerReceived(incumbentPreferredAssigner)
+    )
+
+    // Drive the heartbeat-failure loop and the final advance that triggers the takeover write.
+    val (advancedNextHeartbeatTime, advancedOpId): (TickerTime, Long) =
+      driveHeartbeatFailuresPrimingTakeover(stateMachine, nextHeartbeatTime, opId)
+    nextHeartbeatTime = advancedNextHeartbeatTime + config.heartbeatInterval
+    opId = advancedOpId + 1
+    clock.advanceBy(config.heartbeatInterval)
+    assert(
+      stateMachine.onAdvance(clock.tickerTime(), clock.instant()) ==
+      StateMachineOutput(
+        nextHeartbeatTime,
+        Seq(
+          DriverAction.SendHeartbeat(HeartbeatRequest(opId, incumbentPreferredAssigner)),
+          DriverAction.Write(
+            clock.tickerTime(),
+            PreferredAssignerProposal(
+              predecessorGenerationOpt = Some(incumbentPreferredAssigner.generation),
+              newPreferredAssignerInfoOpt = Some(externalPick)
+            )
+          )
+        )
+      )
+    )
+    assert(externalPickTracker.totalChange() == 1)
+  }
+
+  test("Preferred + terminating still abdicates regardless of ExternalPick") {
+    // Test plan: Verify that abdication semantics are preserved when an external pick is set:
+    // an assigner that is currently preferred and has received a termination notice still
+    // writes `None` (an abdication), not the pick.
+    val stateMachine = createStateMachine()
+    val noAssignerTracker: MetricUtils.ChangeTracker[Int] =
+      MetricUtils.ChangeTracker(() => getWriteCount(ValueSource.NoAssigner))
+    val externalPickTracker: MetricUtils.ChangeTracker[Int] =
+      MetricUtils.ChangeTracker(() => getWriteCount(ValueSource.ExternalPick))
+
+    val selfPreferredAssigner =
+      PreferredAssignerValue.SomeAssigner(selfAssignerInfo, generation(clock))
+    val externalPick: AssignerInfo = otherAssignerInfo
+
+    // Drive Startup -> Preferred -> record an external pick (silent while Preferred).
+    stateMachine.onAdvance(clock.tickerTime(), clock.instant())
+    stateMachine.onEvent(
+      clock.tickerTime(),
+      clock.instant(),
+      Event.PreferredAssignerReceived(selfPreferredAssigner)
+    )
+    stateMachine.onEvent(
+      clock.tickerTime(),
+      clock.instant(),
+      Event.ExternalPickReceived(Some(externalPick))
+    )
+
+    // Receive termination. The abdication write should carry `None`, not the pick.
+    val expectedWriteDeadline = clock.tickerTime() + config.writeRetryInterval
+    assert(
+      stateMachine.onEvent(clock.tickerTime(), clock.instant(), Event.TerminationNoticeReceived) ==
+      StateMachineOutput(
+        expectedWriteDeadline,
+        Seq(
+          DriverAction.Write(
+            clock.tickerTime(),
+            PreferredAssignerProposal(
+              predecessorGenerationOpt = Some(selfPreferredAssigner.generation),
+              newPreferredAssignerInfoOpt = None
+            )
+          )
+        )
+      )
+    )
+    assert(noAssignerTracker.totalChange() == 1)
+    assert(externalPickTracker.totalChange() == 0)
+  }
+
+  test("Clearing the ExternalPick restores Self as the next write's preferred-assigner candidate") {
+    // Test plan: Make the pick the active preferred-assigner candidate by letting the state
+    // machine actually emit a write proposing it (proving the pick was processed, not just
+    // set-and-reset in a single SEC turn). Then deliver `ExternalPickReceived(None)` to clear
+    // the pick, advance past the next write-retry interval, and verify the resulting write
+    // proposes `selfAssignerInfo`.
+    val stateMachine = createStateMachine()
+    val selfTracker: MetricUtils.ChangeTracker[Int] =
+      MetricUtils.ChangeTracker(() => getWriteCount(ValueSource.Self))
+    val externalPickTracker: MetricUtils.ChangeTracker[Int] =
+      MetricUtils.ChangeTracker(() => getWriteCount(ValueSource.ExternalPick))
+
+    val externalPick: AssignerInfo = otherAssignerInfo
+
+    val testEpochTime = clock.tickerTime()
+    assert(
+      stateMachine.onAdvance(clock.tickerTime(), clock.instant()) ==
+      StateMachineOutput(testEpochTime + config.initialPreferredAssignerTimeout, Seq.empty)
+    )
+
+    // Deliver the pick and let the state machine emit a write proposing it. This forces the SM
+    // to have observed and recorded the pick; we then know the subsequent clear can only be
+    // observed against that recorded state.
+    stateMachine.onEvent(
+      clock.tickerTime(),
+      clock.instant(),
+      Event.ExternalPickReceived(Some(externalPick))
+    )
+    driveStartupToInitialWrite(stateMachine, expectedAssignerInfo = externalPick)
+    assert(externalPickTracker.totalChange() == 1)
+
+    // Clear the pick; advance past the write-retry interval; the next write must propose self.
+    stateMachine.onEvent(
+      clock.tickerTime(),
+      clock.instant(),
+      Event.ExternalPickReceived(None)
+    )
+    clock.advanceBy(config.writeRetryInterval)
+    val secondWriteTickerTime = clock.tickerTime()
+    assert(
+      stateMachine.onAdvance(secondWriteTickerTime, clock.instant()) ==
+      StateMachineOutput(
+        secondWriteTickerTime + config.writeRetryInterval,
+        Seq(
+          DriverAction.Write(
+            secondWriteTickerTime,
+            PreferredAssignerProposal(
+              predecessorGenerationOpt = None,
+              newPreferredAssignerInfoOpt = Some(selfAssignerInfo)
+            )
+          )
+        )
+      )
+    )
+    assert(selfTracker.totalChange() == 1)
+    assert(externalPickTracker.totalChange() == 1)
+  }
+
+  test("Updating the ExternalPick from one assigner to another retargets the next write") {
+    // Test plan: First make the original pick (otherAssignerInfo) the active
+    // preferred-assigner candidate by letting the state machine emit a write proposing it.
+    // Then update the pick to the replacement pick (thirdAssignerInfo) and let the state
+    // machine emit another write — that second write must propose the replacement pick,
+    // demonstrating the pick is NOT sticky to the original after being changed.
+    val stateMachine = createStateMachine()
+    val externalPickTracker: MetricUtils.ChangeTracker[Int] =
+      MetricUtils.ChangeTracker(() => getWriteCount(ValueSource.ExternalPick))
+
+    val originalPick: AssignerInfo = otherAssignerInfo
+    val replacementPick: AssignerInfo = thirdAssignerInfo
+
+    val testEpochTime = clock.tickerTime()
+    assert(
+      stateMachine.onAdvance(clock.tickerTime(), clock.instant()) ==
+      StateMachineOutput(testEpochTime + config.initialPreferredAssignerTimeout, Seq.empty)
+    )
+
+    // Deliver the original pick, advance past the startup timeout, and verify the first write
+    // proposes it.
+    stateMachine.onEvent(
+      clock.tickerTime(),
+      clock.instant(),
+      Event.ExternalPickReceived(Some(originalPick))
+    )
+    clock.advanceBy(config.initialPreferredAssignerTimeout + 1.second)
+    val firstWriteTickerTime = clock.tickerTime()
+    val secondWriteAdvanceTime = firstWriteTickerTime + config.writeRetryInterval
+    assert(
+      stateMachine.onAdvance(firstWriteTickerTime, clock.instant()) ==
+      StateMachineOutput(
+        secondWriteAdvanceTime,
+        Seq(
+          DriverAction.Write(
+            firstWriteTickerTime,
+            PreferredAssignerProposal(
+              predecessorGenerationOpt = None,
+              newPreferredAssignerInfoOpt = Some(originalPick)
+            )
+          )
+        )
+      )
+    )
+
+    // Update to the replacement pick and advance past the write-retry interval. The next write
+    // must propose the replacement pick, proving the pick was replaced rather than sticky to
+    // the original.
+    stateMachine.onEvent(
+      clock.tickerTime(),
+      clock.instant(),
+      Event.ExternalPickReceived(Some(replacementPick))
+    )
+    clock.advanceBy(config.writeRetryInterval)
+    val secondWriteTickerTime = clock.tickerTime()
+    assert(
+      stateMachine.onAdvance(secondWriteTickerTime, clock.instant()) ==
+      StateMachineOutput(
+        secondWriteTickerTime + config.writeRetryInterval,
+        Seq(
+          DriverAction.Write(
+            secondWriteTickerTime,
+            PreferredAssignerProposal(
+              predecessorGenerationOpt = None,
+              newPreferredAssignerInfoOpt = Some(replacementPick)
+            )
+          )
+        )
+      )
+    )
+    assert(externalPickTracker.totalChange() == 2)
+  }
+
+  test("ExternalPick is preserved across Preferred -> Standby transitions") {
+    // Test plan: Become Preferred, record a pick while Preferred, transition to Standby, then
+    // drive a takeover. The takeover write must propose the pick recorded while Preferred,
+    // confirming that the pick is not cleared by run-state transitions.
+    val stateMachine = createStateMachine()
+    val externalPickTracker: MetricUtils.ChangeTracker[Int] =
+      MetricUtils.ChangeTracker(() => getWriteCount(ValueSource.ExternalPick))
+
+    val externalPick: AssignerInfo = thirdAssignerInfo
+    val selfPreferredAssigner =
+      PreferredAssignerValue.SomeAssigner(selfAssignerInfo, generation(clock))
+
+    // Drive Startup -> Preferred -> record pick (silent while Preferred).
+    stateMachine.onAdvance(clock.tickerTime(), clock.instant())
+    stateMachine.onEvent(
+      clock.tickerTime(),
+      clock.instant(),
+      Event.PreferredAssignerReceived(selfPreferredAssigner)
+    )
+    stateMachine.onEvent(
+      clock.tickerTime(),
+      clock.instant(),
+      Event.ExternalPickReceived(Some(externalPick))
+    )
+
+    // Transition Preferred -> Standby by learning a different preferred assigner.
+    clock.advanceBy(1.second)
+    val otherPreferredAssigner =
+      PreferredAssignerValue.SomeAssigner(otherAssignerInfo, generation(clock))
+    var nextHeartbeatTime = clock.tickerTime() + config.heartbeatInterval
+    var opId = 1L
+    stateMachine.onEvent(
+      clock.tickerTime(),
+      clock.instant(),
+      Event.PreferredAssignerReceived(otherPreferredAssigner)
+    )
+
+    // Drive the heartbeat-failure loop and the final advance that triggers the takeover write.
+    val (advancedNextHeartbeatTime, advancedOpId): (TickerTime, Long) =
+      driveHeartbeatFailuresPrimingTakeover(stateMachine, nextHeartbeatTime, opId)
+    nextHeartbeatTime = advancedNextHeartbeatTime + config.heartbeatInterval
+    opId = advancedOpId + 1
+    clock.advanceBy(config.heartbeatInterval)
+    assert(
+      stateMachine.onAdvance(clock.tickerTime(), clock.instant()) ==
+      StateMachineOutput(
+        nextHeartbeatTime,
+        Seq(
+          DriverAction.SendHeartbeat(HeartbeatRequest(opId, otherPreferredAssigner)),
+          DriverAction.Write(
+            clock.tickerTime(),
+            PreferredAssignerProposal(
+              predecessorGenerationOpt = Some(otherPreferredAssigner.generation),
+              newPreferredAssignerInfoOpt = Some(externalPick)
+            )
+          )
+        )
+      )
+    )
+    assert(externalPickTracker.totalChange() == 1)
+  }
+
   /** Creates a generation for the current time on clock. */
   private def generation(clock: TypedClock): Generation =
     Generation(STORE_INCARNATION, clock.tickerTime().nanos)
+
+  private def getWriteCount(valueSource: ValueSource): Int = {
+    MetricUtils
+      .getMetricValue(
+        registry,
+        "dicer_assigner_preferred_assigner_writes_total",
+        Map("valueSource" -> valueSource.labelValue)
+      )
+      .toInt
+  }
 
   private def getHeartbeatSuccessCount: Int = {
     MetricUtils

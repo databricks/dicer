@@ -4,7 +4,6 @@ import com.databricks.caching.util._
 import com.databricks.dicer.assigner.HealthWatcher._
 import com.databricks.dicer.assigner.config.InternalTargetConfig.HealthWatcherTargetConfig
 import com.databricks.dicer.assigner.TargetMetrics.AssignmentDistributionSource
-import com.databricks.dicer.assigner.TargetMetrics.AssignmentDistributionSource.AssignmentDistributionSource
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.common.TestSliceUtils.{createRandomProposal, createTestSquid}
 import com.databricks.dicer.common._
@@ -90,6 +89,7 @@ private abstract class HealthWatcherSuite(
       generation: Generation,
       source: AssignmentDistributionSource,
       resources: Set[Squid]): Event.AssignmentSyncObserved.AssignmentObserved = {
+    require(resources.nonEmpty, "resources must not be empty")
     val assignmentContainingResources: Assignment =
       ProposedAssignment(
         predecessorOpt = None,
@@ -1504,7 +1504,7 @@ private abstract class HealthWatcherSuite(
         Set(pod0, pod1)
       ),
       createHealthReportOutput(Set(pod1)),
-      30.seconds // expiry of pods 4 and 5 whose health was bootstrapped
+      30.seconds // pod1 expires at the unhealthy timeout past the watcher's start time
     )
   }
 
@@ -1551,7 +1551,7 @@ private abstract class HealthWatcherSuite(
     // pod5 has the same UUID as pod1, but lesser timestamp, so it should be ignored.
     val pod5: Squid = pod1.copy(creationTimeMillis = pod1.creationTimeMillis - 1L)
 
-    val loggerPrefix: String = s"${target.getLoggerPrefix}"
+    val loggerPrefix: String = target.getLoggerPrefix
     val initialCount: Int = MetricUtils.getPrefixLoggerErrorCount(
       Severity.DEGRADED,
       CachingErrorCode.ASSIGNER_ASSIGNED_SQUIDS_WITH_SAME_UUID,
@@ -1689,7 +1689,8 @@ private abstract class HealthWatcherSuite(
     //         expires at 94s, delay = -3.0s)
     // Use a unique target name to isolate metrics from other tests.
     val pod4: Squid = createTestSquid("http://pod4")
-    val target: Target = Target(s"expiration-stats-$observeSliceletReadiness")
+    val target: Target =
+      Target(s"expiration-stats-$observeSliceletReadiness-$permitRunningToNotReady")
     val harness =
       new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
 

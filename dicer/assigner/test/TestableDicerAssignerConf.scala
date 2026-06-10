@@ -1,15 +1,15 @@
 package com.databricks.dicer.assigner
 
 import scala.collection.mutable
+import scala.concurrent.duration._
 
-import com.databricks.caching.util.SafeConfigUtil.DICER_CONFIG_FLAGS_NAME_PREFIX
+import com.databricks.caching.util.SafeConfigUtil.DICER_TARGET_CONFIG_FLAGS_NAME_PREFIX
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
 import com.databricks.featureflag.client.experimentation.MockFeatureFlagReaderProvider
 import com.databricks.featureflag.client.utils.RuntimeContext
 import com.databricks.rpc.DatabricksObjectMapper
 import com.typesafe.config.Config
 
-import com.databricks.api.proto.dicer.assigner.config.InternalDicerTargetConfigP
 import com.databricks.dicer.assigner.config.{InternalTargetConfig, NamedInternalTargetConfig}
 import com.databricks.dicer.common.TargetName
 
@@ -20,6 +20,20 @@ import com.databricks.dicer.common.TargetName
 class TestableDicerAssignerConf(config: Config)
     extends DicerAssignerConf(config)
     with MockFeatureFlagReaderProvider {
+
+  /**
+   * Override of [[DicerAssignerConf.protoLoggerGenerationSampleFractionPollInterval]]. Short
+   * interval so flag updates are observed quickly in tests.
+   */
+  override val protoLoggerGenerationSampleFractionPollInterval: FiniteDuration = 10.milliseconds
+
+  /** Sets the test value for the logging sample fraction SAFE flag. */
+  def setLoggingSampleFraction(fraction: Double): Unit = {
+    mockFeatureFlagReader.setMockValue(
+      protoLoggerGenerationSampleFractionFlag.flagName,
+      fraction
+    )
+  }
 
   /** Names of targets that have dynamic configurations. */
   private val targetNames = mutable.ArrayBuffer.empty[String]
@@ -34,8 +48,7 @@ class TestableDicerAssignerConf(config: Config)
 
   /** Updates dynamic configuration targets to include the given parsed `config`. */
   def putDynamicTargetConfig(targetName: TargetName, config: InternalTargetConfig): Unit = {
-    val proto: InternalDicerTargetConfigP = NamedInternalTargetConfig(targetName, config).toProto
-    val json: String = DatabricksObjectMapper.toJson(proto)
+    val json: String = NamedInternalTargetConfig(targetName, config).toJsonString
     putDynamicTargetConfig(targetName.value, json)
   }
 
@@ -44,17 +57,32 @@ class TestableDicerAssignerConf(config: Config)
    * and (possibly invalid) config json.
    */
   def putDynamicTargetConfig(targetName: String, jsonConfig: String): Unit = {
-    val key: String = s"$DICER_CONFIG_FLAGS_NAME_PREFIX$targetName"
+    val key: String = s"$DICER_TARGET_CONFIG_FLAGS_NAME_PREFIX$targetName"
     mockFeatureFlagReader.setMockValue(key, jsonConfig)
 
     // The batch flag must enumerate the dynamically configured target flags.
     targetNames += targetName
     val flagNames = targetNames.map { targetName: String =>
-      s"$DICER_CONFIG_FLAGS_NAME_PREFIX$targetName"
+      s"$DICER_TARGET_CONFIG_FLAGS_NAME_PREFIX$targetName"
     }
     mockFeatureFlagReader.setMockValue(
       targetConfigBatchFlag.flagName,
       DatabricksObjectMapper.toJson(flagNames)
+    )
+  }
+
+  /**
+   * Updates the dynamic target migration config flag value with the provided JSON.
+   *
+   * @param jsonConfig The JSON-serialized [[TargetMigrationConfigP]] instance to set the flag
+   *                   value to. Note that the provided JSON can be invalid if test scenarios
+   *                   want to simulate a malformed config.
+   */
+  def putDynamicTargetMigrationConfig(jsonConfig: String): Unit = {
+    mockFeatureFlagReader.setMockValue(
+      targetMigrationConfigFlag.flagName,
+      value = jsonConfig,
+      runtimeCtxOpt = Some(RuntimeContext.EMPTY)
     )
   }
 

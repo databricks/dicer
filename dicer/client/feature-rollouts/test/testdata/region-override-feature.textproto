@@ -1,0 +1,19 @@
+# proto-file: dicer/client/feature-rollouts/proto/dicer_client_feature_rollout_config.proto
+# proto-message: DicerClientFeatureRolloutConfigP
+
+# Default rule: all targets disabled.
+# Override for region:dev/cloud1/public/region2: all targets enabled.
+default_rule {
+  target_instance_enable_fraction: 0.0
+}
+
+override_rules: [
+  {
+    override_scopes: [
+      { region_uri: "region:dev/cloud1/public/region2" }
+    ]
+    override_rule {
+      target_instance_enable_fraction: 1.0
+    }
+  }
+]

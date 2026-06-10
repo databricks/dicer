@@ -255,6 +255,7 @@ class SliceletLoadAccumulatorSuite extends DatabricksTest with TestName {
         case (actual, expect) =>
           assert(actual.slice == expect.slice, debugMessage)
           assert(actual.primaryRateLoad == expect.primaryRateLoad, debugMessage)
+          assert(actual.numReplicas == expect.numReplicas, debugMessage)
           assert(
             actual.windowLowInclusive == expect.windowLowInclusive,
             debugMessage

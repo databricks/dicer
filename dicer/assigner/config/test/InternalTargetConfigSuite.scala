@@ -34,7 +34,6 @@ import com.databricks.dicer.common.{SliceAssignment, SubsliceAnnotation}
 import com.databricks.dicer.friend.Squid
 import com.databricks.rpc.DatabricksObjectMapper
 import com.databricks.testing.DatabricksTest
-
 class InternalTargetConfigSuite extends DatabricksTest {
 
   test("LoadBalancingMetricConfig tolerance") {
@@ -113,7 +112,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
           KeyReplicationConfig.DEFAULT_SINGLE_REPLICA,
           HealthWatcherTargetConfig.DEFAULT,
           KeyOfDeathProtectionConfig.DEFAULT,
-          TargetWatchRequestRateLimitConfig.DEFAULT
+          TargetWatchRequestRateLimitConfig.DEFAULT,
+          AuthorizerHelper.DEFAULT_AUTHORIZER
         )
       ),
       TestCase(
@@ -146,7 +146,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
           KeyReplicationConfig.DEFAULT_SINGLE_REPLICA,
           HealthWatcherTargetConfig.DEFAULT,
           KeyOfDeathProtectionConfig.DEFAULT,
-          TargetWatchRequestRateLimitConfig.DEFAULT
+          TargetWatchRequestRateLimitConfig.DEFAULT,
+          AuthorizerHelper.DEFAULT_AUTHORIZER
         )
       ),
       TestCase(
@@ -172,7 +173,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
           KeyReplicationConfig.DEFAULT_SINGLE_REPLICA,
           HealthWatcherTargetConfig.DEFAULT,
           KeyOfDeathProtectionConfig.DEFAULT,
-          TargetWatchRequestRateLimitConfig.DEFAULT
+          TargetWatchRequestRateLimitConfig.DEFAULT,
+          AuthorizerHelper.DEFAULT_AUTHORIZER
         )
       ),
       TestCase(
@@ -195,7 +197,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
           KeyReplicationConfig.DEFAULT_SINGLE_REPLICA,
           HealthWatcherTargetConfig.DEFAULT,
           KeyOfDeathProtectionConfig.DEFAULT,
-          TargetWatchRequestRateLimitConfig.DEFAULT
+          TargetWatchRequestRateLimitConfig.DEFAULT,
+          AuthorizerHelper.DEFAULT_AUTHORIZER
         )
       ),
       TestCase(
@@ -222,7 +225,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
           KeyReplicationConfig(minReplicas = 5, maxReplicas = 10),
           HealthWatcherTargetConfig.DEFAULT,
           KeyOfDeathProtectionConfig.DEFAULT,
-          TargetWatchRequestRateLimitConfig.DEFAULT
+          TargetWatchRequestRateLimitConfig.DEFAULT,
+          AuthorizerHelper.DEFAULT_AUTHORIZER
         )
       ),
       TestCase(
@@ -249,7 +253,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
           KeyReplicationConfig.DEFAULT_SINGLE_REPLICA,
           HealthWatcherTargetConfig.DEFAULT,
           KeyOfDeathProtectionConfig.DEFAULT,
-          TargetWatchRequestRateLimitConfig.DEFAULT
+          TargetWatchRequestRateLimitConfig.DEFAULT,
+          AuthorizerHelper.DEFAULT_AUTHORIZER
         )
       ),
       TestCase(
@@ -277,7 +282,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
           KeyReplicationConfig.DEFAULT_SINGLE_REPLICA,
           HealthWatcherTargetConfig.DEFAULT,
           KeyOfDeathProtectionConfig.DEFAULT,
-          TargetWatchRequestRateLimitConfig(clientRequestsPerSecond = 500L)
+          TargetWatchRequestRateLimitConfig(clientRequestsPerSecond = 500L),
+          AuthorizerHelper.DEFAULT_AUTHORIZER
         )
       )
     )
@@ -412,7 +418,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
       nonDefaultKeyReplicationConfig,
       nonDefaultHealthWatcherConfig,
       nonDefaultKeyOfDeathProtectionConfig,
-      nonDefaultTargetWatchRequestRateLimitConfig
+      nonDefaultTargetWatchRequestRateLimitConfig,
+      AuthorizerHelper.DEFAULT_AUTHORIZER
     )
     val expectedStringWithAllNonDefault = "InternalTargetConfig(, " +
       "LoadWatcherTargetConfig(minDuration=2 minutes, maxAge=20 minutes, useTopKeys=false), " +
@@ -433,7 +440,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
       KeyReplicationConfig.DEFAULT_SINGLE_REPLICA,
       nonDefaultHealthWatcherConfig,
       nonDefaultKeyOfDeathProtectionConfig,
-      nonDefaultTargetWatchRequestRateLimitConfig
+      nonDefaultTargetWatchRequestRateLimitConfig,
+      AuthorizerHelper.DEFAULT_AUTHORIZER
     )
     val expectedStringWithDefaultKeyReplication = "InternalTargetConfig(, " +
       "LoadWatcherTargetConfig(minDuration=2 minutes, maxAge=20 minutes, useTopKeys=false), " +
@@ -605,7 +613,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
         keyReplicationConfig,
         HealthWatcherTargetConfig.DEFAULT,
         KeyOfDeathProtectionConfig.DEFAULT,
-        TargetWatchRequestRateLimitConfig.DEFAULT
+        TargetWatchRequestRateLimitConfig.DEFAULT,
+        AuthorizerHelper.DEFAULT_AUTHORIZER
       )
     )
     // It's hard to access a real stale version of InternalTargetConfig in test and verify this in

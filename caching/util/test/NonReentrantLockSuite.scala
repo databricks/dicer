@@ -87,6 +87,9 @@ private class ParameterizedNonReentrantLockSuite(useFairUnderlyingLock: Boolean 
     // that the new thread is started, and then signal it to exit.
     val lock = new NonReentrantLock(useFairUnderlyingLock)
     val condition = lock.newCondition()
+    // `threadStarted` and `shouldExitThread` are protected by `lock`: every read/write below
+    // happens inside `withLock(lock)`, which establishes the happens-before edge between the
+    // worker thread and the main thread. Do not access these vars outside the lock.
     var threadStarted = false
     var shouldExitThread = false
 
@@ -95,6 +98,8 @@ private class ParameterizedNonReentrantLockSuite(useFairUnderlyingLock: Boolean 
         threadStarted = true
         // Wake up main thread if waiting on `threadStarted`.
         condition.signal()
+        // Loop on `await()` to guard against spurious wakeups: only exit when `shouldExitThread`
+        // has actually been set.
         while (!shouldExitThread) {
           condition.await()
         }
@@ -103,6 +108,7 @@ private class ParameterizedNonReentrantLockSuite(useFairUnderlyingLock: Boolean 
     thread.start()
 
     withLock(lock) {
+      // Loop on `await()` to guard against spurious wakeups, as above.
       while (!threadStarted) {
         condition.await()
       }
@@ -115,9 +121,12 @@ private class ParameterizedNonReentrantLockSuite(useFairUnderlyingLock: Boolean 
   }
 
   test("Reentrant locking from multiple threads") {
-    // Test plan: Verify that reentrantly locking fails even with multiple threads. Create multiple
-    // threads that lock/unlock with some small delay in between. With some probability they try
-    // to reentrantly lock, and we assert that this fails.
+    // Test plan: Verify that the reentrancy check still rejects reentrant acquisitions when the
+    // underlying lock is contended by multiple threads. Create multiple threads that
+    // lock/unlock with some small delay in between to produce contention; with some probability
+    // each thread attempts to reentrantly acquire the lock it already holds and we assert that
+    // this fails (each reentrant attempt is from the holding thread, just as in the
+    // single-threaded "Reentrant locking fails" test).
     val lock = new NonReentrantLock(useFairUnderlyingLock)
     val numThreads = 4
     val numIterations = 100

@@ -8,7 +8,7 @@ import "scalapb.proto";
 
 option java_package = "com.databricks.api.proto.dicer.assigner.config";
 option java_generate_equals_and_hash = true;
-option java_outer_classname = "AdvancedTargetConfigProto";
+
 option java_multiple_files = true;
 option (scalapb.options) = {
   package_name: "com.databricks.api.proto.dicer.assigner.config",
@@ -103,6 +103,7 @@ message HealthWatcherConfigP {
   // never reports ready, which we have seen is the case for some services). Note that even when
   // observing the Slicelet's state, certain status transitions may be disallowed by the Assigner
   // (e.g., Running -> NotReady is only permitted if permit_running_to_not_ready is true).
+  // See <internal link> for more details.
   optional bool observe_slicelet_readiness = 1;
 
   // OPTIONAL: Whether to permit a Slicelet's health to transition from Running to NotReady at the
@@ -110,7 +111,7 @@ message HealthWatcherConfigP {
   // Running will transition to the NotReady state, allowing the Assigner to remove it from an
   // assignment. When false, the HealthWatcher will ignore NOT_READY reports from Slicelets labeled
   // as Running. A valid config may only have this field set to true if observe_slicelet_readiness
-  // is also true.
+  // is also true. See <internal link> for more details.
   optional bool permit_running_to_not_ready = 2;
 }
 

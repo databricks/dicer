@@ -9,10 +9,14 @@ object SafeConfigUtil {
   /** The common prefix of SAFE flag names for Softstore. */
   val SOFTSTORE_CONFIG_FLAGS_NAME_PREFIX: String = "databricks.softstore.config."
 
-  /** The common prefix of SAFE flag names for Dicer. */
-  val DICER_CONFIG_FLAGS_NAME_PREFIX: String = "databricks.dicer.assigner.targetConfig."
+  /** The common prefix of SAFE flag names for Dicer target configs. */
+  val DICER_TARGET_CONFIG_FLAGS_NAME_PREFIX: String = "databricks.dicer.assigner.targetConfig."
 
-  /** The directory relative to the universe directory where we define the SAFE flags. */
+  /** The name of the SAFE flag used for the Dicer target migration dynamic configs. */
+  val DICER_TARGET_MIGRATION_CONFIG_FLAG_NAME: String =
+    "databricks.dicer.assigner.targetMigrationConfig"
+
+  /** The relative directory, from the workspace root, where we define the SAFE flags. */
   val SAFE_FLAG_DIR = "feature-flag/configs/caching/"
 
   val DEV_MODE_SHORT_NAME: String = "dev"
@@ -28,7 +32,7 @@ object SafeConfigUtil {
 
   /** Gets the name of the Dicer target from the config flag name. */
   def getTargetNameFromConfigFlagName(configFlagName: String): String = {
-    getSuffix(configFlagName, DICER_CONFIG_FLAGS_NAME_PREFIX)
+    getSuffix(configFlagName, DICER_TARGET_CONFIG_FLAGS_NAME_PREFIX)
   }
 
   /** Stripes flagNamePrefix from configFlagName.  */

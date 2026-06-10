@@ -1,7 +1,5 @@
 package com.databricks.dicer.external.javaapi;
 
-import com.databricks.dicer.client.javaapi.SliceletConfImpl;
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import java.util.List;
 import java.util.Optional;
@@ -21,24 +19,31 @@ public final class Slicelet {
   /**
    * Private constructor that prevents external instantiation.
    *
-   * <p>Production code should use {@link #create(Target)} instead, which uses the singleton
-   * configuration. This constructor is exposed at package scope to allow tests in the same package
-   * to create Slicelet instances with test-specific configurations.
-   *
-   * @param conf the Slicelet configuration
+   * @param config the Slicelet configuration
    * @param target identifies the set of resources sharded by Dicer
    */
-  private Slicelet(SliceletConfImpl conf, Target target) {
+  private Slicelet(SliceletConfig config, Target target) {
     com.databricks.dicer.external.Slicelet scalaSlicelet =
-        com.databricks.dicer.external.Slicelet.apply(conf, target.toScala());
+        com.databricks.dicer.external.Slicelet.apply(config.toScala(), target.toScala());
     this.scalaSlicelet = scalaSlicelet;
   }
 
   /**
    * @see com.databricks.dicer.external.Slicelet#apply
    */
+  public static Slicelet create(SliceletConfig config, Target target) {
+    return new Slicelet(config, target);
+  }
+
+  /**
+   * Creates a {@link Slicelet} with default configuration.
+   *
+   * @deprecated Use {@link #create(SliceletConfig, Target)} instead, which allows configuring TLS
+   *     options and other settings.
+   */
+  @Deprecated
   public static Slicelet create(Target target) {
-    return new Slicelet(SliceletConfImpl.INSTANCE(), target);
+    return create(SliceletConfig.builder().build(), target);
   }
 
   /**
@@ -78,11 +83,5 @@ public final class Slicelet {
   /** Package-private accessor for the underlying Scala Slicelet. */
   com.databricks.dicer.external.Slicelet toScala() {
     return this.scalaSlicelet;
-  }
-
-  /** Creates a Slicelet instance with a custom configuration for testing purposes. */
-  @VisibleForTesting
-  static Slicelet createForTest(SliceletConfImpl conf, Target target) {
-    return new Slicelet(conf, target);
   }
 }

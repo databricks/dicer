@@ -16,6 +16,12 @@ import com.databricks.caching.util.UnixTimeVersion
 object AssignmentFormatter {
 
   /**
+   * Default per-chunk character budget. Lower than Log4j's 16 KiB character limit to leave
+   * headroom for the PrefixLogger prefix and the "(part currentChunk/totalChunks) " suffix.
+   */
+  private[common] val DEFAULT_LOG_CHUNK_MAX_CHARS: Int = 15 * 1024
+
+  /**
    * Appends a human-readable representation of the given `assignment` to the given `builder`. The
    * format is subject to change. For example:
    *
@@ -84,12 +90,12 @@ object AssignmentFormatter {
    * The output contains a link to the Dicer assignment documentation at <internal link>,
    * which explains concepts like Slice generations and continuously assigned subslices.
    *
-   * *
    * @param assignment the assignment to format.
    * @param builder the StringBuilder to append the formatted assignment to.
    * @param maxResources the maximum number of resources to display in the resource table. Does not
    *                    affect the resources per slice displayed in the assignment table.
-   * @param maxSlices the maximum number of slices to display in the assignment table.
+   * @param maxSlices the maximum number of slices to display in the assignment table. The slices
+   *                  with the highest load are kept, with ties broken by lower key.
    * @param loadPerResourceOpt the load per resource to display in the resource table. Note that
    *                           when this field is empty, the AssignmentFormatter does not attempt
    *                           to calculate the load per resource from the assignment-tracked load,
@@ -100,6 +106,8 @@ object AssignmentFormatter {
    * @param squidFilterOpt the squid filter to apply to both the resource table and the assignment
    *                       table. In the assignment table, only slice assignments related to the
    *                       given resource will be displayed.
+   *
+   * @throws IllegalArgumentException if `maxSlices` is negative.
    */
   def appendAssignmentToStringBuilder(
       assignment: Assignment,
@@ -110,67 +118,17 @@ object AssignmentFormatter {
       loadPerSliceOverrideOpt: Option[Map[Slice, Double]],
       topKeysOpt: Option[SortedMap[SliceKey, Double]],
       squidFilterOpt: Option[Squid]): Unit = {
-    // Write assignment metadata, e.g.: "0#3#1970-01-01T00:00:00.050Z"
-    builder.append(assignment.generation.toString).append('\n')
-    if (assignment.isFrozen) {
-      builder.append("FROZEN\n")
-    }
-    builder.append('\n')
-
-    appendResourceTableToStringBuilder(
-      assignment.assignedResources,
-      builder,
+    formatAssignmentChunks(
+      () => builder,
+      assignment,
       maxResources,
+      maxSlices,
       loadPerResourceOpt,
-      squidFilterOpt
-    )
-
-    // Append slice assignments table.
-    // If `squidFilterOpt` is defined, only slice assignments related to the resource defined in
-    // `squidFilterOpt` will be presented in the slice assignments table. Otherwise, information
-    // for all assigned resources will be displayed.
-    val selectedSliceAssignments: Vector[SliceAssignment] = squidFilterOpt match {
-      case Some(squid: Squid) =>
-        assignment.sliceAssignments
-          .flatMap { sliceAssignment: SliceAssignment =>
-            if (sliceAssignment.resources.contains(squid)) {
-              // We only care about the information related with `squid`. Filter out all other
-              // unnecessary information of other resources.
-              Some(
-                SliceAssignment(
-                  SliceWithResources(sliceAssignment.slice, Set(squid)),
-                  sliceAssignment.generation,
-                  sliceAssignment.subsliceAnnotationsByResource
-                    .filterKeys((_: Squid) == squid)
-                    .toMap,
-                  sliceAssignment.primaryRateLoadOpt
-                )
-              )
-            } else {
-              // This Slice Assignment doesn't contain any information about `squid` so we discard
-              // it.
-              None
-            }
-          }
-      case None =>
-        assignment.sliceAssignments
-    }
-    val shortResourceAddresses = createShortAddrMap(assignment.assignedResources)
-    if (maxSlices < selectedSliceAssignments.size) {
-      builder.append(s"$maxSlices of ${selectedSliceAssignments.size} slices:\n")
-    }
-    val sliceAssignmentsTable: AsciiTable = createSliceAssignmentTable(
-      shortResourceAddresses,
-      assignment.generation,
-      selectedSliceAssignments,
       loadPerSliceOverrideOpt,
       topKeysOpt,
-      maxSlices
+      squidFilterOpt,
+      maxCharsPerChunk = Int.MaxValue
     )
-    sliceAssignmentsTable.appendTo(builder)
-
-    // Append a link to the Dicer assignment documentation.
-    builder.append("\n<internal link>\n")
   }
 
   /**
@@ -182,12 +140,16 @@ object AssignmentFormatter {
    * string representation of an [[Assignment]] is that gaps in the [[DiffAssignment]] are
    * represented as rows with '(Gap)' values for each column. Additionally, the string
    * representation of a [[DiffAssignment]] does not include assignment stats.
+   *
+   * @throws IllegalArgumentException if `maxSlices` is negative.
    */
   def appendDiffAssignmentToStringBuilder(
       diffAssignment: DiffAssignment,
       builder: StringBuilder,
       maxResources: Int,
       maxSlices: Int): Unit = {
+    require(maxSlices >= 0, s"`maxSlices` must be non-negative, got $maxSlices")
+
     // Write assignment metadata, e.g.: "0#3#1970-01-01T00:00:00.050Z"
     builder.append(diffAssignment.generation.toString).append('\n')
     diffAssignment.sliceMap match {
@@ -253,10 +215,121 @@ object AssignmentFormatter {
       sliceAssignments = Vector(sliceAssignment),
       loadPerSliceOverrideOpt = None,
       topKeysOpt = None,
-      maxSlices = 1 // Only 1 slice assignment is passed in anyway.
+      maxSlices = 1, // Only 1 slice assignment is passed in anyway.
+      keyspaceStart = sliceAssignment.slice.lowInclusive
     )
     builder.append("\n")
     sliceAssignmentTable.appendTo(builder)
+  }
+
+  /**
+   * Same as [[appendAssignmentToStringBuilder]], but splits the result into chunks of at most
+   * `maxCharsPerChunk` characters, preserving AsciiTable row boundaries. See
+   * [[appendAssignmentToStringBuilder]] for the table format and parameter descriptions.
+   *
+   * `maxCharsPerChunk` is a soft target: a chunk may exceed it when a single table row plus its
+   * framing does not fit — rows are never split.
+   *
+   * For example, if an assignment spans across 3 chunks:
+   *   chunk 1: "Generation...<resource table>...<first slice rows>(part 1/3)"
+   *   chunk 2: "Generation...<next slice rows>(part 2/3)"
+   *   chunk 3: "Generation...<last slice rows>(part 3/3)"
+   *
+   * When only one chunk is needed, no part suffix is added.
+   *
+   * See [[appendAssignmentToStringBuilder]] for other parameters.
+   * @param createBuilder  Called once per chunk to produce the StringBuilder for that chunk.
+   *                       If the builder returned by createBuilder already contains data,
+   *                       the data will be added to the existing StringBuilder.
+   * @param maxCharsPerChunk Soft per-chunk character target; may be exceeded when a single row
+   *                         plus framing does not fit. This is applied to the length of the
+   *                         string that is added to the StringBuilder.
+   *
+   * @return sequence of StringBuilders, each containing one chunk of the formatted assignment.
+   *
+   * @throws IllegalArgumentException if `maxCharsPerChunk` is not positive.
+   * @throws IllegalArgumentException if `maxSlices` is negative.
+   */
+  def formatAssignmentChunks(
+      createBuilder: () => mutable.StringBuilder,
+      assignment: Assignment,
+      maxResources: Int,
+      maxSlices: Int,
+      loadPerResourceOpt: Option[Map[Squid, Double]],
+      loadPerSliceOverrideOpt: Option[Map[Slice, Double]],
+      topKeysOpt: Option[SortedMap[SliceKey, Double]],
+      squidFilterOpt: Option[Squid],
+      maxCharsPerChunk: Int = DEFAULT_LOG_CHUNK_MAX_CHARS): Seq[mutable.StringBuilder] = {
+    require(
+      maxCharsPerChunk > 0,
+      s"`maxCharsPerChunk` must be positive, got $maxCharsPerChunk"
+    )
+    require(maxSlices >= 0, s"`maxSlices` must be non-negative, got $maxSlices")
+
+    val chunkedStringBuilder =
+      new ChunkedStringBuilder(maxCharsPerChunk, createBuilder, assignment.generation.toString)
+
+    // Preamble: generation, optional FROZEN flag, blank line.
+    chunkedStringBuilder.appendText(assignment.generation.toString + "\n")
+    if (assignment.isFrozen) chunkedStringBuilder.appendText("FROZEN\n")
+    chunkedStringBuilder.appendText("\n")
+
+    // Resource table with optional truncation notice.
+    val selectedResources: Set[Squid] = squidFilterOpt match {
+      case Some(squid: Squid) => Set(squid)
+      case None => assignment.assignedResources
+    }
+    if (selectedResources.size > maxResources) {
+      chunkedStringBuilder.appendText(s"$maxResources of ${selectedResources.size} resources:\n")
+    }
+    chunkedStringBuilder.appendTable(
+      createResourceTable(selectedResources, loadPerResourceOpt, maxResources)
+    )
+
+    // Blank line between the two tables.
+    chunkedStringBuilder.appendText("\n")
+
+    // Slice assignments table with optional truncation notice.
+    val selectedSliceAssignments: Vector[SliceAssignment] = squidFilterOpt match {
+      case Some(squid: Squid) =>
+        assignment.sliceAssignments.flatMap { sliceAssignment: SliceAssignment =>
+          if (sliceAssignment.resources.contains(squid)) {
+            Some(
+              SliceAssignment(
+                SliceWithResources(sliceAssignment.slice, Set(squid)),
+                sliceAssignment.generation,
+                sliceAssignment.subsliceAnnotationsByResource
+                  .filterKeys((_: Squid) == squid)
+                  .toMap,
+                sliceAssignment.primaryRateLoadOpt
+              )
+            )
+          } else {
+            None
+          }
+        }
+      case None => assignment.sliceAssignments
+    }
+    if (maxSlices < selectedSliceAssignments.size) {
+      chunkedStringBuilder.appendText(
+        s"$maxSlices of ${selectedSliceAssignments.size} slices with highest load:\n"
+      )
+    }
+    val shortResourceAddresses: Map[Squid, String] = createShortAddrMap(
+      assignment.assignedResources
+    )
+    chunkedStringBuilder.appendTable(
+      createSliceAssignmentTable(
+        shortResourceAddresses,
+        assignment.generation,
+        selectedSliceAssignments,
+        loadPerSliceOverrideOpt,
+        topKeysOpt,
+        maxSlices,
+        keyspaceStart = SliceKey.MIN // Assignment covers the keyspace from MIN
+      )
+    )
+    chunkedStringBuilder.build()
   }
 
   private def appendResourceTableToStringBuilder(
@@ -265,15 +338,10 @@ object AssignmentFormatter {
       maxResources: Int,
       loadPerResourceOpt: Option[Map[Squid, Double]],
       squidFilterOpt: Option[Squid]): Unit = {
-    // Append resource table.
-    // If `squidFilterOpt` is defined, only the information related to the resource defined in
-    // `squidFilterOpt` will be presented in the resource table. Otherwise, information for all
-    // assigned resources will be displayed.
-    val selectedResources: Set[Squid] =
-      squidFilterOpt match {
-        case Some(squid: Squid) => Set(squid)
-        case None => assignedResources
-      }
+    val selectedResources: Set[Squid] = squidFilterOpt match {
+      case Some(squid: Squid) => Set(squid)
+      case None => assignedResources
+    }
 
     if (selectedResources.size > maxResources) {
       builder.append(s"$maxResources of ${selectedResources.size} resources:\n")
@@ -333,6 +401,35 @@ object AssignmentFormatter {
   }
 
   /**
+   * Returns the indices of `sliceAssignments` to keep when truncating to at most `maxSlices` rows.
+   * The slices with the highest load are preferred, breaking ties by their position in
+   * `sliceAssignments`.
+   */
+  private def selectKeptIndicesByLoad(
+      sliceAssignments: Vector[SliceAssignment],
+      loadPerSliceOverrideOpt: Option[Map[Slice, Double]],
+      maxSlices: Int): Set[Int] = {
+    if (maxSlices >= sliceAssignments.size) {
+      // Performance optimization: skip sorting when all slices fit.
+      sliceAssignments.indices.toSet
+    } else {
+      def getLoad(sliceAssignment: SliceAssignment): Double = {
+        loadPerSliceOverrideOpt
+          .flatMap((_: Map[Slice, Double]).get(sliceAssignment.slice))
+          .getOrElse(sliceAssignment.primaryRateLoadOpt.getOrElse(0.0))
+      }
+      // Sort by the tuple (-load, index). Negating the load puts the highest-load slices first
+      // while the untouched index breaks ties in ascending order by key.
+      sliceAssignments.indices
+        .sortBy { index: Int =>
+          (-getLoad(sliceAssignments(index)), index)
+        }
+        .take(maxSlices)
+        .toSet
+    }
+  }
+
+  /**
    * Creates an ASCII table representation of assignment information.
    *
    * @param shortResourceAddresses short-form addresses for resources.
@@ -346,7 +443,9 @@ object AssignmentFormatter {
    *                               [[Assignment.sliceAssignments]] within the table.
    * @param topKeysOpt hot keys for each slice. This will be included in the "Details" column of
    *                   the table, if there is a top key in the corresponding slice.
-   * @param maxSlices the maximum number of slices to display in the table.
+   * @param maxSlices the maximum number of slices to display in the table. The highest-load slices
+   *                  are kept, with ties broken by lower key.
+   * @param keyspaceStart the key at which coverage is expected to begin.
    */
   private def createSliceAssignmentTable(
       shortResourceAddresses: Map[Squid, String],
@@ -354,7 +453,8 @@ object AssignmentFormatter {
       sliceAssignments: Vector[SliceAssignment],
       loadPerSliceOverrideOpt: Option[Map[Slice, Double]],
       topKeysOpt: Option[SortedMap[SliceKey, Double]],
-      maxSlices: Int): AsciiTable = {
+      maxSlices: Int,
+      keyspaceStart: HighSliceKey): AsciiTable = {
     val generationInstant: Instant = generation.toTime
 
     // Write all Slice assignments to a table.
@@ -367,51 +467,55 @@ object AssignmentFormatter {
     )
 
     val sliceAssignmentsTable = new AsciiTable(headers: _*)
-    var lastHighSliceKeyOpt: Option[HighSliceKey] = None
+    // Tracks the high key of the previous slice, i.e. where the next slice is expected to begin.
+    // Seeded with `keyspaceStart` so that a first slice not beginning at `keyspaceStart`
+    // is detected as a leading unassigned range.
+    var lastHighSliceKeyOpt: Option[HighSliceKey] = Some(keyspaceStart)
 
-    val truncateStartCount = maxSlices - (maxSlices / 2)
-    val truncateEndIndex = sliceAssignments.size - maxSlices + truncateStartCount
-    var omittedCount = 0
-    var unassignedCount = 0
-    var firstOmitted: Option[HighSliceKey] = None
+    val keptIndices: Set[Int] =
+      selectKeptIndicesByLoad(sliceAssignments, loadPerSliceOverrideOpt, maxSlices)
+    // An unassigned gap between two kept slices is folded into the gap summary row together
+    // with the gap from truncated assigned slices, instead of a standalone row.
+    var lastHighKeyBeforeCurrentGap: Option[HighSliceKey] = None
+    var omittedSlicesInCurrentGap: Int = 0
+    var unassignedRangesInCurrentGap: Int = 0
+
+    // Appends a summary row for the currently open gap and resets the gap state.
+    def flushCurrentGap(): Unit = {
+      // The last high key before the current gap is the low key of the first slice in the gap.
+      lastHighKeyBeforeCurrentGap.foreach { firstLowKey: HighSliceKey =>
+        sliceAssignmentsTable.appendRow(
+          firstLowKey.toString, // "Low Key"
+          "...", // "Address"
+          "...", // "Slice Generation"
+          "...", // "Load"
+          s"$omittedSlicesInCurrentGap slice(s) omitted " +
+          s"and $unassignedRangesInCurrentGap unassigned range(s)" // "Details"
+        )
+        lastHighKeyBeforeCurrentGap = None
+        omittedSlicesInCurrentGap = 0
+        unassignedRangesInCurrentGap = 0
+      }
+    }
 
     for (item <- sliceAssignments.zipWithIndex) {
       val (sliceAssignment, index): (SliceAssignment, Int) = item
-      if (index >= truncateStartCount && index < truncateEndIndex) {
-        // We are in the truncated range. Keep track of what has been truncated.
-        if (firstOmitted.isEmpty) {
-          firstOmitted = lastHighSliceKeyOpt.orElse(Some(SliceKey.MIN))
+      if (keptIndices.contains(index)) {
+        val hasUnassignedRangeBefore: Boolean =
+          lastHighSliceKeyOpt.exists((_: HighSliceKey) != sliceAssignment.slice.lowInclusive)
+
+        if (hasUnassignedRangeBefore) {
+          // Fold the unassigned gap into the currently-open gap (opening one if needed)
+          // so the summary row replaces what would otherwise be a "(Unassigned)" row.
+          if (lastHighKeyBeforeCurrentGap.isEmpty) {
+            lastHighKeyBeforeCurrentGap = lastHighSliceKeyOpt
+          }
+          unassignedRangesInCurrentGap += 1
         }
 
-        omittedCount += 1
-
-        if (lastHighSliceKeyOpt.exists((_: HighSliceKey) != sliceAssignment.slice.lowInclusive)) {
-          unassignedCount += 1
-        }
-
-        if (index == truncateEndIndex - 1) {
-          // We are exiting the truncated range. Add a row indicating what has been truncated.
-          sliceAssignmentsTable.appendRow(
-            firstOmitted.get.toString, // "Low Key"
-            "...", // "Address"
-            "...", // "Slice Generation"
-            "...", // "Load"
-            f"$omittedCount slices(s) omitted and $unassignedCount unassigned range(s)" // "Details"
-          )
-        }
-      } else {
-        if (lastHighSliceKeyOpt.exists((_: HighSliceKey) != sliceAssignment.slice.lowInclusive)) {
-          // The current low SliceKey doesn't match the last high SliceKey. This may be because the
-          // caller has filtered Slice Assignments by resource. We add a new row indicating where
-          // the last Slice Assignment ends.
-          sliceAssignmentsTable.appendRow(
-            lastHighSliceKeyOpt.get.toString, // "Low Key"
-            "(Unassigned)", // "Address"
-            "(N/A)", // "Slice Generation"
-            "(N/A)", // "Load"
-            "" // "Details"
-          )
-        }
+        // Flush any open gap (including a gap just folded above) before rendering the
+        // kept slice's rows.
+        flushCurrentGap()
 
         appendSliceAssignmentRows(
           sliceAssignment,
@@ -421,20 +525,33 @@ object AssignmentFormatter {
           loadPerSliceOverrideOpt,
           topKeysOpt
         )
+      } else {
+        // This slice is omitted. Open or extend the current gap, anchoring at MIN if no prior
+        // slice has been seen.
+        if (lastHighKeyBeforeCurrentGap.isEmpty) {
+          lastHighKeyBeforeCurrentGap = lastHighSliceKeyOpt.orElse(Some(SliceKey.MIN))
+        }
+        omittedSlicesInCurrentGap += 1
+        if (lastHighSliceKeyOpt.exists((_: HighSliceKey) != sliceAssignment.slice.lowInclusive)) {
+          unassignedRangesInCurrentGap += 1
+        }
       }
       lastHighSliceKeyOpt = Some(sliceAssignment.slice.highExclusive)
-
     }
+
+    // Flush any trailing gap.
+    flushCurrentGap()
 
     if (lastHighSliceKeyOpt.exists((_: HighSliceKey) != InfinitySliceKey)) {
       // The last Slice Assignment doesn't end at infinity key. Add a row indicating where it ends.
       // This might because the last Slice Assignments are filtered by resource.
       sliceAssignmentsTable.appendRow(
         lastHighSliceKeyOpt.get.toString, // "Low Key"
-        "(Unassigned)", // "Address"
-        "(N/A)", // "Slice Generation"
-        "(N/A)", // "Load"
-        "" // "Details"
+        "...", // "Address"
+        "...", // "Slice Generation"
+        "...", // "Load"
+        "0 slice(s) omitted " +
+        "and 1 unassigned range(s)" // "Details"
       )
     }
 
@@ -692,5 +809,111 @@ object AssignmentFormatter {
       shortResourceAddresses(resource) = shortResourceAddress
     }
     shortResourceAddresses.toMap
+  }
+
+  /**
+   * Manages the character budget for chunked string building. Each chunk is written into a
+   * [[mutable.StringBuilder]] produced by `createBuilder`. Continuation chunks (all but the
+   * first) are automatically prefixed with `generationString` so each chunk is self-identifying
+   * in logs.
+   *
+   * Not thread-safe.
+   *
+   * @param maxCharsPerChunk soft per-chunk character budget; may be exceeded for oversized rows.
+   * @param createBuilder    called once per chunk to produce the target StringBuilder.
+   * @param generationString generation header prepended to every continuation chunk.
+   */
+  private[AssignmentFormatter] class ChunkedStringBuilder(
+      maxCharsPerChunk: Int,
+      createBuilder: () => mutable.StringBuilder,
+      generationString: String
+  ) {
+
+    /** Finalized chunks, in order. */
+    private val finalizedChunks: mutable.ArrayBuffer[mutable.StringBuilder] = mutable.ArrayBuffer()
+
+    /** The chunk currently being written to, or None if no chunk is currently being written to. */
+    private var current: Option[StringBuilder] = Some(createBuilder())
+
+    /** Remaining character budget for `current`; may go negative for oversized rows. */
+    private var remainingChars: Int = maxCharsPerChunk
+
+    /**
+     * Appends `s` to the current chunk, consuming from the character budget. Text will not be
+     * split across multiple chunks since the text portions within an assignment do not have
+     * well-defined boundaries to split at.
+     */
+    def appendText(s: String): Unit = {
+      initializeCurrentBuilderIfNeeded()
+      current.get.append(s)
+      remainingChars -= s.length
+    }
+
+    /**
+     * Appends `table` to the current chunk, packing as many rows as possible before finalizing
+     * and starting a new chunk when rows overflow the budget.
+     */
+    def appendTable(table: AsciiTable): Unit = {
+      var cursorOpt: Option[AsciiTable.Cursor] = Some(AsciiTable.Cursor.begin)
+      while (cursorOpt.isDefined) {
+        val cursor: AsciiTable.Cursor = cursorOpt.get
+        initializeCurrentBuilderIfNeeded()
+        val currentBuilder: StringBuilder = current.get
+        val chunkLengthBeforeAppend: Int = currentBuilder.length
+        // `remainingChars` can go negative when a single oversized row exceeds the budget;
+        // clamp to 1 to satisfy appendNextChunk's require(maxChars > 0).
+        val nextCursorOpt: Option[AsciiTable.Cursor] =
+          table.appendNextChunk(currentBuilder, cursor, math.max(remainingChars, 1))
+        remainingChars -= (currentBuilder.length - chunkLengthBeforeAppend)
+        // Finalize the chunk if there are still more rows to process or we have exhausted all of
+        // the characters in the current chunk.
+        if (nextCursorOpt.isDefined || remainingChars <= 0) {
+          finalizeChunk()
+        }
+        cursorOpt = nextCursorOpt
+      }
+    }
+
+    /**
+     * Returns all accumulated chunks as StringBuilders. When more than one chunk is produced,
+     * `"(part currentChunk/totalChunks)"` is appended to each chunk.
+     */
+    def build(): Seq[mutable.StringBuilder] = {
+      if (current.nonEmpty) {
+        finalizedChunks += current.get
+      }
+      val totalChunks: Int = finalizedChunks.size
+      val footer: String = "\n<internal link>\n"
+      finalizedChunks.zipWithIndex.foreach {
+        case (stringBuilder: mutable.StringBuilder, currentChunk: Int) =>
+          stringBuilder.append(footer)
+          if (totalChunks > 1) {
+            stringBuilder.append(s"(part ${currentChunk + 1}/$totalChunks)")
+          }
+      }
+      finalizedChunks.toSeq
+    }
+
+    /** Finalizes the current chunk if non-empty and clears it. */
+    private def finalizeChunk(): Unit = {
+      if (current.nonEmpty) {
+        finalizedChunks += current.get
+        current = None
+      }
+    }
+
+    /**
+     * Initializes the current StringBuilder with the generation string if it is not
+     * already initialized. After calling this method, `current` is guaranteed to be
+     * Some StringBuilder.
+     */
+    private def initializeCurrentBuilderIfNeeded(): Unit = {
+      if (current.isEmpty) {
+        current = Some(createBuilder())
+        val currentBuilder: StringBuilder = current.get
+        currentBuilder.append(generationString).append("\n")
+        remainingChars = maxCharsPerChunk - currentBuilder.length
+      }
+    }
   }
 }

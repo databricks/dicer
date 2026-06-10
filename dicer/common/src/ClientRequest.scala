@@ -378,20 +378,35 @@ object SyncAssignmentState {
 }
 
 /**
- * REQUIRES: If `addressOpt` is not None, it must contain a non-empty URI.
- *
  * Encapsulates and validates [[RedirectP]].
+ *
+ * @param addressOpt URI to which the client should send future requests. If `None`, the client
+ *                   falls back to its default server-selection behavior.
+ * @param redirectTokenOpt Optional opaque token produced by the server alongside `addressOpt`. The
+ *                         client echoes this back in the next [[ClientRequest]] sent to
+ *                         `addressOpt`.
+ *
+ * @throws IllegalArgumentException If `addressOpt` is not None but contains an empty URI.
+ * @throws IllegalArgumentException If `redirectTokenOpt` is set but `addressOpt` is not.
  *
  * TODO(<internal bug>): rename this to `RoutingHint`.
  */
-case class Redirect private (addressOpt: Option[URI]) {
+case class Redirect @throws[IllegalArgumentException]() private (
+    addressOpt: Option[URI],
+    redirectTokenOpt: Option[ByteString]) {
   if (addressOpt.isDefined) {
     require(addressOpt.get.toString.nonEmpty, "Redirect address must not be empty")
+  } else {
+    require(
+      redirectTokenOpt.isEmpty,
+      "Redirect token must not be set without a redirect address"
+    )
   }
 
   def toProto: RedirectP = {
     new RedirectP(
-      address = addressOpt.map(_.toString)
+      address = addressOpt.map(_.toString),
+      redirectToken = redirectTokenOpt
     )
   }
 }
@@ -399,7 +414,7 @@ case class Redirect private (addressOpt: Option[URI]) {
 object Redirect {
 
   /** The empty redirect, which causes the sender to send to a random address. */
-  val EMPTY: Redirect = Redirect(None)
+  val EMPTY: Redirect = Redirect(addressOpt = None, redirectTokenOpt = None)
 
   /**
    * Create [[Redirect]] from `proto` if it is valid.
@@ -413,7 +428,7 @@ object Redirect {
     } else {
       Some(new URI(proto.getAddress))
     }
-    Redirect(addressOpt)
+    Redirect(addressOpt, proto.redirectToken)
   }
 }
 
@@ -423,6 +438,10 @@ object Redirect {
  * @param supportsSerializedAssignment indicates whether the client supports parsing serialized
  *                                     assignments. If true, the server may return a serialized
  *                                     assignment in response to this watch request.
+ * @param redirectTokenOpt Opaque token echoed back from the most recent
+ *                         [[Redirect.redirectTokenOpt]] the client received. `None` when the client
+ *                         is not currently acting on a redirect. The client does not inspect the
+ *                         bytes — the server on the redirected address is responsible for decoding.
  */
 case class ClientRequest(
     target: Target,
@@ -431,6 +450,7 @@ case class ClientRequest(
     timeout: FiniteDuration,
     subscriberData: SubscriberData,
     supportsSerializedAssignment: Boolean,
+    redirectTokenOpt: Option[ByteString],
     version: Long = LATEST_VERSION) {
   require(timeout.toMillis > 0, s"Positive timeout value needed: $timeout.")
   require(subscriberDebugName.nonEmpty, "Subscriber debug name must not be empty.")
@@ -452,7 +472,8 @@ case class ClientRequest(
       subscriberDataP = subData,
       clientFeatureSupport = Some(
         ClientFeatureSupportP(supportsSerializedAssignment = Some(supportsSerializedAssignment))
-      )
+      ),
+      redirectToken = redirectTokenOpt
     )
   }
 
@@ -512,6 +533,7 @@ object ClientRequest {
       chosenRpcTimeout,
       subscriberData,
       supportsSerializedAssignment,
+      proto.redirectToken,
       proto.version.getOrElse(UNKNOWN_VERSION)
     )
   }

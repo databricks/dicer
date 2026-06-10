@@ -90,7 +90,7 @@ object MetricUtils extends Assertions {
    * of `severity`, `errorCode`, and `prefix`.
    */
   def getPrefixLoggerErrorCount(
-      severity: Severity.Value,
+      severity: Severity,
       errorCode: CachingErrorCode,
       prefix: String): Int =
     getMetricValue(

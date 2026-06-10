@@ -21,6 +21,7 @@ scala_library(
         "//caching/util:config_scope",
         "//caching/util:etcd_client",
         "//caching/util:prefix_logger",
+        "//caching/util:sequential_execution_context",
         "//caching/util:server_conf",
         "//caching/util:where_am_i_helper",
         "//dicer/assigner/config:config_provider",
@@ -45,24 +46,41 @@ scala_library(
 )
 
 
+scala_library(
+    name = "remote_membership_checker_factory",
+    srcs = ["src/RemoteMembershipCheckerFactory.scala"],
+    deps = [
+        ":assigner_proto_logger",
+        ":kubernetes_membership_checker",
+        ":preferred_assigner_value",
+        "//wrappers/conf:kam-client-config",
+    ],
+    visibility = ["//dicer:internal"],
+)
+
+
 scala_test(
     name = "assigner_main_test",
     srcs = ["test/AssignerMainSuite.scala"],
     env = {
-        "POD_IP": "192.168.0.1",
+        "POD_IP": "127.0.0.1",
         "POD_UID": "67a738a6-0f47-49ab-97db-b3e9858f196f"
     },
     timeout = "moderate",
     deps = [
         ":assigner",
         ":assigner_conf",
+        ":assigner_proto_logger",
+        ":assigner_slicez",
         ":dicer-assigner",
         ":etcd_preferred_assigner_store",
+        ":kubernetes_membership_checker",
         ":preferred_assigner_value",
         "//caching/util:etcd_client",
         "//caching/util:etcd_test_env",
         "//caching/util:metric_utils",
         "//caching/util:prefix_logger",
+        "//caching/util:sequential_execution_context",
         "//caching/util:server_conf",
         "//caching/util:test_util",
         "//caching/util:unix_time_version",
@@ -76,6 +94,7 @@ scala_test(
         "//wrappers/conf:dbconf",
         "//wrappers/conf:location",
         "//wrappers/conf:location_test",
+        "//wrappers/conf:project",
         "//wrappers/conf:project-conf",
         "//wrappers/rpc:rpc_testing",
         "//wrappers/util:async_test_helpers",
@@ -83,6 +102,7 @@ scala_test(
         "//wrappers/util:databricks_main",
         "//wrappers/util:jsonutil",
         "@maven//:com_typesafe_config",
+        "@maven//:io_prometheus_simpleclient",
     ],
 )
 
@@ -95,7 +115,10 @@ scala_test(
     timeout = "short",
     deps = [
         ":assigner_conf",
+        ":assigner_proto_logger",
         ":dicer-assigner",
+        ":kubernetes_membership_checker",
+        ":preferred_assigner_value",
         "//caching/util:server_conf",
         "//caching/util:test_util",
         "//dicer/external:conf",
@@ -118,7 +141,10 @@ scala_test(
     timeout = "short",
     deps = [
         ":assigner_conf",
+        ":assigner_proto_logger",
         ":dicer-assigner",
+        ":kubernetes_membership_checker",
+        ":preferred_assigner_value",
         "//caching/util:server_conf",
         "//caching/util:test_util",
         "//dicer/external:conf",
@@ -153,6 +179,7 @@ scala_library(
     deps = [
         ":assignment_stats",
         ":generator",
+        ":migration_mode",
         ":preferred_assigner_value",
         "//caching/util:sequential_execution_context",
         "//caching/util:state_machine",
@@ -182,6 +209,7 @@ scala_test(
         ":assigner_slicez",
         ":assignment_stats",
         ":generator",
+        ":migration_mode",
         ":preferred_assigner_value",
         "//caching/util:state_machine",
         "//dicer/assigner/algorithm",
@@ -221,21 +249,27 @@ scala_library(
         ":assigner_proto_logger",
         ":assigner_slicez",
         ":assignment_generator_driver",
+        ":consistent_hashing_preferred_assigner_driver",
         ":dicer_tee_event",
         ":disabled_preferred_assigner_driver",
         ":etcd_preferred_assigner_driver",
         ":etcd_preferred_assigner_store",
-        ":etcd_store",
         ":generator",
         ":in_memory_store",
         ":kubernetes_membership_checker",
         ":kubernetes_target_watcher",
+        ":migration_mode",
+        ":migration_preferred_assigner_driver",
         ":preferred_assigner_driver",
         ":preferred_assigner_server_helper",
         ":preferred_assigner_value",
+        ":redirect_token",
         ":store_interface",
         ":subscriber_manager",
-        ":target_migration_router",
+        ":target_migrator",
+        ":target_ownership_resolver",
+        ":watch_request_rate_limiting_strategy",
+        "//caching/util:cancellable",
         "//caching/util:etcd_client",
         "//caching/util:generic_rpc_service_builder",
         "//caching/util:prefix_logger",
@@ -243,6 +277,8 @@ scala_library(
         "//caching/util:server_conf",
         "//caching/util:state_machine",
         "//caching/util:watch_cell",
+        "//caching/util:watch_cell_adapter",
+        "//dicer/assigner/config:authorizer",
         "//dicer/assigner/config:config_provider",
         "//dicer/assigner/config:internal_target_config_map",
         "//dicer/assigner/proto:preferred_assigner_protolib",
@@ -263,7 +299,7 @@ scala_library(
         "//wrappers/instrumentation",
         "//wrappers/rpc:client",
         "//wrappers/rpc:error_code",
-        "//wrappers/rpc:headers",
+        "//wrappers/rpc:rich_scalapb",
         "//wrappers/rpc:rpc_context",
         "//wrappers/rpc:rpc_exceptions",
         "//wrappers/rpc:rpc_server",
@@ -294,17 +330,17 @@ scala_library(
 scala_test(
     name = "assigner_test",
     srcs = ["test/AssignerSuite.scala"],
-    timeout = "short",
+    timeout = "moderate",
     deps = [
         ":assigner",
         ":assigner_conf",
         ":assigner_slicez",
-        ":generator",
         ":kubernetes_membership_checker",
         ":kubernetes_target_watcher",
         ":preferred_assigner_test_helper",
         ":preferred_assigner_value",
         ":store_interface",
+        ":target_migrator",
         ":testable_assigner_conf",
         "//caching/util:config_scope",
         "//caching/util:fake_sequential_execution_context",
@@ -316,6 +352,7 @@ scala_test(
         "//caching/util:test_util",
         "//caching/util:unix_time_version",
         "//caching/util:where_am_i_test_utils",
+        "//dicer/assigner/config:authorizer",
         "//dicer/assigner/config:config_provider",
         "//dicer/assigner/config:internal_target_config_map",
         "//dicer/assigner/proto:assigner_dpage_proto_scala_lib",
@@ -343,7 +380,6 @@ scala_test(
         "//wrappers/conf:project",
         "//wrappers/conf:project-conf",
         "//wrappers/instrumentation:info-service",
-        "//wrappers/rpc:headers",
         "//wrappers/rpc:rpc_server",
         "//wrappers/rpc:rpc_testing",
         "//wrappers/util:async_test_helpers",
@@ -397,45 +433,11 @@ scala_test(
     ],
 )
 
-scala_test(
-    name = "etcd_assigner_test",
-    srcs = ["test/EtcdAssignerSuite.scala"],
-    size = "large",
-    timeout = "moderate",
-    deps = [
-        ":assigner",
-        ":assigner_conf",
-        ":assigner_slicez",
-        ":testable_assigner_conf",
-        "//caching/util:etcd_client",
-        "//caching/util:etcd_test_env",
-        "//caching/util:fake_sequential_execution_context",
-        "//caching/util:server_conf",
-        "//caching/util:test_util",
-        "//caching/util:unix_time_version",
-        "//dicer/assigner/config:internal_target_config_map",
-        "//dicer/client:slicelet_impl",
-        "//dicer/common:assignment_core",
-        "//dicer/common:generation",
-        "//dicer/common:test_common",
-        "//dicer/common:test_environment",
-        "//dicer/external:conf",
-        "//dicer/external:external_common",
-        "//dicer/external:slicelet",
-        "//dicer/friend:slicelet_accessor",
-        "//dicer/friend:squid",
-        "//wrappers/conf:core",
-        "//wrappers/conf:project-conf",
-        "//wrappers/util:async_test_helpers",
-        "//wrappers/util:databricks-test",
-        "@maven//:com_typesafe_config",
-    ],
-)
-
 scala_library(
     name = "preferred_assigner_value",
     srcs = [
         "src/AssignerInfo.scala",
+        "src/AssignerUri.scala",
         "src/PreferredAssignerValue.scala",
     ],
     visibility = [
@@ -446,7 +448,6 @@ scala_library(
         "//caching/util:watch_cell",
         "//dicer/assigner/proto:preferred_assigner_protolib",
         "//dicer/common/proto:common_proto_scala_lib",
-        "//dicer/common:client_request",
         "//dicer/common:generation",
         "//wrappers/rpc:client",
     ],
@@ -462,7 +463,6 @@ scala_test(
         "//caching/util:unix_time_version",
         "//dicer/assigner/proto:preferred_assigner_protolib",
         "//dicer/common/proto:common_proto_scala_lib",
-        "//dicer/common:client_request",
         "//dicer/common:generation",
         "//wrappers/util:async_test_helpers",
         "//wrappers/util:databricks-test",
@@ -476,38 +476,174 @@ scala_test(
 )
 
 scala_library(
-    name = "target_migration_router",
-    srcs = ["src/TargetMigrationRouter.scala"],
-    deps = ["//dicer/external:conf"],
+    name = "redirect_token",
+    srcs = ["src/RedirectToken.scala"],
+    visibility = ["//dicer/assigner:__pkg__"],
+    deps = [
+        "//caching/util:prefix_logger",
+        "//dicer/common/proto:common_proto_scala_lib",
+        "//wrappers/rpc:rich_scalapb",
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_guava_guava",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
+    ],
 )
 
 scala_test(
-    name = "target_migration_router_test",
-    srcs = ["test/TargetMigrationRouterSuite.scala"],
+    name = "redirect_token_test",
+    srcs = ["test/RedirectTokenSuite.scala"],
     timeout = "short",
     deps = [
-        ":target_migration_router",
+        ":redirect_token",
+        "//caching/util:metric_utils",
+        "//caching/util:prefix_logger",
+        "//dicer/common/proto:common_proto_scala_lib",
+        "//wrappers/rpc:rich_scalapb",
+        "//wrappers/util:async_test_helpers",
+        "//wrappers/util:databricks-test",
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_guava_guava",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
+    ],
+)
+
+scala_library(
+    name = "target_ownership_resolver",
+    srcs = ["src/TargetOwnershipResolver.scala"],
+    deps = [
+        ":redirect_token",
+        "//caching/util:deterministic_sampling",
+        "//dicer/assigner/config:target_migration_config",
+        "//dicer/common:target_name",
+        "@maven//:com_google_code_findbugs_jsr305",
+        "@maven//:io_prometheus_simpleclient",
+    ],
+)
+
+scala_library(
+    name = "target_migrator",
+    srcs = [
+        "src/TargetMigrator.scala",
+        "src/TargetMigratorStateMachine.scala",
+    ],
+    deps = [
+        ":assigner_conf",
+        ":target_ownership_resolver",
+        "//caching/util:assert_macros",
+        "//caching/util:cancellable",
+        "//caching/util:prefix_logger",
+        "//caching/util:sequential_execution_context",
+        "//caching/util:server_conf",
+        "//caching/util:state_machine",
+        "//caching/util:ticker_time",
+        "//caching/util:watch_cell",
+        "//dicer/assigner/config:config_provider",
+        "//dicer/assigner/config:target_migration_config",
         "//dicer/external:conf",
+        "//wrappers/conf:location",
+        "//wrappers/conf:project",
+        "//wrappers/conf:project-conf",
+        "@maven//:com_google_code_findbugs_jsr305",
+    ],
+)
+
+scala_test(
+    name = "target_migrator_test",
+    srcs = ["test/TargetMigratorSuite.scala"],
+    timeout = "short",
+    deps = [
+        ":assigner_conf",
+        ":target_migrator",
+        ":target_ownership_resolver",
+        ":testable_assigner_conf",
+        "//caching/util:assertion_waiter",
+        "//caching/util:metric_utils",
+        "//caching/util:prefix_logger",
+        "//caching/util:sequential_execution_context",
+        "//caching/util:server_conf",
+        "//caching/util:test_util",
+        "//caching/util:watch_cell",
+        "//dicer/assigner/config:target_migration_config",
+        "//dicer/common:generation",
+        "//dicer/common:target_name",
+        "//dicer/external:conf",
+        "//wrappers/conf:core",
+        "//wrappers/conf:location",
+        "//wrappers/conf:project",
+        "//wrappers/conf:project-conf",
+        "//wrappers/util:async_test_helpers",
+        "//wrappers/util:databricks-test",
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_guava_guava",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
+    ],
+)
+
+scala_test(
+    name = "target_migrator_state_machine_test",
+    srcs = ["test/TargetMigratorStateMachineSuite.scala"],
+    timeout = "short",
+    deps = [
+        ":target_migrator",
+        ":target_ownership_resolver",
+        "//caching/util:sequential_execution_context",
+        "//caching/util:state_machine",
+        "//caching/util:test_util",
+        "//caching/util:ticker_time",
+        "//dicer/assigner/config:target_migration_config",
+        "//dicer/common:target_name",
         "//wrappers/util:async_test_helpers",
         "//wrappers/util:databricks-test",
     ],
 )
 
 scala_library(
-    name = "preferred_assigner_selector",
-    srcs = ["src/PreferredAssignerSelector.scala"],
-    visibility = ["//dicer:internal"],
-    deps = ["@maven//:com_google_guava_guava"],
+    name = "fake_target_migrator",
+    srcs = ["test/FakeTargetMigrator.scala"],
+    testonly = True,
+    deps = [
+        ":target_migrator",
+        ":target_ownership_resolver",
+        "//caching/util:cancellable",
+        "//caching/util:watch_cell",
+        "@maven//:com_google_code_findbugs_jsr305",
+    ],
+)
+
+scala_library(
+    name = "target_migration_config_builder",
+    srcs = ["test/TargetMigrationConfigBuilder.scala"],
+    testonly = True,
+    deps = [
+        "//dicer/assigner/config:target_migration_config",
+        "//dicer/common:target_name",
+        "@maven//:com_google_code_findbugs_jsr305",
+    ],
 )
 
 scala_test(
-    name = "preferred_assigner_selector_test",
-    srcs = ["test/PreferredAssignerSelectorSuite.scala"],
+    name = "target_ownership_resolver_test",
+    srcs = ["test/TargetOwnershipResolverSuite.scala"],
     timeout = "short",
     deps = [
-        ":preferred_assigner_selector",
+        ":redirect_token",
+        ":target_ownership_resolver",
+        "//caching/util:metric_utils",
+        "//caching/util:test_util",
+        "//dicer/assigner/config:target_migration_config",
+        "//dicer/common:target_name",
         "//wrappers/util:async_test_helpers",
         "//wrappers/util:databricks-test",
+        "@maven//:io_prometheus_simpleclient",
     ],
 )
 
@@ -537,12 +673,12 @@ scala_library(
         ":assigner_conf",
         "//caching/util:safe_config_util",
         "//caching/util:server_conf",
-        "//dicer/assigner/config/proto:internal_target_config_scala_lib",
         "//dicer/assigner/config:internal_target_config",
         "//dicer/common:generation",
         "//dicer/external:conf",
         "//wrappers/conf:core",
         "//wrappers/conf:dbconf",
+        "//wrappers/conf:project",
         "//wrappers/conf:project-conf",
         "//wrappers/util:jsonutil",
         "@maven//:com_typesafe_config",
@@ -575,31 +711,44 @@ scala_library(
 
 scala_library(
     name = "consistent_hashing_preferred_assigner_driver",
-    srcs = ["src/ConsistentHashingPreferredAssignerStateMachine.scala"],
+    srcs = [
+        "src/ConsistentHashingPreferredAssignerDriver.scala",
+        "src/ConsistentHashingPreferredAssignerStateMachine.scala",
+    ],
     visibility = ["//dicer:internal"],
     deps = [
+        ":assigner_proto_logger",
+        ":kubernetes_membership_checker",
+        ":preferred_assigner_driver",
         ":preferred_assigner_metrics",
-        ":preferred_assigner_selector",
         ":preferred_assigner_value",
         ":resource_watcher",
         "//caching/util:assert_macros",
+        "//caching/util:cancellable",
+        "//caching/util:consistent_hash_ring",
         "//caching/util:prefix_logger",
         "//caching/util:sequential_execution_context",
         "//caching/util:state_machine",
         "//caching/util:ticker_time",
         "//caching/util:unix_time_version",
+        "//caching/util:watch_cell",
         "//dicer/common:generation",
+        "//dicer/external:external_common",
+        "//wrappers/rpc:rich_scalapb",
         "@maven//:com_google_code_findbugs_jsr305",
+        "@maven//:io_prometheus_simpleclient",
     ],
 )
 
 scala_test(
     name = "consistent_hashing_preferred_assigner_state_machine_test",
-    srcs = ["test/ConsistentHashingPreferredAssignerStateMachineSuite.scala"],
+    srcs = [
+        "test/ConsistentHashingPreferredAssignerStateMachineSuite.scala",
+        "test/golden_files/ConsistentHashingPreferredAssignerStateMachineGoldenData.scala",
+    ],
     timeout = "short",
     deps = [
         ":consistent_hashing_preferred_assigner_driver",
-        ":preferred_assigner_selector",
         ":preferred_assigner_value",
         ":resource_watcher",
         "//caching/util:state_machine",
@@ -763,6 +912,7 @@ scala_library(
         "//caching/util:caching_latency_histogram",
         "//caching/util:intrusive_min_heap",
         "//caching/util:prefix_logger",
+        "//caching/util:safe_counter",
         "//caching/util:state_machine",
         "//caching/util:status_utils",
         "//caching/util:ticker_time",
@@ -788,22 +938,19 @@ scala_library(
 scala_test(
     name = "assignment_generator_test",
     srcs = ["test/AssignmentGeneratorSuite.scala"],
-    timeout = "moderate",
+    timeout = "short",
     deps = [
         ":assigner_conf",
         ":assigner_proto_logger",
         ":assignment_generator_driver",
         ":assignment_stats",
         ":dicer_tee_event",
-        ":etcd_store",
         ":generator",
         ":in_memory_store",
         ":kubernetes_target_watcher",
         ":load_watcher",
         ":store_interface",
         ":target_metrics_utils",
-        "//caching/util:etcd_client",
-        "//caching/util:etcd_test_env",
         "//caching/util:fake_sequential_execution_context",
         "//caching/util:fake_typed_clock",
         "//caching/util:metric_utils",
@@ -959,6 +1106,39 @@ scala_test(
 )
 
 scala_library(
+    name = "assigner_readiness_source",
+    srcs = ["src/AssignerReadinessSource.scala"],
+    visibility = ["//dicer/assigner:__pkg__"],
+    deps = [
+        "//caching/util:lock",
+        "//caching/util:watch_cell",
+        "//wrappers/common/status:status",
+        "//wrappers/conf:project",
+        "//wrappers/conf:project-conf",
+        "//wrappers/feature-flag",
+        "@maven//:com_google_code_findbugs_jsr305",
+        "@maven//:io_prometheus_simpleclient",
+    ],
+)
+
+scala_test(
+    name = "assigner_readiness_source_test",
+    srcs = ["test/AssignerReadinessSourceSuite.scala"],
+    timeout = "short",
+    deps = [
+        ":assigner_readiness_source",
+        "//caching/util:metric_utils",
+        "//caching/util:watch_cell",
+        "//wrappers/common/status:status",
+        "//wrappers/feature-flag",
+        "//wrappers/util:async_test_helpers",
+        "//wrappers/util:databricks-test",
+        "@maven//:com_google_guava_guava",
+        "@maven//:io_prometheus_simpleclient",
+    ],
+)
+
+scala_library(
     name = "dicer_tee_event",
     srcs = [
         "src/DicerTeeEvent.scala",
@@ -1064,77 +1244,6 @@ scala_test(
 )
 
 scala_library(
-    name = "etcd_store",
-    srcs = [
-        "src/EtcdStore.scala",
-        "src/EtcdStoreStateMachine.scala",
-    ],
-    visibility = ["//dicer:internal"],
-    deps = [
-        ":store_interface",
-        "//caching/util:assert_macros",
-        "//caching/util:cancellable",
-        "//caching/util:etcd_client",
-        "//caching/util:exponential_backoff",
-        "//caching/util:prefix_logger",
-        "//caching/util:sequential_execution_context",
-        "//caching/util:state_machine",
-        "//caching/util:ticker_time",
-        "//caching/util:unix_time_version",
-        "//caching/util:watch_cell",
-        "//dicer/common/proto:common_proto_scala_lib",
-        "//dicer/common:assignment_core",
-        "//dicer/common:etcd_client_helper",
-        "//dicer/common:generation",
-        "//dicer/common:target_helper",
-        "//dicer/external:conf",
-        "//dicer/friend:slice_map",
-        "@maven//:io_prometheus_simpleclient",
-        "@scala_proto_rules_grpc_api",
-        "@scala_proto_rules_grpc_netty",
-    ],
-)
-
-scala_test(
-    name = "etcd_store_test",
-    srcs = ["test/EtcdStoreSuite.scala"],
-    size = "large",
-    timeout = "moderate",
-    deps = [
-        ":common_store_test_base",
-        ":etcd_store",
-        ":store_interface",
-        "//caching/util:etcd_client",
-        "//caching/util:etcd_test_env",
-        "//caching/util:etcd_test_utils",
-        "//caching/util:fake_sequential_execution_context",
-        "//caching/util:fake_typed_clock",
-        "//caching/util:metric_utils",
-        "//caching/util:prefix_logger",
-        "//caching/util:state_machine",
-        "//caching/util:status_or",
-        "//caching/util:test_state_machine_driver",
-        "//caching/util:test_util",
-        "//caching/util:unix_time_version",
-        "//caching/util:watch_cell",
-        "//dicer/common/proto:common_proto_scala_lib",
-        "//dicer/common:assignment_core",
-        "//dicer/common:etcd_client_helper",
-        "//dicer/common:generation",
-        "//dicer/common:target_helper",
-        "//dicer/common:test_common",
-        "//dicer/external:conf",
-        "//dicer/external:external_common",
-        "//dicer/friend:slice_map",
-        "//dicer/friend:squid",
-        "//wrappers/rpc:rich_scalapb",
-        "//wrappers/util:async_test_helpers",
-        "//wrappers/util:databricks-test",
-        "@maven//:io_prometheus_simpleclient",
-    ],
-)
-
-scala_library(
     name = "etcd_preferred_assigner_store",
     srcs = [
         "src/EtcdPreferredAssignerStore.scala",
@@ -1206,7 +1315,6 @@ scala_library(
     deps = [
         ":assigner_proto_logger",
         ":etcd_preferred_assigner_store",
-        ":kubernetes_membership_checker",
         ":preferred_assigner_driver",
         ":preferred_assigner_metrics",
         ":preferred_assigner_server_helper",
@@ -1240,6 +1348,7 @@ scala_test(
         ":etcd_preferred_assigner_driver",
         ":etcd_preferred_assigner_store",
         ":preferred_assigner_driver",
+        ":preferred_assigner_metrics",
         ":preferred_assigner_value",
         "//caching/util:fake_sequential_execution_context",
         "//caching/util:fake_typed_clock",
@@ -1299,6 +1408,54 @@ scala_test(
 )
 
 scala_library(
+    name = "migration_mode",
+    srcs = ["src/MigrationMode.scala"],
+    visibility = ["//dicer:internal"],
+)
+
+scala_library(
+    name = "migration_preferred_assigner_driver",
+    srcs = ["src/MigrationPreferredAssignerDriver.scala"],
+    visibility = ["//dicer:internal"],
+    deps = [
+        ":assigner_proto_logger",
+        ":migration_mode",
+        ":preferred_assigner_driver",
+        ":preferred_assigner_metrics",
+        ":preferred_assigner_value",
+        "//caching/util:cancellable",
+        "//caching/util:prefix_logger",
+        "//caching/util:sequential_execution_context",
+        "//caching/util:watch_cell",
+        "@maven//:com_google_code_findbugs_jsr305",
+    ],
+)
+
+scala_test(
+    name = "migration_preferred_assigner_driver_test",
+    srcs = ["test/MigrationPreferredAssignerDriverSuite.scala"],
+    timeout = "short",
+    deps = [
+        ":assigner_proto_logger",
+        ":migration_mode",
+        ":migration_preferred_assigner_driver",
+        ":preferred_assigner_driver",
+        ":preferred_assigner_metrics",
+        ":preferred_assigner_value",
+        "//caching/util:cancellable",
+        "//caching/util:metric_utils",
+        "//caching/util:sequential_execution_context",
+        "//caching/util:test_util",
+        "//caching/util:unix_time_version",
+        "//caching/util:watch_cell",
+        "//dicer/common:generation",
+        "//wrappers/util:async_test_helpers",
+        "//wrappers/util:databricks-test",
+        "@maven//:io_prometheus_simpleclient",
+    ],
+)
+
+scala_library(
     name = "assigner_conf",
     srcs = ["src/conf/DicerAssignerConf.scala"],
     visibility = [
@@ -1306,14 +1463,17 @@ scala_library(
         "//dicer:internal",
     ],
     deps = [
+        ":migration_mode",
         "//caching/util:assert_macros",
         "//caching/util:config_scope",
         "//caching/util:prefix_logger",
+        "//caching/util:safe_batch_flag_helper",
         "//caching/util:safe_config_util",
         "//caching/util:server_conf",
         "//dicer/common:generation",
         "//dicer/external:slicelet",
         "//wrappers/conf:core",
+        "//wrappers/conf:kam-client-config",
         "//wrappers/conf:project",
         "//wrappers/conf:project-conf",
         "//wrappers/util:jsonutil",
@@ -1358,7 +1518,6 @@ scala_library(
         ":assigner_proto_logger",
         ":etcd_preferred_assigner_driver",
         ":etcd_preferred_assigner_store",
-        ":kubernetes_membership_checker",
         ":preferred_assigner_driver",
         ":preferred_assigner_value",
         "//caching/util:etcd_client",
@@ -1552,6 +1711,36 @@ scala_test(
 )
 
 scala_test(
+    name = "migration_mode_conf_test",
+    srcs = ["test/conf/MigrationModeConfSuite.scala"],
+    timeout = "short",
+    deps = [
+        ":assigner_conf",
+        ":migration_mode",
+        "//caching/util:server_conf",
+        "//caching/util:test_util",
+        "//dicer/external:conf",
+        "//wrappers/conf:core",
+        "//wrappers/conf:project",
+        "//wrappers/conf:project-conf",
+        "//wrappers/util:async_test_helpers",
+        "//wrappers/util:databricks-test",
+        "@maven//:com_typesafe_config",
+    ],
+)
+
+scala_test(
+    name = "migration_mode_test",
+    srcs = ["test/MigrationModeSuite.scala"],
+    timeout = "short",
+    deps = [
+        ":migration_mode",
+        "//wrappers/util:async_test_helpers",
+        "//wrappers/util:databricks-test",
+    ],
+)
+
+scala_test(
     name = "preferred_assigner_store_conf_test",
     srcs = ["test/conf/PreferredAssignerStoreConfSuite.scala"],
     timeout = "short",
@@ -1562,6 +1751,7 @@ scala_test(
         ":etcd_preferred_assigner_driver",
         ":etcd_preferred_assigner_store",
         ":kubernetes_membership_checker",
+        ":migration_preferred_assigner_driver",
         ":preferred_assigner_driver",
         ":preferred_assigner_test_helper",
         "//caching/util:server_conf",
@@ -1571,32 +1761,7 @@ scala_test(
         "//wrappers/conf:core",
         "//wrappers/conf:dbconf",
         "//wrappers/conf:location",
-        "//wrappers/conf:project-conf",
-        "//wrappers/util:async_test_helpers",
-        "//wrappers/util:databricks-test",
-        "//wrappers/util:jsonutil",
-        "@maven//:com_typesafe_config",
-    ],
-)
-
-scala_test(
-    name = "store_conf_test",
-    srcs = ["test/conf/StoreConfSuite.scala"],
-    timeout = "short",
-    deps = [
-        ":assigner",
-        ":assigner_conf",
-        ":assigner_slicez",
-        ":etcd_store",
-        ":in_memory_store",
-        ":store_interface",
-        "//caching/util:server_conf",
-        "//caching/util:test_util",
-        "//dicer/common:common_ssl_conf",
-        "//dicer/common:watch_server_conf",
-        "//wrappers/conf:core",
-        "//wrappers/conf:dbconf",
-        "//wrappers/conf:location",
+        "//wrappers/conf:project",
         "//wrappers/conf:project-conf",
         "//wrappers/util:async_test_helpers",
         "//wrappers/util:databricks-test",
@@ -1636,6 +1801,7 @@ scala_test(
         "//dicer/external:slicelet",
         "//dicer/friend:squid",
         "//wrappers/conf:core",
+        "//wrappers/conf:project",
         "//wrappers/conf:project-conf",
         "//wrappers/rpc:rpc_testing",
         "//wrappers/util:async_test_helpers",
@@ -1658,6 +1824,7 @@ scala_library(
         ":preferred_assigner_driver",
         ":preferred_assigner_metrics",
         ":preferred_assigner_value",
+        ":target_migrator",
         "//caching/util:fake_typed_clock",
         "//caching/util:metric_utils",
         "//caching/util:sequential_execution_context",
@@ -1677,7 +1844,9 @@ scala_library(
         "//dicer/external:slicelet",
         "//dicer/friend:squid",
         "//wrappers/conf:core",
+        "//wrappers/conf:project",
         "//wrappers/conf:project-conf",
+        "//wrappers/rpc:rich_scalapb",
         "//wrappers/rpc:rpc_context",
         "//wrappers/rpc:rpc_testing",
         "//wrappers/util:async_test_helpers",
@@ -1698,7 +1867,6 @@ scala_test(
         ":etcd_preferred_assigner_driver",
         ":etcd_preferred_assigner_store",
         ":interposing_preferred_assigner",
-        ":kubernetes_membership_checker",
         ":preferred_assigner_driver",
         ":preferred_assigner_metrics",
         ":preferred_assigner_test_helper",
@@ -1754,19 +1922,77 @@ scala_test(
     ],
 )
 
+scala_test(
+    name = "target_migration_integration_test",
+    srcs = ["test/TargetMigrationIntegrationSuite.scala"],
+    timeout = "moderate",
+    deps = [
+        ":assigner",
+        ":assigner_conf",
+        ":assigner_slicez",
+        ":etcd_preferred_assigner_driver",
+        ":fake_target_migrator",
+        ":interposing_preferred_assigner",
+        ":preferred_assigner_test_helper",
+        ":preferred_assigner_value",
+        ":target_migration_config_builder",
+        ":target_migrator",
+        ":target_ownership_resolver",
+        ":testable_assigner_conf",
+        "//caching/util:fake_sequential_execution_context",
+        "//caching/util:fake_typed_clock",
+        "//caching/util:metric_utils",
+        "//caching/util:server_conf",
+        "//caching/util:test_util",
+        "//dicer/assigner/config:config_provider",
+        "//dicer/assigner/config:internal_target_config_map",
+        "//dicer/assigner/config:target_migration_config",
+        "//dicer/client:slicelet_impl",
+        "//dicer/client:test_client",
+        "//dicer/common:assignment_core",
+        "//dicer/common:generation",
+        "//dicer/common:target_name",
+        "//dicer/common:test_common",
+        "//dicer/common:test_environment",
+        "//dicer/external:conf",
+        "//dicer/external:slicelet",
+        "//wrappers/conf:project",
+        "//wrappers/conf:project-conf",
+        "//wrappers/util:async_test_helpers",
+        "//wrappers/util:databricks-test",
+        "@maven//:io_prometheus_simpleclient",
+    ],
+)
+
+scala_library(
+    name = "watch_request_rate_limiting_strategy",
+    srcs = ["src/WatchRequestRateLimitingStrategy.scala"],
+    deps = [
+        "//caching/util:sequential_execution_context",
+        "//caching/util:typed_clock",
+        "//dicer/assigner/config:internal_target_config_map",
+        "//dicer/common:watch_server_helper",
+    ],
+    visibility = ["//dicer:internal"],
+)
+
+
 scala_library(
     name = "assigner_proto_logger",
-    srcs = ["src/AssignerProtoLogger.scala"],
-    visibility = ["//dicer:internal"],
+    srcs = [
+        "src/AssignerProtoLogger.scala",
+    ],
     deps = [
         ":generator",
         ":preferred_assigner_value",
         "//caching/util:sequential_execution_context",
         "//caching/util:state_machine",
+        "//caching/util:watch_cell",
         "//dicer/common:assignment_core",
         "//dicer/external:slicelet",
     ],
 )
+
 
 filegroup(
     name = "advanced_target_config",

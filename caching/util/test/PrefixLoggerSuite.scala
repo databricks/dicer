@@ -187,7 +187,7 @@ class PrefixLoggerSuite extends DatabricksTest with TestName {
     val errorCode = CachingErrorCode.SLICELET_NAMESPACE_MISMATCH
 
     // Get the current metric value for the given severity and the hardcoded `errorCode`.
-    def getMetricValue(severity: Severity.Value): Int = {
+    def getMetricValue(severity: Severity): Int = {
       MetricUtils.getPrefixLoggerErrorCount(severity, errorCode, getSafeName)
     }
 

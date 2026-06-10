@@ -1158,71 +1158,6 @@ class ParameterizedAlgorithmSuite(keyReplicationConfig: KeyReplicationConfig)
     verifyHomomorphicAssignment(initialAssignment, newAssignment)
   }
 
-  test("Homomorphic assignment prioritizes resources with high load during replacement") {
-    // Test plan: Verify that, given an initial assignment with a set of healthy resources and an
-    // unevenly distributed resource load, when some resources become unhealthy, the one with
-    // highest resource load is prioritized for replacement after a new, healthy resource is added.
-    val target = Target(getSafeName)
-    val targetConfig: InternalTargetConfig = defaultTargetConfig
-
-    // We create (2 * targetConfig.keyReplicationConfig.minReplicas - 1) resources so that we can
-    // skew the initial assignment and load distribution such that the first resource has the
-    // highest load, given a uniform load map.
-    // slice0: resource0 and the next (minReplicas - 1) resources
-    // slice1: resource0 and the last (minReplicas - 1) resources
-    val resource0Squid: Squid = createTestSquid("resource0", salt = "")
-    val startingResources: Resources =
-      createNResources(2 * targetConfig.keyReplicationConfig.minReplicas - 1)
-    val slice0Resources: Set[Squid] =
-      createNResources(targetConfig.keyReplicationConfig.minReplicas).availableResources
-    val slice1Resources: Set[Squid] = if (targetConfig.keyReplicationConfig.minReplicas > 1) {
-      createNResourcesFrom(
-        startIndex = targetConfig.keyReplicationConfig.minReplicas,
-        n = targetConfig.keyReplicationConfig.minReplicas - 1
-      ).availableResources + resource0Squid
-    } else {
-      // Special case for minReplicas = 1, since `Resources` cannot be created from an
-      // empty sequence.
-      Set(resource0Squid)
-    }
-
-    // Create the initial assignment, with non-zero load on both slices.
-    val generation: Generation = createGeneration()
-    val initialAssignment: Assignment = createAssignment(
-      generation,
-      AssignmentConsistencyMode.Affinity,
-      (("" -- "Dori") @@ generation -> slice0Resources).withPrimaryRateLoad(10.0),
-      (("Dori" -- ∞) @@ generation -> slice1Resources).withPrimaryRateLoad(2.0)
-    )
-
-    // Remove all healthy resources in the initial assignment and generate a homomorphic
-    // assignment, providing just one new, healthy resource.
-    val newResources: Resources = createNResourcesFrom(
-      startIndex = startingResources.availableResources.size,
-      n = 1
-    )
-    val newResourceSquid: Squid = newResources.availableResources.head
-    val newAssignment: Assignment =
-      generateHomomorphicAssignment(target, newResources, initialAssignment)
-
-    // Verify that the new assignment is the exact same as the initial assignment in terms of slice
-    // boundaries. The resource set in the new assignment should be the same as the old assignment,
-    // except for "resource0", which should be replaced by the new, healthy resource.
-    val expectedNewAssignmentResources: Set[Squid] =
-      initialAssignment.assignedResources - resource0Squid + newResourceSquid
-    assert(
-      newAssignment.assignedResources == expectedNewAssignmentResources
-    )
-    for (tuple <- newAssignment.sliceAssignments.zip(initialAssignment.sliceAssignments)) {
-      val (newSliceAssignment, initialSliceAssignment): (SliceAssignment, SliceAssignment) = tuple
-      if (initialSliceAssignment.resources.contains(resource0Squid)) {
-        assert(!newSliceAssignment.resources.contains(resource0Squid))
-        assert(newSliceAssignment.resources.contains(newResourceSquid))
-      }
-    }
-    verifyHomomorphicAssignment(initialAssignment, newAssignment)
-  }
-
   test("Homomorphic assignment with extra healthy resources") {
     // Test plan: Verify that, given an initial assignment with some healthy resources and a new
     // set of resources that includes extra healthy resources, the homomorphic assignment generated
@@ -1268,6 +1203,64 @@ class ParameterizedAlgorithmSuite(keyReplicationConfig: KeyReplicationConfig)
 
     // Verify that the slice boundaries are the same as in the initial assignment, and that the
     // number of resources per slice assignment is the same as in the initial assignment.
+    verifyHomomorphicAssignment(initialAssignment, newAssignment)
+  }
+
+  test(
+    "Homomorphic assignment replaces hottest unhealthy resources first when only some are replaced"
+  ) {
+    // Test plan: Verify that, when there are multiple unhealthy resources with distinct loads and
+    // fewer new healthy resources are available than unhealthy resources, the algorithm replaces
+    // the unhealthy resources strictly in priority order (hottest to coldest), leaving the
+    // unhealthy resources with the lowest loads in place.
+    val target = Target(getSafeName)
+    val targetConfig: InternalTargetConfig = defaultTargetConfig
+    val minReplicas: Int = targetConfig.keyReplicationConfig.minReplicas
+
+    // Create three disjoint groups of `minReplicas` unhealthy resources, where in the initial
+    // assignment below, we will make one group relatively cold, one group medium, and one group
+    // relatively hot in terms of load.
+    val coldSquids: Set[Squid] =
+      createNResourcesFrom(startIndex = 0, n = minReplicas).availableResources
+    val mediumSquids: Set[Squid] =
+      createNResourcesFrom(startIndex = minReplicas, n = minReplicas).availableResources
+    val hotSquids: Set[Squid] =
+      createNResourcesFrom(startIndex = 2 * minReplicas, n = minReplicas).availableResources
+
+    // Assign the cold group a single slice with the highest per-slice load. Assign the hot group
+    // multiple slices, each with the lowest per-slice load -- but enough of them that the hot
+    // group's pods carry the highest total load. The medium group sits in between, both in
+    // per-slice load and in total per-resource load.
+    //
+    // Per-slice loads:           cold (10.0) > medium (6.0) > hot (5.0)
+    // Per-resource total loads:  cold (10.0) < medium (12.0) < hot (15.0)
+    val generation: Generation = createGeneration()
+    val initialAssignment: Assignment = createAssignment(
+      generation,
+      AssignmentConsistencyMode.Affinity,
+      (("" -- "k1") @@ generation -> coldSquids).withPrimaryRateLoad(10.0),
+      (("k1" -- "k2") @@ generation -> mediumSquids).withPrimaryRateLoad(6.0),
+      (("k2" -- "k3") @@ generation -> mediumSquids).withPrimaryRateLoad(6.0),
+      (("k3" -- "k4") @@ generation -> hotSquids).withPrimaryRateLoad(5.0),
+      (("k4" -- "k5") @@ generation -> hotSquids).withPrimaryRateLoad(5.0),
+      (("k5" -- ∞) @@ generation -> hotSquids).withPrimaryRateLoad(5.0)
+    )
+
+    // Provide `2 * minReplicas` new healthy resources, enough to replace the hot and medium
+    // groups but not the cold group.
+    val newResources: Resources =
+      createNResourcesFrom(startIndex = 3 * minReplicas, n = 2 * minReplicas)
+    val newAssignment: Assignment =
+      generateHomomorphicAssignment(target, newResources, initialAssignment)
+
+    // The hot and medium groups should be replaced; only the cold group of unhealthy resources
+    // should remain in the new assignment.
+    val expectedAssignedResources: Set[Squid] = newResources.availableResources ++ coldSquids
+    assert(
+      newAssignment.assignedResources == expectedAssignedResources,
+      s"Expected hottest unhealthy resources to be replaced first, leaving only the cold " +
+      s"group: expected $expectedAssignedResources but got ${newAssignment.assignedResources}"
+    )
     verifyHomomorphicAssignment(initialAssignment, newAssignment)
   }
 }

@@ -5,13 +5,12 @@ import scala.util.Random
 
 import com.github.blemale.scaffeine.{Cache, Scaffeine}
 
+import com.databricks.caching.util.{ConsistentHashRing, PrefixLogger, WatchValueCell}
 import com.databricks.common.instrumentation.SCaffeineCacheInfoExporter
 
-import com.databricks.dicer.common.Assignment.AssignmentValueCellConsumer
-import com.databricks.dicer.common.Assignment
+import com.databricks.dicer.common.SliceAssignment
 import com.databricks.dicer.external.{ResourceAddress, SliceKey}
 import com.databricks.dicer.friend.Squid
-import com.databricks.caching.util.PrefixLogger
 
 /**
  * Abstraction to route keys to application-defined stubs.
@@ -20,13 +19,13 @@ import com.databricks.caching.util.PrefixLogger
  * application-supplied stub factory to map the address to a stub. As an optimization, it caches the
  * resulting stub for a configurable period of time before asking the application to recreate it.
  *
- * @param assignmentConsumer Assignment consumer exposing the latest assignment to the router.
- * @param logPrefix Prefix to use with the PrefixLogger
- * @param stubFactory An application supplied function to create a stub given an address
- * @param stubCacheLifetime How long stubs are cached before being recreated
+ * @param clerkAssignmentConsumer Consumer exposing the latest [[ClerkAssignment]] to the router.
+ * @param logPrefix Prefix to use with the PrefixLogger.
+ * @param stubFactory An application-supplied function to create a stub given an address.
+ * @param stubCacheLifetime How long stubs are cached before being recreated.
  */
 class ResourceRouter[Stub <: AnyRef] private[dicer] (
-    assignmentConsumer: AssignmentValueCellConsumer,
+    clerkAssignmentConsumer: WatchValueCell.Consumer[ClerkAssignment],
     logPrefix: String,
     stubFactory: ResourceAddress => Stub,
     stubCacheLifetime: FiniteDuration) {
@@ -52,17 +51,42 @@ class ResourceRouter[Stub <: AnyRef] private[dicer] (
    */
   def getStubForKey(key: SliceKey): Option[Stub] = {
     val resourceOpt: Option[Squid] =
-      assignmentConsumer.getLatestValueOpt.map { assignment: Assignment =>
-        val resources: Vector[Squid] = assignment.sliceMap.lookUp(key).indexedResources
+      clerkAssignmentConsumer.getLatestValueOpt.map { clerkAssignment: ClerkAssignment =>
+        val resources: Vector[Squid] =
+          clerkAssignment.assignment.sliceMap.lookUp(key).indexedResources
         resources(Random.nextInt(resources.length))
       }
-    resourceOpt.map { resource: Squid =>
-      // Look up the corresponding stub from the map, or create and remember a new resource if no
-      // entry exists.
-      resourceMap.get(resource, _ => {
-        logger.info(s"Creating resource stub for $resource")
-        stubFactory(resource.resourceAddress)
-      })
-    }
+    resourceOpt.map(getOrCreateStub)
   }
+
+  /**
+   * Two-level sharding variant of [[getStubForKey]]. Resolves `primaryKey` to the resources owning
+   * it in the assignment, and then uses the precomputed [[ConsistentHashRing]] over those
+   * resources keyed on `secondaryKey` to deterministically pick one. Single-replica slices skip
+   * the ring and return their lone replica. If no assignment is currently known, returns None.
+   */
+  def getStubForKey(primaryKey: SliceKey, secondaryKey: SliceKey): Option[Stub] = {
+    val resourceOpt: Option[Squid] =
+      clerkAssignmentConsumer.getLatestValueOpt.map { clerkAssignment: ClerkAssignment =>
+        val sliceAssignment: SliceAssignment =
+          clerkAssignment.assignment.sliceMap.lookUp(primaryKey)
+        clerkAssignment.hashRingsBySlice.get(sliceAssignment.slice) match {
+          case Some(ring: ConsistentHashRing[Squid, SliceKey]) => ring.lookup(secondaryKey)
+          // Single-replica slices do not have a precomputed hash ring and are not present in the
+          // map.
+          case None => sliceAssignment.indexedResources.head
+        }
+      }
+    resourceOpt.map(getOrCreateStub)
+  }
+
+  /**
+   * Converts a given [[Squid]] to a stub, looking it up in the cache if present or creating and
+   * caching it via [[stubFactory]] if not.
+   */
+  private def getOrCreateStub(resource: Squid): Stub =
+    resourceMap.get(resource, (_: Squid) => {
+      logger.info(s"Creating resource stub for $resource")
+      stubFactory(resource.resourceAddress)
+    })
 }

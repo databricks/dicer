@@ -8,4 +8,7 @@ object Headers {
 
   /** Header that defines the app instance id that is sending the request. */
   val HEADER_DATABRICKS_APP_INSTANCE_ID = "X-Databricks-App-Instance-Id"
+
+  /** Header carrying the base64-encoded secondary slice key for Dicer two-level sharding. */
+  val HEADER_DICER_SECONDARY_SLICE_KEY = "x-databricks-internal-dicer-secondary-slice-key"
 }

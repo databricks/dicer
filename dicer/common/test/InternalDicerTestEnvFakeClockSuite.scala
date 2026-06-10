@@ -28,7 +28,7 @@ class InternalDicerTestEnvFakeClockSuite extends DatabricksTest with TestName {
 
   /** The test environment used in the suite. */
   private val testEnv =
-    InternalDicerTestEnvironment.create(allowEtcdMode = true, secPool = fakeSecPool)
+    InternalDicerTestEnvironment.create(secPool = fakeSecPool)
 
   override def beforeEach(): Unit = {
     testEnv.clear()
@@ -43,16 +43,16 @@ class InternalDicerTestEnvFakeClockSuite extends DatabricksTest with TestName {
     // clock. First, start a single assigner, two Slicelets and two Clerks. Verify that:
     //  - Both Slicelets and both Clerks get the assignment.
     //  - The assignment generation matches the time of the fake clock.
-    val storeIncarnation = Incarnation(42)
+    // InMemoryStore requires a loose incarnation (see Incarnation.isLoose).
+    val storeIncarnation = Incarnation(43)
 
-    val etcdConf: DicerAssignerConf = new DicerAssignerConf(
+    val assignerConf: DicerAssignerConf = new DicerAssignerConf(
       Configs.parseMap(
-        "databricks.dicer.assigner.store.type" -> "etcd",
         "databricks.dicer.assigner.storeIncarnation" -> storeIncarnation.value
       )
     )
 
-    testEnv.addAssigner(TestAssigner.Config.create(etcdConf))
+    testEnv.addAssigner(TestAssigner.Config.create(assignerConf))
 
     val target = Target(getSafeName)
     val slicelet0: Slicelet =

@@ -1,0 +1,77 @@
+# proto-file: dicer/client/feature-rollouts/test/proto/test_data.proto
+# proto-message: DicerClientFeatureRolloutScopeTestDataP
+
+# Region URIs that should be accepted by `DicerClientFeatureRolloutScope::from_proto`.
+valid_scope_test_cases: [
+  {
+    description: "cloud1-region2 region URI"
+    scope_proto: { region_uri: "region:prod/cloud1/public/region2" }
+  },
+  {
+    description: "cloud1-region1 region URI"
+    scope_proto: { region_uri: "region:prod/cloud1/public/region1" }
+  },
+  {
+    description: "cloud2-region10 region URI"
+    scope_proto: { region_uri: "region:prod/cloud2/public/region10" }
+  }
+]
+
+# Scope protos that should be rejected by `DicerClientFeatureRolloutScope::from_proto`. Each entry
+# pairs the proto with a substring expected to appear in the error message.
+invalid_scope_test_cases: [
+  # Absent region_uri: rejected before format validation runs.
+  {
+    description: "absent region_uri"
+    scope_proto: {}
+    expected_error_substring: "regionUri must be set"
+  },
+  # Strings that bear no resemblance to a region URI.
+  {
+    description: "empty region_uri"
+    scope_proto: { region_uri: "" }
+    expected_error_substring: "regionUri must match format"
+  },
+  {
+    description: "free-form non-URI string"
+    scope_proto: { region_uri: "hello" }
+    expected_error_substring: "regionUri must match format"
+  },
+  {
+    description: "string with whitespace"
+    scope_proto: { region_uri: "foo bar" }
+    expected_error_substring: "regionUri must match format"
+  },
+  {
+    description: "numeric-only string"
+    scope_proto: { region_uri: "123" }
+    expected_error_substring: "regionUri must match format"
+  },
+  # Wrong scheme (not "region:").
+  {
+    description: "wrong scheme (kubernetes-cluster)"
+    scope_proto: { region_uri: "kubernetes-cluster:prod/cloud1/public/region2/clustertype2/01" }
+    expected_error_substring: "regionUri must match format"
+  },
+  # Right scheme, wrong path structure (not exactly four non-empty segments).
+  {
+    description: "scheme only, no segments"
+    scope_proto: { region_uri: "region:" }
+    expected_error_substring: "regionUri must match format"
+  },
+  {
+    description: "three segments instead of four"
+    scope_proto: { region_uri: "region:prod/cloud1/public" }
+    expected_error_substring: "regionUri must match format"
+  },
+  {
+    description: "five segments instead of four"
+    scope_proto: { region_uri: "region:prod/cloud1/public/region2/clustertype2/01" }
+    expected_error_substring: "regionUri must match format"
+  },
+  {
+    description: "empty middle segment"
+    scope_proto: { region_uri: "region:prod//public/region2" }
+    expected_error_substring: "regionUri must match format"
+  }
+]

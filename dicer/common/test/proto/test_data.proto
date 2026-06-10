@@ -2,8 +2,8 @@ syntax = "proto2";
 
 package dicer.test;
 
-
 import "dicer/common/proto/common.proto";
+import "dicer/common/proto/dpage.proto";
 import "dicer/friend/proto/friend.proto";
 import "scalapb.proto";
 
@@ -404,6 +404,16 @@ message AssignmentTestDataP {
 
     repeated CallP calls = 2;
   }
+
+  // Test cases for `assignedResources`.
+  repeated AssignedResourcesTestCaseP assigned_resources_test_cases = 9;
+  message AssignedResourcesTestCaseP {
+    // The assignment to test.
+    optional SimpleDiffAssignmentP assignment = 1;
+
+    // The expected resources assigned to at least one slice.
+    repeated string expected_assigned_resources = 2;
+  }
 }
 
 message SliceAssignmentTestDataP {
@@ -799,5 +809,67 @@ message CrossClusterClerkAccessorTestDataP {
   message InvalidClusterUriTestCaseP {
     optional string cluster_uri = 1;
     optional string expected_error_message = 2;
+  }
+}
+
+/** Test data for converting Dicer domain objects to DPage view protos. */
+message DpageViewHelpersTestDataP {
+  // Test cases for converting a Generation to its DPage view proto.
+  repeated GenerationToViewProtoTestCaseP generation_to_view_proto_test_cases = 1;
+
+  message GenerationToViewProtoTestCaseP {
+    // Logically required: description of the test case to aid debugging.
+    optional string description = 1;
+
+    // Input generation.
+    optional GenerationP input = 2;
+
+    // Expected DPage view proto.
+    optional GenerationViewP expected_output = 3;
+  }
+
+  // Test cases for converting an optional Assignment to its DPage view proto.
+  repeated GetAssignmentViewProtoTestCaseP get_assignment_view_proto_test_cases = 2;
+
+  message GetAssignmentViewProtoTestCaseP {
+    // Logically required: description of the test case to aid debugging.
+    optional string description = 1;
+
+    // Input data.
+    optional InputP input = 2;
+
+    // Expected output assignment view proto.
+    optional AssignmentViewP expected_output = 3;
+
+    message InputP {
+      // Input assignment.
+      optional SimpleDiffAssignmentP assignment = 1;
+
+      // Reported load values by resource.
+      repeated ReportedLoadPerResourceP reported_load_per_resource = 2;
+
+      // Reported load values by slice.
+      repeated ReportedLoadPerSliceP reported_load_per_slice = 3;
+
+      // Top keys by load.
+      repeated TopKeyP top_keys = 4;
+
+      message ReportedLoadPerResourceP {
+        optional string resource = 1;
+        optional double load = 2;
+      }
+
+      message ReportedLoadPerSliceP {
+        optional friend.SliceP slice = 1;
+        optional double load = 2;
+      }
+
+      message TopKeyP {
+        optional bytes key = 1;
+        optional double load = 2;
+      }
+
+      // TODO(<internal bug>): Add more input fields.
+    }
   }
 }

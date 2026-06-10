@@ -90,16 +90,35 @@ object HybridConcurrencyDomain {
    *                                 caller's AttributionContext. Synchronous commands will always
    *                                 observe the caller's context, but asynchronous commands will
    *                                 only observe it if this is true.
+   * @param alertOwnerTeam the team's registered alert routing name, e.g.
+   *                       [[AlertOwnerTeam.CACHING_TEAM_NAME]] for Caching-owned domains,
+   *                       or "eng-my-team" for domains owned by other teams.
    */
-  def create(name: String, enableContextPropagation: Boolean): HybridConcurrencyDomain = {
+  def create(
+      name: String,
+      alertOwnerTeam: String,
+      enableContextPropagation: Boolean): HybridConcurrencyDomain = {
     // In production, always use a dedicated thread for the internal executor. Tasks will block
     // on the internal task lock which we shouldn't do on any shared threads.
     val sec = SequentialExecutionContext.createWithDedicatedPool(
       name = s"$name-internal-sec",
-      enableContextPropagation
+      enableContextPropagation = enableContextPropagation,
+      alertOwnerTeam = alertOwnerTeam
     )
     new Impl(name, sec, enableContextPropagation)
   }
+
+  /** Use [[create]] with an explicit `alertOwnerTeam` instead. */
+  @deprecated(
+    "Provide alertOwnerTeam explicitly; the CachingTeam default is only correct for " +
+    "Caching-owned domains (<internal bug>)."
+  )
+  def create(name: String, enableContextPropagation: Boolean): HybridConcurrencyDomain =
+    create(
+      name,
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+      enableContextPropagation = enableContextPropagation
+    )
 
   /**
    * REQUIRES: `sec` must enable/disable context propagation based on `enableContextPropagation`.

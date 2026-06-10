@@ -1,0 +1,7 @@
+# proto-file: dicer/client/feature-rollouts/proto/dicer_client_feature_rollout_config.proto
+# proto-message: DicerClientFeatureRolloutConfigP
+
+# All targets are enabled in all regions (fraction 1.0).
+default_rule {
+  target_instance_enable_fraction: 1.0
+}

@@ -3,8 +3,7 @@ package com.databricks.dicer.client
 import java.time.Instant
 import java.util.concurrent.TimeUnit
 import io.prometheus.client.{Counter, Gauge, Histogram}
-import com.databricks.dicer.common.AssignmentMetricsSource.AssignmentMetricsSource
-import com.databricks.dicer.common.{ClientType, Generation}
+import com.databricks.dicer.common.{AssignmentMetricsSource, ClientType, Generation}
 import com.databricks.dicer.external.Target
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import io.grpc.Status.Code
@@ -158,6 +157,28 @@ private[dicer] object ClientMetrics {
     .labelNames("targetCluster", "targetName", "targetInstanceId", "clientType")
     .buckets(CLIENT_REQUEST_SIZE_BUCKETS: _*)
     .register()
+
+  /**
+   * Removes the per-(target, source) labels from the gauge metrics so that a stopped client does
+   * not leave stale samples in the Prometheus scrape.
+   *
+   * Only Gauges are removed; Counters (e.g. `numberNewGenerations`) are intentionally left in
+   * place because we typically observe counters by `rate()` queries and leaving them in place
+   * doesn't affect the dashboards or alerts.
+   *
+   * @param target the target whose labels should be removed
+   * @param source the source label associated with the stopped client
+   */
+  private[client] def removeGaugesForTarget(
+      target: Target,
+      source: AssignmentMetricsSource): Unit = {
+    val targetCluster: String = target.getTargetClusterLabel
+    val targetName: String = target.getTargetNameLabel
+    val targetInstanceId: String = target.getTargetInstanceIdLabel
+    val sourceLabel: String = source.toString
+    latestGenerationNumber.remove(targetCluster, targetName, targetInstanceId, sourceLabel)
+    latestStoreIncarnation.remove(targetCluster, targetName, targetInstanceId, sourceLabel)
+  }
 
   /**
    * Updates the Prometheus metrics for the latestGenerationNumber, latestTargetIncarnation,

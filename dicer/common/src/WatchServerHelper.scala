@@ -21,10 +21,20 @@ import com.databricks.api.proto.dicer.common.{
 }
 
 /**
+ * OSS-dummy stubs mirroring the internal Armeria throttling types referenced in
+ * [[WatchServerHelper]] for rate limiting purposes. Rate limiting is not available in OSS.
+ */
+object ThrottlingShims {
+  trait HttpRequest
+  trait ThrottlingStrategy[T]
+}
+
+/**
  * Helper utilities for assignment watch server implementations. (Helpers that are not Dicer-
  * specific should be defined in [[com.databricks.caching.util]].)
  */
 object WatchServerHelper {
+  import ThrottlingShims.{HttpRequest, ThrottlingStrategy}
 
   /** Timeout for the Watch RPC from a client perspective. */
   val WATCH_RPC_TIMEOUT: FiniteDuration = 5.seconds
@@ -71,13 +81,14 @@ object WatchServerHelper {
    * Configures and creates a unary RPC server for the Assignment Watch API, which is exported by
    * both the Dicer Assigner and Slicelets.
    *
-   * `localPort` is not used.
+   * `localPort` and `rateLimitingStrategyOpt` are not used.
    */
   def createWatchServer(
       conf: WatchServerConf with CommonSslConf,
       port: Int,
       localPort: Option[Int],
-      serviceHandlerBuilder: GenericRpcServiceBuilder): DatabricksServerWrapper = {
+      serviceHandlerBuilder: GenericRpcServiceBuilder,
+      rateLimitingStrategyOpt: Option[ThrottlingStrategy[HttpRequest]]): DatabricksServerWrapper = {
     // Configure a few critical knobs:
     // - cap message sizes to handle large assignment payloads
     // - use a dedicated thread pool sized by config

@@ -45,7 +45,7 @@ case class Incarnation private (value: Long) extends AnyVal with Ordered[Incarna
    * state among system components, and additionally make strong guarantees about continuous
    * assignment of slices. See [[SliceAssignment]] for details.
    *
-   *   Note: Since https://github.com/databricks-eng/universe/pull/465640, linear histories are
+   *   Note: Since <internal link>, linear histories are
    *   technically guaranteed as long as g1.incarnation.storeIncarnation ==
    *   g2.incarnation.storeIncarnation, however to maintain backwards compatibility with existing
    *   client code, the definitions of loose and non-loose on [[Incarnation]]s as a whole were

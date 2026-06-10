@@ -6,7 +6,7 @@ import "scalapb.proto";
 
 option java_package = "com.databricks.api.proto.dicer.client.featurerollouts";
 option java_generate_equals_and_hash = true;
-option java_outer_classname = "DicerClientFeatureRolloutConfigProto";
+
 option java_multiple_files = true;
 option (scalapb.options) = {
   package_name: "com.databricks.api.proto.dicer.client.featurerollouts",
@@ -49,7 +49,7 @@ message DicerClientFeatureRolloutConfigP {
 
 // The rollout rule defining which target instances a Dicer client feature is enabled for, and at
 // what fraction. Used in DicerClientFeatureRolloutConfigP.default_rule and in each
-// DicerClientFeatureRolloutRuleOverrideP.override_config.
+// DicerClientFeatureRolloutRuleOverrideP.override_rule.
 //
 // Next ID: 4.
 message DicerClientFeatureRolloutRuleP {
@@ -86,7 +86,7 @@ message DicerClientFeatureRolloutRuleP {
 
 // Override of a Dicer client feature rollout rule that applies to specific regions.
 //
-// Next ID: 3.
+// Next ID: 4.
 message DicerClientFeatureRolloutRuleOverrideP {
 
   // PRECONDITION: Must be non-empty.
@@ -100,9 +100,12 @@ message DicerClientFeatureRolloutRuleOverrideP {
   // within the override scopes. This matters for Clerks watching Slicelets across regions.
   repeated DicerClientFeatureRolloutScopeP override_scopes = 1;
 
+  reserved 2;
+  reserved "override_config";
+
   // The rule that is applied to the `override_scopes`, overriding the default rule in
   // `DicerClientFeatureRolloutConfigP`.
-  optional DicerClientFeatureRolloutRuleP override_config = 2;
+  optional DicerClientFeatureRolloutRuleP override_rule = 3;
 }
 
 // The config scope specifying a region to which a DicerClientFeatureRolloutRuleOverrideP applies. The

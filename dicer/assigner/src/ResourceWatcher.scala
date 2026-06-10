@@ -12,6 +12,9 @@ import com.databricks.dicer.external.ResourceAddress
  * This implements the resource version spec described by the k8s docs here:
  * https://kubernetes.io/docs/reference/using-api/api-concepts/#resource-versions.
  *
+ * Note: values are only comparable across [[ResourceVersion]]s emitted by a single producer
+ * instance and MUST NOT be externalized.
+ *
  * @param value the underlying version string.
  */
 case class ResourceVersion(value: String) extends Ordered[ResourceVersion] {

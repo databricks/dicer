@@ -3,9 +3,11 @@ package com.databricks.dicer.external.javaapi;
 import static com.databricks.dicer.external.javaapi.TestSliceUtils.fp;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatNoException;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.databricks.backend.common.util.CurrentProject;
 import com.databricks.backend.common.util.Project;
+import com.databricks.rpc.tls.JTLSOptions;
 import com.databricks.testing.DatabricksJavaTest;
 import java.util.Optional;
 import java.util.concurrent.CompletionStage;
@@ -95,6 +97,45 @@ final class ClerkTest extends DatabricksJavaTest {
     testEnv.stopSlicelet(slicelet1);
     testEnv.stopSlicelet(slicelet2);
     testEnv.stopClerk(clerk);
+  }
+
+  @Test
+  public void testBuilderWithTlsOptions() {
+    // Test plan: Verify that setTlsOptions on the Java builder propagates through to the
+    // underlying ClerkConfImpl. Build with a known JTLSOptions and confirm
+    // clerkTlsOptions returns the equivalent Scala TLSOptions.
+    JTLSOptions jTlsOptions = JTLSOptions.builder().build();
+    ClerkConfig.Builder builder = ClerkConfig.builder();
+    ClerkConfig config = builder.setTlsOptions(jTlsOptions).build();
+    assertThat(DicerClientConfigTestInterop.clerkTlsOptions(config).get())
+        .isEqualTo(jTlsOptions.toTLSOptions());
+  }
+
+  @Test
+  public void testBuilderWithoutTlsOptions() {
+    // Test plan: Verify that building a ClerkConfig without calling setTlsOptions results
+    // in no TLS options on the underlying ClerkConfImpl. Also verify that reusing the same
+    // builder produces distinct config instances.
+    ClerkConfig.Builder builder = ClerkConfig.builder();
+    ClerkConfig config1 = builder.build();
+    ClerkConfig config2 = builder.build();
+    assertThat(DicerClientConfigTestInterop.clerkTlsOptions(config1).isEmpty()).isTrue();
+    assertThat(DicerClientConfigTestInterop.clerkTlsOptions(config2).isEmpty()).isTrue();
+    assertThat(config1).isNotSameAs(config2);
+  }
+
+  @Test
+  public void testSetSliceletPortRejectsNonPositive() {
+    // Test plan: Verify that setSliceletPort validates port values eagerly at set time.
+    // Non-positive values should throw IllegalArgumentException, while a positive value should
+    // succeed without exception.
+    assertThatThrownBy(() -> ClerkConfig.builder().setSliceletPort(0))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("sliceletPort must be positive");
+    assertThatThrownBy(() -> ClerkConfig.builder().setSliceletPort(-1))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("sliceletPort must be positive");
+    assertThatNoException().isThrownBy(() -> ClerkConfig.builder().setSliceletPort(8080));
   }
 
   @Test

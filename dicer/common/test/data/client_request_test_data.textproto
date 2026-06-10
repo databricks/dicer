@@ -736,5 +736,19 @@ round_tripping_cases: [
     chosen_rpc_timeout_millis: 600000
     clerk_fields: { }
     client_feature_support: { supports_serialized_assignment: false }
+  },
+
+  # ClerkRequest echoing back an opaque redirect_token.
+  {
+    target: {
+      name: "softstore"
+    }
+    sync_assignment_state: {
+      known_generation: { incarnation: 10 number: 42 }
+    }
+    subscriber_debug_name: "subscriber"
+    chosen_rpc_timeout_millis: 600000
+    clerk_fields: { }
+    redirect_token: "\x01\x02\x03\x04"
   }
 ]

@@ -185,18 +185,37 @@ case class Assignment(
   }
 
   override def toString: String = {
-    val builder = mutable.StringBuilder.newBuilder
-    AssignmentFormatter.appendAssignmentToStringBuilder(
-      this,
-      builder,
-      maxResources = 16,
-      maxSlices = 32,
-      loadPerResourceOpt = None,
-      loadPerSliceOverrideOpt = None,
-      topKeysOpt = None,
-      squidFilterOpt = None
-    )
-    builder.toString()
+    toChunkedString(maxCharsPerChunk = Int.MaxValue).mkString
+  }
+
+  /**
+   * Formats this assignment and splits the result into chunks of at most `maxCharsPerChunk`
+   * characters, preserving AsciiTable structure across boundaries.
+   *
+   * This is helpful in cases where the number of resources and slices is large, making the
+   * assignment too large to fit in a single log message.
+   * @param maxResources    maximum resources shown in the resource table.
+   * @param maxSlices       maximum slices shown in the assignment table.
+   * @param maxCharsPerChunk soft per-chunk character budget.
+   * @return sequence of chunk strings, each a self-contained fragment of the formatted assignment.
+   */
+  def toChunkedString(
+      maxResources: Int = 16,
+      maxSlices: Int = 32,
+      maxCharsPerChunk: Int = AssignmentFormatter.DEFAULT_LOG_CHUNK_MAX_CHARS): Seq[String] = {
+    AssignmentFormatter
+      .formatAssignmentChunks(
+        () => new mutable.StringBuilder(),
+        this,
+        maxResources,
+        maxSlices,
+        loadPerResourceOpt = None,
+        loadPerSliceOverrideOpt = None,
+        topKeysOpt = None,
+        squidFilterOpt = None,
+        maxCharsPerChunk = maxCharsPerChunk
+      )
+      .map((_: mutable.StringBuilder).toString())
   }
 
   /**
@@ -234,7 +253,7 @@ object Assignment {
   @throws[NotImplementedError]
   def fromDiff(
       knownAssignmentOpt: Option[Assignment],
-      diffAssignment: DiffAssignment): Either[Assignment, DiffUnused.DiffUnused] = {
+      diffAssignment: DiffAssignment): Either[Assignment, DiffUnused] = {
     if (diffAssignment.consistencyMode != AssignmentConsistencyMode.Affinity) {
       throw new NotImplementedError("TODO(<internal bug>): Only Affinity is currently supported")
     }
@@ -394,31 +413,31 @@ object Assignment {
   }
 
   /**
-   * Enumeration of reasons a diff passed to [[fromDiff()]] may be unused or unusable. These cases
-   * are conveyed as an explicit enumeration rather than throwing exceptions because the
-   * requirements for inputs to [[fromDiff()]] are too complex to be reasonably checked by all
-   * callers and are (with the exception of `INCONSISTENCY`) expected outcomes of the assignment
-   * sync protocol.
+   * Reasons a diff passed to [[fromDiff()]] may be unused or unusable. These cases are conveyed as
+   * explicit values rather than thrown exceptions because the requirements for inputs to
+   * [[fromDiff()]] are too complex to be reasonably checked by all callers and are (with the
+   * exception of `INCONSISTENCY`) expected outcomes of the assignment sync protocol.
    */
-  object DiffUnused extends Enumeration {
-    type DiffUnused = Value
+  sealed trait DiffUnused
+
+  object DiffUnused {
 
     /**
      * An inconsistency was detected between the diff and known assignments, e.g., the known
      * assignment has Slices with higher generations than a supposedly fresher diff assignment.
      */
-    val INCONSISTENCY: Value = Value
+    case object INCONSISTENCY extends DiffUnused
 
     /**
      * The known assignment has a greater generation than the diff (making it uninteresting).
      */
-    val TOO_STALE_DIFF: Value = Value
+    case object TOO_STALE_DIFF extends DiffUnused
 
     /** The known assignment has the same generation as the diff (making it uninteresting). */
-    val DIFF_MATCHES_KNOWN: Value = Value
+    case object DIFF_MATCHES_KNOWN extends DiffUnused
 
     /** A partial diff was supplied but there is no known assignment. */
-    val NO_KNOWN: Value = Value
+    case object NO_KNOWN extends DiffUnused
 
     /**
      * A partial diff was supplied with a diff generation that is greater than that of the known
@@ -426,6 +445,10 @@ object Assignment {
      * known assignment, leaving a gap and making the diff unable to be applied to the known
      * assignment).
      */
-    val TOO_STALE_KNOWN: Value = Value
+    case object TOO_STALE_KNOWN extends DiffUnused
+
+    /** All cases of [[DiffUnused]], for callers that need to iterate over them. */
+    val values: Vector[DiffUnused] =
+      Vector(INCONSISTENCY, TOO_STALE_DIFF, DIFF_MATCHES_KNOWN, NO_KNOWN, TOO_STALE_KNOWN)
   }
 }

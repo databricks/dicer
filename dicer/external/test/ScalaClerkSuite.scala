@@ -14,7 +14,7 @@ private class ScalaClerkSuite extends ScalaClerkSuiteBase {
   override protected def createClerkInternal(
       target: Target,
       clerkLocationConfigMap: Option[Map[String, String]],
-      clientBranchOpt: Option[String] = None): ClerkDriver = {
+      clientBranchOpt: Option[String] = None): ClerkHarness = {
     val envMap: Map[String, String] = clerkLocationConfigMap.getOrElse(Map.empty)
     val locationConf: LocationConf = LocationConfTestUtils.newTestLocationConfig(envMap = envMap)
 
@@ -40,7 +40,7 @@ private class ScalaClerkSuite extends ScalaClerkSuiteBase {
         case None =>
           testEnv.createClerk(slicelet)
       }
-      ScalaClerkDriver.create(clerk)
+      ScalaClerkHarness.create(clerk)
     }
   }
 

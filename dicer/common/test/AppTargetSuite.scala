@@ -97,6 +97,26 @@ private class AppTargetSuite extends DatabricksTest {
     }
   }
 
+  gridTest("Invalid app names (parse)")(TEST_DATA.invalidAppTargetNames) { invalidName: String =>
+    // Test plan: verify that TargetHelper.parse rejects AppTarget descriptions with invalid app
+    // names.
+    if (!invalidName.contains(":")) {
+      // Names containing ':' are excluded because ':' is the parseable-description delimiter.
+      assertThrow[IllegalArgumentException]("Name is invalid") {
+        TargetHelper.parse(s"appTarget:$invalidName:a123")
+      }
+    }
+  }
+
+  gridTest("Invalid instance IDs (parse)")(TEST_DATA.invalidInstanceIds) {
+    invalidInstanceId: String =>
+      // Test plan: verify that TargetHelper.parse rejects AppTarget descriptions with invalid
+      // instance IDs.
+      assertThrow[IllegalArgumentException]("Instance ID is invalid") {
+        TargetHelper.parse(s"appTarget:name:$invalidInstanceId")
+      }
+  }
+
   test("Proto conversion") {
     // Test plan: verify that AppTarget object round-trip via TargetHelper.fromProto and
     // Target.toProto.

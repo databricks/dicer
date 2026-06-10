@@ -338,7 +338,8 @@ class ClientRequestSuite extends DatabricksTest {
       subscriberDebugName = "test-clerk",
       timeout = 10.seconds,
       subscriberData = ClerkData,
-      supportsSerializedAssignment = false
+      supportsSerializedAssignment = false,
+      redirectTokenOpt = None
     )
 
     assert(clerkRequest.getClientType == ClientType.Clerk)
@@ -356,7 +357,8 @@ class ClientRequestSuite extends DatabricksTest {
       subscriberDebugName = "test-slicelet",
       timeout = 10.seconds,
       subscriberData = sliceletData,
-      supportsSerializedAssignment = false
+      supportsSerializedAssignment = false,
+      redirectTokenOpt = None
     )
 
     assert(sliceletRequest.getClientType == ClientType.Slicelet)

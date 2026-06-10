@@ -1,21 +1,36 @@
 load("@rules_scala//scala:scala.bzl", "scala_library", "scala_test")
 
 filegroup(
-    name = "feature_rollout_configs",
-    srcs = glob(["**/*.textproto"]),
-    visibility = ["//dicer:internal"],
+    name = "test_feature_rollout_configs",
+    srcs = [
+        "test/testdata/all-disabled-feature.textproto",
+        "test/testdata/all-enabled-feature.textproto",
+        "test/testdata/force-disable-feature.textproto",
+        "test/testdata/force-enable-feature.textproto",
+        "test/testdata/half-enabled-feature.textproto",
+        "test/testdata/malformed/broken-feature.textproto",
+        "test/testdata/region-override-feature.textproto",
+    ],
+    testonly = True,
 )
 
 scala_library(
     name = "dicer_client_feature_rollout_config",
     srcs = [
+        "src/DicerClientFeatureRolloutConfig.scala",
+        "src/DicerClientFeatureRolloutFlag.scala",
+        "src/DicerClientFeatureRolloutFlagImpl.scala",
         "src/DicerClientFeatureRolloutRule.scala",
+        "src/DicerClientFeatureRolloutRuleOverride.scala",
         "src/DicerClientFeatureRolloutScope.scala",
     ],
     visibility = ["//dicer:internal"],
     deps = [
+        "//caching/util:deterministic_sampling",
+        "//caching/util:prefix_logger",
         "//dicer/client/feature-rollouts/proto:dicer_client_feature_rollout_config_scala_lib",
         "//dicer/common:target_name",
+        "//dicer/external:conf",
         "@com_google_protobuf_protobuf_java",
         "@maven//:com_google_guava_guava",
         "@scala_proto_rules_grpc_api",
@@ -28,14 +43,18 @@ scala_library(
 scala_test(
     name = "dicer_client_feature_rollout_config_test",
     srcs = [
+        "test/DicerClientFeatureRolloutConfigSuite.scala",
+        "test/DicerClientFeatureRolloutRuleOverrideSuite.scala",
         "test/DicerClientFeatureRolloutRuleSuite.scala",
         "test/DicerClientFeatureRolloutScopeSuite.scala",
     ],
+    data = ["//dicer/client/feature-rollouts/test/data"],
     timeout = "short",
     deps = [
         ":dicer_client_feature_rollout_config",
         "//caching/util:test_util",
         "//dicer/client/feature-rollouts/proto:dicer_client_feature_rollout_config_scala_lib",
+        "//dicer/client/feature-rollouts/test/proto:test_data_proto_scala_lib",
         "//dicer/common:target_name",
         "//wrappers/util:async_test_helpers",
         "//wrappers/util:databricks-test",
@@ -45,5 +64,20 @@ scala_test(
         "@scala_proto_rules_grpc_netty",
         "@scala_proto_rules_grpc_stub",
         "@scala_proto_rules_scalapb_runtime",
+    ],
+)
+
+scala_test(
+    name = "dicer_client_feature_rollout_flag_test",
+    srcs = ["test/DicerClientFeatureRolloutFlagImplSuite.scala"],
+    data = [":test_feature_rollout_configs"],
+    timeout = "short",
+    deps = [
+        ":dicer_client_feature_rollout_config",
+        "//caching/util:metric_utils",
+        "//caching/util:prefix_logger",
+        "//dicer/external:conf",
+        "//wrappers/util:async_test_helpers",
+        "//wrappers/util:databricks-test",
     ],
 )

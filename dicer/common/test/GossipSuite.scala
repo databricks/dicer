@@ -29,23 +29,17 @@ class GossipSuite extends DatabricksTest with TestName {
 
   /** Test environment where the Assigner is configured with an in-memory store. */
   private val testEnv = InternalDicerTestEnvironment.create(
-    TestAssigner.Config.create(assignerConf = getAssignerConf("in_memory", 0))
-  )
-
-  /**
-   * Returns assigner configuration with specified store type (e.g. "in_memory", "etcd"),
-   * and store incarnation, and where delays have been reduced to speed up tests.
-   */
-  private def getAssignerConf(storeType: String, storeIncarnation: Short) =
-    new DicerAssignerConf(
-      Configs.parseMap(
-        "databricks.dicer.internal.cachingteamonly.watchServerSuggestedRpcTimeoutMillis" -> 1000,
-        // This suite uses createDirectClerk, so we need to configure this setting as well.
-        "databricks.dicer.assigner.assignerSuggestedClerkWatchTimeoutSeconds" -> 1,
-        "databricks.dicer.assigner.store.type" -> storeType,
-        "databricks.dicer.assigner.storeIncarnation" -> storeIncarnation
+    TestAssigner.Config.create(
+      // Reduce delays to speed up tests. This suite uses createDirectClerk, so we need to configure
+      // assignerSuggestedClerkWatchTimeoutSeconds as well.
+      assignerConf = new DicerAssignerConf(
+        Configs.parseMap(
+          "databricks.dicer.internal.cachingteamonly.watchServerSuggestedRpcTimeoutMillis" -> 1000,
+          "databricks.dicer.assigner.assignerSuggestedClerkWatchTimeoutSeconds" -> 1
+        )
       )
     )
+  )
 
   // Sequence of sample assignment proposals that are designed to exercise diffing logic.
   private val PROPOSAL1: Proposal = createProposal(

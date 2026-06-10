@@ -52,6 +52,7 @@ scala_macro_library(
 scala_library(
     name = "ascii_table",
     srcs = ["src/AsciiTable.scala"],
+    deps = ["@maven//:com_google_code_findbugs_jsr305"],
 )
 
 scala_test(
@@ -60,6 +61,7 @@ scala_test(
     timeout = "short",
     deps = [
         ":ascii_table",
+        ":test_util",
         "//wrappers/util:async_test_helpers",
         "//wrappers/util:databricks-test",
     ],
@@ -506,6 +508,13 @@ scala_library(
     visibility = ["//caching:all_caching"],
 )
 
+scala_library(
+    name = "safe_batch_flag_helper",
+    srcs = ["src/SafeBatchFlagHelper.scala"],
+    visibility = ["//caching:all_caching"],
+    deps = ["//wrappers/feature-flag"],
+)
+
 scala_test(
     name = "safe_config_util_test",
     srcs = ["test/SafeConfigUtilSuite.scala"],
@@ -515,6 +524,29 @@ scala_test(
         ":test_util",
         "//wrappers/util:async_test_helpers",
         "//wrappers/util:databricks-test",
+    ],
+)
+
+scala_library(
+    name = "safe_counter",
+    srcs = ["src/SafeCounter.scala"],
+    deps = [
+        ":prefix_logger",
+        "@maven//:io_prometheus_simpleclient",
+    ],
+)
+
+scala_test(
+    name = "safe_counter_test",
+    srcs = ["test/SafeCounterSuite.scala"],
+    timeout = "short",
+    deps = [
+        ":metric_utils",
+        ":safe_counter",
+        ":test_util",
+        "//wrappers/util:async_test_helpers",
+        "//wrappers/util:databricks-test",
+        "@maven//:io_prometheus_simpleclient",
     ],
 )
 
@@ -741,6 +773,7 @@ scala_library(
     name = "log_capturer",
     srcs = ["test/LogCapturer.scala"],
     testonly = True,
+    visibility = ["//caching:all_caching"],
     deps = [
         ":assertion_waiter",
         ":lock",
@@ -914,6 +947,67 @@ scala_test(
 )
 
 scala_library(
+    name = "deterministic_sampling",
+    srcs = ["src/DeterministicSampling.scala"],
+    deps = [
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_guava_guava",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
+    ],
+)
+
+scala_test(
+    name = "deterministic_sampling_test",
+    srcs = ["test/DeterministicSamplingSuite.scala"],
+    timeout = "short",
+    deps = [
+        ":deterministic_sampling",
+        "//wrappers/util:async_test_helpers",
+        "//wrappers/util:databricks-test",
+    ],
+)
+
+scala_library(
+    name = "consistent_hash_ring",
+    srcs = ["src/ConsistentHashRing.scala"],
+    deps = [
+        "//wrappers/rpc:rich_scalapb",
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_guava_guava",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
+    ],
+)
+
+scala_test(
+    name = "consistent_hash_ring_test",
+    srcs = [
+        "test/ConsistentHashRingHarness.scala",
+        "test/ConsistentHashRingSuite.scala",
+        "test/golden_files/ConsistentHashRingGoldenData.scala",
+    ],
+    timeout = "short",
+    deps = [
+        ":consistent_hash_ring",
+        ":test_utils",
+        "//wrappers/rpc:rich_scalapb",
+        "//wrappers/util:async_test_helpers",
+        "//wrappers/util:databricks-test",
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_guava_guava",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
+    ],
+)
+
+scala_library(
     name = "config_scope",
     srcs = ["src/ConfigScope.scala"],
     deps = [
@@ -948,7 +1042,6 @@ scala_test(
         "//wrappers/rpc:rich_scalapb",
         "//wrappers/util:async_test_helpers",
         "//wrappers/util:databricks-test",
-        "@maven//:com_typesafe_config",
     ],
 )
 
@@ -996,6 +1089,7 @@ scala_library(
     deps = [
         ":context_aware_util",
         ":lock",
+        ":prefix_logger",
         ":sequential_execution_context",
         ":typed_clock",
         "@maven//:com_google_code_findbugs_jsr305",
@@ -1077,6 +1171,10 @@ scala_test(
     srcs = ["test/WatchValueCellPollAdapterSuite.scala"],
     timeout = "short",
     deps = [
+        ":fake_sequential_execution_context",
+        ":lock",
+        ":metric_utils",
+        ":prefix_logger",
         ":sequential_execution_context",
         ":status_or",
         ":test_util",
@@ -1234,6 +1332,7 @@ scala_library(
     srcs = ["src/WhereAmIHelper.scala"],
     deps = [
         "//wrappers/conf:dbconf",
+        "//wrappers/conf:environment",
         "//wrappers/conf:location",
     ],
 )

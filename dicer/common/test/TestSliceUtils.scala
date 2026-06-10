@@ -1050,7 +1050,15 @@ object TestSliceUtils extends Assertions {
               )
             }.toVector
         }
-    (slice @@ generation) -> proto.resources | subsliceAnnotationsByResource
+    SliceAssignment(
+      SliceWithResources(
+        slice,
+        proto.resources.map((resource: String) => createTestSquid(resource)).toSet
+      ),
+      generation,
+      subsliceAnnotationsByResource,
+      proto.primaryRateLoadOpt
+    )
   }
 
   /** Blocks until `clerk` has the `expected` assignment. */

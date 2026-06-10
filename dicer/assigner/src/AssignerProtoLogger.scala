@@ -1,6 +1,7 @@
 package com.databricks.dicer.assigner
 
 import com.databricks.caching.util.SequentialExecutionContext
+import com.databricks.caching.util.WatchValueCell
 
 import com.databricks.dicer.common.Assignment
 import com.databricks.dicer.external.Target
@@ -27,14 +28,18 @@ private[assigner] trait AssignerProtoLogger {
    *
    * @param latencyMs the elapsed time of the Kubernetes API call in milliseconds.
    * @param httpStatusCode the HTTP status code returned by the Kubernetes API.
-   * @param resourceUri the URI of the resource whose membership is being checked.
-   * @param memberUuids the UUIDs of pods that are members of the resource.
+   * @param namespace the Kubernetes namespace of the application whose membership is being checked.
+   * @param appName the name of the application whose membership is being checked.
+   * @param memberUuids the UUIDs of pods discovered for given namespace + appName.
+   * @param version the resource version token returned by the Kubernetes API.
    */
   def logMembershipCheck(
       latencyMs: Long,
       httpStatusCode: Int,
-      resourceUri: String,
-      memberUuids: Seq[String]): Unit
+      namespace: String,
+      appName: String,
+      memberUuids: Seq[String],
+      version: String): Unit
 
   /**
    * Convenience method to log preferred assigner change events.
@@ -59,8 +64,10 @@ private object NoopAssignerProtoLogger extends AssignerProtoLogger {
   override def logMembershipCheck(
       latencyMs: Long,
       httpStatusCode: Int,
-      resourceUri: String,
-      memberUuids: Seq[String]): Unit = {
+      namespace: String,
+      appName: String,
+      memberUuids: Seq[String],
+      version: String): Unit = {
     // No-op
     ()
   }
@@ -77,12 +84,12 @@ private[assigner] object AssignerProtoLogger {
    * Creates a new [[AssignerProtoLogger]] instance. Always returns [[NoopAssignerProtoLogger]].
    *
    * @param assignerInfo the AssignerInfo.
-   * @param generationSampleFraction the fraction of generations to sample.
+   * @param sampleFractionCell provides the fraction of generations to sample.
    * @param loggingSec the sequential execution context for async logging operations.
    */
   def create(
       assignerInfo: AssignerInfo,
-      generationSampleFraction: Double,
+      sampleFractionCell: WatchValueCell.Consumer[Double],
       loggingSec: SequentialExecutionContext): AssignerProtoLogger = {
     NoopAssignerProtoLogger
   }

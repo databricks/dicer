@@ -5,9 +5,11 @@ load("@rules_scala//scala_proto:scala_proto.bzl", "scala_proto_library")
 proto_library(
     name = "test_data_proto",
     srcs = ["test_data.proto"],
+    testonly = True,
     visibility = ["//dicer:internal"],
     deps = [
         "//dicer/common/proto:common_proto",
+        "//dicer/common/proto:dpage_proto_library",
         "//dicer/friend/proto:friend_proto_library",
         "//wrappers/rpc:scalapb_proto",
     ],
@@ -15,19 +17,22 @@ proto_library(
 
 java_proto_library(
     name = "test_data_proto_java_lib",
+    testonly = True,
     visibility = ["//dicer:internal"],
     deps = [":test_data_proto"],
 )
 
 scala_proto_library(
     name = "test_data_proto_scala_lib",
+    testonly = True,
     visibility = ["//dicer:internal"],
     deps = [":test_data_proto"],
 )
 
 proto_library(
-    name = "clerk_test_driver_proto",
-    srcs = ["clerk_test_driver.proto"],
+    name = "clerk_test_harness_proto",
+    srcs = ["clerk_test_harness.proto"],
+    testonly = True,
     visibility = ["//dicer:internal"],
     deps = [
         "//dicer/common/proto:common_proto",
@@ -36,14 +41,16 @@ proto_library(
 )
 
 scala_proto_library(
-    name = "clerk_test_driver_proto_scala_lib",
+    name = "clerk_test_harness_proto_scala_lib",
+    testonly = True,
     visibility = ["//dicer:internal"],
-    deps = [":clerk_test_driver_proto"],
+    deps = [":clerk_test_harness_proto"],
 )
 
 proto_library(
-    name = "slicelet_test_driver_proto",
-    srcs = ["slicelet_test_driver.proto"],
+    name = "slicelet_test_harness_proto",
+    srcs = ["slicelet_test_harness.proto"],
+    testonly = True,
     visibility = ["//dicer:internal"],
     deps = [
         "//dicer/common/proto:common_proto",
@@ -53,7 +60,8 @@ proto_library(
 )
 
 scala_proto_library(
-    name = "slicelet_test_driver_proto_scala_lib",
+    name = "slicelet_test_harness_proto_scala_lib",
+    testonly = True,
     visibility = ["//dicer:internal"],
-    deps = [":slicelet_test_driver_proto"],
+    deps = [":slicelet_test_harness_proto"],
 )

@@ -56,12 +56,13 @@ object ConfigTestUtil {
     }
 
     /**
-     * Writes a file with the given `directory`, filename`, and `contents` to the temporary
-     * directory from which target configuration files will be read. See [[writeConfig]] for
-     * details.
+     * Writes a file with the given `directory`, `filename`, and `contents` to the temporary
+     * directory from which target configuration files will be read. `directory` may be several
+     * path segments deep (e.g. "a/b"), which lets tests exercise how deep the reader walks. See
+     * [[writeConfig]] for details.
      */
     def writeConfigInDirectory(directory: String, filename: String, contents: String): Unit = {
-      val configPath: Path = path / directory / filename
+      val configPath: Path = path / os.SubPath(directory) / filename
       os.write(configPath, contents, createFolders = true)
     }
 
@@ -113,7 +114,8 @@ object ConfigTestUtil {
       keyReplicationConfig = KeyReplicationConfig.DEFAULT_SINGLE_REPLICA,
       healthWatcherConfig = HealthWatcherTargetConfig.DEFAULT,
       keyOfDeathProtectionConfig = KeyOfDeathProtectionConfig.DEFAULT,
-      targetRateLimitConfig = TargetWatchRequestRateLimitConfig.DEFAULT
+      targetRateLimitConfig = TargetWatchRequestRateLimitConfig.DEFAULT,
+      authorizer = AuthorizerHelper.DEFAULT_AUTHORIZER
     )
     // Try parsing as well, just to make sure the assumptions in this helper are valid.
     val proto = TargetConfigFieldsP(

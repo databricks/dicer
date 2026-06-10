@@ -5,14 +5,14 @@ package dicer;
 import "dicer/friend/proto/friend.proto";
 import "scalapb.proto";
 
+
 option java_package = "com.databricks.api.proto.dicer.common";
 option java_generate_equals_and_hash = true;
 option (scalapb.options) = {
   flat_package: true,
 };
 
-// The generation used for versioning assignments/redirects - see specs on Generation for more
-// details.
+// The generation used for versioning assignments - see specs on Generation for more details.
 // Note: If we change this proto, we need to change the corresponding proto in the logs package.
 // `LoggedGenerationP` is present in `proto/logs/caching/caching_team_log.proto`.
 message GenerationP {
@@ -229,9 +229,8 @@ message SyncAssignmentStateP {
   }
 }
 
-// Sent by the server to inform the client of how to direct its future requests, either to a random
+// Sent by the server to inform the client of how to direct its next request, either to a random
 // address (the default) or to a specific address.
-//
 message RedirectP {
   // Removed fields.
   reserved 2, 3, 4;
@@ -239,6 +238,21 @@ message RedirectP {
   // OPTIONAL: URI to which the request should be redirected. If empty, the client should use the
   // default behavior which sends it to a random assigner/Slicelet.
   optional string address = 1;
+
+  // OPTIONAL, if set then `address` must also be set. Opaque token corresponding to this redirect.
+  // If set, this should be echoed back in the next `ClientRequestP`, to pass some relevant
+  // information to the redirected server at `address`. As with `address`, this is not sticky, and
+  // should only be sent with the very next request.
+  optional bytes redirect_token = 5;
+}
+
+// This is serialized on the server-side and sent in `RedirectP.redirect_token` as opaque bytes. It
+// should not be deserialized/used on the client-side.
+message RedirectTokenP {
+  // The version of the server's target migration config that resulted in the redirect. If the
+  // receiving server has an older version of the config, the newer config takes precedence and it
+  // assumes the request should be handled by the current Assigner.
+  optional int32 target_migration_config_version = 1;
 }
 
 // Identify the sharded set of resources whose assignment is being watched. This is a logical name
@@ -326,16 +340,11 @@ message ClientRequestP {
 
   optional ClientFeatureSupportP client_feature_support = 11;
 
-  // The set of features supported by the client. The server can use this information to determine
-  // what it can include in its response. Fields in this message should eventually be graduated
-  // once they are fully rolled out.
-  message ClientFeatureSupportP {
-    // Whether the client supports parsing serialized assignments. If true, the server may
-    // return serialized assignment in response to this request.
-    optional bool supports_serialized_assignment = 1;
-  }
+  // OPTIONAL: If the client is sending this request to a specific address based on a `RedirectP` it
+  // received, this echoes back the `RedirectP.redirect_token` field.
+  optional bytes redirect_token = 12;
 
-  // Next unused field number: 12
+  // Next unused field number: 13
 
   // Clerk-specific information sent by the Clerk.
   message ClerkDataP {
@@ -481,6 +490,15 @@ message ClientRequestP {
     // Global cardinality measurement for all keys not assigned to this Slicelet.
     optional KeyCardinalityP unattributed_key_cardinality = 12;
   }
+
+  // The set of features supported by the client. The server can use this information to determine
+  // what it can include in its response. Fields in this message should eventually be graduated
+  // once they are fully rolled out.
+  message ClientFeatureSupportP {
+    // Whether the client supports parsing serialized assignments. If true, the server may
+    // return serialized assignment in response to this request.
+    optional bool supports_serialized_assignment = 1;
+  }
 }
 
 // The response for a Watch request - contains state to sync the assignment.
@@ -496,7 +514,9 @@ message ClientResponseP {
   // The timeout that the server suggests for the next RPC.
   optional int64 suggested_rpc_timeout_millis = 2;
 
-  // OPTIONAL: if present, indicates that the request should be redirected to the given address.
+  // OPTIONAL: if present, indicates that the next request should be redirected to the given
+  // address.  Note this is not sticky, it controls the behavior only for the next request. If not
+  // specified, the client should revert back to its default address.
   optional RedirectP redirect = 3;
 }
 
@@ -504,7 +524,9 @@ message ClientResponseP {
 // reporting health, etc.
 service AssignmentService {
   // The Clerk/Slicelet watch RPC to the Assigner.
-  rpc Watch(ClientRequestP) returns (ClientResponseP) {}
+  rpc Watch(ClientRequestP) returns (ClientResponseP) {
+
+  }
 }
 
 // -Protos and service definitions for the SquidLeaseRecallService:
@@ -569,5 +591,7 @@ service SquidLeaseRecallService {
   // Checks whether a SQUID has been recalled and how long the Slicelet may assume its SQUID will
   // remain valid. (After a SQUID is recalled, it is guaranteed to remain valid for some interval of
   // time.)
-  rpc GetRecallStatus(GetRecallStatusRequestP) returns (GetRecallStatusResponseP) {}
+  rpc GetRecallStatus(GetRecallStatusRequestP) returns (GetRecallStatusResponseP) {
+
+  }
 }

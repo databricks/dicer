@@ -1,7 +1,6 @@
 package com.databricks.dicer.common
 
 import com.databricks.caching.util.{BuildInfo, PrefixLogger}
-import com.databricks.dicer.common.AssignmentMetricsSource.AssignmentMetricsSource
 import com.databricks.dicer.external.Target
 import io.prometheus.client.Gauge
 import com.databricks.dicer.common.TargetHelper.TargetOps
@@ -34,7 +33,7 @@ object Version {
   //
   // 1710541787 (2024-03-15):
   // - Eliminate usage of hazzers for redirect protos so that even the empty proto results in the
-  //   desired redirect being sent. See https://github.com/databricks-eng/universe/pull/522450.
+  //   desired redirect being sent. See <internal link>.
   //   (As of that PR, the Assigner server never sends a non-empty redirect proto, so even older
   //   clients will still do the right thing as long as the Assigner server is sufficiently up to
   //   date.)
@@ -122,7 +121,12 @@ object Version {
   }
 }
 
-object AssignmentMetricsSource extends Enumeration {
-  type AssignmentMetricsSource = Value
-  val Clerk, Slicelet = Value
+/**
+ * Identifies which client component (Clerk or Slicelet) is reporting an assignment-related metric.
+ */
+sealed trait AssignmentMetricsSource
+
+object AssignmentMetricsSource {
+  case object Clerk extends AssignmentMetricsSource
+  case object Slicelet extends AssignmentMetricsSource
 }

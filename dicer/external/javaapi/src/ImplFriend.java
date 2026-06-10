@@ -52,4 +52,13 @@ public class ImplFriend {
   public static com.databricks.dicer.external.Target toScalaTarget(Target target) {
     return target.toScala();
   }
+
+  /**
+   * Allows Java shims outside `com.databricks.dicer.external.javaapi` to access ClerkConfig's
+   * `toScala` method.
+   */
+  public static com.databricks.dicer.client.javaapi.ClerkConfImpl toScalaClerkConfig(
+      ClerkConfig config) {
+    return config.toScala();
+  }
 }

@@ -81,6 +81,12 @@ object FakeProxy {
      */
     @throws[StatusException]("if the metadata is invalid or malformed")
     def extractUpstreamHostAndPort(metadata: Metadata): Option[(String, Int)]
+
+    /**
+     * Returns additional headers to inject into the outbound request metadata. These headers are
+     * merged into the outbound metadata before forwarding the request to the upstream server.
+     */
+    def additionalOutboundHeaders(): Metadata
   }
 
   /**
@@ -117,6 +123,7 @@ object FakeProxy {
       // Call the metadata handler before acquiring the lock to avoid holding the lock during
       // upcalls, which could introduce deadlocks.
       val upstreamOpt: Option[(String, Int)] = metadataHandler.extractUpstreamHostAndPort(metadata)
+      val additionalHeaders: Metadata = metadataHandler.additionalOutboundHeaders()
 
       // Acquire the lock only to update shared state and read the fallback ports if needed.
       val (host, port): (String, Int) = withLock(lock) {
@@ -154,6 +161,7 @@ object FakeProxy {
       }
       val outboundMetadata = new Metadata
       outboundMetadata.merge(metadata)
+      outboundMetadata.merge(additionalHeaders)
       outboundMetadata.put(Metadata.Key.of(ADDED_HEADER, Metadata.ASCII_STRING_MARSHALLER), "true")
       clientCall.start(clientCallListener, outboundMetadata)
 

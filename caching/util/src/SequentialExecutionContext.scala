@@ -315,8 +315,15 @@ object SequentialExecutionContext {
       .register()
 
     /** The possible reasons for a spurious wakeup. */
-    object SpuriousWakeupReason extends Enumeration {
-      val ALREADY_RUNNING, NO_PENDING_COMMANDS = Value
+    sealed trait SpuriousWakeupReason
+
+    object SpuriousWakeupReason {
+      case object AlreadyRunning extends SpuriousWakeupReason {
+        override def toString: String = "ALREADY_RUNNING"
+      }
+      case object NoPendingCommands extends SpuriousWakeupReason {
+        override def toString: String = "NO_PENDING_COMMANDS"
+      }
     }
 
     val spuriousWakeupsCounter: Counter = Counter
@@ -352,24 +359,49 @@ object SequentialExecutionContext {
    * @param enableContextPropagation whether to propagate the context object to runnables submitted
    *                                 to this execution context
    * @param alertOwnerTeam the team's registered alert routing name, e.g.
-   *                       [[AlertOwnerTeam.CachingTeam.toString]] for Caching-owned pools,
+   *                       [[AlertOwnerTeam.CACHING_TEAM_NAME]] for Caching-owned pools,
    *                       or "eng-my-team" for pools owned by other teams. For alert routing to
    *                       work correctly, this must be used as the `owner_team_name` for some
    *                       Dicer target config.
    */
   def createWithDedicatedPool(
       name: String,
-      enableContextPropagation: Boolean = true,
-      // TODO(<internal bug>): Make alertOwnerTeam required once all call sites are updated.
-      alertOwnerTeam: String = AlertOwnerTeam.CachingTeam.toString): SequentialExecutionContext = {
+      alertOwnerTeam: String,
+      enableContextPropagation: Boolean = true): SequentialExecutionContext = {
     val pool = SequentialExecutionContextPool.create(
       s"$name-pool",
       numThreads = 1,
-      enableContextPropagation,
-      alertOwnerTeam
+      alertOwnerTeam,
+      enableContextPropagation
     )
     pool.createExecutionContext(contextName = name)
   }
+
+  /** Use [[createWithDedicatedPool]] with an explicit `alertOwnerTeam` instead. */
+  @deprecated(
+    "Provide alertOwnerTeam explicitly; the CachingTeam default is only correct for " +
+    "Caching-owned pools (<internal bug>)."
+  )
+  def createWithDedicatedPool(name: String): SequentialExecutionContext =
+    createWithDedicatedPool(
+      name,
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+      enableContextPropagation = true
+    )
+
+  /** Use [[createWithDedicatedPool]] with an explicit `alertOwnerTeam` instead. */
+  @deprecated(
+    "Provide alertOwnerTeam explicitly; the CachingTeam default is only correct for " +
+    "Caching-owned pools (<internal bug>)."
+  )
+  def createWithDedicatedPool(
+      name: String,
+      enableContextPropagation: Boolean): SequentialExecutionContext =
+    createWithDedicatedPool(
+      name,
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+      enableContextPropagation = enableContextPropagation
+    )
 
   /**
    * The production implementation of [[SequentialExecutionContext]]. Separate from the
@@ -443,7 +475,7 @@ object SequentialExecutionContext {
     private val queue = new WorkItemQueue
 
     /** State of the context! See [[State]] class docs for background. */
-    private var state = State.PENDING
+    private var state: State = State.Pending
 
     // References to labeled metrics (so that we don't need to repeatedly resolve them).
     private val executionDelayHistogram: Histogram.Child =
@@ -456,7 +488,7 @@ object SequentialExecutionContext {
       Metrics.pendingCommandsImmediateGauge.labels(poolName, name)
 
     /**
-     * When in [[State.PENDING]], the time at which the `pool` is expected to [[tickle]] the
+     * When in [[State.Pending]], the time at which the `pool` is expected to [[tickle]] the
      * context. The pool may of course tickle us earlier or later than this time because of timer/
      * clock mismatches or backlogs. We use this value to avoid unnecessarily re-adding ourselves to
      * the executor when we're already scheduled to run soon enough.
@@ -464,7 +496,7 @@ object SequentialExecutionContext {
     private var nextTickleTime = TickerTime.MAX
 
     /**
-     * When in [[State.PENDING]], a handle that can be used to (best-effort) cancel an outstanding
+     * When in [[State.Pending]], a handle that can be used to (best-effort) cancel an outstanding
      * "tickle" task on `pool`. It is always possible for this handle to be None, since the pool
      * does not provide a handle for a task that is added for "immediate" execution.
      */
@@ -558,7 +590,7 @@ object SequentialExecutionContext {
      *    with locks in <internal link>.
      */
     /** A reference to the spurious wakeups counter for this context with labels set. */
-    private def spuriousWakeupsCounter(reason: Metrics.SpuriousWakeupReason.Value): Counter.Child =
+    private def spuriousWakeupsCounter(reason: Metrics.SpuriousWakeupReason): Counter.Child =
       Metrics.spuriousWakeupsCounter.labels(poolName, name, reason.toString)
 
     /**
@@ -578,11 +610,11 @@ object SequentialExecutionContext {
     private def tickle(): Unit = {
       assert(lock.isHeldByCurrentThread)
 
-      if (state == State.RUNNING) {
+      if (state == State.Running) {
         // Spurious wakeup. This context is already running, so we can't run any commands
         // concurrently and we can the assume the RUNNING thread will call `ensureScheduled` when
         // it's done.
-        spuriousWakeupsCounter(Metrics.SpuriousWakeupReason.ALREADY_RUNNING).inc()
+        spuriousWakeupsCounter(Metrics.SpuriousWakeupReason.AlreadyRunning).inc()
         return
       }
       // Clear the pending tickle task so that in the next call to `ensureScheduled`, no existing
@@ -595,12 +627,12 @@ object SequentialExecutionContext {
         case None =>
           // A different kind of spurious wakeup: there are no pending commands. Ensure that this
           // executor will be tickled again when the next command is due.
-          spuriousWakeupsCounter(Metrics.SpuriousWakeupReason.NO_PENDING_COMMANDS).inc()
+          spuriousWakeupsCounter(Metrics.SpuriousWakeupReason.NoPendingCommands).inc()
           ensureScheduled(now)
         case Some(command) =>
           // Enter the running state to ensure that no concurrent work is done (violating the
           // "sequential" part of our contract) while the command is running.
-          state = State.RUNNING
+          state = State.Running
 
           // Set the current context so that `assertCurrentContext` is satisfied while the
           // command is running.
@@ -649,7 +681,7 @@ object SequentialExecutionContext {
             // We're responsible for ensuring that future work is scheduled after running a
             // command. Exit the RUNNING state, since `ensureScheduled` will/should do nothing
             // while it believes a command is running.
-            state = State.PENDING
+            state = State.Pending
             ensureScheduled(now = clock.tickerTime())
           }
       }
@@ -685,10 +717,10 @@ object SequentialExecutionContext {
       pendingCommandsImmediateGauge.set(queue.getNumPendingImmediate)
 
       state match {
-        case State.RUNNING =>
+        case State.Running =>
         // Nothing to do. The thread that is running a command is responsible for calling
         // ensureScheduled when the command is done.
-        case State.PENDING =>
+        case State.Pending =>
           val (monotonicNow, desiredExecutionTime): (TickerTime, TickerTime) =
             queue.getMonotonicNowAndDesiredExecutionTime(now)
           if (desiredExecutionTime == TickerTime.MAX) {
@@ -749,12 +781,15 @@ object SequentialExecutionContext {
   }
 
   /**
-   * The possible states for the context. Either the context is RUNNING, which means that it is
-   * executing a command, or it is in the PENDING state where it's waiting to be tickled by the
+   * The possible states for the context. Either the context is Running, which means that it is
+   * executing a command, or it is in the Pending state where it's waiting to be tickled by the
    * underlying thread-pool executor.
    */
-  private[SequentialExecutionContext] object State extends Enumeration {
-    val RUNNING, PENDING = Value
+  private[SequentialExecutionContext] sealed trait State
+
+  private[SequentialExecutionContext] object State {
+    case object Running extends State
+    case object Pending extends State
   }
 
   /**

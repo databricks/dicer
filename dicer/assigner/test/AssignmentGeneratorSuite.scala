@@ -24,13 +24,11 @@ import com.databricks.dicer.assigner.AssignmentGenerator.AssignmentGenerationDec
 import com.databricks.dicer.assigner.AssignmentGenerator.DriverAction.StartKubernetesTargetWatcher
 import com.databricks.dicer.assigner.AssignmentGenerator._
 import com.databricks.dicer.assigner.AssignmentStats.AssignmentChangeStats
-import com.databricks.dicer.assigner.CommonAssignmentGeneratorSuite.resource
 import com.databricks.dicer.assigner.config.{ChurnConfig, InternalTargetConfig}
 import com.databricks.dicer.assigner.config.InternalTargetConfig._
 import com.databricks.dicer.assigner.algorithm.{Algorithm, LoadMap, Resources}
 import com.databricks.dicer.assigner.algorithm.LoadMap.Entry
 import com.databricks.dicer.assigner.Store.WriteAssignmentResult
-import com.databricks.dicer.assigner.TargetMetrics.AssignmentDistributionSource.AssignmentDistributionSource
 import com.databricks.dicer.assigner.TargetMetrics.{
   AssignmentDistributionSource,
   AssignmentGeneratorOpType,
@@ -38,7 +36,6 @@ import com.databricks.dicer.assigner.TargetMetrics.{
   KeyOfDeathTransitionType
 }
 import com.databricks.dicer.assigner.conf.{DicerAssignerConf, LoadWatcherConf}
-import com.databricks.dicer.common.Assignment.DiffUnused.DiffUnused
 import com.databricks.dicer.common.Assignment.{AssignmentValueCellConsumer, DiffUnused}
 import com.databricks.dicer.common.SliceletData.SliceLoad
 import com.databricks.dicer.common.SliceletState
@@ -54,26 +51,30 @@ import com.google.common.primitives.Longs
 import io.prometheus.client.CollectorRegistry
 
 /**
- * The suite containing setup and tests specific to the AssignmentGenerator while using
- * InMemoryStore.
+ * The suite containing setup and tests specific to the AssignmentGenerator.
  *
- * There should be very few tests here; new tests should always be added to
- * [[CommonAssignmentGeneratorSuite]] when possible.
+ * @param observeSliceletReadiness if true, the HealthWatcher faithfully reports the
+ *                                 Slicelet-reported health status for a pod. If false, masks the
+ *                                 health status so that NotReady is masked to Running.
+ * @param permitRunningToNotReady  if true, a pod that reports NotReady while Running is
+ *                                 transitioned to NotReady by the HealthWatcher. Only valid when
+ *                                 observeSliceletReadiness is also true.
  */
-abstract class InMemoryStoreAssignmentGeneratorSuite(
+abstract class CommonAssignmentGeneratorSuite(
     observeSliceletReadiness: Boolean,
     permitRunningToNotReady: Boolean)
-    extends CommonAssignmentGeneratorSuite(observeSliceletReadiness, permitRunningToNotReady) {
+    extends DatabricksTest
+    with TestName
+    with ParameterizedTestNameDecorator {
+  import CommonAssignmentGeneratorSuite.{getAssignedResources, resource}
 
   override def paramsForDebug: Map[String, Any] = Map(
     "observeSliceletReadiness" -> observeSliceletReadiness,
     "permitRunningToNotReady" -> permitRunningToNotReady
   )
 
-  override def createStore(sec: SequentialExecutionContext, incarnation: Incarnation): Store =
-    InMemoryStore(sec, incarnation)
-
-  override def createLargerValidIncarnation(lowerBound: Incarnation): Incarnation = {
+  /** Returns a loose [[Incarnation]] larger than `lowerBound`. */
+  private[assigner] def createLargerValidIncarnation(lowerBound: Incarnation): Incarnation = {
     // InMemoryStore requires a loose incarnation.
     var incarnation = Incarnation(lowerBound.value + random.nextInt(100) + 1)
     while (incarnation.isNonLoose) {
@@ -82,8 +83,10 @@ abstract class InMemoryStoreAssignmentGeneratorSuite(
     incarnation
   }
 
-  // This test doesn't apply to etcd because subscribers should not know more than the store within
-  // the same incarnation.
+  /** Returns an [[InMemoryStore]] for the store incarnation `incarnation` which uses `sec`. */
+  private def createStore(sec: SequentialExecutionContext, incarnation: Incarnation): Store =
+    InMemoryStore(sec, incarnation)
+
   test("Assignment synced from subscriber") {
     // Test plan: send a watch request from a Slicelet including an assignment with a
     // higher/lower/same generation than that known by the generator. Verify that assignments with
@@ -93,7 +96,12 @@ abstract class InMemoryStoreAssignmentGeneratorSuite(
         target: Target): Map[(AssignmentDistributionSource, DiffUnused), Long] = {
 
       (for (source: AssignmentDistributionSource <- AssignmentDistributionSource.values;
-        diffUnusedReason: DiffUnused <- DiffUnused.values;
+        diffUnusedReason: DiffUnused <- DiffUnused.values.iterator;
+        sourceLabel: String = source match {
+          case AssignmentDistributionSource.Store => "Store"
+          case AssignmentDistributionSource.Clerk => "Clerk"
+          case AssignmentDistributionSource.Slicelet => "Slicelet"
+        };
         metricValue: Double <- MetricUtils.getMetricValueOpt(
           registry,
           metric = "dicer_assigner_num_unused_assignment_diffs",
@@ -101,7 +109,7 @@ abstract class InMemoryStoreAssignmentGeneratorSuite(
             "targetCluster" -> target.getTargetClusterLabel,
             "targetName" -> target.getTargetNameLabel,
             "targetInstanceId" -> target.getTargetInstanceIdLabel,
-            "source" -> source.toString,
+            "source" -> sourceLabel,
             "reason" -> diffUnusedReason.toString
           )
         )) yield {
@@ -110,9 +118,13 @@ abstract class InMemoryStoreAssignmentGeneratorSuite(
     }
 
     def getNumAssignmentStoreIncarnationMismatch(
-        target: Target): Map[IncarnationMismatchType.Value, Long] = {
+        target: Target): Map[IncarnationMismatchType, Long] = {
       (for {
-        mismatchType: IncarnationMismatchType.Value <- IncarnationMismatchType.values
+        mismatchType: IncarnationMismatchType <- IncarnationMismatchType.values
+        mismatchTypeLabel: String = mismatchType match {
+          case IncarnationMismatchType.ASSIGNMENT_HIGHER => "ASSIGNMENT_HIGHER"
+          case IncarnationMismatchType.ASSIGNMENT_LOWER => "ASSIGNMENT_LOWER"
+        }
         metricValue: Double <- MetricUtils.getMetricValueOpt(
           registry,
           metric = "dicer_assigner_num_store_incarnation_mismatch",
@@ -120,7 +132,7 @@ abstract class InMemoryStoreAssignmentGeneratorSuite(
             "targetCluster" -> target.getTargetClusterLabel,
             "targetName" -> target.getTargetNameLabel,
             "targetInstanceId" -> target.getTargetInstanceIdLabel,
-            "mismatchType" -> mismatchType.toString
+            "mismatchType" -> mismatchTypeLabel
           )
         )
       } yield {
@@ -137,12 +149,12 @@ abstract class InMemoryStoreAssignmentGeneratorSuite(
     val Source = AssignmentDistributionSource
     val Reason = DiffUnused
     val expectedDistributedAssignments =
-      mutable.Map[Source.AssignmentDistributionSource, Long]().withDefaultValue(0)
+      mutable.Map[AssignmentDistributionSource, Long]().withDefaultValue(0)
     var expectedAssignmentSlices = 0
     val expectedStoreIncarnationMismatch =
-      mutable.Map[IncarnationMismatchType.Value, Long]().withDefaultValue(0)
+      mutable.Map[IncarnationMismatchType, Long]().withDefaultValue(0)
     val expectedUnusedAssignments = mutable
-      .Map[(Source.AssignmentDistributionSource, Reason.DiffUnused), Long]()
+      .Map[(AssignmentDistributionSource, DiffUnused), Long]()
       .withDefaultValue(0)
     def assertMetrics(): Unit = {
       AssertionWaiter("Wait for metrics to be updated", ecOpt = Some(sec)).await {
@@ -269,8 +281,6 @@ abstract class InMemoryStoreAssignmentGeneratorSuite(
     assertMetrics()
   }
 
-  // This test doesn't apply to etcd store, because it is an unexpected case that the slicelet
-  // has an known assignment but the etcd store is empty.
   test(
     "Known assignment sync-ed from slicelet bootstraps health information when in-memory " +
     "store is empty"
@@ -336,8 +346,6 @@ abstract class InMemoryStoreAssignmentGeneratorSuite(
     )
   }
 
-  // This test doesn't apply to etcd store, because it is unexpected that a slicelet knows a newer
-  // generation than etcd.
   test("Stale assignment from in-memory store doesn't pollute initial assignment generation") {
     // Test plan: Verify that when an assignment generator is started while the in-memory store
     // contains a stale assignment which is older than some assignments known by the slicelets,
@@ -416,183 +424,6 @@ abstract class InMemoryStoreAssignmentGeneratorSuite(
       )
     )
   }
-}
-
-/**
- * The suite containing setup and tests specific to the AssignmentGenerator when used with
- * EtcdStore.
- *
- * As stated above, new tests should be added to [[CommonAssignmentGeneratorSuite]] whenever
- * possible.
- */
-abstract class EtcdStoreAssignmentGeneratorSuite(
-    observeSliceletReadiness: Boolean,
-    permitRunningToNotReady: Boolean)
-    extends CommonAssignmentGeneratorSuite(observeSliceletReadiness, permitRunningToNotReady) {
-
-  private val ETCD_NAMESPACE = EtcdClient.KeyNamespace("test-namespace")
-
-  private val etcd = EtcdTestEnvironment.create()
-
-  override def paramsForDebug: Map[String, Any] = Map(
-    "observeSliceletReadiness" -> observeSliceletReadiness,
-    "permitRunningToNotReady" -> permitRunningToNotReady
-  )
-
-  override def beforeEach(): Unit = {
-    etcd.deleteAll()
-    etcd.initializeStore(ETCD_NAMESPACE)
-  }
-
-  override def createStore(
-      sec: SequentialExecutionContext,
-      incarnation: Incarnation): InterceptableStore = {
-    new InterceptableStore(
-      sec,
-      EtcdStore
-        .create(
-          sec,
-          etcd.createEtcdClient(EtcdClient.Config(ETCD_NAMESPACE)),
-          EtcdStoreConfig.create(incarnation),
-          random
-        )
-    )
-  }
-
-  override def createLargerValidIncarnation(lowerBound: Incarnation): Incarnation = {
-    // EtcdStore requires a non-loose incarnation.
-    var incarnation = Incarnation(lowerBound.value + random.nextInt(100) + 1)
-    while (incarnation.isLoose) {
-      incarnation = Incarnation(incarnation.value + random.nextInt(100) + 1)
-    }
-    incarnation
-  }
-
-  test(
-    "Can overwrite existing assignment from prior incarnation even if not most recent"
-  ) {
-    // Test plan: verify that the generator is able to commit a new assignment atop an existing
-    // assignment in the store, even if a more recent assignment is known from a subscriber, which
-    // it should use to bootstrap.
-    //
-    // This is not relevant to InMemoryStore because it does not persist assignments across
-    // restarts, so we won't start and find an existing assignment from a prior store incarnation.
-
-    val incarnation0: Incarnation = createLargerValidIncarnation(Incarnation.MIN)
-    // For realism, use a loose Incarnation here, but it isn't important.
-    val incarnation1: Incarnation = Incarnation(incarnation0.value + 1)
-    val incarnation2: Incarnation = createLargerValidIncarnation(incarnation1)
-    val (driver, incarnation2Store): (AssignmentGeneratorDriver, InterceptableStore) =
-      createDriverAndStore(storeIncarnationOpt = Some(incarnation2))
-
-    // To validate that we use the more recent assignment as the base, we provide two assignments,
-    // each assigning one slice to a different resource. We apply a load distribution which balances
-    // both assignments, and we should find that the newly generated assignment resembles the later
-    // assignment.
-    val slices = Seq[Slice](
-      "" -- 0XA000000000000000L,
-      0XA000000000000000L -- ∞
-    )
-    val incarnation0Proposal: SliceMap[ProposedSliceAssignment] =
-      createProposal(
-        slices(0) -> Seq(resource(0)),
-        slices(1) -> Seq(resource(1))
-      )
-    val incarnation1Generation = Generation(incarnation1, 42)
-    val incarnation1Assignment: Assignment = createAssignment(
-      incarnation1Generation,
-      AssignmentConsistencyMode.Affinity,
-      slices(0) @@ incarnation1Generation -> Seq(resource(1)),
-      slices(1) @@ incarnation1Generation -> Seq(resource(0))
-    )
-    val loadMap: LoadMap = LoadMap
-      .newBuilder()
-      .putLoad(slices.map(slice => Entry(slice, load = 10.0)): _*)
-      .build()
-
-    // Write an assignment from a lower incarnation into the store, and prevent the driver from
-    // learning about it to avoid triggering immediate assignment generation based on this older
-    // assignment.
-    sec.run {
-      incarnation2Store.blockWatchAssignmentsCallbacks(defaultTarget)
-    }
-    val incarnation0Store: InterceptableStore = createStore(sec, incarnation0)
-    val incarnation0Assignment: Assignment = TestUtils.awaitResult(
-      incarnation0Store.writeAssignment(
-        defaultTarget,
-        shouldFreeze = false,
-        ProposedAssignment(predecessorOpt = None, incarnation0Proposal)
-      ),
-      Duration.Inf
-    ) match {
-      case occFailure: WriteAssignmentResult.OccFailure =>
-        throw new AssertionError(s"Conflicting write? Detail: $occFailure")
-      case WriteAssignmentResult.Committed(assignment: Assignment) => assignment
-    }
-
-    // incarnation0Assignment and incarnation1Assignment are constructed such that there should a
-    // complete reassignment between them.
-    val loadBalancingChurnRatio0: Double = AssignmentChangeStats
-      .calculate(
-        incarnation0Assignment,
-        incarnation1Assignment,
-        loadMap
-      )
-      .loadBalancingChurnRatio
-    assert(loadBalancingChurnRatio0 > 0.9)
-
-    // Inform the generator of a newer assignment; it should use this one as the base for its
-    // generated assignment and be able to overwrite the existing assignment in the store.
-    sec.advanceBySync(20.seconds)
-    // Inform the driver of the latest assignment and the healthy resources.
-    driver.onWatchRequest(createSliceletRequest(0, incarnation1Assignment))
-    driver.onWatchRequest(createSliceletRequest(1, incarnation1Assignment))
-
-    // Advance beyond the healthy timeout after the driver has the assignment and healthy resources.
-    sec.advanceBySync(10.seconds)
-
-    val newlyGeneratedAssignment: Assignment =
-      awaitNewerAssignment(driver, Generation(incarnation2, number = 0))
-    val loadBalancingChurnRatio1: Double = AssignmentChangeStats
-      .calculate(
-        incarnation1Assignment,
-        newlyGeneratedAssignment,
-        loadMap
-      )
-      .loadBalancingChurnRatio
-    assert(loadBalancingChurnRatio1 < 0.1)
-  }
-}
-
-/**
- * The base set of tests which validate behaviors for AssignmentGenerator regardless of store type.
- *
- * Implementing suites are expected to provide the [[createStore()]] and
- * [[createLargerValidIncarnation()]] implementations.
- *
- * @param observeSliceletReadiness if true, the HealthWatcher faithfully reports the
- *                                 Slicelet-reported health status for a pod. If false, masks the
- *                                 health status so that NotReady is masked to Running.
- * @param permitRunningToNotReady  if true, a pod that reports NotReady while Running is
- *                                 transitioned to NotReady by the HealthWatcher. Only valid when
- *                                 observeSliceletReadiness is also true.
- */
-abstract class CommonAssignmentGeneratorSuite(
-    observeSliceletReadiness: Boolean,
-    permitRunningToNotReady: Boolean)
-    extends DatabricksTest
-    with TestName
-    with ParameterizedTestNameDecorator {
-  import CommonAssignmentGeneratorSuite.{getAssignedResources, resource}
-
-  /** Returns a [[Store]] for the store incarnation `incarnation` which uses `sec`. */
-  def createStore(sec: SequentialExecutionContext, incarnation: Incarnation): Store
-
-  /**
-   * Returns an [[Incarnation]] larger than `lowerBound` which is valid for the [[createStore()]]
-   * implementation.
-   */
-  def createLargerValidIncarnation(lowerBound: Incarnation): Incarnation
 
   /** Random number generator used by the test suite, with seed logged for debugging. */
   protected val random: Random = TestUtils.newRandomWithLoggedSeed()
@@ -622,8 +453,13 @@ abstract class CommonAssignmentGeneratorSuite(
   protected def getNumDistributedAssignmentsMap(
       target: Target): Map[AssignmentDistributionSource, Long] = {
     AssignmentDistributionSource.values
-      .map { source =>
-        source -> TargetMetricsUtils.getNumDistributedAssignments(target, source.toString)
+      .map { source: AssignmentDistributionSource =>
+        val sourceLabel: String = source match {
+          case AssignmentDistributionSource.Store => "Store"
+          case AssignmentDistributionSource.Clerk => "Clerk"
+          case AssignmentDistributionSource.Slicelet => "Slicelet"
+        }
+        source -> TargetMetricsUtils.getNumDistributedAssignments(target, sourceLabel)
       }
       .filter { case (_, count: Long) => count > 0 }
       .toMap
@@ -661,7 +497,8 @@ abstract class CommonAssignmentGeneratorSuite(
       targetConfig: InternalTargetConfig = defaultTargetConfig,
       storeIncarnationOpt: Option[Incarnation] = None,
       target: Target = defaultTarget,
-      assignerProtoLogger: AssignerProtoLogger = AssignerProtoLogger.createNoop(sec))
+      assignerProtoLogger: AssignerProtoLogger = AssignerProtoLogger.createNoop(sec),
+      crashRecordRetentionOpt: Option[FiniteDuration] = None)
       : (AssignmentGeneratorDriver, InterceptableStore) = {
     val storeIncarnation: Incarnation =
       storeIncarnationOpt.getOrElse(createLargerValidIncarnation(Incarnation.MIN))
@@ -672,7 +509,8 @@ abstract class CommonAssignmentGeneratorSuite(
         store,
         targetConfig,
         target,
-        assignerProtoLogger = assignerProtoLogger
+        assignerProtoLogger = assignerProtoLogger,
+        crashRecordRetentionOpt = crashRecordRetentionOpt
       ),
       store
     )
@@ -689,8 +527,15 @@ abstract class CommonAssignmentGeneratorSuite(
       targetConfig: InternalTargetConfig = defaultTargetConfig,
       target: Target = defaultTarget,
       minAssignmentGenerationInterval: FiniteDuration = Duration.Zero,
-      assignerProtoLogger: AssignerProtoLogger = AssignerProtoLogger.createNoop(sec))
-      : AssignmentGeneratorDriver = {
+      assignerProtoLogger: AssignerProtoLogger = AssignerProtoLogger.createNoop(sec),
+      crashRecordRetentionOpt: Option[FiniteDuration] = None): AssignmentGeneratorDriver = {
+    val defaultKodConfig = KeyOfDeathDetector.Config.defaultConfig()
+    val keyOfDeathDetectorConfig: KeyOfDeathDetector.Config = crashRecordRetentionOpt match {
+      case Some(retention) =>
+        defaultKodConfig.copy(crashRecordRetention = retention)
+      case None =>
+        defaultKodConfig
+    }
     val conf = new DicerAssignerConf(
       Configs.parseMap(
         "databricks.dicer.assigner.unhealthyTimeoutPeriodSeconds" ->
@@ -712,10 +557,7 @@ abstract class CommonAssignmentGeneratorSuite(
           HealthWatcher.StaticConfig.fromConf(conf),
           targetConfig.healthWatcherConfig
         ),
-      new KeyOfDeathDetector(
-        target,
-        KeyOfDeathDetector.Config.defaultConfig()
-      ),
+      new KeyOfDeathDetector(target, keyOfDeathDetectorConfig),
       GENERATOR_CLUSTER_URI,
       minAssignmentGenerationInterval,
       DicerTeeEventEmitter.getNoopEmitter,
@@ -728,14 +570,15 @@ abstract class CommonAssignmentGeneratorSuite(
       targetConfig: InternalTargetConfig = defaultTargetConfig,
       storeIncarnationOpt: Option[Incarnation] = None,
       target: Target = defaultTarget,
-      assignerProtoLogger: AssignerProtoLogger = AssignerProtoLogger.createNoop(sec))
-      : AssignmentGeneratorDriver = {
+      assignerProtoLogger: AssignerProtoLogger = AssignerProtoLogger.createNoop(sec),
+      crashRecordRetentionOpt: Option[FiniteDuration] = None): AssignmentGeneratorDriver = {
     val (driver, _): (AssignmentGeneratorDriver, _) =
       createDriverAndStore(
         targetConfig,
         storeIncarnationOpt,
         target,
-        assignerProtoLogger
+        assignerProtoLogger,
+        crashRecordRetentionOpt
       )
     driver
   }
@@ -887,7 +730,8 @@ abstract class CommonAssignmentGeneratorSuite(
         attributedLoads = attributedLoads,
         unattributedLoadOpt = None
       ),
-      supportsSerializedAssignment = true
+      supportsSerializedAssignment = true,
+      redirectTokenOpt = None
     )
   }
 
@@ -924,7 +768,8 @@ abstract class CommonAssignmentGeneratorSuite(
       "subscriber",
       WATCH_RPC_TIMEOUT,
       ClerkData,
-      supportsSerializedAssignment = true
+      supportsSerializedAssignment = true,
+      redirectTokenOpt = None
     )
   }
 
@@ -1023,7 +868,13 @@ abstract class CommonAssignmentGeneratorSuite(
 
   private def getAssignmentGeneratorLatencyHistogramCount(
       target: Target,
-      operation: AssignmentGeneratorOpType.Value): Int = {
+      operation: AssignmentGeneratorOpType): Int = {
+    val operationLabel: String = operation match {
+      case AssignmentGeneratorOpType.GENERATE_INITIAL_ASSIGNMENT => "generateInitialAssignment"
+      case AssignmentGeneratorOpType.GENERATE_ASSIGNMENT => "generateAssignment"
+      case AssignmentGeneratorOpType.GET_PRIMARY_RATE_LOAD_MAP => "getPrimaryRateLoadMap"
+      case AssignmentGeneratorOpType.REPORT_LOAD => "reportLoad"
+    }
     MetricUtils.getHistogramCount(
       registry,
       "dicer_assigner_generator_latency_secs",
@@ -1031,7 +882,7 @@ abstract class CommonAssignmentGeneratorSuite(
         "targetCluster" -> target.getTargetClusterLabel,
         "targetName" -> target.getTargetNameLabel,
         "targetInstanceId" -> target.getTargetInstanceIdLabel,
-        "operation" -> operation.toString
+        "operation" -> operationLabel
       )
     )
   }
@@ -1292,8 +1143,12 @@ abstract class CommonAssignmentGeneratorSuite(
     )
   }
 
-  gridTest("Test updated assignment with changing resources")(
-    Seq(() => defaultTarget, () => Target.createAppTarget(getSafeAppTargetName, "instance-id"))
+  // Use `namedGridTest` so the non-deterministic `Function0.toString` is not used in the test name.
+  namedGridTest("Test updated assignment with changing resources")(
+    Seq(
+      "kubernetesTarget" -> (() => defaultTarget),
+      "appTarget" -> (() => Target.createAppTarget(getSafeAppTargetName, "instance-id"))
+    )
   ) { (targetFactory: () => Target) =>
     // Test plan: Create a generator that observes evolving available resources. Verify that new,
     // valid assignments are generated as new resources signal they are healthy. Verify that a new,
@@ -3100,11 +2955,8 @@ abstract class CommonAssignmentGeneratorSuite(
     // into the store and then injecting it into a watch request from slicelet and supplying the
     // request to the assignment generator.
 
-    // We first inject it to the store so that:
-    // - We verify the assignment sync-ed from store doesn't bypass initialization delay.
-    // - When using etcd store, we need to maintain the invariance that the etcd store knows the
-    //   assignment with highest generation; otherwise the assigner cannot write to store because of
-    //   the occ check.
+    // We first inject it into the store so that we verify the assignment synced from the store
+    // does not bypass the initialization delay.
 
     // Deliver it to the generator 1 second into the generator's life.
     sec.advanceBySync(1.second)
@@ -3222,6 +3074,21 @@ abstract class CommonAssignmentGeneratorSuite(
         resource(2),
         resource(3)
       )
+    )
+
+    // Verify that the ASSIGNMENT_LOWER incarnation-mismatch metric was incremented as a result of
+    // the slicelet syncing an assignment from a prior (lower) incarnation than the generator's.
+    assert(
+      MetricUtils.getMetricValue(
+        registry,
+        metric = "dicer_assigner_num_store_incarnation_mismatch",
+        Map(
+          "targetCluster" -> defaultTarget.getTargetClusterLabel,
+          "targetName" -> defaultTarget.getTargetNameLabel,
+          "targetInstanceId" -> defaultTarget.getTargetInstanceIdLabel,
+          "mismatchType" -> "ASSIGNMENT_LOWER"
+        )
+      ) > 0
     )
   }
 
@@ -3345,7 +3212,16 @@ abstract class CommonAssignmentGeneratorSuite(
 
     val driver: AssignmentGeneratorDriver =
       createDriverUsingStore(store, defaultTargetConfig, defaultTarget)
-    // No assignment should be generated.
+    // Wait deterministically for the driver to receive and distribute the fresh assignment from
+    // the store. This synchronization is required before the negative assertion below: without
+    // it, a race exists where the SEC has not yet delivered AssignmentReceived(freshAssignment)
+    // to the generator when assertNoNewerAssignment's sleep ends, causing the watch request to
+    // arrive before the generator knows about the fresh assignment.
+    awaitAssignment(driver, debugMessage = "wait for fresh assignment from store") {
+      (_: Assignment).generation == freshAssignment.generation
+    }
+    // No brand-new assignment (generation > freshAssignment.generation) should be generated
+    // without a watch request — the generator has no health signals to work with.
     assertNoNewerAssignment(driver, freshAssignment.generation)
 
     // Watch request from slicelet containing the stale assignment. It should trigger the health
@@ -4014,8 +3890,6 @@ abstract class CommonAssignmentGeneratorSuite(
     )
   }
 
-  // Note: it's important to use `gridTest` here because we need to run the `beforeEach()` test hook
-  // for EtcdStoreAssignmentGeneratorSuite to clear the data written to etcd between test runs.
   gridTest("Bootstraps from assignment in previous store incarnation")(
     loadBalancedAssignments
   ) { loadBalancedAssignment: Assignment =>
@@ -5050,11 +4924,6 @@ abstract class CommonAssignmentGeneratorSuite(
     )
     assert(afterWatchRequestReportLoadCount == 1)
 
-    // Watch the generator's cell to get the initial assignment. Even though this assignment
-    // is unused and has no impact on the statistics count, it is still necessary to call
-    // to ensure that the write to the EtcdStore (when running in
-    // `EtcdStoreAssignmentGeneratorSuite`) has completed and can be properly cleaned up prior to
-    // the start of the next test.
     awaitNewerAssignment(driver, Generation.EMPTY)
   }
 
@@ -5157,7 +5026,13 @@ abstract class CommonAssignmentGeneratorSuite(
     // reported in the key of death detector metrics. This includes setting up three initial
     // resources and crashing two of them to indicate the start of a key of death scenario.
     // The key of death scenario will only be resolved when all recorded crashes expire.
-    val driver: AssignmentGeneratorDriver = createDriver()
+
+    // Use a shorter `crashRecordRetention` than production so the time used for the simulation
+    // below remains small.
+    val crashRecordRetention: FiniteDuration = 5.minutes
+    val driver: AssignmentGeneratorDriver = createDriver(
+      crashRecordRetentionOpt = Some(crashRecordRetention)
+    )
 
     // Deliver heartbeats and advance past the health report delay to allow the initial
     // assignment to be generated for the available resources. There are three resources available.
@@ -5227,11 +5102,11 @@ abstract class CommonAssignmentGeneratorSuite(
       )
     )
 
-    // Since the crashes are recorded for one hour, we send heartbeats for each resource
-    // until one hour has passed.
-    // The current time is 75 seconds, and the crash expiry time is 1 hours and 50 seconds.
+    // Crashes are recorded for `crashRecordRetention`; we heartbeat each resource until the
+    // retention window elapses.
+    // The current time is 75 seconds, and the crash expiry time is crashRecordRetention + 55s.
     var currentTime: Duration = 75.seconds
-    val crashExpiryTime: Duration = 1.hours + 55.seconds
+    val crashExpiryTime: Duration = crashRecordRetention + 55.seconds
     while (currentTime < crashExpiryTime) {
       sec.advanceBySync(10.seconds)
       driver.onWatchRequest(createSliceletRequest(0, Generation.EMPTY))
@@ -5486,38 +5361,20 @@ object CommonAssignmentGeneratorSuite {
 
 // Note: (observeSliceletReadiness = false, permitRunningToNotReady = true) is not a valid
 // configuration. See [[InternalTargetConfig.HealthWatcherTargetConfig]] for details.
-class InMemoryStoreAssignmentGeneratorWithStatusMaskingSuite
-    extends InMemoryStoreAssignmentGeneratorSuite(
+class AssignmentGeneratorWithStatusMaskingSuite
+    extends CommonAssignmentGeneratorSuite(
       observeSliceletReadiness = false,
       permitRunningToNotReady = false
     )
 
-class InMemoryStoreAssignmentGeneratorWithoutStatusMaskingSuite
-    extends InMemoryStoreAssignmentGeneratorSuite(
+class AssignmentGeneratorWithoutStatusMaskingSuite
+    extends CommonAssignmentGeneratorSuite(
       observeSliceletReadiness = true,
       permitRunningToNotReady = false
     )
 
-class InMemoryStoreAssignmentGeneratorWithPermitRunningToNotReadySuite
-    extends InMemoryStoreAssignmentGeneratorSuite(
-      observeSliceletReadiness = true,
-      permitRunningToNotReady = true
-    )
-
-class EtcdStoreAssignmentGeneratorWithStatusMaskingSuite
-    extends EtcdStoreAssignmentGeneratorSuite(
-      observeSliceletReadiness = false,
-      permitRunningToNotReady = false
-    )
-
-class EtcdStoreAssignmentGeneratorWithoutStatusMaskingSuite
-    extends EtcdStoreAssignmentGeneratorSuite(
-      observeSliceletReadiness = true,
-      permitRunningToNotReady = false
-    )
-
-class EtcdStoreAssignmentGeneratorWithPermitRunningToNotReadySuite
-    extends EtcdStoreAssignmentGeneratorSuite(
+class AssignmentGeneratorWithPermitRunningToNotReadySuite
+    extends CommonAssignmentGeneratorSuite(
       observeSliceletReadiness = true,
       permitRunningToNotReady = true
     )
