@@ -115,6 +115,7 @@ class CommonSlicezSuite extends DatabricksTest {
     val assignment: Assignment = createAssignment(
       23 ## 67,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- "Balin") @@ (23 ## 34) -> Seq("Pod2"),
       ("Balin" -- "Fili") @@ (23 ## 34) -> Seq("Pod0"),
       ("Fili" -- "Nori") @@ (23 ## 45) -> Seq("Pod1"),
@@ -183,6 +184,7 @@ class CommonSlicezSuite extends DatabricksTest {
     val assignment: Assignment = createAssignment(
       generation = generation,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- ∞) @@ (23 ## 34) -> Seq("Pod0")
     )
     val (generationString, _): (String, String) = CommonSlicez.getAssignmentString(
@@ -202,6 +204,7 @@ class CommonSlicezSuite extends DatabricksTest {
     val assignment: Assignment = createAssignment(
       generation = generation,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- ∞) @@ (23 ## 34) -> Seq("Pod0")
     )
     val (generationString, assignmentString): (String, String) = CommonSlicez.getAssignmentString(

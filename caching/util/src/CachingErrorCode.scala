@@ -79,6 +79,31 @@ object CachingErrorCode {
   }
 
   /**
+   * A watch request for a target whose advanced config has `use_alternative_target` enabled arrived
+   * without a populated `alternative_target`. `use_alternative_target` should only be enabled after
+   * metrics confirm every client for that target (Slicelets and Clerks that watch the Assigner
+   * directly) populates `alternative_target`, so a missing value means a client regressed and will
+   * not be assigned slices. To mitigate, find the offending target from the logs and set
+   * `use_alternative_target` back to false for it.
+   */
+  case object ASSIGNER_MISSING_EXPECTED_ALTERNATIVE_TARGET extends CachingErrorCode {
+    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
+  }
+
+  /**
+   * A watch request for a target whose advanced config has `use_alternative_target` enabled arrived
+   * with an `alternative_target` that names a different target than the one being watched.
+   * Ownership and routing are decided on the incoming target name, so serving the request under a
+   * differently-named `alternative_target` would route it as one target and assign it as another.
+   * This means a client populated `alternative_target` incorrectly, so the watch is rejected. To
+   * mitigate, find the offending target in the logs and set `use_alternative_target` back to false
+   * for it.
+   */
+  case object ASSIGNER_MISMATCHED_ALTERNATIVE_TARGET_NAME extends CachingErrorCode {
+    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
+  }
+
+  /**
    * The Dicer Assigner produced an assignment with too many Slices given the number of available
    * resources in the sharded service.
    */
@@ -269,11 +294,71 @@ object CachingErrorCode {
   }
 
   /**
+   * Building the remote cluster membership checker factory failed, so the Assigner will not be
+   * able to watch the remote cluster specified in its configuration. The Assigner recovers by
+   * skipping creation of the factory rather than failing startup. Since there are a few ways that
+   * the factory creation can fail, investigate the exception in the alert message, which describes
+   * the specific failure and how to resolve it.
+   */
+  case object REMOTE_MEMBERSHIP_CHECKER_FACTORY_CREATION_FAILED extends CachingErrorCode {
+    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
+  }
+
+  /**
    * The Assigner's [[TargetMigrator]] did not produce its initial [[TargetOwnershipResolver]]
    * within the startup await timeout. The Assigner cannot start without a valid resolver, so this
    * blocks startup and should be investigated (e.g. SAFE availability or migrator wiring).
    */
   case object INITIAL_TARGET_OWNERSHIP_RESOLVER_CREATION_TIMED_OUT extends CachingErrorCode {
+    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
+  }
+
+  /**
+   * The Assigner's [[TargetMigrator]] failed to apply a state transition upon receiving a new
+   * [[TargetMigrationConfig]]. The alert message should identify the specific cause of the failure
+   * so that we can investigate it.
+   *
+   * NOTE: The migrator will remain in its previous state and keep serving its existing
+   * [[TargetOwnershipResolver]] if the state transition fails.
+   */
+  case object TARGET_MIGRATOR_STATE_TRANSITION_FAILED extends CachingErrorCode {
+    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
+  }
+
+  /**
+   * Constructing the Assigner's `KamEndpoint` for authenticating to remote clusters failed. This
+   * likely indicates a misconfiguration of
+   * `databricks.dicer.assigner.remote.kamDestinationClusterUri` or
+   * `databricks.dicer.assigner.remote.kamDbnsIdentifier`, check the logs for more details. This
+   * will result in disabling remote-cluster membership checking, but this is not catastrophic for
+   * the [[TargetMigrationType.GeneralToSmk]] migration. See the comment for
+   * [[ACTIVE_TARGET_MIGRATION_REMOTE_CLUSTER_ENDPOINT_WATCHER_CREATION_FAILED]] below for more
+   * details. Based on the error logs, fix the misconfiguration as required.
+   */
+  case object KAM_ENDPOINT_CONSTRUCTION_FAILED extends CachingErrorCode {
+    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
+  }
+
+  /**
+   * The [[TargetMigrator]] failed to create the remote cluster endpoint watcher. This will result
+   * in watch requests failing for targets that need to be redirected since we don't know
+   * where (i.e. which Assigner pods) to redirect them to. However, for the
+   * [[TargetMigrationType.GeneralToSmk]] migration, this is not catastrophic since clients will
+   * retry their watch requests and eventually, by random chance, have these requests end up on an
+   * Assigner in the intended/correct cluster (since we will set up the Assigner's ClusterIP service
+   * and DBNS target to span both the General and SMK clusters).
+   *
+   * There are a few ways this can fail, so investigate the exception in the alert message to
+   * determine which one occurred:
+   *  - No remote cluster membership checker factory was configured. In this case, the
+   *    [[REMOTE_MEMBERSHIP_CHECKER_FACTORY_CREATION_FAILED]] alert should have already fired on
+   *    this Assigner's startup with more granular details; this most likely indicates a remote
+   *    cluster watching config misconfiguration (see [[RemoteMembershipCheckerConf]]).
+   *  - The factory was configured but could not create the checker, or starting the checker threw.
+   *    In this case, the exception in the alert message describes the specific failure.
+   */
+  case object ACTIVE_TARGET_MIGRATION_REMOTE_CLUSTER_ENDPOINT_WATCHER_CREATION_FAILED
+      extends CachingErrorCode {
     override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
   }
 
@@ -340,6 +425,15 @@ object CachingErrorCode {
   }
 
   /**
+   * A watch response distributed by [[SubscriberHandler]] is near or exceeding the maximum content
+   * length limit clients enforce. Responses exceeding the limit cause clients to receive
+   * RESOURCE_EXHAUSTED errors and fail to receive assignments.
+   */
+  case object SUBSCRIBER_HANDLER_WATCH_RESPONSE_NEAR_OR_EXCEEDING_LIMIT extends CachingErrorCode {
+    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
+  }
+
+  /**
    * After the assigner Algorithm merges a Slice, the per-replica load on the Slice becomes too
    * hot (exceeding replica threshold). This is unexpected and should be investigated, see
    * [[com.databricks.dicer.assigner.Algorithm.Merger]] where this error is logged for why.
@@ -370,11 +464,38 @@ object CachingErrorCode {
   }
 
   /**
+   * `DicerClientFeatureRolloutFlag` could not resolve the current region URI from WhereAmI at
+   * process initialization, so every `isEnabled` call will return false for the lifetime of the
+   * process.
+   */
+  case object DICER_CLIENT_FEATURE_ROLLOUT_REGION_URI_UNAVAILABLE extends CachingErrorCode {
+    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
+  }
+
+  /**
+   * `DicerClientFeatureRolloutFlag` could not resolve the deployment environment (dev/staging/prod)
+   * from WhereAmI at process initialization, so no configurations are loaded and every
+   * `isEnabled` call will return false for the lifetime of the process.
+   */
+  case object DICER_CLIENT_FEATURE_ROLLOUT_ENV_UNAVAILABLE extends CachingErrorCode {
+    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
+  }
+
+  /**
    * `DicerClientFeatureRolloutFlag.isEnabled` was called with a feature name that does not match
    * any feature loaded for the current deployment environment, indicating either a typo at the
    * call site or a missing config file.
    */
   case object DICER_CLIENT_FEATURE_ROLLOUT_FLAG_NOT_FOUND extends CachingErrorCode {
+    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
+  }
+
+  /**
+   * The cardinality estimate delivered over Watch() from a Slicelet was unparseable and so dropped.
+   * Does not affect the success of Watch(). The metric `dicer_target_recent_key_cardinality` for
+   * the target will be incorrect.
+   */
+  case object DICER_CLIENT_REQUEST_MALFORMED_CARDINALITY_ESTIMATE extends CachingErrorCode {
     override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
   }
 

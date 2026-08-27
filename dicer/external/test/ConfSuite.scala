@@ -3,9 +3,8 @@ package com.databricks.dicer.external
 import java.net.URI
 import java.util.UUID
 
-import com.databricks.backend.common.util.Project
 import com.databricks.conf.Configs
-import com.databricks.conf.trusted.ProjectConf
+import com.databricks.conf.trusted.ProjectConfByName
 import com.databricks.conf.trusted.RPCPortConf
 import com.databricks.rpc.tls.TLSOptions
 import com.databricks.testing.DatabricksTest
@@ -31,7 +30,7 @@ class ConfSuite extends DatabricksTest {
       "databricks.dicer.internal.cachingteamonly.clientUuid" -> FAKE_CLIENT_UUID
     )
 
-    new ProjectConf(Project.TestProject, clerkConfig) with ClerkConf with RPCPortConf {
+    new ProjectConfByName("test", clerkConfig) with ClerkConf with RPCPortConf {
       override protected def dicerTlsOptions: Option[TLSOptions] = None
     }
   }
@@ -54,7 +53,7 @@ class ConfSuite extends DatabricksTest {
       "databricks.dicer.assigner.rpc.port" -> FAKE_ASSIGNER_PORT,
       "databricks.dicer.internal.cachingteamonly.clientUuid" -> FAKE_CLIENT_UUID
     )
-    val conf = new ProjectConf(Project.TestProject, clerkConfig) with ClerkConf with RPCPortConf {
+    val conf = new ProjectConfByName("test", clerkConfig) with ClerkConf with RPCPortConf {
       override protected def dicerTlsOptions: Option[TLSOptions] = None
     }
     assertResult(Some(FAKE_CLIENT_UUID))(conf.clientUuidOpt)
@@ -69,8 +68,7 @@ class ConfSuite extends DatabricksTest {
       "databricks.dicer.assigner.rpc.port" -> FAKE_ASSIGNER_PORT
     )
 
-    val conf = new ProjectConf(Project.TestProject, configWithoutUuid) with ClerkConf
-    with RPCPortConf {
+    val conf = new ProjectConfByName("test", configWithoutUuid) with ClerkConf with RPCPortConf {
       override protected def dicerTlsOptions: Option[TLSOptions] = None
       override def envVars: Map[String, String] = super.envVars ++ Map("POD_UID" -> podUid)
     }
@@ -86,8 +84,7 @@ class ConfSuite extends DatabricksTest {
       "databricks.dicer.assigner.rpc.port" -> FAKE_ASSIGNER_PORT
     )
 
-    val conf = new ProjectConf(Project.TestProject, configWithoutUuid) with ClerkConf
-    with RPCPortConf {
+    val conf = new ProjectConfByName("test", configWithoutUuid) with ClerkConf with RPCPortConf {
       override protected def dicerTlsOptions: Option[TLSOptions] = None
       override def envVars: Map[String, String] = Map.empty
     }

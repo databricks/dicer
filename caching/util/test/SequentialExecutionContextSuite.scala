@@ -178,8 +178,9 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
     // Test plan: enqueue a task using `run()` on a sequential executor and ensure that the task
     // runs.
     val sec = SequentialExecutionContext.createWithDedicatedPool(
-      s"$getSafeName-Context",
-      enableContextPropagation
+      name = s"$getSafeName-Context",
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+      enableContextPropagation = enableContextPropagation
     )
     val log = new TestLog
     sec.run { new LogRunnable("First", log, sec).run() }
@@ -191,9 +192,10 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
     // relevant time has passed.
 
     val pool = SequentialExecutionContextPool.create(
-      s"$getSafeName-Pool",
+      poolName = s"$getSafeName-Pool",
       numThreads = 2,
-      enableContextPropagation
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+      enableContextPropagation = enableContextPropagation
     )
     val sec = FakeSequentialExecutionContext.create(s"$getSafeName-Context", pool = pool)
     val log = new TestLog
@@ -214,8 +216,9 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
     // at least one of the immediate tasks.
 
     val sec = SequentialExecutionContext.createWithDedicatedPool(
-      s"$getSafeName-Context",
-      enableContextPropagation
+      name = s"$getSafeName-Context",
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+      enableContextPropagation = enableContextPropagation
     )
 
     var commandsStarted: Int = 0 // number of commands started
@@ -267,7 +270,11 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
       new Thread(() => {
         secPromise.success(
           SequentialExecutionContext
-            .createWithDedicatedPool(s"$getSafeName-Context", enableContextPropagation)
+            .createWithDedicatedPool(
+              name = s"$getSafeName-Context",
+              alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+              enableContextPropagation = enableContextPropagation
+            )
         )
         try {
           Thread.sleep( /*millis=*/ Long.MaxValue)
@@ -307,9 +314,10 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
     // case
 
     val pool = SequentialExecutionContextPool.create(
-      s"$getSafeName-Pool",
+      poolName = s"$getSafeName-Pool",
       numThreads = 1,
-      enableContextPropagation
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+      enableContextPropagation = enableContextPropagation
     )
     var now = TickerTime.ofNanos(0)
     val clock = new TypedClock {
@@ -344,8 +352,9 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
     // combinations of scheduled and immediate commands.
 
     val sec = SequentialExecutionContext.createWithDedicatedPool(
-      s"$getSafeName-Context",
-      enableContextPropagation
+      name = s"$getSafeName-Context",
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+      enableContextPropagation = enableContextPropagation
     )
 
     {
@@ -394,9 +403,10 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
 
     val clock = new FakeTypedClock
     val pool = SequentialExecutionContextPool.create(
-      s"$getSafeName-Pool",
+      poolName = s"$getSafeName-Pool",
       numThreads = 1,
-      enableContextPropagation
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+      enableContextPropagation = enableContextPropagation
     )
     val sec = new SequentialExecutionContext.Impl(
       pool.name,
@@ -422,8 +432,9 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
   test("Two runs in order") {
     // Test plan: Run two tasks on a sequential executor and ensure that the tasks run in order.
     val sec = SequentialExecutionContext.createWithDedicatedPool(
-      s"$getSafeName-Pool",
-      enableContextPropagation
+      name = s"$getSafeName-Pool",
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+      enableContextPropagation = enableContextPropagation
     )
     val log = new TestLog
     sec.run { new LogRunnable("First", log, sec).run() }
@@ -436,8 +447,9 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
     // future bound to an execution context based on a sequential execution context runs eventually.
     // Also check that it runs on the right context (and not a random thread).
     val sec = SequentialExecutionContext.createWithDedicatedPool(
-      s"$getSafeName-Pool",
-      enableContextPropagation
+      name = s"$getSafeName-Pool",
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+      enableContextPropagation = enableContextPropagation
     )
     val fut: Future[String] = Future {
       sec.assertCurrentContext()
@@ -452,9 +464,10 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
     // different execution contexts. Check that both run in the expected order on the right context.
     val pool: SequentialExecutionContextPool =
       SequentialExecutionContextPool.create(
-        s"$getSafeName-Pool",
+        poolName = s"$getSafeName-Pool",
         numThreads = 2,
-        enableContextPropagation
+        alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+        enableContextPropagation = enableContextPropagation
       )
     val sec1: SequentialExecutionContext = pool.createExecutionContext(s"$getSafeName-Context1")
     val sec2: SequentialExecutionContext = pool.createExecutionContext(s"$getSafeName-Context2")
@@ -473,8 +486,9 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
   test("SequentialExecutionContext.run") {
     // Test plan: verify that the func passed to `run` runs on the executor.
     val sec = SequentialExecutionContext.createWithDedicatedPool(
-      s"$getSafeName-Context",
-      enableContextPropagation
+      name = s"$getSafeName-Context",
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+      enableContextPropagation = enableContextPropagation
     )
     val promise = Promise[Unit]()
     sec.run {
@@ -488,8 +502,9 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
     // Test plan: verify that the func passed to `call` runs on the executor, and that the
     // returned future completes with the expected outcomes for the success and failure cases.
     val sec = SequentialExecutionContext.createWithDedicatedPool(
-      s"$getSafeName-Context",
-      enableContextPropagation
+      name = s"$getSafeName-Context",
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+      enableContextPropagation = enableContextPropagation
     )
 
     // Success.
@@ -520,8 +535,9 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
     //  - The future returned by `func` succeeds or fails
     //  - The future returned by `func` is already complete when returned, or it completes later
     val sec = SequentialExecutionContext.createWithDedicatedPool(
-      s"$getSafeName-Context",
-      enableContextPropagation
+      name = s"$getSafeName-Context",
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+      enableContextPropagation = enableContextPropagation
     )
 
     // Immediate success.
@@ -591,8 +607,9 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
     // returned cancellable's cancel request propagates to the cancellable supplied by the func
     // whether cancellation is requested before or after the command runs.
     val sec = SequentialExecutionContext.createWithDedicatedPool(
-      s"$getSafeName-Context",
-      enableContextPropagation
+      name = s"$getSafeName-Context",
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+      enableContextPropagation = enableContextPropagation
     )
 
     // Cancellation requested after func runs.
@@ -639,9 +656,10 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
     // Test plan: Execute a task on a sequential executor and schedule another task for later.
     // Ensure that the first task runs first.
     val pool = SequentialExecutionContextPool.create(
-      s"$getSafeName-Pool",
+      poolName = s"$getSafeName-Pool",
       numThreads = 2,
-      enableContextPropagation
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+      enableContextPropagation = enableContextPropagation
     )
     val sec = FakeSequentialExecutionContext.create(s"$getSafeName-Context", pool = pool)
 
@@ -663,9 +681,10 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
     // Test plan: Schedule a task on an execution context for a later time and then enqueue a task
     // using `run()`. Check that the immediate task runs first.
     val pool = SequentialExecutionContextPool.create(
-      s"$getSafeName-Pool",
+      poolName = s"$getSafeName-Pool",
       numThreads = 2,
-      enableContextPropagation
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+      enableContextPropagation = enableContextPropagation
     )
     val sec = FakeSequentialExecutionContext.create(s"$getSafeName-Context", pool = pool)
     val log = new TestLog
@@ -686,9 +705,10 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
     // Test plan: Schedule two tasks on an execution context and make sure that they run in the
     // expected order.
     val pool = SequentialExecutionContextPool.create(
-      s"$getSafeName-Pool",
+      poolName = s"$getSafeName-Pool",
       numThreads = 2,
-      enableContextPropagation
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+      enableContextPropagation = enableContextPropagation
     )
     val sec = FakeSequentialExecutionContext.create(s"$getSafeName-Context", pool = pool)
 
@@ -704,9 +724,10 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
     // Test plan: Create two execution contexts with a pool of 2 threads and schedule a task on
     // each context and make sure that both are run.
     val pool = SequentialExecutionContextPool.create(
-      s"$getSafeName-Pool",
+      poolName = s"$getSafeName-Pool",
       numThreads = 2,
-      enableContextPropagation
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+      enableContextPropagation = enableContextPropagation
     )
     val sec1 = FakeSequentialExecutionContext.create(s"$getSafeName-Context1", pool = pool)
     val sec2 = FakeSequentialExecutionContext.create(s"$getSafeName-Context2", pool = pool)
@@ -734,9 +755,10 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
     // Test plan: Create an sequential executor and schedule a task. Cancel it and check for
     // cancellation. Then enqueue a task and check that it runs.
     val pool = SequentialExecutionContextPool.create(
-      s"$getSafeName-Pool",
+      poolName = s"$getSafeName-Pool",
       numThreads = 2,
-      enableContextPropagation
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+      enableContextPropagation = enableContextPropagation
     )
     val sec = FakeSequentialExecutionContext.create(s"$getSafeName-Context", pool = pool)
     val log = new TestLog
@@ -761,9 +783,10 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
     // repeating schedules periodically and also can be cancelled.
 
     val pool = SequentialExecutionContextPool.create(
-      s"$getSafeName-Pool",
+      poolName = s"$getSafeName-Pool",
       numThreads = 2,
-      enableContextPropagation
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+      enableContextPropagation = enableContextPropagation
     )
     val sec = FakeSequentialExecutionContext.create(s"$getSafeName-Context", pool = pool)
     val log1 = new TestLog
@@ -819,9 +842,10 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
     val fakeTypedClock = new FakeTypedClock
     val secFuture: Future[SequentialExecutionContext.Impl] = Future {
       val secPool = SequentialExecutionContextPool.create(
-        s"$getSafeName-Pool",
+        poolName = s"$getSafeName-Pool",
         numThreads = 1,
-        enableContextPropagation
+        alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+        enableContextPropagation = enableContextPropagation
       )
       new SequentialExecutionContext.Impl(
         secPool.name,
@@ -889,9 +913,10 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
     val random = new Random(RealtimeTypedClock.tickerTime().nanos)
     val numPoolThreads = 4
     val pool = SequentialExecutionContextPool.create(
-      s"$getSafeName-Pool",
-      numPoolThreads,
-      enableContextPropagation
+      poolName = s"$getSafeName-Pool",
+      numThreads = numPoolThreads,
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+      enableContextPropagation = enableContextPropagation
     )
     val contexts = new mutable.ArrayBuffer[(SequentialExecutionContext, TestLog)]()
     val numContexts = 10
@@ -1000,7 +1025,12 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
       override def run(): Unit = {
         // Initialize the pool.
         poolPromise.success(
-          SequentialExecutionContextPool.create(poolName, numThreads = 1, enableContextPropagation)
+          SequentialExecutionContextPool.create(
+            poolName = poolName,
+            numThreads = 1,
+            alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+            enableContextPropagation = enableContextPropagation
+          )
         )
 
         // Wait for the thread to be interrupted.
@@ -1068,7 +1098,12 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
 
     val poolName = s"$getSafeName-Pool"
     val pool: SequentialExecutionContextPool =
-      SequentialExecutionContextPool.create(poolName, numThreads = 1, enableContextPropagation)
+      SequentialExecutionContextPool.create(
+        poolName = poolName,
+        numThreads = 1,
+        alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+        enableContextPropagation = enableContextPropagation
+      )
     val contextName = s"$getSafeName-Context"
     val sec = new SequentialExecutionContext.Impl(
       pool.name,
@@ -1102,8 +1137,12 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
     val createPoolThread = new Thread {
       override def run(): Unit = {
         // Initialize the pool.
-        pool =
-          SequentialExecutionContextPool.create(poolName, numThreads = 1, enableContextPropagation)
+        pool = SequentialExecutionContextPool.create(
+          poolName = poolName,
+          numThreads = 1,
+          alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+          enableContextPropagation = enableContextPropagation
+        )
       }
     }
     createPoolThread.start()
@@ -1125,7 +1164,12 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
     // is yielded by the returned future and  that the exception is not recorded as "uncaught".
     val poolName = s"$getSafeName-Pool"
     val pool: SequentialExecutionContextPool =
-      SequentialExecutionContextPool.create(poolName, numThreads = 1, enableContextPropagation)
+      SequentialExecutionContextPool.create(
+        poolName = poolName,
+        numThreads = 1,
+        alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+        enableContextPropagation = enableContextPropagation
+      )
     val sec = pool.createExecutionContext(s"$getSafeName-Context")
     val fut: Future[Int] = Future
       .successful(42)
@@ -1145,7 +1189,12 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
 
     val poolName = s"$getSafeName-Pool"
     val pool: SequentialExecutionContextPool =
-      SequentialExecutionContextPool.create(poolName, numThreads = 1, enableContextPropagation)
+      SequentialExecutionContextPool.create(
+        poolName = poolName,
+        numThreads = 1,
+        alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+        enableContextPropagation = enableContextPropagation
+      )
     val contextName = s"$getSafeName-Context"
     val fakeTypedClock = new FakeTypedClock
     val sec = new SequentialExecutionContext.Impl(
@@ -1189,7 +1238,12 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
 
     val poolName = s"$getSafeName-Pool"
     val pool: SequentialExecutionContextPool =
-      SequentialExecutionContextPool.create(poolName, numThreads = 1, enableContextPropagation)
+      SequentialExecutionContextPool.create(
+        poolName = poolName,
+        numThreads = 1,
+        alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+        enableContextPropagation = enableContextPropagation
+      )
     val contextName = s"$getSafeName-Context"
     val fakeTypedClock = new FakeTypedClock
     val sec = new SequentialExecutionContext.Impl(
@@ -1238,7 +1292,12 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
 
     val poolName = s"$getSafeName-Pool"
     val pool: SequentialExecutionContextPool =
-      SequentialExecutionContextPool.create(poolName, numThreads = 1, enableContextPropagation)
+      SequentialExecutionContextPool.create(
+        poolName = poolName,
+        numThreads = 1,
+        alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+        enableContextPropagation = enableContextPropagation
+      )
     val contextName = s"$getSafeName-Context"
     val fakeTypedClock = new FakeTypedClock
     val sec = new SequentialExecutionContext.Impl(
@@ -1284,7 +1343,12 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
 
     val poolName = s"$getSafeName-Pool"
     val pool: SequentialExecutionContextPool =
-      SequentialExecutionContextPool.create(poolName, numThreads = 1, enableContextPropagation)
+      SequentialExecutionContextPool.create(
+        poolName = poolName,
+        numThreads = 1,
+        alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+        enableContextPropagation = enableContextPropagation
+      )
     val contextName = s"$getSafeName-Context"
     val fakeTypedClock = new FakeTypedClock
     val sec = new SequentialExecutionContext.Impl(
@@ -1384,7 +1448,12 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
 
     val poolName = s"$getSafeName-Pool"
     val pool: SequentialExecutionContextPool =
-      SequentialExecutionContextPool.create(poolName, numThreads = 7, enableContextPropagation)
+      SequentialExecutionContextPool.create(
+        poolName = poolName,
+        numThreads = 7,
+        alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+        enableContextPropagation = enableContextPropagation
+      )
     val startingNumThreads: Double = MetricUtils.getMetricValue(
       CollectorRegistry.defaultRegistry,
       "sequential_execution_context_pool_num_threads",
@@ -1433,9 +1502,10 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
 
     // Setup: Create a pool and SEC (currently with no queued tasks).
     val pool = SequentialExecutionContextPool.create(
-      s"$getSafeName-Pool",
+      poolName = s"$getSafeName-Pool",
       numThreads = 2,
-      enableContextPropagation
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+      enableContextPropagation = enableContextPropagation
     )
     val clock = RealtimeTypedClock
     val sec = new SequentialExecutionContext.Impl(
@@ -1539,9 +1609,10 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
     // wakeups metric is not updated.
 
     val pool = SequentialExecutionContextPool.create(
-      s"$getSafeName-Pool",
+      poolName = s"$getSafeName-Pool",
       numThreads = 2,
-      enableContextPropagation
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+      enableContextPropagation = enableContextPropagation
     )
     val clock = RealtimeTypedClock
     val sec = new SequentialExecutionContext.Impl(
@@ -1574,5 +1645,108 @@ private class ParameterizedSequentialExecutionContextSuite(enableContextPropagat
     // woken up.
     assertResult(0)(getSpuriousWakeupMetricTotal(pool, sec, "NO_PENDING_COMMANDS"))
     assertResult(0)(getSpuriousWakeupMetricTotal(pool, sec, "ALREADY_RUNNING"))
+  }
+
+  test(
+    "Cancelling zero-delay scheduled task behind immediate backlog is successful"
+  ) {
+    // Test plan: verify that it is possible to cancel a zero-delay scheduled task. We do this by
+    // scheduling a task while the executor is blocked on another task, and then cancelling the
+    // scheduled task before unblocking the blocked task. We then drain the queue and assert that
+    // the cancelled task did not run.
+    val sec =
+      SequentialExecutionContext.createWithDedicatedPool(
+        name = s"$getSafeName",
+        alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+        enableContextPropagation = enableContextPropagation
+      )
+    val unblockTask = Promise[Unit]()
+    val cancelledTaskRan = Promise[Unit]()
+
+    // Run a task that will block the SEC until the task is unblocked.
+    sec.run {
+      Await.result(unblockTask.future, Duration.Inf)
+    }
+    try {
+      // Schedule a zero-delay task and immediately cancel it.
+      val cancellable = sec.schedule(
+        "zero-delay-task",
+        Duration.Zero,
+        () => cancelledTaskRan.success(())
+      )
+      cancellable.cancel()
+
+      // Unblock the SEC and wait for the queue to drain.
+      val queueDrained = sec.call {}
+      unblockTask.success(())
+      Await.result(queueDrained, Duration.Inf)
+
+      // Verify that the task was actually cancelled.
+      assert(!cancelledTaskRan.isCompleted)
+    } finally {
+      unblockTask.trySuccess(())
+    }
+  }
+
+  test("Cancelling zero-delay task does not report spurious wakeup when work remains") {
+    // Test plan: verify that cancelling a zero-delay task does not report a spurious wakeup when
+    // there is work remaining in the SEC. We do this by scheduling a zero-delay task that will be
+    // cancelled, and then scheduling a trailing task that will be run after the zero-delay task is
+    // cancelled. We then cancel the zero-delay task and verify that the spurious wakeup metric is
+    // not updated.
+    val pool = SequentialExecutionContextPool.create(
+      poolName = s"$getSafeName-Pool",
+      numThreads = 1,
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+      enableContextPropagation = enableContextPropagation
+    )
+    val clock = new FakeTypedClock
+    val sec = new SequentialExecutionContext.Impl(
+      poolName = pool.name,
+      name = s"$getSafeName-Context",
+      pool.executorService,
+      pool.exceptionHandler,
+      clock,
+      pool.enableContextPropagation
+    )
+    val unblockTask = Promise[Unit]()
+    val cancelledTaskRan = Promise[Unit]()
+    val trailingTaskRan = Promise[Unit]()
+    val initialNoPendingWakeups = getSpuriousWakeupMetricTotal(pool, sec, "NO_PENDING_COMMANDS")
+
+    // Run a task that will block the SEC until the task is unblocked.
+    sec.run {
+      Await.result(unblockTask.future, Duration.Inf)
+    }
+
+    try {
+      // Schedule a zero-delay task that will be cancelled.
+      val cancellable = sec.schedule(
+        "zero-delay-task",
+        Duration.Zero,
+        () => cancelledTaskRan.success(())
+      )
+      // Schedule a trailing task that will be run after the zero-delay task is cancelled.
+      sec.schedule("trailing-task", 1.second, () => trailingTaskRan.success(()))
+      // Cancel the zero-delay task.
+      cancellable.cancel()
+      // Advance the clock to run the trailing task.
+      clock.advanceBy(1.second)
+
+      // Unblock the SEC.
+      unblockTask.success(())
+      // Wait for the trailing task to run.
+      Await.result(trailingTaskRan.future, Duration.Inf)
+
+      // Verify that the zero-delay task was not run.
+      assert(!cancelledTaskRan.isCompleted)
+      // FAILS: A spurious wakeup was reported because the zero-delay task was cancelled but is
+      // still in the immediate queue, so `pollReadyCommand` returned `None`.
+      assertResult(initialNoPendingWakeups)(
+        getSpuriousWakeupMetricTotal(pool, sec, "NO_PENDING_COMMANDS")
+      )
+    } finally {
+      unblockTask.trySuccess(())
+    }
   }
 }

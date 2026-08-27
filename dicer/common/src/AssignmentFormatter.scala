@@ -26,14 +26,15 @@ object AssignmentFormatter {
    * format is subject to change. For example:
    *
    * <pre>
+   * Generating Assigner: dicer-assigner/test-instance
    * 0#3#1970-01-01T00:00:00.050Z
    *
    * ┌──────────────┬──────────────────────────────────────┬──────────────────────┬─────────────────
    * │ Address      │ Resource UUID                        │ Creation Time        │ Attributed Load
    * ├──────────────┼──────────────────────────────────────┼──────────────────────┼─────────────────
-   * │ https://pod1 │ d1eaf1f9-7b39-3651-bb77-1d10433dacfd │ 2023-03-31T16:12:12Z │ -
-   * │ https://pod2 │ 570ee4ff-e8ec-3177-a6bc-b726beb829c9 │ 2023-03-31T16:12:12Z │ -
-   * │ https://pod3 │ 5751882d-485c-3c8a-94ef-5166d2191616 │ 2023-03-31T16:12:12Z │ -
+   * │ https://pod1 │ 32e0529c-2509-3212-9971-8cd9eea4a2f2 │ 2023-03-31T16:12:12Z │ -
+   * │ https://pod2 │ cb034067-a92d-3c9d-9a05-84a64ddb159e │ 2023-03-31T16:12:12Z │ -
+   * │ https://pod3 │ ada8a919-e5f7-3812-a292-c68f26e38d70 │ 2023-03-31T16:12:12Z │ -
    * └──────────────┴──────────────────────────────────────┴──────────────────────┴─────────────────
    *
    * ┌──────────┬──────────────────────┬──────────────────┬───────┬─────────┐
@@ -150,6 +151,7 @@ object AssignmentFormatter {
       maxSlices: Int): Unit = {
     require(maxSlices >= 0, s"`maxSlices` must be non-negative, got $maxSlices")
 
+    builder.append(s"${formatAssignerServiceInfo(diffAssignment.assignerServiceInfoOpt)}\n")
     // Write assignment metadata, e.g.: "0#3#1970-01-01T00:00:00.050Z"
     builder.append(diffAssignment.generation.toString).append('\n')
     diffAssignment.sliceMap match {
@@ -269,7 +271,10 @@ object AssignmentFormatter {
     val chunkedStringBuilder =
       new ChunkedStringBuilder(maxCharsPerChunk, createBuilder, assignment.generation.toString)
 
-    // Preamble: generation, optional FROZEN flag, blank line.
+    // Preamble: Assigner identity, generation, optional FROZEN flag, blank line.
+    chunkedStringBuilder.appendText(
+      s"${formatAssignerServiceInfo(assignment.assignerServiceInfoOpt)}\n"
+    )
     chunkedStringBuilder.appendText(assignment.generation.toString + "\n")
     if (assignment.isFrozen) chunkedStringBuilder.appendText("FROZEN\n")
     chunkedStringBuilder.appendText("\n")
@@ -332,6 +337,20 @@ object AssignmentFormatter {
     chunkedStringBuilder.build()
   }
 
+  /**
+   * Formats the Assigner identity `assignerServiceInfoOpt`, or returns it as "unknown" when it is
+   * absent.
+   */
+  private def formatAssignerServiceInfo(
+      assignerServiceInfoOpt: Option[AssignerServiceInfo]): String = {
+    assignerServiceInfoOpt match {
+      case Some(assignerServiceInfo: AssignerServiceInfo) =>
+        s"Generating Assigner: ${assignerServiceInfo.name}/${assignerServiceInfo.instanceId}"
+      case None =>
+        "Generating Assigner: unknown"
+    }
+  }
+
   private def appendResourceTableToStringBuilder(
       assignedResources: Set[Squid],
       builder: StringBuilder,
@@ -388,7 +407,7 @@ object AssignmentFormatter {
             "-"
         }
         // Add address row, e.g.
-        // "https://pod1 | d1eaf1f9-7b39-3651-bb77-1d10433dacfd | 2023-03-31T16:12:12Z | 0.0"
+        // "https://pod1 | 32e0529c-2509-3212-9971-8cd9eea4a2f2 | 2023-03-31T16:12:12Z | 0.0"
         resourcesTable.appendRow(
           resource.resourceAddress.toString,
           resource.resourceUuid.toString,

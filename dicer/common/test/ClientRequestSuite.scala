@@ -18,7 +18,7 @@ import com.databricks.api.proto.dicer.common.{
   TargetP
 }
 import com.databricks.caching.util.TestUtils.{assertThrow, loadTestData}
-import com.databricks.caching.util.{CachingErrorCode, MetricUtils, Severity}
+import com.databricks.caching.util.{CachingErrorCode, HyperLogLog, MetricUtils, Severity}
 import com.google.protobuf.ByteString
 import com.databricks.dicer.common.SliceletData.{KeyLoad, SliceLoad}
 import com.databricks.dicer.common.TestSliceUtils._
@@ -295,6 +295,7 @@ class ClientRequestSuite extends DatabricksTest {
     val assignment: Assignment = TestSliceUtils.createAssignment(
       generation = generation,
       consistencyMode = AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       entries = Vector(sliceAssignment)
     )
     val diffAssignment: DiffAssignment = assignment.toDiff(Generation.EMPTY)
@@ -339,7 +340,10 @@ class ClientRequestSuite extends DatabricksTest {
       timeout = 10.seconds,
       subscriberData = ClerkData,
       supportsSerializedAssignment = false,
-      redirectTokenOpt = None
+      redirectTokenOpt = None,
+      alternativeTargetOpt = None,
+      clusterUriOpt = None,
+      regionUriOpt = None
     )
 
     assert(clerkRequest.getClientType == ClientType.Clerk)
@@ -349,7 +353,8 @@ class ClientRequestSuite extends DatabricksTest {
       state = SliceletState.Running,
       kubernetesNamespace = "test-namespace",
       attributedLoads = Vector.empty,
-      unattributedLoadOpt = None
+      unattributedLoadOpt = None,
+      keyCardinalityEstimateOpt = None
     )
     val sliceletRequest = ClientRequest(
       target = Target("test-target"),
@@ -358,10 +363,28 @@ class ClientRequestSuite extends DatabricksTest {
       timeout = 10.seconds,
       subscriberData = sliceletData,
       supportsSerializedAssignment = false,
-      redirectTokenOpt = None
+      redirectTokenOpt = None,
+      alternativeTargetOpt = None,
+      clusterUriOpt = None,
+      regionUriOpt = None
     )
 
     assert(sliceletRequest.getClientType == ClientType.Slicelet)
+  }
+
+  test("ClientRequest drops an unrecognized clusterUriOpt / regionUriOpt to None") {
+    // Test plan: Verify that fromProto drops a cluster_uri/region_uri that is unset, malformed, or
+    // well-formed but absent from IDM to None, parsing successfully rather than rejecting the
+    // request: these fields are advisory sender metadata. Verify this by parsing each dropped-URI
+    // test case and asserting both URI options are empty.
+    val testCases: Seq[ClientRequestP] = CLIENT_REQUEST_TEST_DATA.droppedUriCases
+
+    for (requestProto <- testCases) {
+      val parsed: ClientRequest =
+        ClientRequest.fromProto(TargetUnmarshaller.CLIENT_UNMARSHALLER, requestProto)
+      assert(parsed.clusterUriOpt.isEmpty)
+      assert(parsed.regionUriOpt.isEmpty)
+    }
   }
 
   test("SliceletState.fromProto normalizes UNKNOWN to Running and fires a DEGRADED alert") {
@@ -390,5 +413,46 @@ class ClientRequestSuite extends DatabricksTest {
         ""
       ) == initialErrorCount + 1
     )
+  }
+
+  test("roundtrip key cardinality estimate") {
+    val hll = new HyperLogLog()
+    for (i <- 0 to 1000) {
+      hll.add(ByteString.copyFrom(BigInt(i.toLong).toByteArray))
+    }
+
+    val sliceletData = SliceletData(
+      squid = createTestSquid(CLUSTER_URI1.toString),
+      state = SliceletState.Running,
+      kubernetesNamespace = "test-namespace",
+      attributedLoads = Vector.empty,
+      unattributedLoadOpt = None,
+      keyCardinalityEstimateOpt = Some(hll)
+    )
+
+    val sliceletDataProto = sliceletData.toProto
+
+    val roundtripped = SliceletData.fromProto(sliceletDataProto, Target("test-target"))
+
+    assert(hll.estimate() == roundtripped.keyCardinalityEstimateOpt.get.estimate())
+  }
+
+  test("drop malformed key cardinality estimate") {
+    val sliceletData = SliceletData(
+      squid = createTestSquid(CLUSTER_URI1.toString),
+      state = SliceletState.Running,
+      kubernetesNamespace = "test-namespace",
+      attributedLoads = Vector.empty,
+      unattributedLoadOpt = None,
+      keyCardinalityEstimateOpt = Some(new HyperLogLog())
+    )
+
+    val sliceletDataProto = sliceletData.toProto.update(
+      _.keyCardinalityEstimate.inner := ByteString.copyFrom(Array[Byte](4))
+    )
+
+    val roundtripped = SliceletData.fromProto(sliceletDataProto, Target("test-target"))
+
+    assert(roundtripped.keyCardinalityEstimateOpt.isEmpty)
   }
 }

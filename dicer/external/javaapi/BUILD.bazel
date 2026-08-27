@@ -31,7 +31,7 @@ java_library(
         "src/SliceKey.java",
         "src/SliceKeyBuilder.java",
     ],
-    visibility = ["//dicer:caching"],
+    visibility = ["//visibility:public"],
     deps = [
         "//dicer/external:external_common",
         "//dicer/external:infinity_slicekey_interop",
@@ -43,7 +43,10 @@ java_library(
 java_library(
     name = "impl_friend",
     srcs = ["src/ImplFriend.java"],
-    visibility = ["//dicer:caching"],
+    visibility = [
+        "//dicer-proxy/external/java:__pkg__",
+        "//dicer:caching",
+    ],
     deps = [
         ":clerk",
         ":resource_address",
@@ -60,7 +63,7 @@ java_library(
 java_library(
     name = "slice",
     srcs = ["src/Slice.java"],
-    visibility = ["//dicer:caching"],
+    visibility = ["//visibility:public"],
     deps = [
         ":slicekey",
         "//dicer/external:external_common",

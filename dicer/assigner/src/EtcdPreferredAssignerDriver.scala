@@ -8,6 +8,7 @@ import scala.util.{Failure, Success, Try}
 import io.grpc.Deadline
 import com.databricks.api.proto.dicer.assigner.HeartbeatResponseP
 import com.databricks.api.proto.dicer.assigner.PreferredAssignerServiceGrpc.PreferredAssignerServiceStub
+import com.databricks.caching.util.AlertOwnerTeam
 import com.databricks.caching.util.AssertMacros.iassert
 import com.databricks.caching.util.{
   Cancellable,
@@ -94,7 +95,8 @@ class EtcdPreferredAssignerDriver(
       baseDriver = new StateMachineDriver[Event, DriverAction, EtcdPreferredAssignerStateMachine](
         sec,
         new EtcdPreferredAssignerStateMachine(assignerInfo, store.storeIncarnation, config),
-        performAction
+        performAction,
+        AlertOwnerTeam.CACHING_TEAM_NAME
       )
       baseDriver.start()
       watchPreferredAssignerValueChanges()
@@ -105,8 +107,9 @@ class EtcdPreferredAssignerDriver(
    * `selfAssignerInfo`. This implementation forwards onto [[sec]] for processing, so it
    * accepts calls from any thread.
    *
-   * Today, only `MigrationPreferredAssignerDriver` in `ConsistentHashingNominatedEtcdReadMode`
-   * calls this.
+   * Today, only `MigrationPreferredAssignerDriver` in the consistent-hashing modes
+   * (`ConsistentHashingNominatedEtcdReadMode` and `ConsistentHashingPrimaryEtcdWritesMode`) calls
+   * this.
    *
    * PRECONDITION: [[start]] has been called.
    */
@@ -116,9 +119,10 @@ class EtcdPreferredAssignerDriver(
       baseDriver.handleEvent(Event.ExternalPickReceived(externalPickOpt))
     }
 
-  // No eligibility factors; the driver is always eligible.
-  override private[assigner] def selectionEligibilityWatchCell: WatchValueCell.Consumer[Boolean] =
-    PreferredAssignerDriver.ALWAYS_ELIGIBLE
+  // The etcd-backed driver does not run a consistent-hashing election, so it has no snapshot.
+  override private[assigner] def consistentHashingStateView
+      : Future[Option[ConsistentHashingState]] =
+    Future.successful(None)
 
   /**
    * Performs the heartbeat RPC call against the preferred assigner. Exposed as protected to allow
@@ -128,7 +132,7 @@ class EtcdPreferredAssignerDriver(
       stub: PreferredAssignerServiceStub,
       heartbeatRequest: HeartbeatRequest): Future[HeartbeatResponseP] = {
     // withBackgroundActivity sets the context for accessing SAFE flags from an async task.
-    // See https://docs.google.com/document/d/1bRnTScFpOZvYArGN3UzVMwlR51n8dvMNloy5pL_2-YU/edit
+    // See <internal link>
     // for details.
     withBackgroundActivity(onlyWarnOnAttrTagViolation = true, addUserContextTags = false) {
       _: Ctx =>

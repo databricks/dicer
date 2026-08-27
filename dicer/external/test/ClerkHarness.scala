@@ -2,8 +2,12 @@ package com.databricks.dicer.external
 
 import com.databricks.caching.util.TestUtils
 import com.databricks.dicer.common.{
+  Assignment,
+  ClerkCheckInvariantsRequestP,
   ClerkGetStubForKeyRequestP,
   ClerkGetStubForKeyResponseP,
+  ClerkGetStubForKeyTwoLevelRequestP,
+  ClerkGetStubForKeyTwoLevelResponseP,
   ClerkReadyRequestP,
   ClerkReadyResponseP,
   ClerkSampleStubForKeyRequestP,
@@ -12,11 +16,15 @@ import com.databricks.dicer.common.{
   CreateClerkResponseP,
   CreateCrossClusterClerkRequestP,
   CreateCrossClusterClerkResponseP,
+  Generation,
   GetClerkDebugNameRequestP,
   GetClerkDebugNameResponseP,
+  GetClerkLatestGenerationRequestP,
+  GetClerkLatestGenerationResponseP,
   StopClerkRequestP
 }
 import com.databricks.dicer.common.TargetHelper.TargetOps
+import com.databricks.dicer.friend.external.TwoLevelShardingClerkAccessor
 import scala.concurrent.duration.Duration
 import scala.concurrent.Future
 import scala.collection.mutable
@@ -81,6 +89,15 @@ trait ClerkHarness {
   def getStubForKey(key: SliceKey): Option[ResourceAddress]
 
   /**
+   * Two-level sharding variant of [[getStubForKey]]. See
+   * [[com.databricks.dicer.friend.external.TwoLevelShardingClerkAccessor.getStubForKey]].
+   */
+  def getStubForKey(primaryKey: SliceKey, secondaryKey: SliceKey): Option[ResourceAddress]
+
+  /** See [[ClerkImpl.forTest.checkInvariants]]. */
+  def checkInvariants(): Unit
+
+  /**
    * Samples `getStubForKey` multiple times and returns a map of results.
    *
    * This method exists because the Rust Clerk runs in a subprocess, and each `getStubForKey` call
@@ -98,6 +115,9 @@ trait ClerkHarness {
 
   /** Gets the debug name for the Clerk. */
   def getDebugName: String
+
+  /** Returns the generation of the latest assignment known to the Clerk. */
+  def getLatestGenerationOpt: Option[Generation]
 }
 
 /**
@@ -110,6 +130,13 @@ class ScalaClerkHarness private (clerk: Clerk[ResourceAddress]) extends ClerkHar
   override def ready: Future[Unit] = clerk.ready
 
   override def getStubForKey(key: SliceKey): Option[ResourceAddress] = clerk.getStubForKey(key)
+
+  override def getStubForKey(
+      primaryKey: SliceKey,
+      secondaryKey: SliceKey): Option[ResourceAddress] =
+    TwoLevelShardingClerkAccessor.getStubForKey(clerk, primaryKey, secondaryKey)
+
+  override def checkInvariants(): Unit = clerk.impl.forTest.checkInvariants()
 
   override def sampleStubForKey(key: SliceKey, sampleCount: Int): Map[ResourceAddress, Int] = {
     val hitCounts = mutable.Map[ResourceAddress, Int]().withDefaultValue(0)
@@ -126,6 +153,9 @@ class ScalaClerkHarness private (clerk: Clerk[ResourceAddress]) extends ClerkHar
   override def stop(): Unit = clerk.forTest.stop()
 
   override def getDebugName: String = clerk.impl.toString
+
+  override def getLatestGenerationOpt: Option[Generation] =
+    clerk.impl.forTest.getLatestAssignmentOpt.map((assignment: Assignment) => assignment.generation)
 }
 
 object ScalaClerkHarness {

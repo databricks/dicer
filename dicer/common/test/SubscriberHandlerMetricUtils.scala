@@ -5,7 +5,7 @@ import com.databricks.caching.util.MetricUtils
 import com.databricks.dicer.common.SubscriberHandler.{Location, MetricsKey}
 import com.databricks.dicer.common.SubscriberHandlerMetrics.TargetMatchedLabels
 import com.databricks.dicer.common.TargetHelper.TargetOps
-import com.databricks.dicer.external.Target
+import com.databricks.dicer.external.{AppTarget, Target}
 
 object SubscriberHandlerMetricUtils {
 
@@ -24,6 +24,28 @@ object SubscriberHandlerMetricUtils {
           "targetInstanceId" -> target.getTargetInstanceIdLabel,
           "type" -> "Clerk",
           "version" -> version.toString,
+          "handlerLocation" -> location.toString
+        )
+      )
+      .toLong
+  }
+
+  /**
+   * Gets the number of Clerks for the `target` handled by `location`, without specifying the
+   * reported client code version. Prefer the version-qualified overload when the version is known.
+   *
+   * Only the first matching sample's value is returned rather than the sum across versions.
+   */
+  def getNumClerksByHandler(location: Location, target: Target): Long = {
+    MetricUtils
+      .getMetricValue(
+        registry,
+        metric = "dicer_subscriber_num_subscribers",
+        Map(
+          "targetCluster" -> target.getTargetClusterLabel,
+          "targetName" -> target.getTargetNameLabel,
+          "targetInstanceId" -> target.getTargetInstanceIdLabel,
+          "type" -> "Clerk",
           "handlerLocation" -> location.toString
         )
       )
@@ -52,11 +74,14 @@ object SubscriberHandlerMetricUtils {
   def getNumWatchRequests(
       handlerTarget: Target,
       requestTarget: Target,
+      alternativeTargetOpt: Option[AppTarget],
       callerService: String,
       metricsKey: MetricsKey,
       handlerLocation: Location): Long = {
     val matchedLabels: TargetMatchedLabels =
       SubscriberHandlerMetrics.getWatchRequestTargetMatchedLabels(handlerTarget, requestTarget)
+    val (alternativeTargetName, alternativeTargetInstanceId): (String, String) =
+      SubscriberHandlerMetrics.getAlternativeTargetLabels(alternativeTargetOpt)
     MetricUtils
       .getMetricValue(
         registry,
@@ -74,7 +99,9 @@ object SubscriberHandlerMetricUtils {
           "handlerLocation" -> handlerLocation.toString,
           "matchedName" -> matchedLabels.matchedName,
           "matchedCluster" -> matchedLabels.matchedCluster,
-          "matchedInstanceId" -> matchedLabels.matchedInstanceId
+          "matchedInstanceId" -> matchedLabels.matchedInstanceId,
+          "alternativeTargetName" -> alternativeTargetName,
+          "alternativeTargetInstanceId" -> alternativeTargetInstanceId
         )
       )
       .toLong

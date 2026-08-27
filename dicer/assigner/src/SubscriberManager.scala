@@ -32,12 +32,18 @@ import com.databricks.dicer.external.Target
  *                                         to inform the [[Clerk]]s to use.
  * @param suggestedSliceletRpcTimeout      the suggested timeout to inform the [[Slicelet]]s to
  *                                         use.
+ * @param maxSubscribersPromptedForAssignmentRecovery the maximum number of subscribers (per
+ *                                                    [[SubscriberHandler]]) prompted to quickly
+ *                                                    sync their assignment back, when the
+ *                                                    subscribers know a newer assignment.
+ *                                                    A value of 0 disables this bound.
  */
 @NotThreadSafe
 private[assigner] class SubscriberManager(
     targetSecPool: SequentialExecutionContextPool,
     getSuggestedClerkRpcTimeoutFn: () => FiniteDuration,
-    suggestedSliceletRpcTimeout: FiniteDuration) {
+    suggestedSliceletRpcTimeout: FiniteDuration,
+    maxSubscribersPromptedForAssignmentRecovery: Int) {
 
   private val logger: PrefixLogger = PrefixLogger.create(this.getClass, "")
 
@@ -131,7 +137,8 @@ private[assigner] class SubscriberManager(
             target,
             getSuggestedClerkRpcTimeoutFn,
             suggestedSliceletRpcTimeout,
-            SubscriberHandler.Location.Assigner
+            SubscriberHandler.Location.Assigner,
+            maxSubscribersPromptedForAssignmentRecovery
           ),
           lastAccessedTime = currentTime
         )

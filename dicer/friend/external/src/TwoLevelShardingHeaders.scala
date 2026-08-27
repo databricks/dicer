@@ -8,7 +8,8 @@ import java.util.Base64
 /**
  * Provides friend access to header serialization helpers for Dicer two-level sharding. See
  * [[TwoLevelShardingClerkAccessor]] for more details on two-level sharding. Usage of this API is
- * currently restricted. Please reach out to the maintainers with any questions.
+ * currently restricted, as this feature is currently under development. Please reach out to
+ * the maintainers with any questions.
  */
 object TwoLevelShardingHeaders {
 

@@ -9,6 +9,7 @@ import scala.util.Try
 
 import io.grpc.Status
 
+import com.databricks.caching.util.AlertOwnerTeam
 import com.databricks.caching.util.AssertMacros.iassert
 import com.databricks.caching.util.{
   Cancellable,
@@ -27,7 +28,7 @@ import com.databricks.dicer.assigner.AssignmentGenerator.{
 import com.databricks.dicer.common.ProposedAssignment
 import com.databricks.dicer.common.Assignment.{AssignmentValueCell, AssignmentValueCellConsumer}
 import com.databricks.dicer.common.TargetHelper.TargetOps
-import com.databricks.dicer.common.{Assignment, ClientRequest}
+import com.databricks.dicer.common.{AssignerServiceInfo, Assignment, ClientRequest}
 import com.databricks.dicer.external.Target
 
 import scala.concurrent.duration.FiniteDuration
@@ -51,7 +52,9 @@ class AssignmentGeneratorDriver private (
     clusterUri: URI,
     minAssignmentGeneration: FiniteDuration,
     dicerTeeEventEmitter: DicerTeeEventEmitter,
-    assignerProtoLogger: AssignerProtoLogger) {
+    dicerSimulatorEventLogEmitter: DicerSimulatorEventEmitter,
+    assignerProtoLogger: AssignerProtoLogger,
+    assignerServiceInfoOpt: Option[AssignerServiceInfo]) {
 
   /** Generic driver implementation that drives the [[AssignmentGenerator]] state machine. */
   val baseDriver = new StateMachineDriver[Event, DriverAction, AssignmentGenerator](
@@ -62,9 +65,11 @@ class AssignmentGeneratorDriver private (
       target,
       targetConfig,
       healthWatcher,
-      keyOfDeathDetector
+      keyOfDeathDetector,
+      assignerServiceInfoOpt
     ),
-    performAction
+    performAction,
+    AlertOwnerTeam.CACHING_TEAM_NAME
   )
 
   /**
@@ -122,6 +127,14 @@ class AssignmentGeneratorDriver private (
     sec.assertCurrentContext()
     baseDriver.handleEvent(event)
     dicerTeeEventEmitter.maybeEmitEvent(target, event)
+
+    // Log the event to Lumberjack for replay by the Dicer Simulator.
+    // TODO(<internal bug>): Remove DicerTeeEventEmitter.
+    dicerSimulatorEventLogEmitter.maybeEmitEvent(
+      target,
+      event,
+      sliceKeySensitivity = targetConfig.keySensitivityConfig.sliceKeySensitivity
+    )
   }
 
   /**
@@ -203,7 +216,8 @@ class AssignmentGeneratorDriver private (
         assignerProtoLogger.logAssignmentUpdate(
           target = target,
           assignment = assignment,
-          contextOpt = contextOpt
+          contextOpt = contextOpt,
+          sliceKeySensitivity = targetConfig.keySensitivityConfig.sliceKeySensitivity
         )
 
       case DriverAction.WriteAssignment(
@@ -259,7 +273,11 @@ object AssignmentGeneratorDriver {
    * @param minAssignmentGenerationInterval The minimum interval between assignment generations.
    * @param dicerTeeEventEmitter The emitter used to optionally
    *                             send state machine events to Dicer Tee.
+   * @param dicerSimulatorEventLogEmitter The emitter used to optionally log state machine events
+   *                                      to Lumberjack for replay by the Dicer Simulator.
    * @param assignerProtoLogger The proto logger for Assigner-specific logging events.
+   * @param assignerServiceInfoOpt The service info of the Assigner that creates this driver or
+   *                               [[None]].
    */
   def create(
       sec: SequentialExecutionContext,
@@ -273,7 +291,9 @@ object AssignmentGeneratorDriver {
       clusterUri: URI,
       minAssignmentGenerationInterval: FiniteDuration,
       dicerTeeEventEmitter: DicerTeeEventEmitter,
-      assignerProtoLogger: AssignerProtoLogger): AssignmentGeneratorDriver = {
+      dicerSimulatorEventLogEmitter: DicerSimulatorEventEmitter,
+      assignerProtoLogger: AssignerProtoLogger,
+      assignerServiceInfoOpt: Option[AssignerServiceInfo]): AssignmentGeneratorDriver = {
     val driver =
       new AssignmentGeneratorDriver(
         sec,
@@ -287,7 +307,9 @@ object AssignmentGeneratorDriver {
         clusterUri,
         minAssignmentGenerationInterval,
         dicerTeeEventEmitter,
-        assignerProtoLogger
+        dicerSimulatorEventLogEmitter,
+        assignerProtoLogger,
+        assignerServiceInfoOpt
       )
     sec.run { driver.start() }
     driver
@@ -309,7 +331,9 @@ object AssignmentGeneratorDriver {
       clusterUri: URI,
       minAssignmentGeneration: FiniteDuration,
       dicerTeeEventEmitter: DicerTeeEventEmitter,
-      assignerProtoLogger: AssignerProtoLogger)
+      dicerSimulatorEventLogEmitter: DicerSimulatorEventEmitter,
+      assignerProtoLogger: AssignerProtoLogger,
+      assignerServiceInfoOpt: Option[AssignerServiceInfo])
       extends AssignmentGeneratorDriver(
         sec,
         loadWatcherConf,
@@ -322,6 +346,8 @@ object AssignmentGeneratorDriver {
         clusterUri,
         minAssignmentGeneration,
         dicerTeeEventEmitter,
-        assignerProtoLogger
+        dicerSimulatorEventLogEmitter,
+        assignerProtoLogger,
+        assignerServiceInfoOpt
       )
 }

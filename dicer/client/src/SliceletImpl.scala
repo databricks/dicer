@@ -11,9 +11,8 @@ import scala.util.matching.Regex
 
 import io.grpc.Status
 
-import com.databricks.dicer.common.ClientType
-
 import com.databricks.api.proto.dicer.common.ClientRequestP.SliceletDataP
+import com.databricks.caching.util.AssertMacros.ifail
 import com.databricks.caching.util.InstantiationTracker.{
   PerProcessSingleton,
   PerProcessSingletonType
@@ -35,6 +34,7 @@ import com.databricks.caching.util.{
 import com.databricks.common.util.ShutdownHookManager
 import com.databricks.dicer.client.SliceletImpl.SLICELET_LOAD_ACCUMULATOR_UPDATE_METRICS_INTERVAL
 import com.databricks.dicer.common.{
+  AppIdentifier,
   Assignment,
   AssignmentMetricsSource,
   ClientType,
@@ -72,6 +72,7 @@ private[dicer] class SliceletImpl private (
     server: DatabricksServerWrapper,
     private[client] val metrics: SliceletMetrics,
     private[client] val loadAccumulator: SliceletLoadAccumulator,
+    private[client] val keyCardinalityEstimator: SliceletKeyCardinalityEstimator,
     lookup: SliceletSliceLookup) {
 
   private val sliceLookupConfig: SliceLookupConfig = config.sliceLookupConfig
@@ -89,7 +90,10 @@ private[dicer] class SliceletImpl private (
    * block the Dicer client library's internal threads when calling user code.
    */
   private val listenerSec =
-    SequentialExecutionContext.createWithDedicatedPool("SliceletListenerExecutor")
+    SequentialExecutionContext.createWithDedicatedPool(
+      name = "SliceletListenerExecutor",
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+    )
 
   /** Lower bound on the latest generation known to the listener. */
   @GuardedBy("listenerSec")
@@ -310,11 +314,10 @@ private[dicer] class SliceletImpl private (
 /** Companion object for [[SliceletImpl]]. */
 private[dicer] object SliceletImpl {
 
+  private val logger = PrefixLogger.create(this.getClass, "")
+
   /** Interval with which to regularly update load accumulator metrics. */
   private val SLICELET_LOAD_ACCUMULATOR_UPDATE_METRICS_INTERVAL: FiniteDuration = 5.seconds
-
-  /** The interval at which the readiness poller polls the readiness provider for readiness. */
-  private val READINESS_PROVIDER_POLL_INTERVAL: FiniteDuration = 1.second
 
   /**
    * Used to enforce that only a single `SliceletImpl` instance is created per process, except in
@@ -381,6 +384,40 @@ private[dicer] object SliceletImpl {
         )
     }
 
+    // The Slicelet's alternative target combines the name of `target` with the app instance from
+    // the Slicelet's App Identifier. This is being used to migrate all existing KubernetesTargets
+    // to AppTargets. As a first step, a Slicelet sends what its AppTarget would be based on its App
+    // Identifier. Once the target is populating a consistent value for this field, the Assigner
+    // will use the alternative target as the canonical identifier instead of the target.
+    // Eventually, all client-side callsites will be updated to use AppTarget and the alternative
+    // target will be removed.
+    // TODO(<internal bug>): Remove the alternative target once all client-side callsites use AppTarget.
+    val alternativeTargetOpt: Option[AppTarget] =
+      try {
+        AppIdentifier.getFromEnv match {
+          case Some(appIdentifier: AppIdentifier) =>
+            Target.createAppTarget(target.name, appIdentifier.instanceId) match {
+              case appTarget: AppTarget => Some(appTarget)
+              // $COVERAGE-OFF$: createAppTarget always returns an AppTarget, so this is
+              // unreachable.
+              case other: Target =>
+                ifail(s"createAppTarget must return an AppTarget, but got: $other")
+              // $COVERAGE-ON$
+            }
+          case None =>
+            logger.warn(
+              "No App Identifier available, so an alternativeTarget could not be populated."
+            )
+            None
+        }
+      } catch {
+        case NonFatal(e) =>
+          logger.warn(
+            s"Failed to populate alternativeTarget from App Identifier: $e."
+          )
+          None
+      }
+
     val sliceLookupConfig: SliceLookupConfig = SliceLookupConfig(
       ClientType.Slicelet,
       assignerWatchAddress,
@@ -389,6 +426,7 @@ private[dicer] object SliceletImpl {
       clientIdOpt = Some(uuid),
       SliceLookupConfig.DEFAULT_WATCH_STUB_CACHE_TIME,
       sliceletConf.watchFromDataPlane,
+      alternativeTargetOpt,
       // TODO(<internal bug>): Use client side feature flag to gradually rollout rate limiting.
       enableRateLimiting = false
     )
@@ -411,21 +449,25 @@ private[dicer] object SliceletImpl {
     // risk blocking the main Slicelet thread, which handles assignment updates and client requests.
     val readinessProviderSec: SequentialExecutionContext = {
       // Include host name for thread pool name uniqueness and debugging efficiency.
-      SequentialExecutionContext.createWithDedicatedPool(s"Slicelet-ReadinessProvider-$hostName")
+      SequentialExecutionContext.createWithDedicatedPool(
+        name = s"Slicelet-ReadinessProvider-$hostName",
+        alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+      )
     }
 
     val readinessPoller =
       new WatchValueCellPollAdapter[Boolean, Boolean](
         initialValueOpt = None,
         poller = () => readinessProvider.isReady,
-        transform = identity,
-        pollInterval = SliceletImpl.READINESS_PROVIDER_POLL_INTERVAL,
+        update = (_, isReady: Boolean) => isReady,
+        pollInterval = sliceletConf.readinessProviderPollInterval,
         sec = readinessProviderSec
       )
 
     // Accumulates load observed by this Slicelet.
     val metrics = new SliceletMetrics(target)
     val loadAccumulator = new SliceletLoadAccumulator(sec.getClock, target, metrics)
+    val keyCardinalityEstimator = new SliceletKeyCardinalityEstimator(sec.getClock)
     val lookup =
       new SliceletSliceLookup(
         sec,
@@ -433,6 +475,7 @@ private[dicer] object SliceletImpl {
         readinessPoller,
         serviceBuilder,
         loadAccumulator,
+        keyCardinalityEstimator,
         kubernetesNamespace,
         metrics,
         protoLogger,
@@ -460,6 +503,7 @@ private[dicer] object SliceletImpl {
       server,
       metrics,
       loadAccumulator,
+      keyCardinalityEstimator,
       lookup
     )
   }
@@ -493,7 +537,7 @@ private[dicer] object SliceletImpl {
     // This execution context does not propagate the context to the threads it creates to avoid
     // the overhead of unnecessarily copying the context to background threads.
     val sec = SequentialExecutionContext.createWithDedicatedPool(
-      "SliceletExecutor",
+      name = "SliceletExecutor",
       enableContextPropagation = false,
       alertOwnerTeam = AlertOwnerTeam.CachingTeam.toString
     )
@@ -667,6 +711,7 @@ private[client] final class SliceletSliceLookup(
     readinessPoller: WatchValueCellPollAdapter[Boolean, Boolean],
     serviceBuilder: GenericRpcServiceBuilder,
     loadAccumulator: SliceletLoadAccumulator,
+    keyCardinalityEstimator: SliceletKeyCardinalityEstimator,
     kubernetesNamespace: String,
     metrics: SliceletMetrics,
     protoLogger: DicerClientProtoLogger,
@@ -845,7 +890,8 @@ private[client] final class SliceletSliceLookup(
       SliceletState.fromProto(stateP, sliceLookupConfig.target),
       kubernetesNamespace,
       attributedLoads,
-      Some(unattributedLoad)
+      Some(unattributedLoad),
+      Some(keyCardinalityEstimator.recent())
     )
   }
 
@@ -975,6 +1021,7 @@ private[dicer] final class SliceKeyHandleImpl private[client] (
 
   /** See `SliceKeyHandle.incrementLoadBy`. */
   def incrementLoadBy(value: Int): Unit = {
+    slicelet.keyCardinalityEstimator.add(key)
     slicelet.loadAccumulator.incrementPrimaryRateBy(key, value)
   }
 

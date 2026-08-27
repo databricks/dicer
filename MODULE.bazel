@@ -162,7 +162,7 @@ maven.install(
         "io.opencensus:opencensus-contrib-zpages:0.31.1",
     ],
     repositories = [
-        "https://repo1.maven.org/maven2",
+        "https://maven-proxy.cloud.databricks.com",
     ],
     # REQUIRED: Pin artifact versions to match internal Databricks compilation environment.
     # Without this, rules_jvm_external resolves transitive dependency conflicts by selecting

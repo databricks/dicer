@@ -1,0 +1,18 @@
+load("@rules_proto//proto:defs.bzl", "proto_library")
+load("@rules_scala//scala_proto:scala_proto.bzl", "scala_proto_library")
+
+proto_library(
+    name = "hyper_log_log_proto",
+    srcs = ["hyper_log_log.proto"],
+    visibility = ["//dicer:__subpackages__"],
+    deps = ["//wrappers/rpc:scalapb_proto"],
+)
+
+scala_proto_library(
+    name = "hyper_log_log_proto_scala_lib",
+    visibility = [
+        "//caching/util:__pkg__",
+        "//dicer:__subpackages__",
+    ],
+    deps = [":hyper_log_log_proto"],
+)

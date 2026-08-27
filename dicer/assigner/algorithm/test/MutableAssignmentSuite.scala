@@ -49,6 +49,7 @@ class MutableAssignmentSuite extends DatabricksTest {
     val predecessor: Assignment = createAssignment(
       generation,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- 10) @@ generation -> Seq("resource0"),
       (10 -- 20) @@ generation -> Seq("resource1"),
       (20 -- ∞) @@ generation -> Seq("resource0", "resource1", "resource2")
@@ -130,6 +131,7 @@ class MutableAssignmentSuite extends DatabricksTest {
     val predecessor: Assignment = createAssignment(
       generation,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- 10) @@ generation -> Seq("resource0", "resource1"),
       (10 -- ∞) @@ generation -> Seq("resource2")
     )
@@ -253,6 +255,7 @@ class MutableAssignmentSuite extends DatabricksTest {
     val predecessor: Assignment = createAssignment(
       generation,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- 10) @@ generation -> Seq("resource0", "resource1"),
       (10 -- ∞) @@ generation -> Seq("resource1", "resource2")
     )
@@ -361,6 +364,7 @@ class MutableAssignmentSuite extends DatabricksTest {
     val predecessor: Assignment = createAssignment(
       generation,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- ∞) @@ generation -> Seq(
         "resource0",
         "resource1",
@@ -405,6 +409,7 @@ class MutableAssignmentSuite extends DatabricksTest {
     val predecessor: Assignment = createAssignment(
       generation,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       // slice0 has 3 replicas on resource0, resource1, resource2
       ("" -- 10) @@ generation -> Seq("resource0", "resource1", "resource2"),
       // Other slices to give resources different base loads
@@ -533,6 +538,7 @@ class MutableAssignmentSuite extends DatabricksTest {
     val predecessor: Assignment = createAssignment(
       generationNow,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       // ["", 10) and [10, 20) are the slices to be merged.
       ("" -- 10) @@ generationNow -> Seq("resource0", "resource2", "resourceUnhealthy") | Map(
         // resource0 has no churn penalty on ["", 10).
@@ -616,6 +622,7 @@ class MutableAssignmentSuite extends DatabricksTest {
     val predecessor: Assignment = createAssignment(
       generation,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       "".andGreater @@ generation -> Seq("pod0", "pod1")
     )
     val hotKey: SliceKey = "a"
@@ -709,6 +716,7 @@ class MutableAssignmentSuite extends DatabricksTest {
     val predecessor: Assignment = createAssignment(
       generation,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- 10) @@ generation -> Seq("resource0"),
       (10 -- 20) @@ generation -> Seq("resource1", "resource2"),
       (20 -- ∞) @@ generation -> Seq("resource0", "resource1", "resource2")

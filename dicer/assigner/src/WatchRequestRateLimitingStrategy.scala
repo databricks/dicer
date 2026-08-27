@@ -13,6 +13,7 @@ private[dicer] final class WatchRequestRateLimitingStrategy(
     sec: SequentialExecutionContext,
     initialConfigMap: InternalTargetConfigMap,
     allowDefaultConfigForExperimentalTargets: Boolean,
+    enforceRateLimit: Boolean,
     clock: TypedClock)
     extends ThrottlingStrategy[HttpRequest] {
 

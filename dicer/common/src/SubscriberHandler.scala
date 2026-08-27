@@ -12,6 +12,7 @@ import io.grpc.{Status, StatusException}
 import io.prometheus.client.{CollectorRegistry, Counter, Gauge, Histogram}
 import com.databricks.api.proto.dicer.common.{ClientResponseP, SyncAssignmentStateP}
 import com.databricks.caching.util.CachingErrorCode.SUBSCRIBER_HANDLER_ASSIGNMENT_CACHE_AHEAD_OF_SOURCE
+import com.databricks.caching.util.CachingErrorCode.SUBSCRIBER_HANDLER_WATCH_RESPONSE_NEAR_OR_EXCEEDING_LIMIT
 import com.databricks.caching.util.{
   Cancellable,
   PrefixLogger,
@@ -47,6 +48,11 @@ import com.databricks.rpc.RPCContext
  *                                      timeout for [[Clerk]].
  * @param suggestedSliceletRpcTimeout the suggested watch RPC timeout for [[Slicelet]].
  * @param handlerLocation the location of this handler.
+ * @param maxSubscribersPromptedForAssignmentRecovery the maximum number of subscribers prompted to
+ *                                                    quickly sync their assignment back, when the
+ *                                                    subscribers know a newer assignment.
+ *                                                    A value of 0 disables this bound.
+ * @throws IllegalArgumentException if `maxSubscribersPromptedForAssignmentRecovery` is negative.
  */
 @ThreadSafe
 class SubscriberHandler(
@@ -54,9 +60,15 @@ class SubscriberHandler(
     target: Target,
     getSuggestedClerkRpcTimeoutFn: () => FiniteDuration,
     suggestedSliceletRpcTimeout: FiniteDuration,
-    handlerLocation: Location) {
+    handlerLocation: Location,
+    maxSubscribersPromptedForAssignmentRecovery: Int) {
 
-  import SubscriberHandler.AssignmentDistributionLatencyTracker
+  import SubscriberHandler.{AssignmentDistributionLatencyTracker, AssignmentRecoveryState}
+
+  require(
+    maxSubscribersPromptedForAssignmentRecovery >= 0,
+    "maxSubscribersPromptedForAssignmentRecovery must be non-negative."
+  )
 
   private val logger = PrefixLogger.create(this.getClass, target.getLoggerPrefix)
 
@@ -90,6 +102,15 @@ class SubscriberHandler(
    */
   @GuardedBy("sec")
   private var cachedSyncAssignmentStateOpt: Option[CachedSyncAssignmentState] = None
+
+  /**
+   * State for bounding the number of subscribers eagerly prompted to sync their assignment back,
+   * when the subscribers know a newer assignment. When a greater generation is heard, a new
+   * instance is created so that the newest assignment is pursued with a reset prompt count.
+   */
+  @GuardedBy("sec")
+  private var assignmentRecoveryState: AssignmentRecoveryState =
+    new AssignmentRecoveryState(Generation.EMPTY)
 
   /**
    * Subscriber debug name -> SubscriberInfo for those that have recently connected with the
@@ -149,6 +170,7 @@ class SubscriberHandler(
    *                 to send the request to. This is defaulted to `Redirect.EMPTY` which means that
    *                 the sender should send the next request to a random endpoint.
    */
+  // TODO(<internal bug>): Rework how the SubscriberHandler handles the assignment cell.
   def handleWatch(
       rpcContext: RPCContext,
       request: ClientRequest,
@@ -190,8 +212,22 @@ class SubscriberHandler(
         }
       }
       .map { responseP: ClientResponseP =>
-        // Record response size metrics using the cached histogram children.
-        clientResponseSizeChild.observe(responseP.serializedSize.toDouble)
+        // Record response size metrics using the cached histogram children, and alert if the
+        // response is near or exceeding the content length limit clients enforce.
+        val responseSizeBytes: Int = responseP.serializedSize
+        clientResponseSizeChild.observe(responseSizeBytes.toDouble)
+        if (responseSizeBytes >= SubscriberHandler.WATCH_RESPONSE_SIZE_ALERT_THRESHOLD_BYTES) {
+          logger.alert(
+            Severity.DEGRADED,
+            SUBSCRIBER_HANDLER_WATCH_RESPONSE_NEAR_OR_EXCEEDING_LIMIT,
+            s"Watch response for target $target is $responseSizeBytes bytes, at or above " +
+            s"${SubscriberHandler.WATCH_RESPONSE_SIZE_ALERT_THRESHOLD_BYTES} bytes (80% of the " +
+            s"${WatchServerHelper.MAX_WATCH_MESSAGE_CONTENT_LENGTH_BYTES} byte limit). " +
+            s"Responses exceeding the limit cause clients to receive RESOURCE_EXHAUSTED errors " +
+            s"and fail to receive assignments.",
+            every = 1.minute
+          )
+        }
         for (syncState: SyncAssignmentStateP <- responseP.syncAssignmentState) {
           serializedAssignmentSizeChild.observe(syncState.serializedSize.toDouble)
         }
@@ -266,6 +302,7 @@ class SubscriberHandler(
       handlerLocation,
       target,
       request.target,
+      request.alternativeTargetOpt,
       serviceIdentityOpt,
       metricsKey
     )
@@ -280,6 +317,58 @@ class SubscriberHandler(
       request: ClientRequest,
       cell: AssignmentValueCellConsumer,
       redirect: Redirect): Future[ClientResponseP] = {
+    sec.assertCurrentContext()
+    if (cell.getLatestValueOpt.isEmpty) {
+      // Eagerly prompt a bounded number of subscribers to return their assignments.
+      //
+      // This mechanism is intended for Assigner assignment recovery (i.e. when the Assigner has no
+      // assignment and needs the latest assignment from clients). This occurs when a new or standby
+      // assigner becomes preferred. During Assigner assignment recovery, we expect the Assigner to
+      // learn its initial assignment from these eagerly-prompted Slicelets so that other Slicelets
+      // are not prompted for their assignments. Without this bounded eager prompting, all Slicelet
+      // requests park until timeout and then send their assignments. With n Slicelets carrying
+      // O(n)-sized assignments, prompting every Slicelet creates a burst of O(n^2) work,
+      // potentially overloading the Assigner. With this bound, we eliminate the linear factor from
+      // the number of syncing Slicelets. We choose a bound of 5 to minimize the burst of work,
+      // while also providing enough redundancy in case all the eagerly-prompted syncs get delayed
+      // or fail. If all these syncs do end up delayed or failing, the Assigner will still see the
+      // burst of O(n^2) work, but this should be very rare.
+      //
+      // For now, only apply this bound when the Assigner's assignment cell is empty, to reduce
+      // unknown risks from this mechanism, and since we only expect Slicelets to sync their
+      // assignments back when a new or standby Assigner becomes preferred.
+      request.syncAssignmentState match {
+        case SyncAssignmentState.KnownGeneration(requestGeneration: Generation) =>
+          if (requestGeneration > assignmentRecoveryState.greatestGenerationHeard) {
+            // Create a new recovery state when pursuing a greater generation assignment. This also
+            // resets the subscribers-prompted count to 0.
+            assignmentRecoveryState = new AssignmentRecoveryState(requestGeneration)
+          }
+          val withinPromptBound: Boolean =
+            assignmentRecoveryState.subscribersPrompted <
+            maxSubscribersPromptedForAssignmentRecovery
+          val hasGreatestGenerationAssignment: Boolean =
+            (requestGeneration == assignmentRecoveryState.greatestGenerationHeard) &&
+            (requestGeneration != Generation.EMPTY)
+          // Only attempt to sync with subscribers at the greatest generation heard.
+          if (withinPromptBound && hasGreatestGenerationAssignment) {
+            logger.debug(
+              s"Eagerly prompting subscriber ${request.subscriberDebugName} for its assignment " +
+              s"at generation $requestGeneration during assignment recovery (bound " +
+              s"$maxSubscribersPromptedForAssignmentRecovery)."
+            )
+            assignmentRecoveryState.incrementSubscribersPrompted()
+            // Respond with empty generation to prompt subscriber for its assignment.
+            val syncState = SyncAssignmentState.KnownGeneration(Generation.EMPTY)
+            val response = ClientResponse(syncState, getSuggestedRpcTimeout(request), redirect)
+            return Future.successful(response.toProto)
+          }
+        case SyncAssignmentState.KnownAssignment(_: DiffAssignment) =>
+        // The subscriber has already supplied its assignment, so no prompt is needed.
+        // Fall through to the normal watch behavior.
+      }
+    }
+
     // The promise that is used to reply to the caller. Only completed on `sec`.
     val promise = Promise[ClientResponseP]
 
@@ -530,6 +619,13 @@ class SubscriberHandler(
 
 object SubscriberHandler {
 
+  /**
+   * Threshold (80% of the max watch message content length) at or above which we alert that a
+   * watch response is near the limit clients enforce.
+   */
+  private val WATCH_RESPONSE_SIZE_ALERT_THRESHOLD_BYTES: Int =
+    WatchServerHelper.MAX_WATCH_MESSAGE_CONTENT_LENGTH_BYTES * 4 / 5
+
   /** The location of the handler. */
   sealed trait Location
   object Location {
@@ -560,6 +656,35 @@ object SubscriberHandler {
 
     /** The metric label value to use for the `version` label. */
     def versionLabel: String = version.toString
+  }
+
+  /**
+   * Tracks the information for bounding the number of subscribers eagerly prompted for syncing back
+   * their assignment at `greatestGenerationHeard`.
+   *
+   * @param greatestGenerationHeard the greatest generation heard while recovering an initial
+   *                                assignment from a client.
+   */
+  @NotThreadSafe
+  private class AssignmentRecoveryState(val greatestGenerationHeard: Generation) {
+
+    /** See [[subscribersPrompted]]. */
+    private var subscribersPromptedCount: Int = 0
+
+    /**
+     * Returns the number of subscribers that have been eagerly prompted for syncing back their
+     * assignment at `greatestGenerationHeard`.
+     *
+     * Note: Technically, this is the number of prompted requests, as opposed to subscribers, but
+     * these two numbers should be equivalent in practice, because we don't expect a subscriber to
+     * send multiple requests with the same KnownGeneration before syncing back the assignment.
+     */
+    def subscribersPrompted: Int = subscribersPromptedCount
+
+    /** Increments the count of eagerly prompted subscribers by 1. */
+    def incrementSubscribersPrompted(): Unit = {
+      subscribersPromptedCount += 1
+    }
   }
 
   /**
@@ -870,6 +995,11 @@ object SubscriberHandlerMetrics {
    *       whether the target of the handler and the target specified in the client request
    *       matches. This greatly simplifies the logic of computing mismatches in the dashboard /
    *       alerts (otherwise we would need complex query to check inequality on the labels).
+   * @note the counter also carries the request's optional `alternativeTarget` as the
+   *       `alternativeTargetName` / `alternativeTargetInstanceId` labels (both empty when the
+   *       request did not populate it). These labels allow us to detect whether all
+   *       subscribers with a given `request.target` are sending the same
+   *       `request.alternativeTargetOpt`.
    */
   private val watchRequestsReceived: Counter = Counter
     .build()
@@ -888,7 +1018,9 @@ object SubscriberHandlerMetrics {
       "handlerLocation",
       "matchedName",
       "matchedCluster",
-      "matchedInstanceId"
+      "matchedInstanceId",
+      "alternativeTargetName",
+      "alternativeTargetInstanceId"
     )
     .register(CollectorRegistry.defaultRegistry)
 
@@ -945,6 +1077,7 @@ object SubscriberHandlerMetrics {
       location: SubscriberHandler.Location,
       handlerTarget: Target,
       requestTarget: Target,
+      alternativeTargetOpt: Option[AppTarget],
       serviceIdentityOpt: Option[ServiceIdentity],
       metricsKey: MetricsKey): Unit = {
     val callerService: String = serviceIdentityOpt
@@ -955,6 +1088,9 @@ object SubscriberHandlerMetrics {
 
     val matchedLabels: TargetMatchedLabels =
       getWatchRequestTargetMatchedLabels(handlerTarget, requestTarget)
+
+    val (alternativeTargetName, alternativeTargetInstanceId): (String, String) =
+      getAlternativeTargetLabels(alternativeTargetOpt)
 
     watchRequestsReceived
       .labels(
@@ -970,9 +1106,24 @@ object SubscriberHandlerMetrics {
         location.toString,
         matchedLabels.matchedName,
         matchedLabels.matchedCluster,
-        matchedLabels.matchedInstanceId
+        matchedLabels.matchedInstanceId,
+        alternativeTargetName,
+        alternativeTargetInstanceId
       )
       .inc()
+  }
+
+  /**
+   * Returns the `(alternativeTargetName, alternativeTargetInstanceId)` label values for the given
+   * optional alternativeTarget, or a pair of empty strings when it is absent.
+   */
+  private[common] def getAlternativeTargetLabels(
+      alternativeTargetOpt: Option[AppTarget]): (String, String) = {
+    alternativeTargetOpt
+      .map { alternativeTarget: AppTarget =>
+        (alternativeTarget.name, alternativeTarget.instanceId)
+      }
+      .getOrElse(("", ""))
   }
 
   /**

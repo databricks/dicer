@@ -61,7 +61,11 @@ message TargetConfigFieldsP {
   // Clerk-Slicelet communication.
   optional google.protobuf.Any authorizer = 3;
 
-  // Next ID: 4.
+  // OPTIONAL: Declares whether this target's SliceKeys may contain sensitive data. If not
+  // specified, the SliceKeys are treated as sensitive.
+  optional KeySensitivityConfigP key_sensitivity_config = 4;
+
+  // Next ID: 5.
 }
 
 // Override of a Dicer target configuration that applies to specific k8s clusters.
@@ -239,4 +243,37 @@ message KeyReplicationConfigP {
   // more than `max_replicas` replicas.
   // TODO(<internal bug>): Support unlimited max number of replicas.
   optional int32 max_replicas = 2;
+}
+
+// Declares whether a target's SliceKeys are sensitive.
+//
+// SliceKey-bearing fields are always logged to Lumberjack and remain available in regional
+// Logfood. The attestation determines whether those Slices and SliceKeys appear in Central Logfood
+// in prod: only non-sensitive Slices and SliceKeys appear.
+//
+// Attesting non-sensitivity therefore helps debug assignment and load-balancing issues in prod,
+// since the logged events may then include the actual SliceKeys.
+message KeySensitivityConfigP {
+  // Sensitive data is any data provided by Databricks users -- including names, content,
+  // credentials, identifiers, or email addresses. See `compliance/taxonomy/taxonomy.proto`
+  // for details.
+  // Examples of non-sensitive SliceKeys are metastore IDs, workspace IDs, and cluster names.
+  // Examples of sensitive SliceKeys are user IDs and user email addresses.
+  // IMPORTANT: Hashing a sensitive SliceKey does NOT make it non-sensitive; the hash of sensitive
+  // data is still sensitive.
+  enum SliceKeySensitivityP {
+
+
+    // Sensitivity not specified. Treated as sensitive.
+    UNSPECIFIED = 0;
+
+    // SliceKeys may contain sensitive data.
+    SENSITIVE = 1;
+
+    // Customer attestation that SliceKeys contain no sensitive data.
+    NON_SENSITIVE = 2;
+  }
+
+  // OPTIONAL: SliceKey sensitivity classification.
+  optional SliceKeySensitivityP slice_key_sensitivity = 1;
 }

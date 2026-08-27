@@ -12,7 +12,6 @@ import com.databricks.dicer.friend.Squid
 import com.databricks.testing.DatabricksTest
 
 import java.time.Instant
-import java.util.UUID
 import scala.concurrent.duration.Duration.Infinite
 import scala.concurrent.duration._
 import scala.util.Random
@@ -66,13 +65,6 @@ private abstract class HealthWatcherSuite(
     Event.SliceletStateFromSlicelet(resource, sliceletState)
   }
 
-  /** Creates an [[Event.SliceletStateFromKubernetes]] event. */
-  private def createSliceletStateFromKubernetesEvent(
-      resourceUuid: UUID,
-      sliceletState: SliceletState): Event = {
-    Event.SliceletStateFromKubernetes(resourceUuid, sliceletState)
-  }
-
   /** Creates a health report state machine output. */
   private def createHealthReportOutput(
       healthy: Set[Squid],
@@ -93,12 +85,13 @@ private abstract class HealthWatcherSuite(
     val assignmentContainingResources: Assignment =
       ProposedAssignment(
         predecessorOpt = None,
-        createRandomProposal(
+        sliceMap = createRandomProposal(
           resources.size,
           resources.toIndexedSeq,
           numMaxReplicas = 1,
           Random
-        )
+        ),
+        assignerServiceInfoOpt = None
       ).commit(
         isFrozen = false,
         AssignmentConsistencyMode.Affinity,
@@ -547,7 +540,7 @@ private abstract class HealthWatcherSuite(
 
     harness.event(
       34.seconds,
-      createSliceletStateFromKubernetesEvent(pod1.resourceUuid, SliceletState.Terminating),
+      Event.PodTerminatingFromKubernetes(pod1.resourceUuid),
       createHealthReportOutput(
         if (observeSliceletReadiness) Set(pod0) else Set(pod0, pod2, pod3)
       ),
@@ -555,7 +548,7 @@ private abstract class HealthWatcherSuite(
     )
     harness.event(
       34.seconds,
-      createSliceletStateFromKubernetesEvent(pod3.resourceUuid, SliceletState.Terminating),
+      Event.PodTerminatingFromKubernetes(pod3.resourceUuid),
       createHealthReportOutput(if (observeSliceletReadiness) Set(pod0) else Set(pod0, pod2)),
       64.seconds
     )
@@ -590,7 +583,7 @@ private abstract class HealthWatcherSuite(
     // request us to callback after the initial report delay.
     harness.event(
       5.seconds,
-      createSliceletStateFromKubernetesEvent(pod0.resourceUuid, SliceletState.Terminating),
+      Event.PodTerminatingFromKubernetes(pod0.resourceUuid),
       Seq.empty,
       30.seconds
     )
@@ -611,7 +604,7 @@ private abstract class HealthWatcherSuite(
     // request us to callback after the initial report delay.
     harness.event(
       5.seconds,
-      createSliceletStateFromKubernetesEvent(pod0.resourceUuid, SliceletState.Terminating),
+      Event.PodTerminatingFromKubernetes(pod0.resourceUuid),
       Seq.empty,
       30.seconds
     )
@@ -622,7 +615,7 @@ private abstract class HealthWatcherSuite(
     // pod0's Terminating status expiry does not change.
     harness.event(
       35.seconds,
-      createSliceletStateFromKubernetesEvent(pod0.resourceUuid, SliceletState.Terminating),
+      Event.PodTerminatingFromKubernetes(pod0.resourceUuid),
       Seq.empty,
       65.seconds
     )
@@ -702,7 +695,7 @@ private abstract class HealthWatcherSuite(
     // request us to callback after the initial report delay.
     harness.event(
       5.seconds,
-      createSliceletStateFromKubernetesEvent(pod0.resourceUuid, SliceletState.Terminating),
+      Event.PodTerminatingFromKubernetes(pod0.resourceUuid),
       Seq.empty,
       30.seconds
     )
@@ -715,9 +708,220 @@ private abstract class HealthWatcherSuite(
     harness.event(
       45.seconds,
       createSliceletStateFromSliceletEvent(pod0, SliceletState.Running),
-      // pod0's computed status is Terminating (stays Terminating once set). Not in healthy.
+      // pod0's computed status is ResourceTerminating (resource-scoped; stays terminating once
+      // set). Not in healthy.
       createHealthReportOutput(Set.empty),
       65.seconds
+    )
+  }
+
+  test(
+    "A new incarnation resets ResourceIncarnationTerminating but preserves ResourceTerminating"
+  ) {
+    // Test plan: Verify the two outcomes of observing a new resource incarnation (a newer SQUID for
+    // the same resource UUID). A resource that is ResourceIncarnationTerminating
+    // (Slicelet-reported) is reset, so the new incarnation becomes healthy, since the prior
+    // incarnation's termination no longer applies. A resource that is ResourceTerminating
+    // (Kubernetes-reported) is NOT reset, since the whole resource -- including the new incarnation
+    // -- is being deleted. Do this by driving pod0 to ResourceIncarnationTerminating and pod1 to
+    // ResourceTerminating, then reporting a newer incarnation of each as Running.
+    val harness =
+      new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
+    harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
+
+    // pod0 and pod1 report Running during the initial delay; both expire at 5s + 30s = 35s.
+    harness.event(
+      5.seconds,
+      createSliceletStateFromSliceletEvent(pod0, SliceletState.Running),
+      Seq.empty,
+      30.seconds
+    )
+    harness.event(
+      5.seconds,
+      createSliceletStateFromSliceletEvent(pod1, SliceletState.Running),
+      Seq.empty,
+      30.seconds
+    )
+
+    // First health report at 30s: both pods are healthy.
+    harness.advance(30.seconds, createHealthReportOutput(Set(pod0, pod1)), 35.seconds)
+
+    // pod0's Slicelet reports TERMINATING at 31s -> ResourceIncarnationTerminating (expires at
+    // 31s + 60s = 91s). pod1 is still Running and healthy, with its expiry unchanged at 35s.
+    harness.event(
+      31.seconds,
+      createSliceletStateFromSliceletEvent(pod0, SliceletState.Terminating),
+      createHealthReportOutput(Set(pod1)),
+      35.seconds
+    )
+
+    // Kubernetes reports pod1 terminating at 31s -> ResourceTerminating (expires at 31s + 60s =
+    // 91s).
+    harness.event(
+      31.seconds,
+      Event.PodTerminatingFromKubernetes(pod1.resourceUuid),
+      createHealthReportOutput(Set.empty),
+      91.seconds
+    )
+
+    // A newer resource incarnation of pod0 reports Running at 32s. pod0 was
+    // ResourceIncarnationTerminating, so the restart resets it: the new resource incarnation is
+    // healthy and its expiry is refreshed to the unhealthy timeout (32s + 30s = 62s) rather than
+    // frozen at 91s.
+    val newPod0: Squid = pod0.copy(creationTimeMillis = pod0.creationTimeMillis + 100)
+    harness.event(
+      32.seconds,
+      createSliceletStateFromSliceletEvent(newPod0, SliceletState.Running),
+      createHealthReportOutput(Set(newPod0)),
+      62.seconds
+    )
+
+    // A newer resource incarnation of pod1 reports Running at 32s. pod1 was ResourceTerminating, so
+    // the restart does NOT revive it: it stays excluded and its expiry stays frozen at 91s. A
+    // report is still emitted because the SQUID changed, but the healthy set is unchanged.
+    val newPod1: Squid = pod1.copy(creationTimeMillis = pod1.creationTimeMillis + 100)
+    harness.event(
+      32.seconds,
+      createSliceletStateFromSliceletEvent(newPod1, SliceletState.Running),
+      createHealthReportOutput(Set(newPod0)),
+      62.seconds
+    )
+  }
+
+  test("A new resource incarnation reported as TERMINATING gets a refreshed terminating expiry") {
+    // Test plan: Verify that when a newer resource incarnation's first report is TERMINATING, it is
+    // treated as a fresh ResourceIncarnationTerminating rather than the prior incarnation's, so its
+    // expiry is refreshed to this report's terminating timeout instead of staying frozen at the
+    // prior incarnation's expiry. Do this by driving pod0 to ResourceIncarnationTerminating, then
+    // reporting a newer incarnation as TERMINATING later, and confirming the resource expires at
+    // the later time.
+    val harness =
+      new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
+    harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
+
+    harness.event(
+      5.seconds,
+      createSliceletStateFromSliceletEvent(pod0, SliceletState.Running),
+      Seq.empty,
+      30.seconds
+    )
+    harness.advance(30.seconds, createHealthReportOutput(Set(pod0)), 35.seconds)
+
+    // pod0 reports TERMINATING at 31s -> ResourceIncarnationTerminating, excluded; expires at
+    // 31s + 60s = 91s.
+    harness.event(
+      31.seconds,
+      createSliceletStateFromSliceletEvent(pod0, SliceletState.Terminating),
+      createHealthReportOutput(Set.empty),
+      91.seconds
+    )
+
+    // A newer resource incarnation reports TERMINATING at 40s. The restart resets the prior
+    // ResourceIncarnationTerminating to Starting, then this report sets
+    // ResourceIncarnationTerminating again, so the expiry is refreshed to 40s + 60s = 100s rather
+    // than left frozen at 91s.
+    val newPod0: Squid = pod0.copy(creationTimeMillis = pod0.creationTimeMillis + 100)
+    harness.event(
+      40.seconds,
+      createSliceletStateFromSliceletEvent(newPod0, SliceletState.Terminating),
+      createHealthReportOutput(Set.empty),
+      100.seconds
+    )
+
+    // At the prior incarnation's expiry (91s) nothing is removed, confirming the expiry was
+    // refreshed past it.
+    harness.advance(91.seconds, Seq.empty, 100.seconds)
+
+    // At 100s the new resource incarnation expires. It was ResourceIncarnationTerminating (not
+    // Running), so it is not counted as a crash.
+    harness.advance(100.seconds, createHealthReportOutput(Set.empty), Duration.Inf)
+  }
+
+  test(
+    "A Slicelet cannot leave ResourceIncarnationTerminating within the same resource incarnation"
+  ) {
+    // Test plan: Verify that once a Slicelet reports TERMINATING, a later RUNNING report from the
+    // same resource incarnation (same SQUID) does not revive it --
+    // ResourceIncarnationTerminating is terminal within a resource incarnation, and only a newer
+    // resource incarnation clears it. Do this by driving pod0 to ResourceIncarnationTerminating and
+    // then reporting the same SQUID as Running.
+    val harness =
+      new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
+    harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
+
+    harness.event(
+      5.seconds,
+      createSliceletStateFromSliceletEvent(pod0, SliceletState.Running),
+      Seq.empty,
+      30.seconds
+    )
+    harness.advance(30.seconds, createHealthReportOutput(Set(pod0)), 35.seconds)
+
+    // pod0 reports TERMINATING at 31s -> ResourceIncarnationTerminating, excluded; expires at 91s.
+    harness.event(
+      31.seconds,
+      createSliceletStateFromSliceletEvent(pod0, SliceletState.Terminating),
+      createHealthReportOutput(Set.empty),
+      91.seconds
+    )
+
+    // The same resource incarnation reports RUNNING at 32s. It stays ResourceIncarnationTerminating
+    // (no status change, so no report) and the expiry stays frozen at 91s.
+    harness.event(
+      32.seconds,
+      createSliceletStateFromSliceletEvent(pod0, SliceletState.Running),
+      Seq.empty,
+      91.seconds
+    )
+  }
+
+  test(
+    "Kubernetes termination escalates ResourceIncarnationTerminating to ResourceTerminating"
+  ) {
+    // Test plan: Verify that a Kubernetes pod-termination signal escalates a
+    // ResourceIncarnationTerminating resource to ResourceTerminating, so a subsequent new
+    // incarnation no longer revives it. Do this by driving pod0 to ResourceIncarnationTerminating,
+    // then reporting Kubernetes pod termination, then reporting a newer incarnation as Running and
+    // confirming it stays excluded.
+    val harness =
+      new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
+    harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
+
+    harness.event(
+      5.seconds,
+      createSliceletStateFromSliceletEvent(pod0, SliceletState.Running),
+      Seq.empty,
+      30.seconds
+    )
+    harness.advance(30.seconds, createHealthReportOutput(Set(pod0)), 35.seconds)
+
+    // pod0 reports TERMINATING at 31s -> ResourceIncarnationTerminating, excluded; expires at 91s.
+    harness.event(
+      31.seconds,
+      createSliceletStateFromSliceletEvent(pod0, SliceletState.Terminating),
+      createHealthReportOutput(Set.empty),
+      91.seconds
+    )
+
+    // Kubernetes reports pod0 terminating at 32s -> escalates to ResourceTerminating. A report is
+    // emitted for the status change, but the healthy set is unchanged and the expiry stays frozen
+    // at 91s.
+    harness.event(
+      32.seconds,
+      Event.PodTerminatingFromKubernetes(pod0.resourceUuid),
+      createHealthReportOutput(Set.empty),
+      91.seconds
+    )
+
+    // A newer resource incarnation reports Running at 33s. Because the resource is now
+    // ResourceTerminating, the restart does not revive it: it stays excluded with its expiry frozen
+    // at 91s.
+    val newPod0: Squid = pod0.copy(creationTimeMillis = pod0.creationTimeMillis + 100)
+    harness.event(
+      33.seconds,
+      createSliceletStateFromSliceletEvent(newPod0, SliceletState.Running),
+      createHealthReportOutput(Set.empty),
+      91.seconds
     )
   }
 
@@ -1490,7 +1694,7 @@ private abstract class HealthWatcherSuite(
     // Tell the watcher about pod 0, which is terminating, but only by UUID.
     harness.event(
       5.seconds,
-      createSliceletStateFromKubernetesEvent(pod0.resourceUuid, SliceletState.Terminating),
+      Event.PodTerminatingFromKubernetes(pod0.resourceUuid),
       Seq.empty,
       30.seconds
     )
@@ -1616,13 +1820,13 @@ private abstract class HealthWatcherSuite(
     assert(
       healthWatcher.toString ==
       """Health summary :
-    |┌──────────────────────────────────────┬─────────┬─────────────┐
-    |│ Resource                             │ Health  │ Expiry Time │
-    |├──────────────────────────────────────┼─────────┼─────────────┤
-    |│ 15322af9-366d-3d09-b784-b8bb3dbf4890 │ Running │ 35.0        │
-    |│ 9f84c9f1-caa8-33ab-8ac6-2a3a52df666e │ Running │ 36.0        │
-    |│ 78dad640-7391-3916-833e-504e395c636c │ Running │ 37.0        │
-    |└──────────────────────────────────────┴─────────┴─────────────┘
+    |┌──────────────────────────────────────┬─────────┬───────────────┐
+    |│ Resource                             │ Health  │ Expiry Time   │
+    |├──────────────────────────────────────┼─────────┼───────────────┤
+    |│ 874d67e4-de98-3406-b672-9bdf9846e585 │ Running │ 35.000000000  │
+    |│ 002a4776-e2c0-3b7a-ada3-d986a468e587 │ Running │ 36.000000000  │
+    |│ 88c43e3e-d1c6-3414-8f02-11a896ba6b9d │ Running │ 37.000000000  │
+    |└──────────────────────────────────────┴─────────┴───────────────┘
     |""".stripMargin
     )
   }
@@ -1782,7 +1986,7 @@ private abstract class HealthWatcherSuite(
     // pod2: Kubernetes reports Terminating at 32s (expires at 32s + 60s = 92s).
     harness.event(
       32.seconds,
-      createSliceletStateFromKubernetesEvent(pod2.resourceUuid, SliceletState.Terminating),
+      Event.PodTerminatingFromKubernetes(pod2.resourceUuid),
       createHealthReportOutput(Set(pod0, pod3, pod4)),
       35.seconds
     )
@@ -1790,7 +1994,7 @@ private abstract class HealthWatcherSuite(
     // pod3: Kubernetes reports Terminating at 33s (expires at 33s + 60s = 93s).
     harness.event(
       33.seconds,
-      createSliceletStateFromKubernetesEvent(pod3.resourceUuid, SliceletState.Terminating),
+      Event.PodTerminatingFromKubernetes(pod3.resourceUuid),
       createHealthReportOutput(Set(pod0, pod4)),
       35.seconds
     )
@@ -1820,12 +2024,14 @@ private abstract class HealthWatcherSuite(
     assert(bothExpirations.totalChange() == 0)
     assert(delayCount.totalChange() == 0)
 
-    // pod4: Kubernetes reports Terminating at 37s (3 seconds after Slicelet).
-    // pod4's expiry remains at 94s since it was already Terminating.
+    // pod4: Kubernetes reports Terminating at 37s (3 seconds after Slicelet). pod4 escalates from
+    // ResourceIncarnationTerminating to ResourceTerminating, a status change that emits a (benign)
+    // health report: the healthy set is unchanged and pod4's expiry remains at 94s since it was
+    // already terminating.
     harness.event(
       37.seconds,
-      createSliceletStateFromKubernetesEvent(pod4.resourceUuid, SliceletState.Terminating),
-      Seq.empty,
+      Event.PodTerminatingFromKubernetes(pod4.resourceUuid),
+      createHealthReportOutput(Set.empty),
       91.seconds
     )
 
@@ -1961,13 +2167,15 @@ private abstract class HealthWatcherSuite(
       (if (observeSliceletReadiness) 1 else 0)
     )
     assert(TargetMetricsUtils.getPodSetSize(metricsTarget, "NotReady") == 0)
-    assert(TargetMetricsUtils.getPodSetSize(metricsTarget, "Terminating") == 1)
+    assert(TargetMetricsUtils.getPodSetSize(metricsTarget, "ResourceIncarnationTerminating") == 1)
 
     // Verify Slicelet-reported podset sizes (pod0=Running, pod1=NotReady, pod2=Terminating,
     // pod3=Running).
     assert(TargetMetricsUtils.getReportedPodSetSize(metricsTarget, "Running") == 2) // pod0, pod3
     assert(TargetMetricsUtils.getReportedPodSetSize(metricsTarget, "NotReady") == 1)
-    assert(TargetMetricsUtils.getReportedPodSetSize(metricsTarget, "Terminating") == 1)
+    assert(
+      TargetMetricsUtils.getReportedPodSetSize(metricsTarget, "ResourceIncarnationTerminating") == 1
+    )
 
     // Verify the computed-differs-from-reported counter. pod1 reported NotReady but was computed
     // as Starting (observeSliceletReadiness=true) or Running (observeSliceletReadiness=false).
@@ -2042,8 +2250,8 @@ private abstract class HealthWatcherSuite(
       (if (!observeSliceletReadiness) 2 else if (!permitRunningToNotReady) 1 else 0)
     )
 
-    // Terminating is still 1 while pod2 is alive.
-    assert(TargetMetricsUtils.getPodSetSize(metricsTarget, "Terminating") == 1)
+    // ResourceIncarnationTerminating is still 1 while pod2 is alive.
+    assert(TargetMetricsUtils.getPodSetSize(metricsTarget, "ResourceIncarnationTerminating") == 1)
 
     // At t=62, pod3 expires. For permitRunningToNotReady=true, pod3 was NotReady and not in
     // previouslyHealthy (removed at t=32 intermediate report) → not in crashed. For other
@@ -2060,8 +2268,8 @@ private abstract class HealthWatcherSuite(
     // At t=65, pod2 (Terminating) expires. It was never healthy so it is not in crashed.
     harness.advance(65.seconds, createHealthReportOutput(Set.empty), Duration.Inf)
 
-    // Terminating resets to 0 once pod2 expires.
-    assert(TargetMetricsUtils.getPodSetSize(metricsTarget, "Terminating") == 0)
+    // ResourceIncarnationTerminating resets to 0 once pod2 expires.
+    assert(TargetMetricsUtils.getPodSetSize(metricsTarget, "ResourceIncarnationTerminating") == 0)
   }
 }
 

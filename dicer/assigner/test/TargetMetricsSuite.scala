@@ -284,6 +284,7 @@ abstract class TargetMetricsSuiteBase extends DatabricksTest with TestName {
     val asn0: Assignment = createAssignment(
       12 ## 42,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- HALF_POINT) @@ (12 ## 42) -> Seq("pod0"),
       (HALF_POINT -- ∞) @@ (12 ## 42) -> Seq("pod1")
     )
@@ -294,6 +295,7 @@ abstract class TargetMetricsSuiteBase extends DatabricksTest with TestName {
     val asn1: Assignment = createAssignment(
       12 ## 59,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- HALF_POINT / 2) @@ (12 ## 59) -> Seq("pod2"),
       (HALF_POINT / 2 -- HALF_POINT) @@ (12 ## 59) -> Seq("pod0"),
       (HALF_POINT -- ∞) @@ (12 ## 42) -> Seq("pod1")
@@ -340,6 +342,7 @@ abstract class TargetMetricsSuiteBase extends DatabricksTest with TestName {
     val asn2: Assignment = createAssignment(
       12 ## 59,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- HALF_POINT / 2) @@ (12 ## 59) -> Seq("pod0"),
       (HALF_POINT / 2 -- HALF_POINT) @@ (12 ## 59) -> Seq("pod2"),
       (HALF_POINT -- ∞) @@ (12 ## 42) -> Seq("pod0")
@@ -415,12 +418,14 @@ abstract class TargetMetricsSuiteBase extends DatabricksTest with TestName {
     val twoResourceAssignment: Assignment = createAssignment(
       12 ## 42,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- HALF_POINT) @@ (12 ## 42) -> Seq("pod0"),
       (HALF_POINT -- ∞) @@ (12 ## 42) -> Seq("pod1")
     )
     val threeResourceAssignment: Assignment = createAssignment(
       12 ## 42,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- HALF_POINT / 2) @@ (12 ## 42) -> Seq("pod0"),
       (HALF_POINT / 2 -- HALF_POINT) @@ (12 ## 42) -> Seq("pod2"),
       (HALF_POINT -- ∞) @@ (12 ## 42) -> Seq("pod1")
@@ -633,6 +638,7 @@ abstract class TargetMetricsSuiteBase extends DatabricksTest with TestName {
     val asn: Assignment = createAssignment(
       12 ## 59,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- HALF_POINT) @@ (12 ## 59) -> Seq("r1", "r2"),
       (HALF_POINT -- ∞) @@ (12 ## 59) -> Seq("r2", "r3")
     )

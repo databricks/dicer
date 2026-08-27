@@ -268,15 +268,17 @@ class SliceKeySuite extends DatabricksTest {
       // Setup: build the key by applying operations
       var builder = SliceKey.newFingerprintBuilder()
       for (op <- testCase.operations) {
-        import SliceKeyTestDataP.FarmhashBuilderTestCaseP.BuilderOperationP.Operation
+        import com.databricks.dicer.common.test.SliceKeyTestDataP.FarmhashBuilderTestCaseP.{
+          BuilderOperationP
+        }
         op.operation match {
-          case Operation.PutLong(value) =>
+          case BuilderOperationP.Operation.PutLong(value) =>
             builder = builder.putLong(value)
-          case Operation.PutString(value) =>
+          case BuilderOperationP.Operation.PutString(value) =>
             builder = builder.putString(value)
-          case Operation.PutBytes(value) =>
+          case BuilderOperationP.Operation.PutBytes(value) =>
             builder = builder.putBytes(value)
-          case Operation.Empty =>
+          case BuilderOperationP.Operation.Empty =>
             throw new IllegalArgumentException("Empty operation in test data")
         }
       }

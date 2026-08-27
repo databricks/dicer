@@ -13,6 +13,7 @@ import io.grpc.Status
 import javax.annotation.concurrent.{GuardedBy, ThreadSafe}
 
 import com.databricks.caching.util.{
+  AlertOwnerTeam,
   AssertionWaiter,
   FakeSequentialExecutionContext,
   FakeTypedClock,
@@ -69,7 +70,8 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
         InternalClientConfig(config, subscriberDebugName = "test-clerk"),
         new Random
       ),
-      recordAction
+      recordAction,
+      AlertOwnerTeam.CACHING_TEAM_NAME
     )
 
     /** Received actions for the `driver`. */
@@ -118,9 +120,10 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
   private def target: Target = Target(getSafeName)
 
   /**
-   * Creates the client configuration for a AssignmentSyncStateMachine, with test SSL parameters.
+   * Creates the client configuration for a AssignmentSyncStateMachine, with test SSL parameters
+   * and the given rate limiting flag.
    */
-  private def createSliceLookupConfig(): SliceLookupConfig = {
+  private def createSliceLookupConfig(enableRateLimiting: Boolean): SliceLookupConfig = {
     SliceLookupConfig(
       ClientType.Clerk,
       watchAddress = URI.create("fake-address"),
@@ -129,7 +132,8 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
       clientIdOpt = Some(TEST_CLIENT_UUID),
       watchStubCacheTime = 10.seconds,
       watchFromDataPlane = false,
-      enableRateLimiting = false
+      alternativeTargetOpt = None,
+      enableRateLimiting = enableRateLimiting
     )
   }
 
@@ -141,12 +145,12 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     // delay, we should retry using the default address. Then, if we later get back a successful
     // response to the original request, it will be incorporated into the state machine.
 
-    val config: SliceLookupConfig = createSliceLookupConfig()
+    val config: SliceLookupConfig = createSliceLookupConfig(enableRateLimiting = false)
     val driver = new AssignmentSyncStateMachineDriverWrapper(sec, config)
 
     driver.start()
 
-    var expectedNumActions = 1
+    var expectedNumActions: Int = 1
     // Get a SendRequest action on driver start.
     val firstRequest: DriverAction.SendRequest =
       AssertionWaiter("Initial SendRequest action").await {
@@ -231,6 +235,7 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     val assignment = createAssignment(
       asnGeneration,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       Slice.FULL @@ asnGeneration -> Seq("pod0")
     )
     val response2 = ClientResponse(
@@ -294,7 +299,7 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     // - Trigger a `ReadFailure` and invoke `onAdvance` explicitly after backoff. Verify that
     //   only the active driver generates a retry request.
 
-    val config: SliceLookupConfig = createSliceLookupConfig()
+    val config: SliceLookupConfig = createSliceLookupConfig(enableRateLimiting = false)
     val driver = new AssignmentSyncStateMachineDriverWrapper(sec, config)
 
     // Setup: Create another driver which will not be cancelled and will be always active. All its
@@ -387,6 +392,7 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     val assignment = createAssignment(
       asnGeneration,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       Slice.FULL @@ asnGeneration -> Seq("pod0")
     )
     val response2 = ClientResponse(
@@ -443,7 +449,7 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     val tickerTime: TickerTime = clock.tickerTime()
     val instant: Instant = clock.instant()
 
-    val config: SliceLookupConfig = createSliceLookupConfig()
+    val config: SliceLookupConfig = createSliceLookupConfig(enableRateLimiting = false)
     val testDriver: TestStateMachineDriver[Event, DriverAction] =
       new TestStateMachineDriver(
         new AssignmentSyncStateMachine(
@@ -461,9 +467,10 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     val fatallyMismatchedTarget = Target(getSuffixedSafeName("other"))
     val assignment1: Assignment = ProposedAssignment(
       predecessorOpt = None,
-      TestSliceUtils.createProposal(
+      sliceMap = TestSliceUtils.createProposal(
         ("" -- ∞) -> Seq("Pod2")
-      )
+      ),
+      assignerServiceInfoOpt = None
     ).commit(
       isFrozen = false,
       AssignmentConsistencyMode.Affinity,
@@ -483,7 +490,10 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
               5.seconds,
               ClerkData,
               supportsSerializedAssignment = true,
-              redirectTokenOpt = None
+              redirectTokenOpt = None,
+              alternativeTargetOpt = None,
+              clusterUriOpt = None,
+              regionUriOpt = None
             )
           )
         )
@@ -505,7 +515,10 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
               5.seconds,
               ClerkData,
               supportsSerializedAssignment = true,
-              redirectTokenOpt = None
+              redirectTokenOpt = None,
+              alternativeTargetOpt = None,
+              clusterUriOpt = None,
+              regionUriOpt = None
             )
           )
         )
@@ -516,9 +529,10 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     // mismatch) should also be incorporated.
     val assignment2: Assignment = ProposedAssignment(
       predecessorOpt = None,
-      TestSliceUtils.createProposal(
+      sliceMap = TestSliceUtils.createProposal(
         ("" -- ∞) -> Seq("Pod3")
-      )
+      ),
+      assignerServiceInfoOpt = None
     ).commit(
       isFrozen = false,
       AssignmentConsistencyMode.Affinity,
@@ -540,12 +554,91 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
               5.seconds,
               ClerkData,
               supportsSerializedAssignment = true,
-              redirectTokenOpt = None
+              redirectTokenOpt = None,
+              alternativeTargetOpt = None,
+              clusterUriOpt = None,
+              regionUriOpt = None
             )
           )
         )
         .actions == Seq(DriverAction.UseAssignment(assignment2))
     )
+  }
+
+  test("Server can extend watch RPC timeout beyond initial config") {
+    // Test plan: Verify that the watch RPC timeout is dynamic - when a server response carries a
+    // `suggestedRpcTimeout` larger than the initial `config.watchRpcTimeout`, that larger value is
+    // used as the next SendRequest's `watchRpcTimeout`.
+
+    val config: SliceLookupConfig = createSliceLookupConfig(enableRateLimiting = false)
+    val driver = new AssignmentSyncStateMachineDriverWrapper(sec, config)
+
+    driver.start()
+
+    val initialTimeout: FiniteDuration = config.watchRpcTimeout
+    val extendedTimeout: FiniteDuration = initialTimeout + 25.seconds
+
+    var expectedNumActions: Int = 1
+    // First SendRequest carries the initial timeout from config.
+    val firstRequest: DriverAction.SendRequest =
+      AssertionWaiter("Initial SendRequest action").await {
+        val actions: Vector[DriverAction] = driver.getReceivedActions
+        assert(actions.size == expectedNumActions)
+        actions.last match {
+          case sendRequestAction: DriverAction.SendRequest => sendRequestAction
+          case otherAction => fail(s"Expected SendRequest action, but got $otherAction")
+        }
+      }
+    assertResult(initialTimeout)(firstRequest.watchRpcTimeout)
+
+    // Feed back a response with a server-extended timeout. No redirect, so the next request stays
+    // on the default address.
+    val response = ClientResponse(
+      SyncAssignmentState.KnownGeneration(Generation.EMPTY),
+      extendedTimeout,
+      Redirect.EMPTY
+    )
+    driver.handleEvent(Event.ReadSuccess(None, firstRequest.opId, response))
+
+    // The next SendRequest must carry the server-suggested timeout, not the initial config value.
+    expectedNumActions += 1
+    val extendedRequest: DriverAction.SendRequest =
+      AssertionWaiter("Second SendRequest action").await {
+        val actions: Vector[DriverAction] = driver.getReceivedActions
+        assert(actions.size == expectedNumActions)
+        actions.last match {
+          case sendRequestAction: DriverAction.SendRequest => sendRequestAction
+          case otherAction => fail(s"Expected SendRequest action, but got $otherAction")
+        }
+      }
+    assertResult(extendedTimeout)(extendedRequest.watchRpcTimeout)
+
+    // The request timeout is now `extendedTimeout`. Advancing the clock less than that shouldn't
+    // trigger backoff.
+    sec.advanceBySync(extendedTimeout - 1.millis)
+    assert(driver.getReceivedActions.size == expectedNumActions)
+    assert(!driver.isInBackoff)
+
+    // Advancing to the deadline should enter backoff, but should not send a new request
+    // immediately.
+    sec.advanceBySync(1.millis)
+    assert(driver.getReceivedActions.size == expectedNumActions)
+    assert(driver.isInBackoff)
+
+    // Advance enough for the backoff retry to be scheduled and emitted.
+    sec.advanceBySync(config.minRetryDelay * 2)
+    expectedNumActions += 1
+    val retryRequest: DriverAction.SendRequest =
+      AssertionWaiter("Retry SendRequest action").await {
+        val actions: Vector[DriverAction] = driver.getReceivedActions
+        assert(actions.size == expectedNumActions)
+        actions.last match {
+          case sendRequestAction: DriverAction.SendRequest => sendRequestAction
+          case otherAction => fail(s"Expected SendRequest action, but got $otherAction")
+        }
+      }
+    // Verify: retry request timeout is still `extendedTimeout`.
+    assertResult(extendedTimeout)(retryRequest.watchRpcTimeout)
   }
 
   test("Watch requests rate limit") {
@@ -561,16 +654,7 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
 
     // Setup: Create a config with rate limiting enabled, a state machine, and a
     // `TestStateMachineDriver`.
-    val config: SliceLookupConfig = SliceLookupConfig(
-      ClientType.Clerk,
-      watchAddress = URI.create("fake-address"),
-      tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
-      target,
-      clientIdOpt = Some(TEST_CLIENT_UUID),
-      watchStubCacheTime = 10.seconds,
-      watchFromDataPlane = false,
-      enableRateLimiting = true
-    )
+    val config: SliceLookupConfig = createSliceLookupConfig(enableRateLimiting = true)
     val testDriver: TestStateMachineDriver[Event, DriverAction] =
       new TestStateMachineDriver(
         new AssignmentSyncStateMachine(
@@ -586,6 +670,7 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     val assignment: Assignment = createAssignment(
       asnGeneration,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       Slice.FULL @@ asnGeneration -> Seq("pod1")
     )
     // Setup: First response includes the full assignment.
@@ -614,7 +699,7 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
       )
     )
 
-    // Verify: The state machine sends the second requests after receiving a successful response at
+    // Verify: The state machine sends the second request after receiving a successful response at
     // time 0.
     assert(
       testDriver
@@ -728,7 +813,7 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     // Setup: Advance the clock by 2 seconds to refill 2 tokens (bucket is now full).
     sec.advanceBySync(2.seconds)
 
-    // Verify: At 4s total, the bucket has refilled to capacity, so we can send request 5.
+    // Verify: At time 4s, the bucket has refilled to capacity, so we can send request 5.
     assert(
       testDriver
         .onAdvance(
@@ -786,16 +871,7 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
 
     // Setup: Create a config with rate limiting enabled, a state machine, and an
     // `AssignmentSyncStateMachineDriver`.
-    val config: SliceLookupConfig = SliceLookupConfig(
-      ClientType.Clerk,
-      watchAddress = URI.create("fake-address"),
-      tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
-      target,
-      clientIdOpt = Some(TEST_CLIENT_UUID),
-      watchStubCacheTime = 10.seconds,
-      watchFromDataPlane = false,
-      enableRateLimiting = true
-    )
+    val config: SliceLookupConfig = createSliceLookupConfig(enableRateLimiting = true)
     val driver = new AssignmentSyncStateMachineDriverWrapper(sec, config)
 
     // Setup: Create an assignment to use in responses.
@@ -803,6 +879,7 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     val assignment: Assignment = createAssignment(
       asnGeneration,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       Slice.FULL @@ asnGeneration -> Seq("pod1")
     )
     val response: ClientResponse = ClientResponse(
@@ -862,16 +939,7 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
 
     // Setup: Create a config with rate limiting disabled, a state machine, and a
     // `TestStateMachineDriver`.
-    val config: SliceLookupConfig = SliceLookupConfig(
-      ClientType.Clerk,
-      watchAddress = URI.create("fake-address"),
-      tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
-      target,
-      clientIdOpt = Some(TEST_CLIENT_UUID),
-      watchStubCacheTime = 10.seconds,
-      watchFromDataPlane = false,
-      enableRateLimiting = false
-    )
+    val config: SliceLookupConfig = createSliceLookupConfig(enableRateLimiting = false)
     val testDriver: TestStateMachineDriver[Event, DriverAction] =
       new TestStateMachineDriver(
         new AssignmentSyncStateMachine(
@@ -887,8 +955,11 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     val assignment: Assignment = createAssignment(
       asnGeneration,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       Slice.FULL @@ asnGeneration -> Seq("pod1")
     )
+
+    // Setup: Create a response for all requests.
     val response: ClientResponse = ClientResponse(
       SyncAssignmentState.KnownAssignment(assignment),
       config.watchRpcTimeout,

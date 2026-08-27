@@ -11,8 +11,12 @@ import com.databricks.caching.util.{
   Cancellable,
   PrefixLogger,
   SequentialExecutionContext,
-  ValueStreamCallback,
-  WatchValueCell
+  ValueStreamCallback
+}
+import com.databricks.dicer.assigner.MigrationMode.{
+  ConsistentHashingNominatedEtcdReadMode,
+  ConsistentHashingPrimaryEtcdWritesMode,
+  ShadowMode
 }
 
 /**
@@ -25,20 +29,30 @@ import com.databricks.caching.util.{
  * callers.
  *
  * Some migration modes additionally forward state between the inner drivers (for example, the
- * new driver's elected pick becomes an input to the old driver). In
- * `ConsistentHashingNominatedEtcdReadMode`, the migration driver subscribes to `newDriver`'s
- * watch stream and forwards every observed pick into `oldDriver` via
- * [[PreferredAssignerDriver.updateExternalPick]]. Drivers that don't model an external-pick
- * input inherit the base trait's no-op default; modes that don't forward picks simply don't
- * subscribe.
+ * new driver's elected pick becomes an input to the old driver). In both consistent-hashing modes
+ * (`ConsistentHashingNominatedEtcdReadMode` and `ConsistentHashingPrimaryEtcdWritesMode`), the
+ * migration driver subscribes to `newDriver`'s watch stream and forwards every observed pick into
+ * `oldDriver` via [[PreferredAssignerDriver.updateExternalPick]]. Drivers that don't model an
+ * external-pick input inherit the base trait's no-op default; modes that don't forward picks (only
+ * `ShadowMode` today) simply don't subscribe to `newDriver`'s watch stream, so nothing is
+ * forwarded to `oldDriver`.
  *
- * PRECONDITION: in `ConsistentHashingNominatedEtcdReadMode`, `oldDriver`, `newDriver`, and
- * this driver must all run on the same `SequentialExecutionContext`. With a shared SEC,
- * FIFO ordering between `oldDriver.start`, `newDriver.start`, and the watch subscription
- * scheduled on `sec` is what guarantees that any forwarded pick observes an initialized
- * `oldDriver`.
+ * The two consistent-hashing modes differ only in what external watchers see via [[watch]]. In
+ * `ConsistentHashingNominatedEtcdReadMode` etcd remains authoritative for reads, so [[watch]]
+ * exposes `oldDriver`'s stream directly. In `ConsistentHashingPrimaryEtcdWritesMode` consistent
+ * hashing is authoritative for reads: [[watch]] exposes `newDriver`'s stream directly, so watchers
+ * see the consistent-hashing pick as soon as it is elected. Etcd is still written (the pick is
+ * forwarded to `oldDriver`, which writes it for durability, interop, and rollback), but the
+ * migration driver no longer waits for or reads back that write. This concerns the [[watch]] read
+ * surface only; [[handleHeartbeatRequest]] remains served by the etcd-backed driver in every mode,
+ * so the etcd lease/election protocol keeps running underneath.
+ *
+ * PRECONDITION: in either consistent-hashing mode, `oldDriver`, `newDriver`, and this driver must
+ * all run on the same `SequentialExecutionContext`. With a shared SEC, FIFO ordering between
+ * `oldDriver.start`, `newDriver.start`, and the watch subscriptions scheduled on `sec` is what
+ * guarantees that any forwarded pick observes an initialized `oldDriver`.
  */
-private[assigner] final class MigrationPreferredAssignerDriver(
+private[dicer] final class MigrationPreferredAssignerDriver(
     sec: SequentialExecutionContext,
     migrationMode: MigrationMode,
     oldDriver: PreferredAssignerDriver,
@@ -48,28 +62,11 @@ private[assigner] final class MigrationPreferredAssignerDriver(
   private val logger: PrefixLogger = PrefixLogger.create(getClass, "")
 
   /**
-   * Migration-aware selection-eligibility cell, selected once at construction
-   * (`migrationMode` is fixed for the driver's lifetime). In [[MigrationMode.ShadowMode]]
-   * the new driver does not gate any decision the system acts on, so the migration driver
-   * reports always-eligible. In [[MigrationMode.ConsistentHashingNominatedEtcdReadMode]]
-   * the new driver nominates the picks the old driver writes, so its eligibility cell is
-   * authoritative.
-   */
-  private val authoritativeSelectionEligibilityWatchCell: WatchValueCell.Consumer[Boolean] =
-    migrationMode match {
-      case MigrationMode.ShadowMode =>
-        PreferredAssignerDriver.ALWAYS_ELIGIBLE
-      case MigrationMode.ConsistentHashingNominatedEtcdReadMode =>
-        newDriver.selectionEligibilityWatchCell
-    }
-
-  /**
    * Latest pick UUID observed from the new (consistent-hashing) driver, or `None` if the
    * driver has not yet published. The inner `Option[UUID]` is `None` when the published
    * pick is "no PA known".
    *
-   * Used only in [[MigrationMode.ConsistentHashingNominatedEtcdReadMode]] to drive the
-   * consistent-hashing-vs-etcd agreement gauge.
+   * Used in both consistent-hashing modes to drive the consistent-hashing-vs-etcd agreement gauge.
    */
   @GuardedBy("sec")
   private var latestConsistentHashingPickUuidOpt: Option[Option[UUID]] = None
@@ -79,11 +76,23 @@ private[assigner] final class MigrationPreferredAssignerDriver(
    * has not yet published. The inner `Option[UUID]` is `None` when the published value is
    * "no PA known".
    *
-   * Used only in [[MigrationMode.ConsistentHashingNominatedEtcdReadMode]] to drive the
-   * consistent-hashing-vs-etcd agreement gauge.
+   * Used in both consistent-hashing modes to drive the consistent-hashing-vs-etcd agreement gauge.
    */
   @GuardedBy("sec")
   private var latestEtcdPickUuidOpt: Option[Option[UUID]] = None
+
+  /**
+   * The agreement gauge/counter are emitted in both consistent-hashing modes; this label
+   * distinguishes Phase 2.1 (etcd authoritative for reads) from Phase 2.2 (consistent-hashing
+   * authoritative). See [[PreferredAssignerMetrics.setConsistentHashingVsEtcdAgreement]].
+   */
+  private val agreementModeLabel: String =
+    migrationMode match {
+      case ShadowMode | ConsistentHashingNominatedEtcdReadMode =>
+        PreferredAssignerMetrics.CONSISTENT_HASHING_VS_ETCD_AGREEMENT_MODE_PHASE_2_1
+      case ConsistentHashingPrimaryEtcdWritesMode =>
+        PreferredAssignerMetrics.CONSISTENT_HASHING_VS_ETCD_AGREEMENT_MODE_PHASE_2_2
+    }
 
   override def start(assignerInfo: AssignerInfo, assignerProtoLogger: AssignerProtoLogger): Unit = {
     oldDriver.start(assignerInfo, assignerProtoLogger)
@@ -93,17 +102,20 @@ private[assigner] final class MigrationPreferredAssignerDriver(
     // gate the write decision inside `EtcdPreferredAssignerStateMachine` instead. That way
     // the only thing the migration-mode toggle controls is whether the etcd state machine
     // *acts* on the externally-supplied pick when proposing writes — the plumbing itself
-    // gets continuous coverage in production well before `ConsistentHashingNominatedEtcdReadMode`
-    // ramps up.
+    // gets continuous coverage in production well before the consistent-hashing modes ramp up.
     migrationMode match {
-      case MigrationMode.ShadowMode =>
-        // No pick forwarding in shadow mode; the new driver's output is discarded.
+      case ShadowMode =>
+        // In shadow mode consistent hashing does not drive selection: there is no pick forwarding
+        // or agreement tracking, and the new driver's output is discarded.
         ()
-      case MigrationMode.ConsistentHashingNominatedEtcdReadMode =>
-        // Schedule the subscriptions on `sec` so they run after both inner drivers' `start`
-        // tasks (FIFO). Per the class scaladoc, this is the load-bearing ordering. The
-        // `WatchValueCell` "latest value" guarantee plus `updateExternalPick`'s idempotency
-        // (see trait scaladoc) handle any intermediate values regardless.
+      case ConsistentHashingNominatedEtcdReadMode | ConsistentHashingPrimaryEtcdWritesMode =>
+        // The consistent-hashing modes forward the elected pick to the etcd driver (which writes
+        // it to the etcd store) and track consistent-hashing-vs-etcd agreement. They differ only
+        // in which driver [[watch]] exposes; the pick forwarding and write path are identical.
+        // Schedule the subscriptions on `sec` so they run after both inner drivers' `start` tasks
+        // (FIFO). Per the class scaladoc, this is the load-bearing ordering. The `WatchValueCell`
+        // "latest value" guarantee plus `updateExternalPick`'s idempotency (see trait scaladoc)
+        // handle any intermediate values.
         sec.run {
           subscribeForPickForwarding()
           subscribeForAgreementTracking()
@@ -111,8 +123,23 @@ private[assigner] final class MigrationPreferredAssignerDriver(
     }
   }
 
+  /**
+   * Subscribes `callback` to the authoritative preferred-assigner stream for the current mode: the
+   * EtcdPreferredAssignerDriver's stream when etcd is the read source of truth (shadow and
+   * consistent-hashing-nominated modes), or the ConsistentHashingPreferredAssignerDriver's stream
+   * in `ConsistentHashingPrimaryEtcdWritesMode` (the elected pick as soon as it is elected; etcd is
+   * still written but not read back). The exposed stream's `PreferredAssignerConfig` generation is
+   * sourced from whichever driver is authoritative; in `ConsistentHashingPrimaryEtcdWritesMode` it
+   * carries the consistent-hashing driver's sentinel generation, not an etcd store generation, and
+   * so is not comparable across a mode transition.
+   */
   override def watch(callback: ValueStreamCallback[PreferredAssignerConfig]): Cancellable = {
-    oldDriver.watch(callback)
+    migrationMode match {
+      case ShadowMode | ConsistentHashingNominatedEtcdReadMode =>
+        oldDriver.watch(callback)
+      case ConsistentHashingPrimaryEtcdWritesMode =>
+        newDriver.watch(callback)
+    }
   }
 
   override def sendTerminationNotice(): Unit = {
@@ -140,8 +167,10 @@ private[assigner] final class MigrationPreferredAssignerDriver(
     oldResponse
   }
 
-  override private[assigner] def selectionEligibilityWatchCell: WatchValueCell.Consumer[Boolean] =
-    authoritativeSelectionEligibilityWatchCell
+  // The consistent-hashing state shown on the debug page comes from the new (CH) driver.
+  override private[assigner] def consistentHashingStateView
+      : Future[Option[ConsistentHashingState]] =
+    newDriver.consistentHashingStateView
 
   /**
    * Subscribes to [[newDriver]]'s watch stream and forwards every observed
@@ -229,6 +258,7 @@ private[assigner] final class MigrationPreferredAssignerDriver(
     (latestConsistentHashingPickUuidOpt, latestEtcdPickUuidOpt) match {
       case (Some(chUuidOpt: Option[UUID]), Some(etcdUuidOpt: Option[UUID])) =>
         PreferredAssignerMetrics.setConsistentHashingVsEtcdAgreement(
+          modeLabel = agreementModeLabel,
           consistentHashingPickUuidOpt = chUuidOpt,
           etcdPickUuidOpt = etcdUuidOpt
         )
@@ -236,5 +266,13 @@ private[assigner] final class MigrationPreferredAssignerDriver(
         // Warm-up: at least one driver has not yet published. Leave the gauge unset.
         ()
     }
+  }
+
+  /**
+   * Test-only accessors. Exposes the etcd-backed old driver so tests can reach it to simulate etcd
+   * faults on an assigner running a migration mode (production never unwraps the migration driver).
+   */
+  private[dicer] object forTest {
+    def oldDriver: PreferredAssignerDriver = MigrationPreferredAssignerDriver.this.oldDriver
   }
 }

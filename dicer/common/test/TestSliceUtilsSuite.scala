@@ -192,10 +192,13 @@ class TestSliceUtilsSuite extends DatabricksTest {
   test("createAssignment") {
     // Test plan: illustrate use of the `createAssignment` helper and related shorthand notations
     // for Slice assignments. Validate they have the expected expansions.
+
+    // Test case 1: sequential slice assignments.
     assert(
       createAssignment(
         42 ## 47,
         AssignmentConsistencyMode.Strong,
+        assignerServiceInfoOpt = None,
         ("" -- fp("Balin")) @@ (42 ## 47) -> Seq("resource1"),
         (fp("Balin") -- ∞) @@ (42 ## 42) -> Seq("resource2", "resource3")
       )
@@ -218,7 +221,44 @@ class TestSliceUtilsSuite extends DatabricksTest {
               subsliceAnnotationsByResource = Map.empty
             )
           )
+        ),
+        assignerServiceInfoOpt = None
+      )
+    )
+
+    // Test case 2: sequence of slice assignments + assigner service info.
+    assert(
+      createAssignment(
+        42 ## 47,
+        AssignmentConsistencyMode.Strong,
+        assignerServiceInfoOpt =
+          Some(AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")),
+        Seq(
+          ("" -- fp("Balin")) @@ (42 ## 47) -> Seq("resource1"),
+          (fp("Balin") -- ∞) @@ (42 ## 42) -> Seq("resource2", "resource3")
         )
+      )
+      == Assignment(
+        isFrozen = false,
+        AssignmentConsistencyMode.Strong,
+        Generation(Incarnation(42), 47),
+        SliceMapHelper.ofSliceAssignments(
+          Vector(
+            createSliceAssignmentAssumingUniformLoad(
+              Slice(SliceKey.MIN, fp("Balin")),
+              Generation(Incarnation(42), 47),
+              Set("resource1"),
+              subsliceAnnotationsByResource = Map.empty
+            ),
+            createSliceAssignmentAssumingUniformLoad(
+              Slice.atLeast(fp("Balin")),
+              Generation(Incarnation(42), 42),
+              Set("resource2", "resource3"),
+              subsliceAnnotationsByResource = Map.empty
+            )
+          )
+        ),
+        Some(AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance"))
       )
     )
   }

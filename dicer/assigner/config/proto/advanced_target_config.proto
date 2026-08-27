@@ -55,6 +55,13 @@ message AdvancedTargetConfigFieldsP {
   // Note: This rate limit applies independently to each client watching this target, i.e. each
   // Slicelet or Clerk gets its own rate limit budget.
   optional TargetWatchRequestRateLimitConfigP target_watch_request_rate_limit_config = 5;
+
+  // When true, the Assigner treats this target as canonicalized to its AppTarget
+  // identity. It will use the AppTarget carried in a watch request's `alternative_target` field in
+  // place of `target`. When false (the default), the request's `target` is used unchanged.
+  // See the migration design doc for details:
+  // <internal link>
+  optional bool use_alternative_target = 6;
 }
 
 // Override of a Dicer advanced target configuration that applies to specific clusters.
@@ -90,6 +97,10 @@ message LoadWatcherConfigP {
   // OPTIONAL: Whether to use fine-grained top key information from the Slicelets for load
   // balancing. If not specified, this defaults to true.
   optional bool use_top_keys = 3;
+
+  // OPTIONAL: Whether to use the per-key load distribution (CDF) reported by the Slicelet for load
+  // balancing (to facilitate efficient range sharding). If not specified, this defaults to false.
+  optional bool use_load_distribution = 4;
 }
 
 // Configuration for the HealthWatcher.

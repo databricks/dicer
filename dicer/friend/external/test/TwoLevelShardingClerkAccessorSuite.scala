@@ -8,31 +8,72 @@ import scala.util.Random
 import com.google.common.primitives.Longs
 import com.google.protobuf.ByteString
 
-import com.databricks.caching.util.{AssertionWaiter, TestUtils}
+import com.databricks.caching.util.{AssertionWaiter, MetricUtils, TestUtils}
 import com.databricks.caching.util.TestUtils.TestName
 import com.databricks.dicer.common.{InternalDicerTestEnvironment, ProposedSliceAssignment}
+import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.common.TestSliceUtils._
-import com.databricks.dicer.external.{Clerk, ResourceAddress, SliceKey, Target}
+import com.databricks.dicer.external.{
+  Clerk,
+  ClerkHarness,
+  ResourceAddress,
+  ScalaClerkHarness,
+  SliceKey,
+  Target
+}
 import com.databricks.dicer.friend.SliceMap
 import com.databricks.dicer.friend.external.TwoLevelShardingClerkAccessorGoldenData.EXPECTED_OWNERS
 import com.databricks.testing.DatabricksTest
+import io.prometheus.client.CollectorRegistry
 
-class TwoLevelShardingClerkAccessorSuite extends DatabricksTest with TestName {
+/**
+ * Shared tests for the two-level sharding Clerk accessor, run against both the Scala and Rust
+ * Clerk implementations through the [[ClerkHarness]] abstraction, which guarantees that both
+ * languages produce identical (primary, secondary) -> pod routing decisions.
+ */
+abstract class TwoLevelShardingClerkAccessorSuiteBase extends DatabricksTest with TestName {
 
   /** Shared Dicer test environment. */
-  private val testEnv: InternalDicerTestEnvironment = InternalDicerTestEnvironment.create()
+  protected val testEnv: InternalDicerTestEnvironment = InternalDicerTestEnvironment.create()
 
   override def afterAll(): Unit = {
     testEnv.stop()
   }
 
+  /**
+   * Creates a [[ClerkHarness]] that wraps a Clerk that receives assignments for the given
+   * `target`.
+   */
+  protected def createClerk(target: Target): ClerkHarness
+
+  /**
+   * Reads and returns the value of the Prometheus metric with the given name and labels. Returns
+   * zero if the metric has never been recorded with this set of label values.
+   *
+   * @note labels is a vector of (label name, label value) pairs, whose order must match the Rust
+   *       struct field declaration order.
+   */
+  protected def readPrometheusMetric(metricName: String, labels: Vector[(String, String)]): Double
+
   /** Creates a [[SliceKey]] from the big-endian byte representation of `value`. */
   private def sliceKeyFromLong(value: Long): SliceKey =
     SliceKey.fromRawBytes(ByteString.copyFrom(Longs.toByteArray(value)))
 
-  /** Creates a clerk that directly connects to the Assigner for assignments. */
-  private def createDirectClerk(target: Target): Clerk[ResourceAddress] = {
-    testEnv.createDirectClerk(target, initialAssignerIndex = 0)
+  /**
+   * Returns the number of times the Clerks for a given target have recorded a getStubForKey call
+   * with the given `secondaryKeyProvided` label.
+   */
+  private def getStubForKeyCallCount(target: Target, secondaryKeyProvided: Boolean): Double = {
+    readPrometheusMetric(
+      "dicer_clerk_getstubforkey_call_count_total",
+      Vector(
+        "targetCluster" -> target.getTargetClusterLabel,
+        "targetName" -> target.getTargetNameLabel,
+        "targetInstanceId" -> target.getTargetInstanceIdLabel,
+        "factoryContext" -> "clerk",
+        "secondaryKeyProvided" -> secondaryKeyProvided.toString
+      )
+    )
   }
 
   test("Two-level getStubForKey returns the single pod when only one is assigned to a range") {
@@ -45,19 +86,18 @@ class TwoLevelShardingClerkAccessorSuite extends DatabricksTest with TestName {
     )
     testEnv.setAndFreezeAssignment(target, proposal)
 
-    val clerk: Clerk[ResourceAddress] = createDirectClerk(target)
+    val clerk: ClerkHarness = createClerk(target)
     TestUtils.awaitResult(clerk.ready, Duration.Inf)
-    clerk.impl.forTest.checkInvariants()
+    clerk.checkInvariants()
 
     val primaryKey: SliceKey = fp("primary")
     val expectedPod: ResourceAddress = ResourceAddress(URI.create("Pod0"))
     for (i: Int <- 0 until 10) {
-      assertResult(Some(expectedPod))(
-        TwoLevelShardingClerkAccessor.getStubForKey(clerk, primaryKey, fp(s"secondary_$i"))
-      )
+      assertResult(Some(expectedPod))(clerk.getStubForKey(primaryKey, fp(s"secondary_$i")))
+      assertResult(i + 1)(getStubForKeyCallCount(target, secondaryKeyProvided = true))
     }
 
-    clerk.forTest.stop()
+    clerk.stop()
   }
 
   test("Two-level getStubForKey is deterministic for the same (primaryKey, secondaryKey)") {
@@ -70,23 +110,22 @@ class TwoLevelShardingClerkAccessorSuite extends DatabricksTest with TestName {
     )
     testEnv.setAndFreezeAssignment(target, proposal)
 
-    val clerk: Clerk[ResourceAddress] = createDirectClerk(target)
+    val clerk: ClerkHarness = createClerk(target)
     TestUtils.awaitResult(clerk.ready, Duration.Inf)
-    clerk.impl.forTest.checkInvariants()
+    clerk.checkInvariants()
 
     val primaryKey: SliceKey = fp("primary")
     val secondaryKey: SliceKey = fp("secondary_A")
 
-    val firstLookup: Option[ResourceAddress] =
-      TwoLevelShardingClerkAccessor.getStubForKey(clerk, primaryKey, secondaryKey)
+    val firstLookup: Option[ResourceAddress] = clerk.getStubForKey(primaryKey, secondaryKey)
     assert(firstLookup.isDefined)
-    for (_: Int <- 0 until 50) {
-      assert(
-        TwoLevelShardingClerkAccessor.getStubForKey(clerk, primaryKey, secondaryKey) == firstLookup
-      )
+    assertResult(1)(getStubForKeyCallCount(target, secondaryKeyProvided = true))
+    for (i: Int <- 0 until 50) {
+      assert(clerk.getStubForKey(primaryKey, secondaryKey) == firstLookup)
+      assertResult(i + 2)(getStubForKeyCallCount(target, secondaryKeyProvided = true))
     }
 
-    clerk.forTest.stop()
+    clerk.stop()
   }
 
   test("Two-level getStubForKey distributes secondaries evenly across multiple pods") {
@@ -101,15 +140,17 @@ class TwoLevelShardingClerkAccessorSuite extends DatabricksTest with TestName {
     )
     testEnv.setAndFreezeAssignment(target, proposal)
 
-    val clerk: Clerk[ResourceAddress] = createDirectClerk(target)
+    val clerk: ClerkHarness = createClerk(target)
     TestUtils.awaitResult(clerk.ready, Duration.Inf)
-    clerk.impl.forTest.checkInvariants()
+    clerk.checkInvariants()
 
     val primaryKey: SliceKey = fp("primary")
     val numSecondaries: Int = 200
     val ownersBySecondary: Seq[ResourceAddress] =
       (0 until numSecondaries).flatMap { i: Int =>
-        TwoLevelShardingClerkAccessor.getStubForKey(clerk, primaryKey, fp(s"secondary_$i"))
+        val owner: Option[ResourceAddress] = clerk.getStubForKey(primaryKey, fp(s"secondary_$i"))
+        assertResult(i + 1)(getStubForKeyCallCount(target, secondaryKeyProvided = true))
+        owner
       }
     val countsByOwner: Map[ResourceAddress, Int] =
       ownersBySecondary.groupBy(identity).map {
@@ -134,7 +175,7 @@ class TwoLevelShardingClerkAccessorSuite extends DatabricksTest with TestName {
       )
     }
 
-    clerk.forTest.stop()
+    clerk.stop()
   }
 
   test("Two-level getStubForKey routes different primary keys to different pod sets") {
@@ -152,21 +193,22 @@ class TwoLevelShardingClerkAccessorSuite extends DatabricksTest with TestName {
     )
     testEnv.setAndFreezeAssignment(target, proposal)
 
-    val clerk: Clerk[ResourceAddress] = createDirectClerk(target)
+    val clerk: ClerkHarness = createClerk(target)
     TestUtils.awaitResult(clerk.ready, Duration.Inf)
-    clerk.impl.forTest.checkInvariants()
+    clerk.checkInvariants()
 
     val secondaryKey: SliceKey = fp("secondary_A")
     val ownerInLowRange: Option[ResourceAddress] =
-      TwoLevelShardingClerkAccessor.getStubForKey(clerk, primaryInLowRange, secondaryKey)
+      clerk.getStubForKey(primaryInLowRange, secondaryKey)
     val ownerInHighRange: Option[ResourceAddress] =
-      TwoLevelShardingClerkAccessor.getStubForKey(clerk, primaryInHighRange, secondaryKey)
+      clerk.getStubForKey(primaryInHighRange, secondaryKey)
 
     assert(ownerInLowRange.isDefined && ownerInHighRange.isDefined)
     assert(ownerInLowRange.get == ResourceAddress(URI.create("PodA")))
     assert(ownerInHighRange.get == ResourceAddress(URI.create("PodB")))
+    assertResult(2)(getStubForKeyCallCount(target, secondaryKeyProvided = true))
 
-    clerk.forTest.stop()
+    clerk.stop()
   }
 
   test("Two-level getStubForKey respects assignment changes") {
@@ -184,19 +226,16 @@ class TwoLevelShardingClerkAccessorSuite extends DatabricksTest with TestName {
     )
     testEnv.setAndFreezeAssignment(target, initialProposal)
 
-    val clerk: Clerk[ResourceAddress] = createDirectClerk(target)
+    val clerk: ClerkHarness = createClerk(target)
     TestUtils.awaitResult(clerk.ready, Duration.Inf)
-    clerk.impl.forTest.checkInvariants()
+    clerk.checkInvariants()
 
     // Verify the initial assignment is in effect.
     val pod0: ResourceAddress = ResourceAddress(URI.create("Pod0"))
     val pod1: ResourceAddress = ResourceAddress(URI.create("Pod1"))
-    assertResult(Some(pod0))(
-      TwoLevelShardingClerkAccessor.getStubForKey(clerk, primaryInLowRange, randomSecondaryKey)
-    )
-    assertResult(Some(pod1))(
-      TwoLevelShardingClerkAccessor.getStubForKey(clerk, primaryInHighRange, randomSecondaryKey)
-    )
+    assertResult(Some(pod0))(clerk.getStubForKey(primaryInLowRange, randomSecondaryKey))
+    assertResult(Some(pod1))(clerk.getStubForKey(primaryInHighRange, randomSecondaryKey))
+    assertResult(2)(getStubForKeyCallCount(target, secondaryKeyProvided = true))
 
     // Replace the assignment so the low range is owned by Pod2 and the high range by Pod3.
     val updatedProposal: SliceMap[ProposedSliceAssignment] = createProposal(
@@ -209,23 +248,20 @@ class TwoLevelShardingClerkAccessorSuite extends DatabricksTest with TestName {
     val pod2: ResourceAddress = ResourceAddress(URI.create("Pod2"))
     val pod3: ResourceAddress = ResourceAddress(URI.create("Pod3"))
     AssertionWaiter("Await for the new assignment to be picked up by the clerk").await {
-      assertResult(Some(pod2))(
-        TwoLevelShardingClerkAccessor.getStubForKey(clerk, primaryInLowRange, randomSecondaryKey)
-      )
-      assertResult(Some(pod3))(
-        TwoLevelShardingClerkAccessor.getStubForKey(clerk, primaryInHighRange, randomSecondaryKey)
-      )
+      assertResult(Some(pod2))(clerk.getStubForKey(primaryInLowRange, randomSecondaryKey))
+      assertResult(Some(pod3))(clerk.getStubForKey(primaryInHighRange, randomSecondaryKey))
     }
-    clerk.impl.forTest.checkInvariants()
+    clerk.checkInvariants()
 
-    clerk.forTest.stop()
+    clerk.stop()
   }
 
   test("Two-level getStubForKey behavior is stable across code changes") {
     // Test plan: Verify with a golden test that the (primary, secondary) -> pod routing produced
-    // by TwoLevelShardingClerkAccessor does not change even when the code is modified. Since
-    // Clerks may reside in different services and thus use different code versions, the two-level
-    // routing API is required to be stable and to agree on the same routing decisions.
+    // by the two-level sharding accessor does not change even when the code is modified. Since
+    // Clerks may reside in different services and thus use different code versions or languages,
+    // the two-level routing API is required to be stable and to agree on the same routing
+    // decisions.
     val target = Target(getSafeName)
     val pods: Seq[String] = (0 until 10).map(i => s"Pod$i")
     val proposal: SliceMap[ProposedSliceAssignment] = createProposal(
@@ -233,17 +269,38 @@ class TwoLevelShardingClerkAccessorSuite extends DatabricksTest with TestName {
     )
     testEnv.setAndFreezeAssignment(target, proposal)
 
-    val clerk: Clerk[ResourceAddress] = createDirectClerk(target)
+    val clerk: ClerkHarness = createClerk(target)
     TestUtils.awaitResult(clerk.ready, Duration.Inf)
 
     val primaryKey: SliceKey = fp("primary")
-    val actualOwners: Seq[String] = (0 until EXPECTED_OWNERS.size).map { i: Int =>
-      val owner: ResourceAddress =
-        TwoLevelShardingClerkAccessor.getStubForKey(clerk, primaryKey, fp(s"secondary_$i")).get
-      owner.uri.toString
+    for (i: Int <- 0 until EXPECTED_OWNERS.size) {
+      val owner: ResourceAddress = clerk.getStubForKey(primaryKey, fp(s"secondary_$i")).get
+      val expectedOwner: ResourceAddress = ResourceAddress(URI.create(EXPECTED_OWNERS(i)))
+      assert(
+        ClerkHarness.resourceAddressEquals(owner, expectedOwner),
+        s"secondary_$i routed to $owner, expected $expectedOwner"
+      )
+      assertResult(i + 1)(getStubForKeyCallCount(target, secondaryKeyProvided = true))
     }
-    assertResult(EXPECTED_OWNERS)(actualOwners)
 
-    clerk.forTest.stop()
+    clerk.stop()
+  }
+}
+
+/**
+ * Runs the two-level sharding Clerk accessor tests against the Scala [[Clerk]] implementation,
+ * using clerks that directly connect to the Assigner for assignments.
+ */
+class ScalaTwoLevelShardingClerkAccessorSuite extends TwoLevelShardingClerkAccessorSuiteBase {
+
+  override protected def createClerk(target: Target): ClerkHarness = {
+    val clerk: Clerk[ResourceAddress] = testEnv.createDirectClerk(target, initialAssignerIndex = 0)
+    ScalaClerkHarness.create(clerk)
+  }
+
+  override protected def readPrometheusMetric(
+      metricName: String,
+      labels: Vector[(String, String)]): Double = {
+    MetricUtils.getMetricValue(CollectorRegistry.defaultRegistry, metricName, labels.toMap)
   }
 }

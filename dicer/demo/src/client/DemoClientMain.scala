@@ -26,8 +26,8 @@ import com.databricks.dicer.external.{Clerk, ClerkConf, ResourceAddress, SliceKe
 import com.databricks.rpc.tls.{TLSOptions, TLSOptionsMigration}
 
 /** Configuration for the demo client. */
-class DemoClientConf(project: Project.Project, rawConfig: Config)
-    extends ProjectConf(project, rawConfig)
+class DemoClientConf(projectName: String, rawConfig: Config)
+    extends ProjectConf(projectName, rawConfig)
     with ClerkConf
     with ServerConf {
 
@@ -65,7 +65,7 @@ object DemoClientMain extends DatabricksMain(Project.DemoClient) {
   private val loadShifter = new LoadShifter(numKeys = NUM_KEYS)
 
   override def wrappedMain(args: Array[String]): Unit = {
-    val conf = new DemoClientConf(Project.DemoClient, rawConfig)
+    val conf = new DemoClientConf("dicer-demo-client", rawConfig)
     val target = Target(DemoCommon.TARGET_NAME)
 
     // Get the Slicelet hostname from environment variable.

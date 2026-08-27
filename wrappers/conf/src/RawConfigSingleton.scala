@@ -39,7 +39,7 @@ object RawConfigSingleton extends ConsoleLogging {
     overriddenConf.getOrElse(baseConf)
   }
 
-  /** Initialize the config to a specific value, in open source version just used for testing. */
+  /** Initialize the config to a specific value, just used for testing. */
   def initializeConfig(newConf: Config): Config = withLock(lock) {
     overriddenConf = Some(newConf)
     newConf

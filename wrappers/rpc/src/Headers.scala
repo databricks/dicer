@@ -1,6 +1,6 @@
 package com.databricks.common.http
 
-/** Wrapper object providing a minimal set of header constants for the open source version. */
+/** Wrapper object providing a set of header constants. */
 object Headers {
 
   /** Header that defines the app that is sending the request. */

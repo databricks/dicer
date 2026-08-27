@@ -168,20 +168,27 @@ object PreferredAssignerMetrics {
   private[assigner] val CONSISTENT_HASHING_VS_ETCD_AGREEMENT_MODE_PHASE_2_1: String = "phase21"
 
   /**
+   * Label value used on [[consistentHashingVsEtcdAgreementGauge]] during the Phase 2.2
+   * consistent-hashing-primary rollout.
+   */
+  private[assigner] val CONSISTENT_HASHING_VS_ETCD_AGREEMENT_MODE_PHASE_2_2: String = "phase22"
+
+  /**
    * Gauge tracking whether the consistent-hashing pick agrees with the etcd-backed
    * authoritative preferred-assigner value (1 = agree, 0 = disagree). Labeled so that
    * Prometheus scrapes no samples until [[setConsistentHashingVsEtcdAgreement]] is first
    * called — this avoids emitting a misleading default-zero (interpreted as "disagree") before
-   * either inner driver has published a value, and keeps the gauge absent in non-dual-driver
-   * modes.
+   * either inner driver has published a value, and keeps the gauge absent in modes where
+   * consistent hashing does not drive selection (shadow mode).
    */
   private val consistentHashingVsEtcdAgreementGauge: Gauge = Gauge
     .build()
     .name("dicer_assigner_preferred_assigner_consistent_hashing_vs_etcd_agreement_gauge")
     .help(
       "Whether the consistent-hashing pick agrees with the etcd-backed authoritative " +
-      "preferred-assigner value (1 = agree, 0 = disagree). Emitted only during the " +
-      "Phase 2.1 dual-driver rollout."
+      "preferred-assigner value (1 = agree, 0 = disagree). Emitted during the Phase 2.1 " +
+      "(dual-driver) and Phase 2.2 (consistent-hashing-primary) rollouts; the `mode` label " +
+      "distinguishes them."
     )
     .labelNames("mode")
     .register()
@@ -195,8 +202,8 @@ object PreferredAssignerMetrics {
     .name("dicer_assigner_preferred_assigner_consistent_hashing_vs_etcd_disagreement_total")
     .help(
       "Number of times the consistent-hashing pick disagreed with the etcd-backed " +
-      "authoritative preferred-assigner value. Emitted only during the Phase 2.1 " +
-      "dual-driver rollout."
+      "authoritative preferred-assigner value. Emitted during the Phase 2.1 (dual-driver) " +
+      "and Phase 2.2 (consistent-hashing-primary) rollouts; the `mode` label distinguishes them."
     )
     .labelNames("mode")
     .register()
@@ -268,18 +275,21 @@ object PreferredAssignerMetrics {
   /**
    * Updates the gauge to reflect whether the consistent-hashing pick UUID matches the etcd-backed
    * authoritative pick UUID. Two `None` values are treated as agreement (both report no preferred
-   * assigner known).
+   * assigner known). The caller supplies the phase label (`modeLabel`) identifying which rollout
+   * the sample belongs to, since the gauge and counter are emitted in both consistent-hashing
+   * modes.
    */
   private[assigner] def setConsistentHashingVsEtcdAgreement(
+      modeLabel: String,
       consistentHashingPickUuidOpt: Option[UUID],
       etcdPickUuidOpt: Option[UUID]): Unit = {
     val agree: Boolean = consistentHashingPickUuidOpt == etcdPickUuidOpt
     consistentHashingVsEtcdAgreementGauge
-      .labels(CONSISTENT_HASHING_VS_ETCD_AGREEMENT_MODE_PHASE_2_1)
+      .labels(modeLabel)
       .set(if (agree) 1.0 else 0.0)
     if (!agree) {
       consistentHashingVsEtcdDisagreementCounter
-        .labels(CONSISTENT_HASHING_VS_ETCD_AGREEMENT_MODE_PHASE_2_1)
+        .labels(modeLabel)
         .inc()
     }
   }

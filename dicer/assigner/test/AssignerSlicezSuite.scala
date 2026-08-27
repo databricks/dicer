@@ -65,12 +65,13 @@ class AssignerSlicezSuite extends DatabricksTest {
     val resources: Resources = createResources("resource0", "resource1", "resource2")
     val proposedAsn1: ProposedAssignment = ProposedAssignment(
       predecessorOpt = None,
-      createRandomProposal(
+      sliceMap = createRandomProposal(
         numSlices = 10,
         resources = resources.availableResources.toIndexedSeq,
         numMaxReplicas = 3,
         rng = Random
-      )
+      ),
+      assignerServiceInfoOpt = None
     )
     val generation: Generation = TestSliceUtils.createLooseGeneration(42)
     proposedAsn1.commit(
@@ -317,7 +318,11 @@ class AssignerSlicezSuite extends DatabricksTest {
     val assignerSlicezData =
       AssignerSlicezData(
         FAKE_ASSIGNER_INFO,
-        PreferredAssignerValue.ModeDisabled(GENERATION),
+        PreferredAssignerSlicezData(
+          PreferredAssignerValue.ModeDisabled(GENERATION),
+          consistentHashingStateOpt = None,
+          migrationMode = MigrationMode.ShadowMode
+        ),
         allTargetsData
       )
     // Get HTML rendered result in String.
@@ -343,7 +348,15 @@ class AssignerSlicezSuite extends DatabricksTest {
         PreferredAssignerValue.ModeDisabled(GENERATION)
       )) {
 
-      val assignerSlicezData = AssignerSlicezData(FAKE_ASSIGNER_INFO, mode, Seq())
+      val assignerSlicezData = AssignerSlicezData(
+        FAKE_ASSIGNER_INFO,
+        PreferredAssignerSlicezData(
+          mode,
+          consistentHashingStateOpt = None,
+          migrationMode = MigrationMode.ShadowMode
+        ),
+        Seq()
+      )
       val html = assignerSlicezData.getHtml.render
 
       def assertContains(html: String, fragment: String): Unit = {
@@ -410,7 +423,11 @@ class AssignerSlicezSuite extends DatabricksTest {
     val assignerSlicezData =
       AssignerSlicezData(
         FAKE_ASSIGNER_INFO,
-        PreferredAssignerValue.ModeDisabled(GENERATION),
+        PreferredAssignerSlicezData(
+          PreferredAssignerValue.ModeDisabled(GENERATION),
+          consistentHashingStateOpt = None,
+          migrationMode = MigrationMode.ShadowMode
+        ),
         Seq(targetSlicezData)
       )
 
@@ -434,7 +451,11 @@ class AssignerSlicezSuite extends DatabricksTest {
     val data: AssignerSlicezData =
       AssignerSlicezData(
         FAKE_ASSIGNER_INFO,
-        PreferredAssignerValue.ModeDisabled(GENERATION),
+        PreferredAssignerSlicezData(
+          PreferredAssignerValue.ModeDisabled(GENERATION),
+          consistentHashingStateOpt = None,
+          migrationMode = MigrationMode.ShadowMode
+        ),
         Seq.empty
       )
 
@@ -452,7 +473,11 @@ class AssignerSlicezSuite extends DatabricksTest {
     val data: AssignerSlicezData =
       AssignerSlicezData(
         FAKE_ASSIGNER_INFO,
-        PreferredAssignerValue.ModeDisabled(GENERATION),
+        PreferredAssignerSlicezData(
+          PreferredAssignerValue.ModeDisabled(GENERATION),
+          consistentHashingStateOpt = None,
+          migrationMode = MigrationMode.ShadowMode
+        ),
         Seq.empty
       )
 
@@ -469,7 +494,11 @@ class AssignerSlicezSuite extends DatabricksTest {
     // proto with "Preferred assigner" role and pa_uuid set to "Self".
     val data: AssignerSlicezData = AssignerSlicezData(
       FAKE_ASSIGNER_INFO,
-      PreferredAssignerValue.SomeAssigner(FAKE_ASSIGNER_INFO, GENERATION),
+      PreferredAssignerSlicezData(
+        PreferredAssignerValue.SomeAssigner(FAKE_ASSIGNER_INFO, GENERATION),
+        consistentHashingStateOpt = None,
+        migrationMode = MigrationMode.ShadowMode
+      ),
       Seq.empty
     )
 
@@ -488,7 +517,11 @@ class AssignerSlicezSuite extends DatabricksTest {
       AssignerInfo(UUID.randomUUID(), new java.net.URI("http://localhost:22222"))
     val data: AssignerSlicezData = AssignerSlicezData(
       FAKE_ASSIGNER_INFO,
-      PreferredAssignerValue.SomeAssigner(otherAssignerInfo, GENERATION),
+      PreferredAssignerSlicezData(
+        PreferredAssignerValue.SomeAssigner(otherAssignerInfo, GENERATION),
+        consistentHashingStateOpt = None,
+        migrationMode = MigrationMode.ShadowMode
+      ),
       Seq.empty
     )
 
@@ -506,7 +539,11 @@ class AssignerSlicezSuite extends DatabricksTest {
     val data: AssignerSlicezData =
       AssignerSlicezData(
         FAKE_ASSIGNER_INFO,
-        PreferredAssignerValue.NoAssigner(GENERATION),
+        PreferredAssignerSlicezData(
+          PreferredAssignerValue.NoAssigner(GENERATION),
+          consistentHashingStateOpt = None,
+          migrationMode = MigrationMode.ShadowMode
+        ),
         Seq.empty
       )
 
@@ -536,7 +573,11 @@ class AssignerSlicezSuite extends DatabricksTest {
     val data: AssignerSlicezData =
       AssignerSlicezData(
         FAKE_ASSIGNER_INFO,
-        PreferredAssignerValue.ModeDisabled(GENERATION),
+        PreferredAssignerSlicezData(
+          PreferredAssignerValue.ModeDisabled(GENERATION),
+          consistentHashingStateOpt = None,
+          migrationMode = MigrationMode.ShadowMode
+        ),
         Seq(td)
       )
 
@@ -556,7 +597,11 @@ class AssignerSlicezSuite extends DatabricksTest {
     val data: AssignerSlicezData =
       AssignerSlicezData(
         FAKE_ASSIGNER_INFO,
-        PreferredAssignerValue.NoAssigner(GENERATION),
+        PreferredAssignerSlicezData(
+          PreferredAssignerValue.NoAssigner(GENERATION),
+          consistentHashingStateOpt = None,
+          migrationMode = MigrationMode.ShadowMode
+        ),
         Seq.empty
       )
 
@@ -568,26 +613,32 @@ class AssignerSlicezSuite extends DatabricksTest {
   }
 
   test("Consistent-hashing state renders as HTML and view proto when populated") {
-    // Test plan: Verify that an AssignerSlicezData carrying a non-empty chState renders the
-    // CH UUID, eligible pod count, and connection health on the ZPage HTML and emits the
-    // corresponding ConsistentHashingStateViewP on the view proto. Covers the populated path
-    // (chState=Some) only; the chState=None placeholder is exercised by every other test in
-    // this suite via the default-None constructor.
+    // Test plan: Verify that an AssignerSlicezData carrying a populated consistent-hashing snapshot
+    // renders the CH UUIDs, the full eligible-pod list, and connection health on the ZPage HTML and
+    // emits the corresponding ConsistentHashingStateViewP on the view proto. Covers the populated
+    // path only; the Etcd placeholder is exercised by every other test in this suite via the
+    // default constructor.
     val localInfo: AssignerInfo =
       AssignerInfo(UUID.randomUUID(), new java.net.URI("http://localhost:11111"))
     val preferredInfo: AssignerInfo =
       AssignerInfo(UUID.randomUUID(), new java.net.URI("http://localhost:22222"))
+    val otherEligibleInfo: AssignerInfo =
+      AssignerInfo(UUID.randomUUID(), new java.net.URI("http://localhost:33333"))
+    val eligiblePods: Seq[AssignerInfo] = Seq(localInfo, preferredInfo, otherEligibleInfo)
     val chState: ConsistentHashingState = ConsistentHashingState(
       localAssignerInfo = localInfo,
       preferredAssignerInfoOpt = Some(preferredInfo),
-      eligiblePodCount = 3,
+      eligiblePods = eligiblePods,
       k8sConnectionHealth = ConsistentHashingState.K8sConnectionHealth.Healthy
     )
     val data: AssignerSlicezData = AssignerSlicezData(
       FAKE_ASSIGNER_INFO,
-      PreferredAssignerValue.NoAssigner(GENERATION),
-      Seq.empty,
-      chState = Some(chState)
+      PreferredAssignerSlicezData(
+        PreferredAssignerValue.NoAssigner(GENERATION),
+        consistentHashingStateOpt = Some(chState),
+        migrationMode = MigrationMode.ShadowMode
+      ),
+      Seq.empty
     )
 
     val html: String = data.getHtml.render
@@ -600,7 +651,11 @@ class AssignerSlicezSuite extends DatabricksTest {
         s"<th>Preferred assigner</th><td>${preferredInfo.uuid} (${preferredInfo.uri})</td>"
       )
     )
-    assert(html.contains("<th>Eligible pod count</th><td>3</td>"))
+    // The eligible-pods cell shows the count followed by one <div> per pod.
+    assert(html.contains("Count: 3"))
+    for (pod: AssignerInfo <- eligiblePods) {
+      assert(html.contains(s"<div>${pod.uuid} (${pod.uri})</div>"))
+    }
     assert(html.contains("<th>K8s connection health</th><td>HEALTHY</td>"))
 
     val viewProto: AssignerSliceViewP = data.toViewProto
@@ -610,19 +665,25 @@ class AssignerSlicezSuite extends DatabricksTest {
     assert(chProto.localAssigner.exists(_.uri.contains(localInfo.uri.toString)))
     assert(chProto.preferredAssigner.exists(_.uuid.contains(preferredInfo.uuid.toString)))
     assert(chProto.preferredAssigner.exists(_.uri.contains(preferredInfo.uri.toString)))
-    assert(chProto.eligiblePodCount.contains(3))
+    assertResult(eligiblePods.map(_.uuid.toString))(
+      chProto.eligiblePods.map(_.uuid.getOrElse(""))
+    )
     assert(
       chProto.k8SConnectionHealth.contains(ConsistentHashingStateViewP.K8sConnectionHealthP.HEALTHY)
     )
   }
 
-  test("Consistent-hashing state omitted from view proto when chState is empty") {
-    // Test plan: Verify that an AssignerSlicezData with chState=None (the default) produces a
-    // ConsistentHashingStateViewP-less proto and the ZPage HTML renders the "not active"
-    // placeholder.
+  test("Consistent-hashing state omitted from view proto when no snapshot is present") {
+    // Test plan: Verify that an AssignerSlicezData with no consistent-hashing snapshot (the
+    // etcd-backed and disabled drivers report `None`) produces a ConsistentHashingStateViewP-less
+    // proto and the ZPage HTML renders the "not active" placeholder.
     val data: AssignerSlicezData = AssignerSlicezData(
       FAKE_ASSIGNER_INFO,
-      PreferredAssignerValue.NoAssigner(GENERATION),
+      PreferredAssignerSlicezData(
+        PreferredAssignerValue.NoAssigner(GENERATION),
+        consistentHashingStateOpt = None,
+        migrationMode = MigrationMode.ShadowMode
+      ),
       Seq.empty
     )
 
@@ -634,55 +695,56 @@ class AssignerSlicezSuite extends DatabricksTest {
   }
 
   test("Migration mode renders as HTML and view proto when populated") {
-    // Test plan: Verify that an AssignerSlicezData carrying a non-empty migrationModeOpt
-    // renders the mode's display name on the ZPage HTML and emits the corresponding
-    // PreferredAssignerMigrationModeP on the view proto. Covers both supported migration
-    // modes so the proto mapping is exercised end-to-end.
-    val shadowData: AssignerSlicezData = AssignerSlicezData(
-      FAKE_ASSIGNER_INFO,
-      PreferredAssignerValue.NoAssigner(GENERATION),
-      Seq.empty,
-      migrationModeOpt = Some(MigrationMode.ShadowMode)
-    )
-    val shadowHtml: String = shadowData.getHtml.render
-    assert(shadowHtml.contains("<h4>Migration Mode</h4>"))
-    assert(shadowHtml.contains("<th>Mode</th><td>Shadow (etcd authoritative)</td>"))
-    assertResult(
-      Some(AssignerSliceViewP.PreferredAssignerMigrationModeP.SHADOW)
-    )(shadowData.toViewProto.migrationMode)
-
-    val nominatedData: AssignerSlicezData = AssignerSlicezData(
-      FAKE_ASSIGNER_INFO,
-      PreferredAssignerValue.NoAssigner(GENERATION),
-      Seq.empty,
-      migrationModeOpt = Some(MigrationMode.ConsistentHashingNominatedEtcdReadMode)
-    )
-    val nominatedHtml: String = nominatedData.getHtml.render
-    assert(
-      nominatedHtml.contains(
-        "<th>Mode</th><td>Consistent-hashing nominates / etcd reads</td>"
+    // Test plan: Verify that an AssignerSlicezData carrying a migration mode renders the mode's
+    // display name on the ZPage HTML and emits the corresponding PreferredAssignerMigrationModeP
+    // on the view proto. Iterates over every mode in `MigrationMode.values` so the proto/display
+    // mapping can't silently drop a mode: a new mode without an expected-proto entry fails loudly
+    // here.
+    val expectedProtoByMode
+        : Map[MigrationMode, AssignerSliceViewP.PreferredAssignerMigrationModeP] =
+      Map(
+        MigrationMode.ShadowMode ->
+        AssignerSliceViewP.PreferredAssignerMigrationModeP.SHADOW,
+        MigrationMode.ConsistentHashingNominatedEtcdReadMode ->
+        AssignerSliceViewP.PreferredAssignerMigrationModeP.CH_NOMINATED_ETCD_READ,
+        MigrationMode.ConsistentHashingPrimaryEtcdWritesMode ->
+        AssignerSliceViewP.PreferredAssignerMigrationModeP.CH_PRIMARY_ETCD_WRITE
       )
-    )
-    assertResult(
-      Some(AssignerSliceViewP.PreferredAssignerMigrationModeP.CH_NOMINATED_ETCD_READ)
-    )(nominatedData.toViewProto.migrationMode)
-  }
-
-  test("Migration mode omitted from view proto when migrationModeOpt is empty") {
-    // Test plan: Verify that an AssignerSlicezData with migrationModeOpt=None (the default)
-    // produces a view proto with no migration_mode field and the ZPage HTML renders the
-    // "not active" placeholder.
-    val data: AssignerSlicezData = AssignerSlicezData(
-      FAKE_ASSIGNER_INFO,
-      PreferredAssignerValue.NoAssigner(GENERATION),
-      Seq.empty
-    )
-
-    val html: String = data.getHtml.render
-    assert(html.contains("Migration driver: not active"))
-
-    val viewProto: AssignerSliceViewP = data.toViewProto
-    assert(viewProto.migrationMode.isEmpty)
+    val expectedDisplayNameByMode: Map[MigrationMode, String] =
+      Map(
+        MigrationMode.ShadowMode -> "Shadow (etcd authoritative)",
+        MigrationMode.ConsistentHashingNominatedEtcdReadMode ->
+        "Consistent-hashing nominates / etcd reads",
+        MigrationMode.ConsistentHashingPrimaryEtcdWritesMode ->
+        "Consistent-hashing primary / etcd writes"
+      )
+    for (mode <- MigrationMode.values) {
+      val data: AssignerSlicezData = AssignerSlicezData(
+        FAKE_ASSIGNER_INFO,
+        PreferredAssignerSlicezData(
+          PreferredAssignerValue.NoAssigner(GENERATION),
+          consistentHashingStateOpt = None,
+          migrationMode = mode
+        ),
+        Seq.empty
+      )
+      val html: String = data.getHtml.render
+      val displayName: String =
+        expectedDisplayNameByMode.getOrElse(
+          mode,
+          fail(s"No expected display name for mode ${mode.name}; add one to keep coverage")
+        )
+      withClue(s"mode ${mode.name}: ") {
+        assert(html.contains("<h4>Migration Mode</h4>"))
+        assert(html.contains(s"<th>Mode</th><td>$displayName</td>"))
+        val expectedProto: AssignerSliceViewP.PreferredAssignerMigrationModeP =
+          expectedProtoByMode.getOrElse(
+            mode,
+            fail(s"No expected proto for mode ${mode.name}; add one to keep coverage")
+          )
+        assertResult(Some(expectedProto))(data.toViewProto.migrationMode)
+      }
+    }
   }
 
   test("toJson returns valid JSON containing expected fields") {
@@ -692,7 +754,11 @@ class AssignerSlicezSuite extends DatabricksTest {
     val data: AssignerSlicezData =
       AssignerSlicezData(
         FAKE_ASSIGNER_INFO,
-        PreferredAssignerValue.ModeDisabled(GENERATION),
+        PreferredAssignerSlicezData(
+          PreferredAssignerValue.ModeDisabled(GENERATION),
+          consistentHashingStateOpt = None,
+          migrationMode = MigrationMode.ShadowMode
+        ),
         Seq.empty
       )
 
@@ -858,12 +924,13 @@ class AssignerSlicezSuite extends DatabricksTest {
   private def createRandomAssignment(resources: Resources): Assignment = {
     val proposedAsn: ProposedAssignment = ProposedAssignment(
       predecessorOpt = None,
-      createRandomProposal(
+      sliceMap = createRandomProposal(
         numSlices = 10,
         resources = resources.availableResources.toIndexedSeq,
         numMaxReplicas = 3,
         rng = Random
-      )
+      ),
+      assignerServiceInfoOpt = None
     )
     proposedAsn.commit(isFrozen = false, AssignmentConsistencyMode.Affinity, GENERATION)
   }

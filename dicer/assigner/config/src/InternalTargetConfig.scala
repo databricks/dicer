@@ -15,15 +15,22 @@ import com.databricks.api.proto.dicer.external.LoadBalancingMetricConfigP.{
   ImbalanceToleranceHintP,
   ReservationHintP
 }
-import com.databricks.api.proto.dicer.external.KeyReplicationConfigP
-import com.databricks.api.proto.dicer.external.{LoadBalancingMetricConfigP, TargetConfigFieldsP}
+import com.databricks.api.proto.dicer.external.{
+  LoadBalancingMetricConfigP,
+  TargetConfigFieldsP,
+  KeySensitivityConfigP,
+  KeyReplicationConfigP
+}
+import com.databricks.api.proto.dicer.external.KeySensitivityConfigP.SliceKeySensitivityP
 import com.databricks.caching.util.JsonSerializableConfig
+import com.databricks.dicer.common.SliceKeySensitivity
 import com.databricks.dicer.common.TargetName
 import com.databricks.dicer.assigner.config.InternalTargetConfig.{
   KeyOfDeathProtectionConfig,
+  KeySensitivityConfig,
+  KeyReplicationConfig,
   LoadBalancingConfig,
   LoadWatcherTargetConfig,
-  KeyReplicationConfig,
   HealthWatcherTargetConfig,
   TargetWatchRequestRateLimitConfig,
   fromProtos
@@ -31,6 +38,10 @@ import com.databricks.dicer.assigner.config.InternalTargetConfig.{
 
 /**
  * Stores the config for the given `target`.
+ *
+ * NOTE: [[TargetConfigValidator.validateEquivalentConfigScopesHaveMatchingConfig]] relies on the
+ * value equality (i.e. `.equals`) of the entire [[InternalTargetConfig]] instance. As a result,
+ * it also transitively relies on value equality of the entire [[Authorizer]] instance.
  *
  * @param loadWatcherConfig      The configuration for the load watcher.
  * @param loadBalancingConfig    the configuration to use for load balancing in the Dicer assigner.
@@ -43,6 +54,12 @@ import com.databricks.dicer.assigner.config.InternalTargetConfig.{
  *                                             AuthorizerConfig class which can create different
  *                                             Authorizers for different targets, rather than hard-
  *                                             coding the Authorizer class in the config fields.
+ * @param keySensitivityConfig   Customer attestation of whether this target's SliceKeys are
+ *                               sensitive. Determines whether Slices and SliceKeys appear
+ *                               in Central Logfood in prod.
+ * @param useAlternativeTarget   When true, the Assigner treats this target as canonicalized to its
+ *                               AppTarget identity, using the AppTarget carried in a watch
+ *                               request's `alternative_target` field in place of `target`.
  */
 case class InternalTargetConfig(
     loadWatcherConfig: LoadWatcherTargetConfig,
@@ -51,7 +68,9 @@ case class InternalTargetConfig(
     healthWatcherConfig: HealthWatcherTargetConfig,
     keyOfDeathProtectionConfig: KeyOfDeathProtectionConfig,
     targetRateLimitConfig: TargetWatchRequestRateLimitConfig,
-    authorizer: Authorizer) {
+    authorizer: Authorizer,
+    keySensitivityConfig: KeySensitivityConfig,
+    useAlternativeTarget: Boolean) {
 
   override def toString: String = {
     // Format non-default configuration parameters.
@@ -72,6 +91,12 @@ case class InternalTargetConfig(
     }
     if (targetRateLimitConfig != TargetWatchRequestRateLimitConfig.DEFAULT) {
       builder.append(s", $targetRateLimitConfig")
+    }
+    if (keySensitivityConfig != KeySensitivityConfig.DEFAULT) {
+      builder.append(s", $keySensitivityConfig")
+    }
+    if (useAlternativeTarget) {
+      builder.append(s", useAlternativeTarget=$useAlternativeTarget")
     }
     builder.append(")").toString()
   }
@@ -149,6 +174,14 @@ object InternalTargetConfig {
     // Decode the authorizer `Any`; an absent field decodes to the default authorizer.
     val authorizer: Authorizer = AuthorizerHelper.fromAnyProto(proto.authorizer)
 
+    // Decode the key sensitivity config; an absent field decodes to the default sensitivity config.
+    val keySensitivityConfig: KeySensitivityConfig =
+      proto.keySensitivityConfig
+        .map(KeySensitivityConfig.fromProto)
+        .getOrElse(KeySensitivityConfig.DEFAULT)
+
+    // use_alternative_target defaults to false.
+    val useAlternativeTarget: Boolean = advancedProto.useAlternativeTarget.getOrElse(false)
     InternalTargetConfig(
       loadWatcherConfig,
       loadBalancingConfig,
@@ -156,7 +189,9 @@ object InternalTargetConfig {
       healthWatcherConfig,
       keyOfDeathProtectionConfig,
       targetRateLimitConfig,
-      authorizer
+      authorizer,
+      keySensitivityConfig,
+      useAlternativeTarget
     )
   }
 
@@ -174,29 +209,39 @@ object InternalTargetConfig {
    *                    load map.
    * @param useTopKeys  whether fine-grained top key information reported by the Slicelet will be
    *                    used (i.e. integrated into the load map).
+   * @param useLoadDistribution whether the per-key load distribution (CDF) reported by the Slicelet
+   *                            will be used (i.e. integrated into the load map).
    */
   case class LoadWatcherTargetConfig(
       minDuration: FiniteDuration,
       maxAge: FiniteDuration,
-      useTopKeys: Boolean) {
+      useTopKeys: Boolean,
+      useLoadDistribution: Boolean) {
     require(minDuration > Duration.Zero, "minDuration must be positive")
     require(maxAge > Duration.Zero, "maxAge must be positive")
 
     override def toString: String =
-      s"LoadWatcherTargetConfig(minDuration=$minDuration, maxAge=$maxAge, useTopKeys=$useTopKeys)"
+      s"LoadWatcherTargetConfig(minDuration=$minDuration, maxAge=$maxAge, " +
+      s"useTopKeys=$useTopKeys, useLoadDistribution=$useLoadDistribution)"
 
     def toProto: LoadWatcherConfigP = {
       LoadWatcherConfigP.of(
         Some(minDuration.toSeconds.toInt),
         Some(maxAge.toSeconds.toInt),
-        Some(useTopKeys)
+        Some(useTopKeys),
+        Some(useLoadDistribution)
       )
     }
   }
 
   object LoadWatcherTargetConfig {
     val DEFAULT: LoadWatcherTargetConfig =
-      LoadWatcherTargetConfig(minDuration = 1.minute, maxAge = 5.minutes, useTopKeys = true)
+      LoadWatcherTargetConfig(
+        minDuration = 1.minute,
+        maxAge = 5.minutes,
+        useTopKeys = true,
+        useLoadDistribution = false
+      )
 
     /** Parses and validates the proto representation of [[LoadWatcherTargetConfig]]. */
     def fromProto(proto: LoadWatcherConfigP): LoadWatcherTargetConfig = {
@@ -209,7 +254,9 @@ object InternalTargetConfig {
         case None => DEFAULT.maxAge
       }
       val useTopKeys: Boolean = proto.useTopKeys.getOrElse(DEFAULT.useTopKeys)
-      LoadWatcherTargetConfig(minDuration, maxAge, useTopKeys)
+      val useLoadDistribution: Boolean =
+        proto.useLoadDistribution.getOrElse(DEFAULT.useLoadDistribution)
+      LoadWatcherTargetConfig(minDuration, maxAge, useTopKeys, useLoadDistribution)
     }
   }
 
@@ -392,6 +439,54 @@ object InternalTargetConfig {
         throw new IllegalArgumentException("maxReplicas is not defined in proto.")
       }
       KeyReplicationConfig(minReplicasOpt.get, maxReplicasOpt.get)
+    }
+  }
+
+  /**
+   * Customer attestation of whether a target's SliceKeys are sensitive.
+   *
+   * SliceKey-bearing fields are always logged to Lumberjack and remain available in regional
+   * Logfood. The attestation only determines whether those Slices and SliceKeys also appear
+   * in Central Logfood in prod: only non-sensitive Slices and SliceKeys appear.
+   *
+   * @param sliceKeySensitivity The customer's attestation of this target's SliceKey sensitivity,
+   *                            or `Unspecified` when the customer has made no attestation.
+   */
+  case class KeySensitivityConfig(sliceKeySensitivity: SliceKeySensitivity) {
+    override def toString: String =
+      s"KeySensitivityConfig(sliceKeySensitivity=$sliceKeySensitivity)"
+
+    /** Converts this instance to a [[KeySensitivityConfigP]] proto object. */
+    def toProto: KeySensitivityConfigP = {
+      val sliceKeySensitivityP: SliceKeySensitivityP = sliceKeySensitivity match {
+        case SliceKeySensitivity.NonSensitive => SliceKeySensitivityP.NON_SENSITIVE
+        case SliceKeySensitivity.Sensitive => SliceKeySensitivityP.SENSITIVE
+        case SliceKeySensitivity.Unspecified => SliceKeySensitivityP.UNSPECIFIED
+      }
+      KeySensitivityConfigP.of(Some(sliceKeySensitivityP))
+    }
+  }
+
+  object KeySensitivityConfig {
+
+    /** Default configuration: the customer has not attested SliceKey sensitivity. */
+    val DEFAULT: KeySensitivityConfig = KeySensitivityConfig(
+      sliceKeySensitivity = SliceKeySensitivity.Unspecified
+    )
+
+    /** Parses the proto representation of [[KeySensitivityConfig]]. */
+    def fromProto(proto: KeySensitivityConfigP): KeySensitivityConfig = {
+      // Map SENSITIVE and UNSPECIFIED to distinct values (both treated as sensitive) so an explicit
+      // sensitive attestation can be told apart from no attestation, such as when reporting metrics
+      // on how customers have configured their targets.
+      val sliceKeySensitivity: SliceKeySensitivity =
+        proto.sliceKeySensitivity match {
+          case Some(SliceKeySensitivityP.NON_SENSITIVE) => SliceKeySensitivity.NonSensitive
+          case Some(SliceKeySensitivityP.SENSITIVE) => SliceKeySensitivity.Sensitive
+          case Some(SliceKeySensitivityP.UNSPECIFIED) => SliceKeySensitivity.Unspecified
+          case None => SliceKeySensitivity.Unspecified
+        }
+      KeySensitivityConfig(sliceKeySensitivity)
     }
   }
 
@@ -596,7 +691,9 @@ object InternalTargetConfig {
     HealthWatcherTargetConfig.DEFAULT,
     KeyOfDeathProtectionConfig.DEFAULT,
     TargetWatchRequestRateLimitConfig.DEFAULT,
-    AuthorizerHelper.DEFAULT_AUTHORIZER
+    AuthorizerHelper.DEFAULT_AUTHORIZER,
+    KeySensitivityConfig.DEFAULT,
+    useAlternativeTarget = false
   )
 
   object forTest {
@@ -617,7 +714,9 @@ object InternalTargetConfig {
       HealthWatcherTargetConfig.DEFAULT,
       KeyOfDeathProtectionConfig.DEFAULT,
       TargetWatchRequestRateLimitConfig.DEFAULT,
-      AuthorizerHelper.DEFAULT_AUTHORIZER
+      AuthorizerHelper.DEFAULT_AUTHORIZER,
+      KeySensitivityConfig.DEFAULT,
+      useAlternativeTarget = false
     )
   }
 }
@@ -666,20 +765,50 @@ case class NamedInternalTargetConfig(targetName: TargetName, config: InternalTar
         Some(config.targetRateLimitConfig.toProto)
       }
 
+    // Only set the key sensitivity config in the proto if it differs from the default to avoid
+    // updating the dynamic config for customers who don't specify this field.
+    val keySensitivityConfigProtoOpt: Option[KeySensitivityConfigP] =
+      if (config.keySensitivityConfig == KeySensitivityConfig.DEFAULT) {
+        None
+      } else {
+        Some(config.keySensitivityConfig.toProto)
+      }
+
+    // Only set use_alternative_target in the proto when enabled, to avoid updating the dynamic
+    // config for targets that leave it at the default (false).
+    val useAlternativeTargetOpt: Option[Boolean] =
+      if (config.useAlternativeTarget) Some(true) else None
+
     val targetConfigProto: TargetConfigFieldsP = TargetConfigFieldsP.of(
       primaryRateMetricConfig = Some(config.loadBalancingConfig.primaryRateMetric.toProto),
       keyReplicationConfig = keyReplicationConfigProtoOpt,
-      authorizer = AuthorizerHelper.toAnyProto(config.authorizer)
+      authorizer = AuthorizerHelper.toAnyProto(config.authorizer),
+      keySensitivityConfig = keySensitivityConfigProtoOpt
     )
 
+    val loadWatcherConfigProto: LoadWatcherConfigP = {
+      val proto: LoadWatcherConfigP = config.loadWatcherConfig.toProto
+      // When `use_load_distribution` was introduced, there were already many customers with
+      // non-empty LoadWatcherConfigP in their configs. If `useLoadDistribution` is at its default,
+      // clear it from the proto to avoid updating the dynamic config for customers who don't
+      // specify this field.
+      if (config.loadWatcherConfig.useLoadDistribution ==
+        LoadWatcherTargetConfig.DEFAULT.useLoadDistribution) {
+        proto.copy(useLoadDistribution = None)
+      } else {
+        proto
+      }
+    }
+
     val advancedConfigProto: AdvancedTargetConfigFieldsP = AdvancedTargetConfigFieldsP.of(
-      loadWatcherConfig = Some(config.loadWatcherConfig.toProto),
+      loadWatcherConfig = Some(loadWatcherConfigProto),
       // This field in advanced config is deprecated, but still populate this filed in advanced
       // config so the generated dynamic config can be recognized by possible stale assigner binary
       // in production.
       keyReplicationConfig = keyReplicationConfigProtoOpt,
       healthWatcherConfig = healthWatcherConfigProtoOpt,
-      targetWatchRequestRateLimitConfig = targetRateLimitConfigProtoOpt
+      targetWatchRequestRateLimitConfig = targetRateLimitConfigProtoOpt,
+      useAlternativeTarget = useAlternativeTargetOpt
     )
     InternalDicerTargetConfigP(
       target = Some(targetName.value),

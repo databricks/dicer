@@ -5,8 +5,14 @@ import scala.util.Random
 
 import com.databricks.testing.DatabricksTest
 import com.databricks.caching.util.TestUtils.assertThrow
+import com.databricks.caching.util.test.ExponentialBackoffTestDataP
 
 class ExponentialBackoffSuite extends DatabricksTest {
+
+  private val SHARED_TEST_DATA: ExponentialBackoffTestDataP =
+    TestUtils.loadTestData[ExponentialBackoffTestDataP](
+      "caching/util/test/data/exponential_backoff_test_data.textproto"
+    )
 
   test("Exponential backoff") {
     // Test plan: Create an exponential back off object with a deterministic random number generator
@@ -44,6 +50,51 @@ class ExponentialBackoffSuite extends DatabricksTest {
     backoff.reset()
     val delay = backoff.nextDelay()
     assert(delay == 2200.milliseconds)
+  }
+
+  test("Exponential backoff shared test data") {
+    // Test plan: Verify that `ExponentialBackoff` doubles, caps, and jitters within the shared
+    // textproto parameters.
+    val testData = SHARED_TEST_DATA
+    val jitterRatio = testData.getJitterRatio
+    val minMillis = testData.getMinRetryDelayMillis
+    val maxMillis = testData.getMaxRetryDelayMillis
+    val multiplier = testData.getMultiplier
+
+    val backoff = new ExponentialBackoff(new Random(), minMillis.millis, maxMillis.millis)
+
+    var preJitterMillis = minMillis
+    for (_ <- 0 until testData.getInitialDoublingStepsToVerify) {
+      val delay = backoff.nextDelay()
+      assert(delayWithinJitter(delay, preJitterMillis, jitterRatio))
+      preJitterMillis = math.min(math.round(preJitterMillis * multiplier), maxMillis)
+    }
+
+    while (preJitterMillis < maxMillis) {
+      val delay = backoff.nextDelay()
+      assert(delayWithinJitter(delay, preJitterMillis, jitterRatio))
+      preJitterMillis = math.min(math.round(preJitterMillis * multiplier), maxMillis)
+    }
+
+    for (_ <- 0 until testData.getIterationsAtMaxInterval) {
+      val delay = backoff.nextDelay()
+      assert(delayWithinJitter(delay, maxMillis, jitterRatio))
+    }
+
+    for (_ <- 0 until testData.getMaxElapsedNoneIterations) {
+      backoff.nextDelay()
+    }
+  }
+
+  /** Returns whether `delay` is within ±`jitterRatio`/2 of `preJitterMillis`. */
+  private def delayWithinJitter(
+      delay: FiniteDuration,
+      preJitterMillis: Long,
+      jitterRatio: Double): Boolean = {
+    val low = math.round(preJitterMillis * (1.0 - jitterRatio / 2.0))
+    val high = math.round(preJitterMillis * (1.0 + jitterRatio / 2.0))
+    val delayMillis = delay.toMillis
+    delayMillis >= low && delayMillis <= high
   }
 
   test("Exponential backoff overflow") {

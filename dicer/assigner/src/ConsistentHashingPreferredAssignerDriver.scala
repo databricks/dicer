@@ -5,10 +5,8 @@ import java.util.UUID
 import javax.annotation.concurrent.GuardedBy
 
 import scala.concurrent.Future
-import scala.util.control.NonFatal
 
-import io.prometheus.client.Gauge
-
+import com.databricks.caching.util.AlertOwnerTeam
 import com.databricks.caching.util.{
   Cancellable,
   PrefixLogger,
@@ -34,13 +32,12 @@ import com.databricks.dicer.external.ResourceAddress
  *
  * @param sec The [[SequentialExecutionContext]] within which all driver and state machine state
  *            is accessed.
- * @param membershipCheckerFactory Factory that creates the [[KubernetesMembershipChecker]] used as
- *                                 the [[ResourceWatcher]]. The checker is created in [[start()]]
- *                                 once [[AssignerInfo]] is available.
+ * @param localClusterMembershipChecker The [[KubernetesMembershipChecker]] used as the
+ *                                      [[ResourceWatcher]] that feeds the selection state machine.
  */
-private[assigner] class ConsistentHashingPreferredAssignerDriver(
+private[dicer] class ConsistentHashingPreferredAssignerDriver(
     sec: SequentialExecutionContext,
-    membershipCheckerFactory: KubernetesMembershipChecker.Factory)
+    localClusterMembershipChecker: KubernetesMembershipChecker)
     extends PreferredAssignerDriver {
 
   /** The base state machine driver. */
@@ -57,18 +54,13 @@ private[assigner] class ConsistentHashingPreferredAssignerDriver(
     new WatchValueCell[PreferredAssignerConfig]()
 
   /**
-   * Tracks the K8s API membership-checker connection-health observations and backs
-   * [[selectionEligibilityWatchCell]] for this driver. Initialized to `false` to fail
-   * closed during the startup window so the pod stays out of `Service` endpoints until the
-   * membership checker confirms K8s connectivity; updated on [[sec]] from
-   * `watchConnectionHealth`'s `onSuccess`; the cell handles synchronization for
-   * cross-thread readers.
+   * Re-exposes the membership checker's connection-health cell as this driver's debug-page
+   * health source. The cell is unset until the checker's first poll resolves (unknown), then
+   * holds `Some(true)` while connectivity is confirmed and `Some(false)` after a sustained
+   * failure run. The cell handles synchronization for cross-thread readers.
    */
-  private val connectionHealthyWatchCell: WatchValueCell[Boolean] = {
-    val cell: WatchValueCell[Boolean] = new WatchValueCell[Boolean]()
-    cell.setValue(false)
-    cell
-  }
+  private val connectionHealthCell: WatchValueCell.Consumer[Boolean] =
+    localClusterMembershipChecker.connectionHealthCell
 
   /**
    * UUID of the most recently published preferred-assigner pick, or `None` if the latest
@@ -79,54 +71,44 @@ private[assigner] class ConsistentHashingPreferredAssignerDriver(
   @GuardedBy("sec")
   private var lastPublishedPickUuidOpt: Option[UUID] = None
 
+  /** This assigner's own identity, set in [[start]]; `None` until the driver starts. */
+  @GuardedBy("sec")
+  private var localAssignerInfoOpt: Option[AssignerInfo] = None
+
+  /** The latest set of eligible assigner pods considered for election. */
+  @GuardedBy("sec")
+  private var latestEligiblePods: Seq[AssignerInfo] = Seq.empty
+
   private val logger: PrefixLogger = PrefixLogger.create(this.getClass, "")
 
   /**
-   * Starts the driver. Creates the [[KubernetesMembershipChecker]] from the factory (now that
-   * [[AssignerInfo]] is available), creates the underlying state machine, starts the base driver
-   * and resource watcher, and begins watching for resource and connection health updates.
+   * PRECONDITION: `localClusterMembershipChecker` must have been started before this driver is
+   * started.
+   *
+   * Starts the driver. Creates the underlying state machine, starts the base driver, and begins
+   * watching the membership checker for resource and connection-health updates.
    */
   override def start(assignerInfo: AssignerInfo, assignerProtoLogger: AssignerProtoLogger): Unit =
     sec.run {
       this.assignerProtoLogger = assignerProtoLogger
 
-      // Create the checker now that assignerInfo is available.
-      val checkerOpt: Option[KubernetesMembershipChecker] = try {
-        membershipCheckerFactory.create(assignerInfo, assignerProtoLogger) match {
-          case Some(checker: KubernetesMembershipChecker) =>
-            ConsistentHashingPreferredAssignerDriver.recordInitSuccess()
-            Some(checker)
-          case None =>
-            logger.info("KubernetesMembershipChecker disabled by factory; driver will not start.")
-            None
-        }
-      } catch {
-        case NonFatal(ex) =>
-          ConsistentHashingPreferredAssignerDriver.recordInitFailure()
-          logger.warn(s"Failed to create KubernetesMembershipChecker: $ex")
-          None
-      }
+      // Create and start the base driver.
+      baseDriver =
+        new StateMachineDriver[Event, DriverAction, ConsistentHashingPreferredAssignerStateMachine](
+          sec,
+          new ConsistentHashingPreferredAssignerStateMachine(assignerInfo),
+          performAction,
+          AlertOwnerTeam.CACHING_TEAM_NAME
+        )
+      baseDriver.start()
 
-      checkerOpt match {
-        case None =>
-          logger.warn("KubernetesMembershipChecker was not created; driver will not start.")
-        case Some(checker: KubernetesMembershipChecker) =>
-          // Create and start the base driver.
-          baseDriver = new StateMachineDriver[
-            Event,
-            DriverAction,
-            ConsistentHashingPreferredAssignerStateMachine](
-            sec,
-            new ConsistentHashingPreferredAssignerStateMachine(assignerInfo),
-            performAction
-          )
-          baseDriver.start()
+      // Begin watching the (already-started) checker for resource and connection-health updates.
+      watchResourceUpdates(localClusterMembershipChecker)
+      watchConnectionHealth()
 
-          // Start the resource watcher and begin watching for updates.
-          checker.start()
-          watchResourceUpdates(checker)
-          watchConnectionHealth(checker)
-      }
+      // Record this assigner's identity so the debug-page snapshot shows the CH driver as
+      // active immediately, before the first resource poll or connection-health observation.
+      localAssignerInfoOpt = Some(assignerInfo)
     }
 
   /**
@@ -143,7 +125,7 @@ private[assigner] class ConsistentHashingPreferredAssignerDriver(
    * their next poll and exclude it from the consistent-hash ring.
    */
   override def sendTerminationNotice(): Unit = {
-    logger.debug("sendTerminationNotice called; no-op for consistent-hashing protocol")
+    logger.info("sendTerminationNotice called; no-op for consistent-hashing protocol")
   }
 
   /** Not used by the consistent-hashing preferred assigner protocol. */
@@ -179,6 +161,10 @@ private[assigner] class ConsistentHashingPreferredAssignerDriver(
           config.knownPreferredAssigner,
         )
         logger.info(s"Preferred assigner config updated: $config")
+
+        // Record the eligible pods reported alongside this config for the debug-page snapshot;
+        // the elected preferred assigner is derived from the config when the snapshot is built.
+        latestEligiblePods = eligibleAssigners
     }
   }
 
@@ -209,18 +195,17 @@ private[assigner] class ConsistentHashingPreferredAssignerDriver(
   }
 
   /**
-   * Watches the given [[ResourceWatcher]]'s connection health and delivers suppression
-   * notices to the state machine. Selection is suppressed when the connection is unhealthy.
+   * Watches the membership checker's connection-health cell and delivers suppression notices to
+   * the state machine. Selection is suppressed when the connection is unhealthy.
    */
   @throws[AssertionError]("if not called within sec")
-  private def watchConnectionHealth(resourceWatcher: ResourceWatcher): Unit = {
+  private def watchConnectionHealth(): Unit = {
     sec.assertCurrentContext()
 
-    resourceWatcher.watchConnectionHealth(
+    connectionHealthCell.watch(
       new ValueStreamCallback[Boolean](sec) {
         override protected def onSuccess(isHealthy: Boolean): Unit = {
           sec.assertCurrentContext()
-          connectionHealthyWatchCell.setValue(isHealthy)
           // Suppress when unhealthy: the resource set may be stale.
           baseDriver.handleEvent(Event.SuppressionNotice(shouldSuppress = !isHealthy))
         }
@@ -228,32 +213,35 @@ private[assigner] class ConsistentHashingPreferredAssignerDriver(
     )
   }
 
-  override private[assigner] def selectionEligibilityWatchCell: WatchValueCell.Consumer[Boolean] =
-    connectionHealthyWatchCell
-}
-
-private[assigner] object ConsistentHashingPreferredAssignerDriver {
-
-  /**
-   * Gauge tracking the initialization result of the cluster-local membership checker used for
-   * preferred assigner selection (1.0 = created successfully, 0.0 = creation failed). Used for
-   * rollout monitoring instead of alert-based monitoring to avoid paging oncall.
-   *
-   * Lives in this driver companion (not on [[KubernetesMembershipChecker]]) because the driver is
-   * the sole caller of [[recordInitSuccess]] / [[recordInitFailure]].
-   */
-  private val initResultGauge: Gauge = Gauge
-    .build()
-    .name("dicer_assigner_k8s_membership_checker_init_result")
-    .help(
-      "Result of cluster-local KubernetesMembershipChecker initialization " +
-      "(1 = success, 0 = failure)."
-    )
-    .register()
-
-  /** Records a successful membership checker initialization. */
-  private[assigner] def recordInitSuccess(): Unit = initResultGauge.set(1.0)
-
-  /** Records a failed membership checker initialization. */
-  private[assigner] def recordInitFailure(): Unit = initResultGauge.set(0.0)
+  override private[assigner] def consistentHashingStateView
+      : Future[Option[ConsistentHashingState]] = sec.call {
+    // Read this driver's state on its own sec and assemble the snapshot. It stays `None` (and the
+    // debug page shows the driver as inactive) until start() records this assigner's identity.
+    localAssignerInfoOpt.map { localAssignerInfo: AssignerInfo =>
+      val preferredAssignerInfoOpt: Option[AssignerInfo] =
+        preferredAssignerConfigCell.getLatestValueOpt.flatMap { config: PreferredAssignerConfig =>
+          config.knownPreferredAssigner match {
+            case someAssigner: PreferredAssignerValue.SomeAssigner =>
+              Some(someAssigner.assignerInfo)
+            case _: PreferredAssignerValue.NoAssigner | _: PreferredAssignerValue.ModeDisabled =>
+              None
+          }
+        }
+      // Derive the health from the membership checker's connection-health cell: unset means no
+      // poll has been observed yet (`Init`), distinct from an observed unhealthy connection
+      // (`Unhealthy`).
+      val k8sConnectionHealth: ConsistentHashingState.K8sConnectionHealth =
+        connectionHealthCell.getLatestValueOpt match {
+          case None => ConsistentHashingState.K8sConnectionHealth.Init
+          case Some(true) => ConsistentHashingState.K8sConnectionHealth.Healthy
+          case Some(false) => ConsistentHashingState.K8sConnectionHealth.Unhealthy
+        }
+      ConsistentHashingState(
+        localAssignerInfo = localAssignerInfo,
+        preferredAssignerInfoOpt = preferredAssignerInfoOpt,
+        eligiblePods = latestEligiblePods,
+        k8sConnectionHealth = k8sConnectionHealth
+      )
+    }
+  }
 }

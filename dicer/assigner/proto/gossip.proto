@@ -1,0 +1,69 @@
+syntax = "proto2";
+
+package dicer;
+
+
+import "dicer/assigner/proto/preferred_assigner.proto";
+import "dicer/assigner/config/proto/target_migration_config.proto";
+import "scalapb.proto";
+
+option java_package = "com.databricks.api.proto.dicer.assigner";
+option java_generate_equals_and_hash = true;
+
+option java_multiple_files = true;
+option (scalapb.options) = {
+  package_name: "com.databricks.api.proto.dicer.assigner",
+  flat_package: true,
+};
+
+// Message and service definitions for the Assigner gossip protocol.
+//
+// Gossip lets Assigner pods converge quickly on a shared value instead of waiting for each pod to
+// independently pick up the value from its source. Each round is a bidirectional exchange: the
+// caller pushes the value it currently holds, and the responder may choose to return its own
+// value -- for example, if it has a more up-to-date value and needs to update the caller.
+//
+// The gossip protocol is currently only used for propagating the target migration config, but is
+// designed to be extensible to other values in the future. See
+// <internal link>
+// for more details on the target migration config and its usage.
+
+// A single value being gossiped -- may be one of many different types.
+message GossipValueP {
+  // The value being gossiped.
+  oneof value {
+    // The target migration config. See `TargetMigrationConfigP` for more details.
+    TargetMigrationConfigP target_migration_config = 1;
+  }
+}
+
+// A gossip round initiated by the caller, pushing the value it currently holds.
+message GossipRequestP {
+  option (scalapb.message).extends = "com.databricks.rpc.RPC[GossipResponseP]";
+
+  // Identity of the calling Assigner.
+  optional AssignerInfoP self = 1;
+
+  // The values that the caller is gossiping.
+  repeated GossipValueP values = 2;
+}
+
+// The responder's reply to a gossip round.
+message GossipResponseP {
+  // Identity of the responding Assigner.
+  optional AssignerInfoP self = 1;
+
+  // The values that the responder is gossiping. This may contain fewer or more values than the
+  // request: fewer when the caller is already up-to-date on some values, and more when the caller
+  // omitted necessary values that the responder can supply.
+  repeated GossipValueP values = 2;
+}
+
+// The service Assigner pods use to gossip values to their peers.
+service GossipService {
+  // Performs a single bidirectional gossip exchange.
+  rpc Gossip(GossipRequestP) returns (GossipResponseP) {
+    // Internal Assigner pod-to-pod traffic; not a customer-facing API.
+
+  }
+}

@@ -1,0 +1,12 @@
+load("@rules_scala//scala:scala.bzl", "scala_library")
+
+package(
+    default_visibility = ["//visibility:public"],
+)
+
+# Liveness probe status wrapper.
+scala_library(
+    name = "liveness-status",
+    srcs = ["LivenessStatusSource.scala"],
+    deps = ["//wrappers/common/status"],
+)

@@ -213,7 +213,10 @@ class WatchCellSuite extends DatabricksTest {
   test("Test WatchValueCell") {
     // Test plan: Create a WatchValueCell and do a simple watch. Then try to setError and check
     // that an exception is thrown.
-    val sec = SequentialExecutionContext.createWithDedicatedPool("Context-WatchValueCell")
+    val sec = SequentialExecutionContext.createWithDedicatedPool(
+      name = "Context-WatchValueCell",
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+    )
     val cell = new WatchValueCell[String]
     val latch = new CountDownLatch(1)
     val callback = new ValueStreamCallback[String](sec) {
@@ -244,7 +247,10 @@ class WatchCellSuite extends DatabricksTest {
    * it along with a stream callback that can be used by a watcher for watching this cell.
    */
   private def createCell(name: String): (WatchCell[String], LoggingStreamCallback[String]) = {
-    val sec = SequentialExecutionContext.createWithDedicatedPool("Context-" + name)
+    val sec = SequentialExecutionContext.createWithDedicatedPool(
+      name = "Context-" + name,
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+    )
     val cell = new WatchCell[String]
     val callback = new LoggingStreamCallback[String](sec)
     (cell, callback)

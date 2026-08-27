@@ -51,7 +51,7 @@ private[client] object ClientSlicezTestHelper {
       watchAddress: URI = WATCH_ADDRESS,
       watchAddressUsedSince: Instant = Instant.EPOCH,
       lastSuccessfulHeartbeat: Instant = Instant.EPOCH,
-      clientClusterOpt: Option[URI] = None
+      clientClusterOpt: Option[String] = None
   ): ClientTargetSlicezData = ClientTargetSlicezData(
     target = target,
     sliceletsData = sliceletsData,
@@ -77,11 +77,12 @@ private[client] object ClientSlicezTestHelper {
     val resources: Resources = createResources(resourceNames: _*)
     val proposedAsn: ProposedAssignment = ProposedAssignment(
       predecessorOpt = None,
-      Algorithm.generateInitialAssignment(
+      sliceMap = Algorithm.generateInitialAssignment(
         TARGET,
         resources,
         KeyReplicationConfig.DEFAULT_SINGLE_REPLICA
-      )
+      ),
+      assignerServiceInfoOpt = None
     )
 
     val generation: Generation = TestSliceUtils.createLooseGeneration(42)

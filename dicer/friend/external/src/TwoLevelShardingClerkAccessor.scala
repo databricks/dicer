@@ -4,7 +4,8 @@ import com.databricks.dicer.external.{Clerk, SliceKey}
 
 /**
  * Provides friend access to Dicer two-level sharding [[Clerk]] routing. Usage of this API is
- * currently restricted. Please reach out to the maintainers with any questions.
+ * currently restricted, as this feature is currently under development. Please reach out to
+ * the maintainers with any questions.
  *
  * Two-level sharding uses two coordinated [[SliceKey]]s: a primary key that selects a set of
  * pods and a secondary key that selects a subset among them, providing affinity for requests

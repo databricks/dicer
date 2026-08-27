@@ -96,14 +96,15 @@ class NonParameterizedAlgorithmSuite extends AlgorithmSuiteBase {
         this.predecessor.assignment.generation.number.value + this.assignmentAge.toMillis
       val proposal: ProposedAssignment = ProposedAssignment(
         predecessorOpt = Some(this.predecessor.assignment),
-        Algorithm.generateAssignment(
+        sliceMap = Algorithm.generateAssignment(
           Instant.ofEpochMilli(generateInstantEpochMilli),
           target,
           targetConfig,
           resources,
           predecessorAssignment.sliceMap,
           loadMap
-        )
+        ),
+        assignerServiceInfoOpt = None
       )
       val assignment: Assignment = proposal.commit(
         isFrozen = false,
@@ -265,7 +266,11 @@ class NonParameterizedAlgorithmSuite extends AlgorithmSuiteBase {
       // overridden continuous generation age.
       val predecessor: Assignment = {
         val committedProposal: Assignment = commitProposal(
-          ProposedAssignment(predecessorOpt = None, this.predecessor)
+          ProposedAssignment(
+            predecessorOpt = None,
+            sliceMap = this.predecessor,
+            assignerServiceInfoOpt = None
+          )
         )
         // Converts the `sliceReplicaAgeOverride` parameter into a mutable slice map for easier
         // lookup. Slices appearing later in the map overlapped with former ones will override the
@@ -417,6 +422,7 @@ class NonParameterizedAlgorithmSuite extends AlgorithmSuiteBase {
     val predecessor: Assignment = createAssignment(
       generation = 42,
       consistencyMode = AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- 10) @@ 42 -> Seq("resource0"),
       (10 -- 11) @@ 42 -> Seq("resource1"), // unsplittable
       (11 -- 50) @@ 42 -> Seq("resource2"),
@@ -462,6 +468,7 @@ class NonParameterizedAlgorithmSuite extends AlgorithmSuiteBase {
     val predecessor: Assignment = createAssignment(
       generation,
       consistencyMode = AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- 10) @@ generation -> Seq("resource0"),
       (10 -- 11) @@ generation -> Seq("resource1"), // unsplittable
       (11 -- 50) @@ generation -> Seq("resource2"),
@@ -611,7 +618,13 @@ class NonParameterizedAlgorithmSuite extends AlgorithmSuiteBase {
     )
     for (testCase <- testCases) {
       val predecessor: Assignment =
-        commitProposal(ProposedAssignment(predecessorOpt = None, testCase.predecessor))
+        commitProposal(
+          ProposedAssignment(
+            predecessorOpt = None,
+            sliceMap = testCase.predecessor,
+            assignerServiceInfoOpt = None
+          )
+        )
       // Disable churn penalties, since they make reasoning about the load more challenging.
       val config: InternalTargetConfig =
         createConfigForLoadBalancing(ChurnConfig.ZERO_PENALTY, maxLoadHint = 1)
@@ -725,7 +738,8 @@ class NonParameterizedAlgorithmSuite extends AlgorithmSuiteBase {
       commitProposal(
         ProposedAssignment(
           predecessorOpt = None,
-          createProposal(proposedAsn.head, proposedAsn.tail: _*)
+          sliceMap = createProposal(proposedAsn.head, proposedAsn.tail: _*),
+          assignerServiceInfoOpt = None
         )
       )
     // Setting maxLoadHint to Int.MaxValue here to ensure that min desired load gets computed as

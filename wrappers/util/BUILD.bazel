@@ -10,6 +10,8 @@ scala_library(
         "src/DatabricksMain.scala",
     ],
     deps = [
+        "//wrappers/common/status",
+        "//wrappers/common/status/liveness:liveness-status",
         "//wrappers/conf:constants",
         "//wrappers/conf:core",
         "//wrappers/conf:current_project",

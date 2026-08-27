@@ -19,7 +19,7 @@ import com.databricks.dicer.assigner.algorithm.{Algorithm, LoadMap, Resources}
 import com.databricks.dicer.common.Assignment.DiffUnused
 import com.databricks.dicer.common.{Assignment, Generation, SliceAssignment}
 import com.databricks.dicer.common.TargetHelper.TargetOps
-import com.databricks.dicer.external.{Slice, Target}
+import com.databricks.dicer.external.{AppTarget, Slice, Target}
 import com.databricks.dicer.friend.Squid
 
 /** Metrics for each sharded target/sharded resource name. */
@@ -272,25 +272,39 @@ object TargetMetrics {
       "targetCluster",
       "targetName",
       "targetInstanceId",
+      "resourceHash",
       "reportedStatus",
       "computedStatus"
     )
     .help("Number of times the Slicelet-reported vs Assigner-computed health statuses differ")
     .register()
 
+  /**
+   * Increments the counter for each resource whose reported and computed status differ.
+   *
+   * @param allResources every Squid in the report; defines the `resourceHash` space, since a hash
+   *                     depends on the set it was computed over.
+   * @param mismatches   Squids whose reported and computed status names differ, as
+   *                     (resource, reportedStatusName, computedStatusName).
+   */
   def incrementHealthStatusComputedDiffersFromReported(
       target: Target,
-      reportedStatusName: String,
-      computedStatusName: String): Unit = {
-    healthStatusComputedDiffersFromReported
-      .labels(
-        target.getTargetClusterLabel,
-        target.getTargetNameLabel,
-        target.getTargetInstanceIdLabel,
-        reportedStatusName,
-        computedStatusName
-      )
-      .inc()
+      allResources: Iterable[Squid],
+      mismatches: Iterable[(Squid, String, String)]): Unit = {
+    val resourceHashes: Map[Squid, Int] = computeResourceHashes(allResources)
+    for (entry: (Squid, String, String) <- mismatches) {
+      val (resource, reportedStatusName, computedStatusName): (Squid, String, String) = entry
+      healthStatusComputedDiffersFromReported
+        .labels(
+          target.getTargetClusterLabel,
+          target.getTargetNameLabel,
+          target.getTargetInstanceIdLabel,
+          resourceHashes(resource).toString,
+          reportedStatusName,
+          computedStatusName
+        )
+        .inc()
+    }
   }
 
   /**
@@ -374,6 +388,53 @@ object TargetMetrics {
           .observe(delaySecs)
       case _ => ()
     }
+  }
+
+  // TODO(<internal bug>): Remove this metric once the AppTarget migration is complete and every target is
+  // canonicalized, at which point clients no longer report a separate alternative_target.
+  private val reportedAlternativeTargets: Counter = Counter
+    .build()
+    .name("dicer_assigner_watch_requests_alternative_targets_total")
+    .labelNames(
+      "targetCluster",
+      "targetName",
+      "targetInstanceId",
+      "alternativeTargetName",
+      "alternativeTargetInstanceId"
+    )
+    .help(
+      "Number of watch requests by the incoming target and the reported alternative_target " +
+      "identity, before canonicalization. The alternativeTargetName and " +
+      "alternativeTargetInstanceId labels are empty when the request did not report an " +
+      "alternative_target. During the use_alternative_target rollout every client of a target is " +
+      "expected to report the same alternative_target, so a target with more than one distinct " +
+      "reported alternative_target identity indicates its clients disagree on the canonical " +
+      "identity, and an empty identity indicates some clients are not reporting one at all. " +
+      "Recorded regardless of whether use_alternative_target is enabled for the target, so the " +
+      "divergence is observable while confirming clients before enabling the use of alternative " +
+      "targets."
+    )
+    .register()
+
+  /** Records a watch request for `target` that reported `alternativeTargetOpt`. */
+  def incrementReportedAlternativeTargets(
+      target: Target,
+      alternativeTargetOpt: Option[AppTarget]): Unit = {
+    val (alternativeTargetName, alternativeTargetInstanceId): (String, String) =
+      alternativeTargetOpt match {
+        case Some(alternativeTarget) =>
+          (alternativeTarget.getTargetNameLabel, alternativeTarget.getTargetInstanceIdLabel)
+        case None => ("", "")
+      }
+    reportedAlternativeTargets
+      .labels(
+        target.getTargetClusterLabel,
+        target.getTargetNameLabel,
+        target.getTargetInstanceIdLabel,
+        alternativeTargetName,
+        alternativeTargetInstanceId
+      )
+      .inc()
   }
 
   private val numActiveGenerators: Gauge = Gauge
@@ -1215,6 +1276,31 @@ object TargetMetrics {
       .set(cumulativeSliceCount)
   }
 
+  private val recentKeyCardinality: Gauge = Gauge
+    .build()
+    .name("dicer_assigner_recent_key_cardinality")
+    .labelNames(
+      "targetName",
+      "targetInstanceId",
+      "targetCluster"
+    )
+    .help(
+      "An estimate of the cardinality of keys used by the target's application in the last few " +
+      "minutes."
+    )
+    .register()
+
+  /** Set the gauge for the cardinality of recently-seen keys for the given target. */
+  def setRecentKeyCardinality(target: Target, estimate: Long): Unit = {
+    recentKeyCardinality
+      .labels(
+        target.getTargetNameLabel,
+        target.getTargetInstanceIdLabel,
+        target.getTargetClusterLabel
+      )
+      .set(estimate)
+  }
+
   /**
    * Clears gauge metrics tied to the lifecycle of the assignment generator for the given `target`
    * and the currently known `resourcesOpt` to prevent stale metrics from being retained after the
@@ -1365,6 +1451,11 @@ object TargetMetrics {
       targetInstanceIdLabel,
       KeyOfDeathTransitionType.POISONED_TO_STABLE.toString
     )
+    recentKeyCardinality.remove(
+      target.getTargetNameLabel,
+      target.getTargetInstanceIdLabel,
+      target.getTargetClusterLabel
+    )
   }
 
   private def decrementNumActiveGenerators(target: Target): Unit = {
@@ -1500,6 +1591,10 @@ object TargetMetrics {
     case object GENERATOR_INACTIVITY extends GeneratorShutdownReason {
       override def toString: String = "GENERATOR_INACTIVITY"
     }
+
+    case object TARGET_MIGRATION_REROUTE extends GeneratorShutdownReason {
+      override def toString: String = "TARGET_MIGRATION_REROUTE"
+    }
   }
 
   object forTest {
@@ -1516,6 +1611,7 @@ object TargetMetrics {
       healthStatusComputedDiffersFromReported.clear()
       numDistributedAssignments.clear()
       numUnusedAssignmentDiffs.clear()
+      reportedAlternativeTargets.clear()
       numAssignmentStoreIncarnationMismatch.clear()
       numAssignmentWrites.clear()
       generatorsRemovedTotal.clear()
@@ -1544,6 +1640,7 @@ object TargetMetrics {
       sliceReplicaCountHistogram.clear()
       keyOfDeathHeuristic.clear()
       estimatedResourceWorkloadSize.clear()
+      recentKeyCardinality.clear()
 
       // Clear churn ratio metrics (each has both gauge and counter components)
       removalChurnRatio.gauge.clear()
@@ -1552,7 +1649,6 @@ object TargetMetrics {
       additionChurnRatio.counter.clear()
       loadBalancingChurnRatio.gauge.clear()
       loadBalancingChurnRatio.counter.clear()
-
       // Note: CachingLatencyHistogram doesn't have a clear() method, so we skip it
     }
   }

@@ -49,22 +49,14 @@ trait ResourceWatcher {
 
   /**
    * Starts the watcher. Must be called before [[watch]].
+   *
+   * @param assignerProtoLogger logger used to output structured logs.
    */
-  def start(): Unit
+  def start(assignerProtoLogger: AssignerProtoLogger): Unit
 
   /**
    * Watches for updates to the resource set. Updates are delivered to `callback` as they become
    * available until some time after the returned handle is cancelled.
    */
   def watch(callback: ValueStreamCallback[VersionedResourceSet]): Cancellable
-
-  /**
-   * Watches the health of the underlying connection used to discover resources. The `callback`
-   * receives `true` when the connection is healthy and `false` when it is not.
-   *
-   * When the connection health is a dependency for the server running (e.g., the server cannot
-   * serve meaningful responses without an up-to-date resource set), the server's own health
-   * should be tied to the connection's health.
-   */
-  def watchConnectionHealth(callback: ValueStreamCallback[Boolean]): Cancellable
 }

@@ -1,0 +1,12 @@
+# proto-file: caching/util/test/proto/test_data.proto
+# proto-message: ExponentialBackoffTestDataP
+
+multiplier: 2.0
+jitter_ratio: 0.4
+
+min_retry_delay_millis: 2000
+max_retry_delay_millis: 60000
+
+initial_doubling_steps_to_verify: 2
+iterations_at_max_interval: 5
+max_elapsed_none_iterations: 100

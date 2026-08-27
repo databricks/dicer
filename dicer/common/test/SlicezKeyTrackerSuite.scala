@@ -1,6 +1,7 @@
 package com.databricks.dicer.common
 import scala.concurrent.duration.Duration
 
+import com.databricks.caching.util.AlertOwnerTeam
 import com.databricks.caching.util.TestUtils
 import com.databricks.caching.util.SequentialExecutionContext
 import com.databricks.dicer.common.SlicezKeyTracker.SlicezKeyTrackable
@@ -13,7 +14,10 @@ import com.databricks.dicer.external.{SliceKey, Target}
 class SlicezKeyTrackerSuite extends DatabricksTest {
 
   /** The sequential execution context the `slicezKeyTracker` runs on. */
-  private val sec = SequentialExecutionContext.createWithDedicatedPool("SlicezKeyTrackerSuite")
+  private val sec = SequentialExecutionContext.createWithDedicatedPool(
+    name = "SlicezKeyTrackerSuite",
+    alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+  )
 
   private val slicezKeyTracker = new SlicezKeyTracker("Test", sec)
 
@@ -224,8 +228,16 @@ class SlicezKeyTrackerSuite extends DatabricksTest {
     // identifier, the trackers do not affect each other. Verify this by tracking different targets
     // and keys in different trackers, and check that the trackers do not contain each other's
     // target-key pairs.
-    val secFoo = SequentialExecutionContext.createWithDedicatedPool("Foo")
-    val secBar = SequentialExecutionContext.createWithDedicatedPool("Bar")
+    val secFoo =
+      SequentialExecutionContext.createWithDedicatedPool(
+        name = "Foo",
+        alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+      )
+    val secBar =
+      SequentialExecutionContext.createWithDedicatedPool(
+        name = "Bar",
+        alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+      )
     val slicezKeyTrackerFoo = new SlicezKeyTracker("foo", secFoo)
     val slicezKeyTrackerBar = new SlicezKeyTracker("bar", secBar)
 

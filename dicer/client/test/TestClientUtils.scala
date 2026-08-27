@@ -3,16 +3,17 @@ package com.databricks.dicer.client
 import java.util.UUID
 import java.io.File
 import io.prometheus.client.CollectorRegistry
-import com.databricks.backend.common.util.Project
+
 import com.typesafe.config.ConfigFactory
 import com.databricks.caching.util.AssertMacros.iassert
 import com.databricks.caching.util.{AssertionWaiter, MetricUtils, NonReentrantLock}
 import com.databricks.caching.util.Lock.withLock
-import com.databricks.conf.trusted.ProjectConf
+import com.databricks.conf.trusted.ProjectConfByName
 import com.databricks.conf.trusted.RPCPortConf
 import com.databricks.conf.Config
 import com.databricks.conf.Configs
 import com.databricks.conf.RichConfig
+import com.databricks.dicer.client.featurerollouts.DicerClientFeatureRolloutFlag
 import com.databricks.dicer.common.{Assignment, Generation, InternalClientConf}
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.external.{
@@ -99,13 +100,20 @@ object TestClientUtils {
   /**
    * Creates an external [[SliceletConf]] configuration. See [[createSliceletConfig()]] for
    * details.
+   *
+   * @param featureRolloutFlagOpt When defined, the returned conf's
+   *                              [[DicerClientConf.isFeatureRolloutFlagEnabled]] delegates to
+   *                              `featureRolloutFlagOpt.get.isEnabled` instead of consulting the
+   *                              process-wide singleton, letting tests deterministically inject
+   *                              flag values.
    */
   def createTestSliceletConf(
       assignerPort: Int,
       sliceletHost: String,
       clientTlsFilePathsOpt: Option[TlsFilePaths],
       serverTlsFilePathsOpt: Option[TlsFilePaths],
-      watchFromDataPlane: Boolean): SliceletConf = {
+      watchFromDataPlane: Boolean,
+      featureRolloutFlagOpt: Option[DicerClientFeatureRolloutFlag] = None): SliceletConf = {
     val config: Config =
       createSliceletConfig(
         assignerPort,
@@ -114,7 +122,7 @@ object TestClientUtils {
         serverTlsFilePathsOpt,
         watchFromDataPlane
       )
-    new ProjectConf(Project.TestProject, config) with SliceletConf with RPCPortConf {
+    new ProjectConfByName("test", config) with SliceletConf with RPCPortConf {
       // See createTestClerkConfInternal on why this value is set for dicerSslArgs.
       override def dicerTlsOptions: Option[TLSOptions] = None
 
@@ -126,6 +134,13 @@ object TestClientUtils {
 
       override val branch: String =
         "dicer_customer_slicelet_2024-09-04_14.57.01Z_master_164f18b3_1957847387"
+
+      override private[dicer] def isFeatureRolloutFlagEnabled(
+          flagName: String,
+          target: Target): Boolean = featureRolloutFlagOpt match {
+        case Some(flag: DicerClientFeatureRolloutFlag) => flag.isEnabled(flagName, target)
+        case None => super.isFeatureRolloutFlagEnabled(flagName, target)
+      }
     }
   }
 
@@ -134,6 +149,8 @@ object TestClientUtils {
    * named by `target`. The Assigner is listening on `assignerPort`.
    *
    * The Slicelet must be started using [[Slicelet.start()]] before it is used.
+   *
+   * @param featureRolloutFlagOpt See [[createTestSliceletConf]].
    */
   def createSlicelet(
       assignerPort: Int,
@@ -141,14 +158,16 @@ object TestClientUtils {
       sliceletHost: String,
       clientTlsFilePathsOpt: Option[TlsFilePaths],
       serverTlsFilePathsOpt: Option[TlsFilePaths],
-      watchFromDataPlane: Boolean): Slicelet = {
+      watchFromDataPlane: Boolean,
+      featureRolloutFlagOpt: Option[DicerClientFeatureRolloutFlag] = None): Slicelet = {
     val externalConf: SliceletConf =
       createTestSliceletConf(
         assignerPort,
         sliceletHost,
         clientTlsFilePathsOpt,
         serverTlsFilePathsOpt,
-        watchFromDataPlane
+        watchFromDataPlane,
+        featureRolloutFlagOpt
       )
     Slicelet(externalConf, target)
   }
@@ -194,11 +213,19 @@ object TestClientUtils {
     )
   }
 
-  /** Creates an external [[ClerkConf]] configuration. See [[createClerkConfig()]] for details. */
+  /**
+   * Creates an external [[ClerkConf]] configuration. See [[createClerkConfig()]] for details.
+   *
+   * @param featureRolloutFlagOpt See [[createTestClerkConfInternal]].
+   */
   def createTestClerkConf(
       sliceletPort: Int,
-      clientTlsFilePathsOpt: Option[TlsFilePaths]): ClerkConf = {
-    createTestClerkConfInternal(createClerkConfig(sliceletPort, clientTlsFilePathsOpt))
+      clientTlsFilePathsOpt: Option[TlsFilePaths],
+      featureRolloutFlagOpt: Option[DicerClientFeatureRolloutFlag] = None): ClerkConf = {
+    createTestClerkConfInternal(
+      createClerkConfig(sliceletPort, clientTlsFilePathsOpt),
+      featureRolloutFlagOpt
+    )
   }
 
   /**
@@ -208,7 +235,7 @@ object TestClientUtils {
    * @param sampleFraction The sample fraction to set.
    */
   def createTestProtoLoggerConf(sampleFraction: Double): TestableDicerClientProtoLoggerConf = {
-    val conf = new ProjectConf(Project.TestProject, ConfigFactory.empty())
+    val conf = new ProjectConfByName("test", ConfigFactory.empty())
     with TestableDicerClientProtoLoggerConf
     conf.setLoggingSampleFraction(sampleFraction)
     conf
@@ -228,12 +255,19 @@ object TestClientUtils {
    * @param assignerPort The port of the Assigner to connect to.
    * @param clientTlsFilePathsOpt Optional TLS file paths for the client.
    * @param branchOpt Optional branch name for version metrics. If None, uses a default test branch.
+   * @param featureRolloutFlagOpt See [[createTestClerkConfInternal]].
    */
   def createTestDirectClerkConf(
       assignerPort: Int,
       clientTlsFilePathsOpt: Option[TlsFilePaths],
-      branchOpt: Option[String] = None): ClerkConf = {
-    createTestDirectClerkConfInternal(assignerPort, clientTlsFilePathsOpt, branchOpt)
+      branchOpt: Option[String] = None,
+      featureRolloutFlagOpt: Option[DicerClientFeatureRolloutFlag] = None): ClerkConf = {
+    createTestDirectClerkConfInternal(
+      assignerPort,
+      clientTlsFilePathsOpt,
+      branchOpt,
+      featureRolloutFlagOpt
+    )
   }
 
   /** Default branch name for test clerks. */
@@ -296,15 +330,32 @@ object TestClientUtils {
     )
   }
 
-  /** Creates an external [[ClerkConf]] using the given raw `config`. */
-  private def createTestClerkConfInternal(config: Config): ClerkConf = {
-    new ProjectConf(Project.TestProject, config) with ClerkConf with RPCPortConf {
+  /**
+   * Creates an external [[ClerkConf]] using the given raw `config`.
+   *
+   * @param featureRolloutFlagOpt When defined, the returned conf's
+   *                              [[DicerClientConf.isFeatureRolloutFlagEnabled]] delegates to
+   *                              `featureRolloutFlagOpt.get.isEnabled` instead of consulting the
+   *                              process-wide singleton, letting tests deterministically inject
+   *                              flag values.
+   */
+  private def createTestClerkConfInternal(
+      config: Config,
+      featureRolloutFlagOpt: Option[DicerClientFeatureRolloutFlag]): ClerkConf = {
+    new ProjectConfByName("test", config) with ClerkConf with RPCPortConf {
       // Provide some definition of `dicerSslArgs` since it is required by DicerClientConf.
       // Can be any value since getConfig defines the relevant parts of SslArguments (e.g.,
       // keyStore) that allows the relevant dicerClientSslArgs and dicerServerSslArgs to be created.
       override def dicerTlsOptions: Option[TLSOptions] = None
 
       override val branch: String = DEFAULT_TEST_CLERK_BRANCH
+
+      override private[dicer] def isFeatureRolloutFlagEnabled(
+          flagName: String,
+          target: Target): Boolean = featureRolloutFlagOpt match {
+        case Some(flag: DicerClientFeatureRolloutFlag) => flag.isEnabled(flagName, target)
+        case None => super.isFeatureRolloutFlagEnabled(flagName, target)
+      }
     }
   }
 
@@ -315,18 +366,21 @@ object TestClientUtils {
    * production code. We avoid modifying the production code because this solution is temporary,
    * intended to support the internal-system use case until a Rust Slicelet with full functionality
    * becomes available.
+   *
+   * @param featureRolloutFlagOpt See [[createTestClerkConfInternal]].
    */
   private def createTestDirectClerkConfInternal(
       assignerPort: Int,
       clientTlsFilePathsOpt: Option[TlsFilePaths],
-      branchOpt: Option[String]): ClerkConf = {
+      branchOpt: Option[String],
+      featureRolloutFlagOpt: Option[DicerClientFeatureRolloutFlag]): ClerkConf = {
     val sslConfig = getSslConfig(
       clientTlsFilePathsOpt,
       serverTlsFilePathsOpt = None
     )
     val config: Config = sslConfig.merge(createAllowMultipleClientsConfig())
 
-    new ProjectConf(Project.TestProject, config) with ClerkConf with RPCPortConf {
+    new ProjectConfByName("test", config) with ClerkConf with RPCPortConf {
       // Provide some definition of `dicerSslArgs` since it is required by DicerClientConf.
       // Can be any value since getConfig defines the relevant parts of SslArguments (e.g.,
       // keyStore) that allows the relevant dicerClientSslArgs and dicerServerSslArgs to be created.
@@ -336,6 +390,13 @@ object TestClientUtils {
 
       // Overrides the default slicelet port to be the Assigner port.
       override val dicerSliceletRpcPort: Int = assignerPort
+
+      override private[dicer] def isFeatureRolloutFlagEnabled(
+          flagName: String,
+          target: Target): Boolean = featureRolloutFlagOpt match {
+        case Some(flag: DicerClientFeatureRolloutFlag) => flag.isEnabled(flagName, target)
+        case None => super.isFeatureRolloutFlagEnabled(flagName, target)
+      }
     }
   }
 

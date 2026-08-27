@@ -1,0 +1,85 @@
+# proto-file: dicer/common/test/proto/test_data.proto
+# proto-message: AssignerServiceInfoTestDataP
+
+round_trip_proto: {
+  name: "dicer-assigner"
+  instance_id: "mt-region2"
+}
+
+constructor_validation_test_cases: [
+  {
+    name: ""
+    instance_id: "mt-region2"
+    expected_error: "Name must match RFC 1123 regex"
+  },
+  {
+    name: "dicer-assigner"
+    instance_id: ""
+    expected_error: "Instance ID must match RFC 1123 regex"
+  },
+  {
+    name: "-starts-with-dash"
+    instance_id: "mt-region2"
+    expected_error: "Name must match RFC 1123 regex"
+  },
+  {
+    name: "dicer-assigner"
+    instance_id: "-starts-with-dash"
+    expected_error: "Instance ID must match RFC 1123 regex"
+  },
+  {
+    name: "-starts-with-dash"
+    instance_id: "-starts-with-dash"
+    expected_error: "Name must match RFC 1123 regex"
+  },
+  {
+    name: "contains-Uppercase-letter"
+    instance_id: "mt-region2"
+    expected_error: "Name must match RFC 1123 regex"
+  },
+  {
+    name: "dicer-assigner"
+    instance_id: "contains-Uppercase-letter"
+    expected_error: "Instance ID must match RFC 1123 regex"
+  },
+  {
+    name: "name-with-64-characters-5678901234567890123456789012345678901234"
+    instance_id: "mt-region2"
+    expected_error: "Name must match RFC 1123 regex"
+  },
+  {
+    name: "dicer-assigner"
+    instance_id: "instance-id-with-64-characters-567890123456789012345678901234567"
+    expected_error: "Instance ID must match RFC 1123 regex"
+  }
+]
+
+valid_info_test_cases: [
+  {
+    proto: {
+      name: "dicer-assigner"
+      instance_id: "mt-region2"
+    }
+    expected_name: "dicer-assigner"
+    expected_instance_id: "mt-region2"
+    expected_to_string: "AssignerServiceInfo(name=dicer-assigner, instanceId=mt-region2)"
+  },
+  {
+    proto: {
+      name: "name-with-63-characters-567890123456789012345678901234567890123"
+      instance_id: "mt-region2"
+    }
+    expected_name: "name-with-63-characters-567890123456789012345678901234567890123"
+    expected_instance_id: "mt-region2"
+    expected_to_string: "AssignerServiceInfo(name=name-with-63-characters-567890123456789012345678901234567890123, instanceId=mt-region2)"
+  },
+  {
+    proto: {
+      name: "dicer-assigner"
+      instance_id: "instance-id-with-63-characters-56789012345678901234567890123456"
+    }
+    expected_name: "dicer-assigner"
+    expected_instance_id: "instance-id-with-63-characters-56789012345678901234567890123456"
+    expected_to_string: "AssignerServiceInfo(name=dicer-assigner, instanceId=instance-id-with-63-characters-56789012345678901234567890123456)"
+  }
+]

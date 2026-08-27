@@ -2,9 +2,8 @@ package com.databricks.dicer.external
 
 import java.net.URI
 
-import com.databricks.backend.common.util.Project
 import com.databricks.caching.util.WhereAmITestUtils.withLocationConfSingleton
-import com.databricks.conf.trusted.{LocationConf, LocationConfTestUtils, ProjectConf}
+import com.databricks.conf.trusted.{LocationConf, LocationConfTestUtils, ProjectConfByName}
 import com.databricks.dicer.client.TestClientUtils
 import com.databricks.rpc.tls.TLSOptions
 
@@ -32,7 +31,7 @@ private class ScalaClerkSuite extends ScalaClerkSuiteBase {
             sliceletPort = slicelet.impl.forTest.sliceletPort,
             clientTlsFilePathsOpt = None
           )
-          val clerkConf: ClerkConf = new ProjectConf(Project.TestProject, rawConf) with ClerkConf {
+          val clerkConf: ClerkConf = new ProjectConfByName("test", rawConf) with ClerkConf {
             override def dicerTlsOptions: Option[TLSOptions] = None
             override val branch: String = clientBranch
           }

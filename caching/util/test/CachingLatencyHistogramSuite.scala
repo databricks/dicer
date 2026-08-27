@@ -13,7 +13,10 @@ import com.databricks.api.base.DatabricksServiceException
 import com.databricks.ErrorCode
 
 class CachingLatencyHistogramSuite extends DatabricksTest {
-  private val sec = SequentialExecutionContext.createWithDedicatedPool("CachingUsageLoggingSuite")
+  private val sec = SequentialExecutionContext.createWithDedicatedPool(
+    name = "CachingUsageLoggingSuite",
+    alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+  )
   private val clock = new FakeTypedClock()
 
   // Name for the histogram metric.

@@ -18,3 +18,7 @@ class ProjectConf(val project: Project.Project, val rawConfig: Config)
   def this(projectName: String, rawConfig: Config) =
     this(Project.fromName(projectName), rawConfig)
 }
+
+/** String-named entry point for [[ProjectConf]]. */
+class ProjectConfByName(projectName: String, rawConfig: Config)
+    extends ProjectConf(projectName, rawConfig)

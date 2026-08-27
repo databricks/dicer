@@ -32,6 +32,10 @@ full_diff_round_trip_test_cases: [
         resources: ["Pod3"]
       }
     ]
+    assigner_service_info {
+      name: "dicer-assigner"
+      instance_id: "test-instance"
+    }
   },
   # Multiple replicas for each slice, with SubsliceAnnotations.
   {
@@ -70,6 +74,10 @@ full_diff_round_trip_test_cases: [
         ]
       }
     ]
+    assigner_service_info {
+      name: "dicer-assigner"
+      instance_id: "test-instance"
+    }
   },
   # Large number (100) of replicas for each Slice, with SubsliceAnnotations.
   {
@@ -153,6 +161,10 @@ full_diff_round_trip_test_cases: [
         ]
       }
     ]
+    assigner_service_info {
+      name: "dicer-assigner"
+      instance_id: "test-instance"
+    }
   }
 ]
 
@@ -176,6 +188,10 @@ partial_diff_round_trip_test_assignments: [
         resources: ["Pod2", "Pod3"]
       }
     ]
+    assigner_service_info {
+      name: "dicer-assigner"
+      instance_id: "test-instance"
+    }
   },
   {
     generation: { incarnation: 2 number: 20 }
@@ -191,7 +207,14 @@ partial_diff_round_trip_test_assignments: [
         resources: ["Pod2", "Pod3"]
       }
     ]
+    assigner_service_info {
+      name: "dicer-assigner"
+      instance_id: "test-instance"
+    }
   },
+  # Intentionally omit assigner_service_info on gen-30 and gen-40 (gen-10/20 have it). The
+  # partial diff round trip tests need to assert that the diff assignment (not the known
+  # assignment) preserves assigner service info.
   {
     generation: { incarnation: 2 number: 30 }
     slice_assignments: [
@@ -567,18 +590,18 @@ is_assigned_key_test_cases: [
       { slice_key: "" resource: "Pod3" expected_result: true },
       { slice_key: "" resource: "Pod4" expected_result: false },
       { slice_key: "" resource: "Pod5" expected_result: false },
-      { slice_key: "" resource: "Pod2" resource_salt: "random salt" expected_result: true },
-      { slice_key: "" resource: "Pod3" resource_salt: "random salt" expected_result: true },
+      { slice_key: "" resource: "Pod2" resource_creation_time_offset: 1 expected_result: true },
+      { slice_key: "" resource: "Pod3" resource_creation_time_offset: 1 expected_result: true },
       { slice_key: "Dori" resource: "Pod2" expected_result: true },
-      { slice_key: "Dori" resource: "Pod3" resource_salt: "random salt" expected_result: false },
+      { slice_key: "Dori" resource: "Pod3" resource_creation_time_offset: 1 expected_result: false },
       { slice_key: "Fili" resource: "Pod1" expected_result: true },
       { slice_key: "Fili" resource: "Pod3" expected_result: false },
       { slice_key: "Kili" resource: "Pod2" expected_result: true },
-      { slice_key: "Kili" resource: "Pod3" resource_salt: "random salt" expected_result: false },
+      { slice_key: "Kili" resource: "Pod3" resource_creation_time_offset: 1 expected_result: false },
       { slice_key: "Nori" resource: "Pod2" expected_result: true },
       { slice_key: "Nori" resource: "Pod3" expected_result: true },
-      { slice_key: "Nori" resource: "Pod3" resource_salt: "random salt" expected_result: true },
-      { slice_key: "Nori" resource: "Pod1" resource_salt: "random salt" expected_result: true }
+      { slice_key: "Nori" resource: "Pod3" resource_creation_time_offset: 1 expected_result: true },
+      { slice_key: "Nori" resource: "Pod1" resource_creation_time_offset: 1 expected_result: true }
     ]
   },
   {
@@ -601,11 +624,11 @@ is_assigned_key_test_cases: [
       { slice_key: "" resource: "Pod2" expected_result: false },
       { slice_key: "" resource: "Pod3" expected_result: true },
       { slice_key: "" resource: "Pod4" expected_result: false },
-      { slice_key: "" resource: "Pod2" resource_salt: "random salt" expected_result: false },
-      { slice_key: "" resource: "Pod1" resource_salt: "random salt" expected_result: true },
+      { slice_key: "" resource: "Pod2" resource_creation_time_offset: 1 expected_result: false },
+      { slice_key: "" resource: "Pod1" resource_creation_time_offset: 1 expected_result: true },
       { slice_key: "Dori" resource: "Pod2" expected_result: false },
       { slice_key: "Dori" resource: "Pod0" expected_result: true },
-      { slice_key: "Dori" resource: "Pod0" resource_salt: "random salt" expected_result: true },
+      { slice_key: "Dori" resource: "Pod0" resource_creation_time_offset: 1 expected_result: true },
       { slice_key: "Nori" resource: "Pod0" expected_result: true },
       { slice_key: "Nori" resource: "Pod1" expected_result: false }
     ]
@@ -638,19 +661,19 @@ is_assigned_key_test_cases: [
       { slice_key: "" resource: "Pod2" expected_result: true },
       { slice_key: "" resource: "Pod3" expected_result: true },
       { slice_key: "" resource: "Pod4" expected_result: false },
-      { slice_key: "" resource: "Pod2" resource_salt: "random salt" expected_result: false },
-      { slice_key: "" resource: "Pod3" resource_salt: "random salt" expected_result: false },
+      { slice_key: "" resource: "Pod2" resource_creation_time_offset: 1 expected_result: false },
+      { slice_key: "" resource: "Pod3" resource_creation_time_offset: 1 expected_result: false },
       { slice_key: "Dori" resource: "Pod1" expected_result: true },
       { slice_key: "Dori" resource: "Pod2" expected_result: false },
-      { slice_key: "Dori" resource: "Pod1" resource_salt: "random salt" expected_result: false },
+      { slice_key: "Dori" resource: "Pod1" resource_creation_time_offset: 1 expected_result: false },
       { slice_key: "Fili" resource: "Pod1" expected_result: true },
       { slice_key: "Fili" resource: "Pod3" expected_result: false },
       { slice_key: "Kili" resource: "Pod2" expected_result: true },
-      { slice_key: "Kili" resource: "Pod3" resource_salt: "random salt" expected_result: false },
+      { slice_key: "Kili" resource: "Pod3" resource_creation_time_offset: 1 expected_result: false },
       { slice_key: "Nori" resource: "Pod2" expected_result: true },
       { slice_key: "Nori" resource: "Pod3" expected_result: true },
-      { slice_key: "Nori" resource: "Pod3" resource_salt: "random salt" expected_result: false },
-      { slice_key: "Nori" resource: "Pod1" resource_salt: "random salt" expected_result: false }
+      { slice_key: "Nori" resource: "Pod3" resource_creation_time_offset: 1 expected_result: false },
+      { slice_key: "Nori" resource: "Pod1" resource_creation_time_offset: 1 expected_result: false }
     ]
   }
 ]
@@ -717,7 +740,7 @@ get_slice_set_for_resource_test_cases: [
       },
       {
         resource: "Pod0"
-        resource_salt: "random salt"
+        resource_creation_time_offset: 1
         expected_slices: [
           { low_inclusive: "" high_exclusive: "Fili" },
           { low_inclusive: "Nori" }
@@ -789,14 +812,14 @@ get_slice_set_for_resource_test_cases: [
       },
       {
         resource: "Pod1"
-        resource_salt: "random salt"
+        resource_creation_time_offset: 1
         expected_slices: [
           { low_inclusive: "" high_exclusive: "Fili" }
         ]
       },
       {
         resource: "Pod4"
-        resource_salt: "random salt"
+        resource_creation_time_offset: 1
         expected_slices: [
           { low_inclusive: "Nori" }
         ]
@@ -870,12 +893,12 @@ get_slice_set_for_resource_test_cases: [
       },
       {
         resource: "Pod1"
-        resource_salt: "random salt"
+        resource_creation_time_offset: 1
         # No expected slices.
       },
       {
         resource: "Pod4"
-        resource_salt: "random salt"
+        resource_creation_time_offset: 1
         # No expected slices.
       }
     ]

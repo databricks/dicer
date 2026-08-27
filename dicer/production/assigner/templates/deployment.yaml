@@ -25,6 +25,7 @@ spec:
         # Forces pod restart on helm upgrade by setting unique timestamp.
         deploymentTime: "{{ now | unixEpoch }}"
     spec:
+      serviceAccountName: {{ default .Values.service.name .Values.serviceAccount.name }}
       {{- if .Values.tls.enabled }}
       volumes:
       - name: tls-certs
@@ -61,6 +62,12 @@ spec:
             configMapKeyRef:
               name: {{ .Values.service.name }}-config
               key: config.json
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: APP_NAME
+          value: {{ .Values.labels.app | quote }}
         ports:
         - containerPort: {{ .Values.service.port }}
           name: grpc

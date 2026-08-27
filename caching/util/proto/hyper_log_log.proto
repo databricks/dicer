@@ -1,0 +1,22 @@
+syntax = "proto2";
+
+package databricks.caching.util;
+
+import "scalapb.proto";
+
+option java_package = "com.databricks.caching.util.proto";
+option java_generate_equals_and_hash = true;
+
+option java_multiple_files = true;
+option (scalapb.options) = {
+  package_name: "com.databricks.caching.util.proto",
+  flat_package: true,
+};
+
+// HyperLogLog is used for efficient estimation of cardinality.
+//
+// See com.databricks.caching.util.HyperLogLog.
+message HyperLogLogP {
+  // The HyperLogLog's registers, one byte per register.
+  optional bytes inner = 1;
+}

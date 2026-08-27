@@ -16,13 +16,14 @@ import com.databricks.api.proto.dicer.common.{ClientRequestP, ClientResponseP}
 import com.databricks.rpc.RPCContext
 import io.grpc.Deadline
 
+import com.databricks.caching.util.AlertOwnerTeam
 import com.databricks.caching.util.{
   GenericRpcServiceBuilder,
+  KubernetesClusterUri,
   PrefixLogger,
   SequentialExecutionContext,
   StateMachineDriver,
-  StatusUtils,
-  WhereAmIHelper
+  StatusUtils
 }
 import com.databricks.common.instrumentation.SCaffeineCacheInfoExporter
 import com.databricks.context.Ctx
@@ -80,12 +81,6 @@ class SliceLookup private (
 
   private val logger = PrefixLogger.create(this.getClass, subscriberDebugName)
 
-  /**
-   * The Kubernetes cluster URI of the pod running this client, captured once at construction time.
-   * Used to determine cross-cluster/region indicators on the slicez page.
-   */
-  private val clientClusterOpt: Option[URI] = WhereAmIHelper.getClusterUri
-
   /** The cell used for communicating a new `Assignment` to various parts of the Clerk/Slicelet. */
   private val cell = new AssignmentValueCell
 
@@ -100,9 +95,7 @@ class SliceLookup private (
     subscriberDebugName = subscriberDebugName,
     defaultWatchAddress = sliceLookupConfig.watchAddress,
     tlsOptionsOpt = sliceLookupConfig.tlsOptionsOpt,
-    watchFromDataPlane = sliceLookupConfig.watchFromDataPlane,
-    target = sliceLookupConfig.target,
-    clientIdOpt = sliceLookupConfig.clientIdOpt
+    watchFromDataPlane = sliceLookupConfig.watchFromDataPlane
   )
 
   /**
@@ -161,7 +154,8 @@ class SliceLookup private (
     new StateMachineDriver[Event, DriverAction, AssignmentSyncStateMachine](
       sec,
       new AssignmentSyncStateMachine(config, new Random),
-      performAction
+      performAction,
+      AlertOwnerTeam.CACHING_TEAM_NAME
     )
 
   /** The handler that receives the watch calls from remote clients. */
@@ -173,7 +167,10 @@ class SliceLookup private (
       // defined in `WatchServerConf`.
       getSuggestedClerkRpcTimeoutFn = () => sliceLookupConfig.watchRpcTimeout,
       suggestedSliceletRpcTimeout = sliceLookupConfig.watchRpcTimeout,
-      getHandlerLocation
+      getHandlerLocation,
+      // Disable bounded syncing during assignment recovery, as it is only intended for the Assigner
+      // for now.
+      maxSubscribersPromptedForAssignmentRecovery = 0
     )
 
   /** Cell consumer exposing the latest assignments.  */
@@ -228,6 +225,12 @@ class SliceLookup private (
         // configured watch address.
         val watchAddress: URI = lastWatchAddress.getOrElse(sliceLookupConfig.watchAddress)
 
+        // Slicez holds the client cluster URI as a `String` for its cross-cluster/region indicator.
+        val slicezClientClusterOpt: Option[String] =
+          sliceLookupConfig.clientClusterUriOpt.map(
+            (cluster: KubernetesClusterUri) => cluster.uri
+          )
+
         // Get the assignment-related statistics information.
         val subscriberData: SubscriberData = subscriberDataSupplier()
         subscriberData match {
@@ -275,7 +278,7 @@ class SliceLookup private (
               watchAddress,
               lastWatchAddressUsedSince,
               lastSuccessfulHeartbeat,
-              clientClusterOpt = this.clientClusterOpt
+              clientClusterOpt = slicezClientClusterOpt
             )
           case ClerkData =>
             // No assignment stats is maintained in Clerks, so all assignment-related statistics
@@ -294,7 +297,7 @@ class SliceLookup private (
               watchAddress,
               lastWatchAddressUsedSince,
               lastSuccessfulHeartbeat,
-              clientClusterOpt = this.clientClusterOpt
+              clientClusterOpt = slicezClientClusterOpt
             )
         }
     }(sec)
@@ -342,59 +345,71 @@ class SliceLookup private (
     // the client that initiated the watch.
     withBackgroundActivity(onlyWarnOnAttrTagViolation = true, addUserContextTags = false) {
       _: Ctx =>
-        val subscriberData: SubscriberData = subscriberDataSupplier()
-        val request: ClientRequest = ClientRequest(
-          sliceLookupConfig.target,
-          syncState,
-          subscriberDebugName,
-          watchRpcTimeout,
-          subscriberData,
-          supportsSerializedAssignment = true,
-          redirectTokenOpt = redirect.redirectTokenOpt
-        )
-        val stub: AssignmentServiceStub = redirect.addressOpt match {
-          case Some(address: URI) =>
-            if (!lastWatchAddress.contains(address)) {
-              lastWatchAddress = Some(address)
-              lastWatchAddressUsedSince = sec.getClock.instant()
-            }
-            watchStubsCache.get(
-              address,
-              _ => watchStubManager.createWatchStub(Some(address))
-            )
-          case None =>
-            if (lastWatchAddress.isDefined) {
-              lastWatchAddress = None
-              lastWatchAddressUsedSince = sec.getClock.instant()
-            }
-            // Creates a stub to the default watch address (sliceLookupConfig.watchAddress) that
-            // was provided when the WatchStubManager was instantiated.
-            watchStubManager.createWatchStub(redirectAddressOpt = None)
-        }
-        val responseFuture: Future[ClientResponse] = performWatchCall(stub, request)
-        // Handle the read success/failure and call the corresponding syncer method.
-        responseFuture.onComplete {
-          case Success(response) =>
-            sec.assertCurrentContext()
-            lastSuccessfulHeartbeat = sec.getClock.instant()
-            ClientMetrics.recordWatchRequest(
-              sliceLookupConfig.target,
-              sliceLookupConfig.clientType,
-              statusCode = Code.OK
-            )
-            driver.handleEvent(Event.ReadSuccess(redirect.addressOpt, opId, response))
+          val subscriberData: SubscriberData = subscriberDataSupplier()
+          val request: ClientRequest = ClientRequest(
+            sliceLookupConfig.target,
+            syncState,
+            subscriberDebugName,
+            watchRpcTimeout,
+            subscriberData,
+            supportsSerializedAssignment = true,
+            redirectTokenOpt = redirect.redirectTokenOpt,
+            alternativeTargetOpt = sliceLookupConfig.alternativeTargetOpt,
+            clusterUriOpt = sliceLookupConfig.clientClusterUriOpt,
+            regionUriOpt = sliceLookupConfig.clientRegionUriOpt
+          )
+          val stub: AssignmentServiceStub = redirect.addressOpt match {
+            case Some(address: URI) =>
+              if (!lastWatchAddress.contains(address)) {
+                lastWatchAddress = Some(address)
+                lastWatchAddressUsedSince = sec.getClock.instant()
+              }
+              watchStubsCache.get(
+                address,
+                _ =>
+                  watchStubManager.createWatchStub(
+                    redirectAddressOpt = Some(address),
+                    target = sliceLookupConfig.target,
+                    clientIdOpt = sliceLookupConfig.clientIdOpt
+                  )
+              )
+            case None =>
+              if (lastWatchAddress.isDefined) {
+                lastWatchAddress = None
+                lastWatchAddressUsedSince = sec.getClock.instant()
+              }
+              // Creates a stub to the default watch address (sliceLookupConfig.watchAddress) that
+              // was provided when the WatchStubManager was instantiated.
+              watchStubManager.createWatchStub(
+                redirectAddressOpt = None,
+                target = sliceLookupConfig.target,
+                clientIdOpt = sliceLookupConfig.clientIdOpt
+              )
+          }
+          val responseFuture: Future[ClientResponse] = performWatchCall(stub, request)
+          // Handle the read success/failure and call the corresponding syncer method.
+          responseFuture.onComplete {
+            case Success(response) =>
+              sec.assertCurrentContext()
+              lastSuccessfulHeartbeat = sec.getClock.instant()
+              ClientMetrics.recordWatchRequest(
+                sliceLookupConfig.target,
+                sliceLookupConfig.clientType,
+                statusCode = Code.OK
+              )
+              driver.handleEvent(Event.ReadSuccess(redirect.addressOpt, opId, response))
 
-          case Failure(exception) =>
-            sec.assertCurrentContext()
-            val status: Status = StatusUtils.convertExceptionToStatus(exception)
-            ClientMetrics.recordWatchRequest(
-              sliceLookupConfig.target,
-              sliceLookupConfig.clientType,
-              statusCode = status.getCode
-            )
-            logger.info(s"Failed watch request, detail: $status", every = 30.seconds)
-            driver.handleEvent(Event.ReadFailure(opId, status))
-        }(sec)
+            case Failure(exception) =>
+              sec.assertCurrentContext()
+              val status: Status = StatusUtils.convertExceptionToStatus(exception)
+              ClientMetrics.recordWatchRequest(
+                sliceLookupConfig.target,
+                sliceLookupConfig.clientType,
+                statusCode = status.getCode
+              )
+              logger.info(s"Watch request failed: $status", every = 30.seconds)
+              driver.handleEvent(Event.ReadFailure(opId, status))
+          }(sec)
     }
   }
 

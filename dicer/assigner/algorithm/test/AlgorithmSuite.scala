@@ -454,6 +454,7 @@ class ParameterizedAlgorithmSuite(keyReplicationConfig: KeyReplicationConfig)
     val assignment: Assignment = createAssignment(
       generation,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- 10) @@ generation -> startingResources.availableResources,
       (10 -- 11) @@ generation -> startingResources.availableResources,
       (11 -- 50) @@ generation -> startingResources.availableResources,
@@ -610,12 +611,13 @@ class ParameterizedAlgorithmSuite(keyReplicationConfig: KeyReplicationConfig)
     val predecessor: Assignment = commitProposal(
       ProposedAssignment(
         predecessorOpt = None,
-        createRandomProposal(
+        sliceMap = createRandomProposal(
           numSlices = numResources * 80, // > 64 Slices per resource
           resources.availableResources.toVector,
           numMaxReplicas = targetConfig.keyReplicationConfig.maxReplicas,
           rng
-        )
+        ),
+        assignerServiceInfoOpt = None
       )
     )
 
@@ -692,6 +694,7 @@ class ParameterizedAlgorithmSuite(keyReplicationConfig: KeyReplicationConfig)
       createAssignment(
         generation,
         AssignmentConsistencyMode.Affinity,
+        assignerServiceInfoOpt = None,
         ("" -- ∞) @@ generation -> Seq("resourceUnhealthy")
       )
     // Load doesn't matter for this test.
@@ -795,7 +798,7 @@ class ParameterizedAlgorithmSuite(keyReplicationConfig: KeyReplicationConfig)
     val resources: Resources = createNResources(10)
     val firstAssignment: Assignment =
       generateInitialAssignment(target, resources, targetConfig.keyReplicationConfig)
-    val updatedResources: Resources = createNResources(10)(salt = "'")
+    val updatedResources: Resources = createNResources(10)(creationTimeOffset = 1)
     val assignment: Assignment =
       generateAssignment(
         target,
@@ -838,7 +841,13 @@ class ParameterizedAlgorithmSuite(keyReplicationConfig: KeyReplicationConfig)
           )
       }
     val expectedAssignment =
-      commitProposal(ProposedAssignment(Some(predecessor), expectedSlices))
+      commitProposal(
+        ProposedAssignment(
+          Some(predecessor),
+          sliceMap = expectedSlices,
+          assignerServiceInfoOpt = None
+        )
+      )
 
     // Run the algorithm and verify the expected outcome.
     val assignment = generateAssignment(
@@ -1238,6 +1247,7 @@ class ParameterizedAlgorithmSuite(keyReplicationConfig: KeyReplicationConfig)
     val initialAssignment: Assignment = createAssignment(
       generation,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       (("" -- "k1") @@ generation -> coldSquids).withPrimaryRateLoad(10.0),
       (("k1" -- "k2") @@ generation -> mediumSquids).withPrimaryRateLoad(6.0),
       (("k2" -- "k3") @@ generation -> mediumSquids).withPrimaryRateLoad(6.0),

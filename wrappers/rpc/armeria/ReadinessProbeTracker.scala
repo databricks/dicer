@@ -1,10 +1,10 @@
 package com.databricks.rpc.armeria
 
 /**
- * OSS wrapper for ReadinessProbeTracker.
+ * Wrapper for ReadinessProbeTracker.
  *
- * In the internal Databricks version, this tracks pod readiness via Kubernetes probes. In the OSS
- * version, we provide a stub implementation that can be controlled via testing APIs.
+ * In the internal Databricks version, this tracks pod readiness via Kubernetes probes. Here we
+ * provide a stub implementation that can be controlled via testing APIs.
  */
 object ReadinessProbeTracker {
 
@@ -34,8 +34,7 @@ object ReadinessProbeTracker {
    * Testing API: Updates the pod readiness status.
    *
    * @param status
-   *   The probe status. In the OSS version, we only check if the status code is 200 (OK) to
-   *   determine readiness.
+   *   The probe status. We only check if the status code is 200 (OK) to determine readiness.
    */
   def updatePodStatusForTesting(status: Int): Unit = {
     podReady = status == 200

@@ -11,6 +11,7 @@ import scala.collection.mutable.ArrayBuffer
 import scala.concurrent.duration._
 
 import com.databricks.caching.util.MetricUtils.ChangeTracker
+import com.databricks.caching.util.WhereAmITestUtils
 import com.databricks.caching.util.{
   AssertionWaiter,
   Cancellable,
@@ -22,6 +23,7 @@ import com.databricks.caching.util.{
   StreamCallback,
   TestUtils
 }
+import com.databricks.conf.trusted.LocationConfTestUtils
 import com.databricks.dicer.common.{
   Assignment,
   ClientType,
@@ -60,52 +62,67 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
 
   override protected def withLookup(
       testAssigner: TestAssigner,
+      enableRateLimiting: Boolean,
       watchStubCacheTime: FiniteDuration = 20.seconds,
       protoLoggerConf: DicerClientProtoLoggerConf = TestClientUtils.createTestProtoLoggerConf(
         sampleFraction = 0.0
       ),
       testTarget: Target = target,
-      clientIdOpt: Option[UUID] = Some(TEST_CLIENT_UUID))(
+      clientIdOpt: Option[UUID] = Some(TEST_CLIENT_UUID),
+      senderClusterUriOpt: Option[String] = None,
+      senderRegionUriOpt: Option[String] = None)(
       func: (SliceLookupHarness, LoggingStreamCallback[Assignment]) => Unit): Unit = {
-    fakeS2SProxy.setFallbackUpstreamPorts(Vector(testAssigner.localUri.getPort))
-    val subscriberDebugName: String = "test-clerk"
-    val config: InternalClientConfig =
-      createInternalClientConfig(
-        ClientType.Clerk,
-        portToConnectTo(testAssigner),
-        watchStubCacheTime,
-        subscriberDebugName = subscriberDebugName,
-        testTarget = testTarget,
-        clientIdOpt = clientIdOpt
+    // Set the sender pod's WhereAmI before constructing the SliceLookup, which captures the
+    // sender cluster/region URIs from the LocationConf singleton at construction time. An empty URI
+    // string is read back as `None` by `WhereAmIHelper`.
+    WhereAmITestUtils.withLocationConfSingleton(
+      LocationConfTestUtils.newTestLocationConf(
+        kubernetesClusterUri = senderClusterUriOpt.getOrElse(""),
+        regionUri = senderRegionUriOpt.getOrElse("")
       )
-    val lookup =
-      SliceLookup.createUnstarted(
-        sec,
-        config,
-        createTestLogger(ClientType.Clerk, protoLoggerConf, subscriberDebugName),
-        serviceBuilderOpt = None
-      )
-    val callback = new LoggingStreamCallback[Assignment](sec)
-    val watchHandle: Cancellable =
-      lookup.cellConsumer.watch(new StreamCallback[Assignment](sec) {
-        override protected def onFailure(status: Status): Unit = callback.executeOnFailure(status)
-        override protected def onSuccess(assignment: Assignment): Unit = {
-          callback.executeOnSuccess(assignment)
-        }
-      })
-    val harness = new ScalaSliceLookupHarness(lookup, () => ClerkData)
-    harness.start()
-    try {
-      func(harness, callback)
-    } finally {
-      lookup.cancel()
-      watchHandle.cancel(Status.CANCELLED.withDescription("cleaning up after withLookup"))
+    ) {
+      fakeS2SProxy.setFallbackUpstreamPorts(Vector(testAssigner.localUri.getPort))
+      val subscriberDebugName: String = "test-clerk"
+      val config: InternalClientConfig =
+        createInternalClientConfig(
+          ClientType.Clerk,
+          portToConnectTo(testAssigner),
+          watchStubCacheTime,
+          subscriberDebugName = subscriberDebugName,
+          enableRateLimiting = enableRateLimiting,
+          testTarget = testTarget,
+          clientIdOpt = clientIdOpt
+        )
+      val lookup =
+        SliceLookup.createUnstarted(
+          sec,
+          config,
+          createTestLogger(ClientType.Clerk, protoLoggerConf, subscriberDebugName),
+          serviceBuilderOpt = None
+        )
+      val callback = new LoggingStreamCallback[Assignment](sec)
+      val watchHandle: Cancellable =
+        lookup.cellConsumer.watch(new StreamCallback[Assignment](sec) {
+          override protected def onFailure(status: Status): Unit = callback.executeOnFailure(status)
+          override protected def onSuccess(assignment: Assignment): Unit = {
+            callback.executeOnSuccess(assignment)
+          }
+        })
+      val harness = new ScalaSliceLookupHarness(lookup, () => ClerkData)
+      harness.start()
+      try {
+        func(harness, callback)
+      } finally {
+        lookup.cancel()
+        watchHandle.cancel(Status.CANCELLED.withDescription("cleaning up after withLookup"))
+      }
     }
   }
 
   override protected def createUnstartedSliceLookup(
       testAssigner: TestAssigner,
       clientType: ClientType,
+      enableRateLimiting: Boolean,
       watchStubCacheTime: FiniteDuration = 20.seconds,
       sec: SequentialExecutionContext = sec): SliceLookupHarness = {
     val subscriberDebugName: String = "test-clerk"
@@ -114,7 +131,8 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
         clientType,
         portToConnectTo(testAssigner),
         watchStubCacheTime,
-        subscriberDebugName = subscriberDebugName
+        subscriberDebugName = subscriberDebugName,
+        enableRateLimiting = enableRateLimiting
       )
     val lookup =
       SliceLookup.createUnstarted(
@@ -176,7 +194,8 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
           numReplicas = 1
         )
       ),
-      unattributedLoadOpt = None
+      unattributedLoadOpt = None,
+      keyCardinalityEstimateOpt = None
     )
 
     // Configure the fake S2S proxy to forward requests to the assigner (for data plane tests).
@@ -203,9 +222,14 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
     )
 
     clerkSliceLookup.start(() => ClerkData)
-    val slicelet1Config: InternalClientConfig = clerkConfig.copy(
-      sliceLookupConfig = clerkSliceLookupConfig.copy(clientType = ClientType.Slicelet),
-      subscriberDebugName = slicelet1DebugName
+    val slicelet1Config: InternalClientConfig = createInternalClientConfig(
+      ClientType.Slicelet,
+      clerkSliceLookupConfig.watchAddress,
+      clerkSliceLookupConfig.watchStubCacheTime,
+      subscriberDebugName = slicelet1DebugName,
+      enableRateLimiting = false,
+      testTarget = clerkSliceLookupConfig.target,
+      clientIdOpt = clerkSliceLookupConfig.clientIdOpt
     )
     val slicelet1SliceLookup = SliceLookup.createUnstarted(
       fakeSec,
@@ -293,13 +317,19 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
           topKeys = Seq(KeyLoad(SliceKey.MIN, 200)),
           numReplicas = 1
         )
-      )
+      ),
+      keyCardinalityEstimateOpt = None
     )
 
     // Start slicelet2's SliceLookup.
-    val slicelet2Config: InternalClientConfig = clerkConfig.copy(
-      sliceLookupConfig = clerkSliceLookupConfig.copy(clientType = ClientType.Slicelet),
-      subscriberDebugName = slicelet2DebugName
+    val slicelet2Config: InternalClientConfig = createInternalClientConfig(
+      ClientType.Slicelet,
+      clerkSliceLookupConfig.watchAddress,
+      clerkSliceLookupConfig.watchStubCacheTime,
+      subscriberDebugName = slicelet2DebugName,
+      enableRateLimiting = false,
+      testTarget = clerkSliceLookupConfig.target,
+      clientIdOpt = clerkSliceLookupConfig.clientIdOpt
     )
     val slicelet2SliceLookup = SliceLookup.createUnstarted(
       fakeSec,

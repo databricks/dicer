@@ -2,6 +2,8 @@ package com.databricks.dicer.common
 
 import com.databricks.api.proto.dicer.assigner.{HeartbeatRequestP, HeartbeatResponseP}
 import com.databricks.dicer.common.TargetHelper.TargetOps
+import io.kubernetes.client.openapi.ApiClient
+import io.kubernetes.client.openapi.apis.CoreV1Api
 import java.net.URI
 import java.time.Instant
 import java.util.UUID
@@ -25,16 +27,18 @@ import com.databricks.caching.util.{
   TestUtils,
   TickerTime
 }
+import com.databricks.caching.util.AssertMacros.iassert
 import com.databricks.conf.Configs
 import com.databricks.dicer.assigner.InterposingEtcdPreferredAssignerDriver.ShutdownOption
 import com.databricks.dicer.assigner.Store.WriteAssignmentResult
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
-import com.databricks.dicer.assigner.config.{StaticTargetConfigProvider, TargetMigrationConfig}
+import com.databricks.dicer.assigner.config.{TargetConfigProvider, TargetMigrationConfig}
 import com.databricks.dicer.assigner.{
   Assigner,
   AssignerInfo,
   AssignerRpcTestHelper,
   AssignmentGeneratorDriver,
+  ConsistentHashingPreferredAssignerDriver,
   DisabledPreferredAssignerDriver,
   EtcdPreferredAssignerDriver,
   EtcdPreferredAssignerStore,
@@ -43,6 +47,9 @@ import com.databricks.dicer.assigner.{
   InMemoryStore,
   InterposingEtcdPreferredAssignerDriver,
   InterposingEtcdPreferredAssignerStore,
+  KubernetesMembershipChecker,
+  MigrationMode,
+  MigrationPreferredAssignerDriver,
   PreferredAssignerDriver,
   Store,
   TargetMigrator,
@@ -73,18 +80,20 @@ import com.databricks.threading.NamedExecutor
 class TestAssigner private (
     secPool: SequentialExecutionContextPool,
     sec: SequentialExecutionContext,
-    private[common] val conf: TestableDicerAssignerConf,
+    conf: TestableDicerAssignerConf,
     preferredAssignerDriver: PreferredAssignerDriver,
     storeFactory: TestAssigner.InterceptableStoreFactory,
     fakeKubernetesTargetWatcherFactory: FakeKubernetesTargetWatcherFactory,
     healthWatcherFactory: HealthWatcher.Factory,
-    configProvider: StaticTargetConfigProvider,
-    uuid: UUID = UUID.randomUUID(),
+    configProvider: TargetConfigProvider,
+    uuid: UUID,
     hostName: String = "localhost",
     assignerClusterUri: URI,
     minAssignmentGenerationInterval: FiniteDuration,
     dPageNamespaceOpt: Option[String],
-    private[common] val targetMigrator: TargetMigrator)
+    targetMigrator: TargetMigrator,
+    localClusterMembershipChecker: KubernetesMembershipChecker,
+    assignerServiceInfoOpt: Option[AssignerServiceInfo])
     extends Assigner.BaseForTest(
       secPool,
       sec,
@@ -99,7 +108,9 @@ class TestAssigner private (
       assignerClusterUri,
       minAssignmentGenerationInterval,
       dPageNamespaceOpt,
-      targetMigrator = targetMigrator
+      targetMigrator = targetMigrator,
+      localClusterMembershipChecker = localClusterMembershipChecker,
+      assignerServiceInfoOpt = assignerServiceInfoOpt
     ) {
 
   /**
@@ -155,11 +166,10 @@ class TestAssigner private (
   def stop(shutdownOption: ShutdownOption): Future[Unit] = withLock(lock) {
     // Shut down the preferred assigner driver before stopping the assigner RPC server,
     // since the `forTest.stopAsync()` can result in an abdication write if the assigner is
-    // preferred, and we need to block that write if `shutdownOption` is `ABRUPT`.
-    preferredAssignerDriver match {
-      case driver: InterposingEtcdPreferredAssignerDriver =>
-        TestUtils.awaitResult(driver.shutdown(shutdownOption), Duration.Inf)
-      case _ => // Do nothing
+    // preferred, and we need to block that write if `shutdownOption` is `ABRUPT`. Route through
+    // `etcdDriverForTest` so this also blocks the write when the driver is migration-wrapped.
+    etcdDriverForTest.foreach { driver: InterposingEtcdPreferredAssignerDriver =>
+      TestUtils.awaitResult(driver.shutdown(shutdownOption), Duration.Inf)
     }
     forTest.stopAsync()
   }
@@ -335,7 +345,11 @@ class TestAssigner private (
                   sliceAssignment.primaryRateLoadOpt
                 )
               }
-            val proposal = ProposedAssignment(Some(latestAssignment), sliceAssignments)
+            val proposal = ProposedAssignment(
+              Some(latestAssignment),
+              sliceAssignments,
+              assignerServiceInfoOpt
+            )
             interceptableStore
               .writeAssignment(
                 normalizedTarget,
@@ -379,7 +393,12 @@ class TestAssigner private (
     interceptableStore
       .getLatestKnownAssignment(normalizedTarget)
       .flatMap { predecessorOpt: Option[Assignment] =>
-        val proposedAssignment = ProposedAssignment(predecessorOpt, proposal)
+        val proposedAssignment =
+          ProposedAssignment(
+            predecessorOpt,
+            sliceMap = proposal,
+            assignerServiceInfoOpt
+          )
         interceptableStore
           .writeAssignment(
             normalizedTarget,
@@ -451,23 +470,50 @@ class TestAssigner private (
 
   /** Shuts down the preferred assigner driver. */
   def shutDownPreferredAssignerDriver(): Unit = {
-    preferredAssignerDriver match {
-      case driver: InterposingEtcdPreferredAssignerDriver =>
+    etcdDriverForTest.foreach(_.shutdown(ShutdownOption.ABRUPT))
+  }
+
+  /**
+   * Simulates the etcd store disappearing for this assigner: the interposing etcd driver starts
+   * failing reads/watches and blocks writes, mirroring the production effect of losing the etcd
+   * cluster without tearing the assigner down. Used to verify that a
+   * [[MigrationMode.ConsistentHashingPrimaryEtcdWritesMode]] assigner keeps electing (its reads are
+   * consistent-hashing-driven and never read etcd back). Returns a [[Future]] that completes once
+   * the fault is armed.
+   */
+  def failEtcdForTest(): Future[Unit] = {
+    etcdDriverForTest match {
+      case Some(driver: InterposingEtcdPreferredAssignerDriver) =>
         driver.shutdown(ShutdownOption.ABRUPT)
-      case _ => // Do nothing
+      case None =>
+        Future.successful(())
     }
   }
+
+  /**
+   * The interposing etcd driver backing this assigner, whether it is the assigner's driver directly
+   * or the old driver wrapped inside a [[MigrationPreferredAssignerDriver]]; `None` when preferred
+   * assigner is disabled.
+   */
+  private def etcdDriverForTest: Option[InterposingEtcdPreferredAssignerDriver] =
+    preferredAssignerDriver match {
+      case driver: InterposingEtcdPreferredAssignerDriver => Some(driver)
+      case migration: MigrationPreferredAssignerDriver =>
+        migration.forTest.oldDriver match {
+          case driver: InterposingEtcdPreferredAssignerDriver => Some(driver)
+          case _ => None
+        }
+      case _ => None
+    }
 
   /**
    * Gets the highest successful heartbeat `opId` this assigner has ever sent to another
    * assigner.
    */
   def getHighestSucceededHeartbeatOpID: Future[Long] = {
-    preferredAssignerDriver match {
-      case driver: InterposingEtcdPreferredAssignerDriver =>
-        driver.getHighestSucceededOpID
-      case _ => Future.successful(0L)
-    }
+    etcdDriverForTest
+      .map(_.getHighestSucceededOpID)
+      .getOrElse(Future.successful(0L))
   }
 
   /** Pauses handling heartbeats. */
@@ -503,6 +549,33 @@ object TestAssigner {
   private val logger = PrefixLogger.create(TestAssigner.getClass, "")
 
   /**
+   * Builds a [[PreferredAssignerDriver]] for a test assigner from the driver's
+   * [[SequentialExecutionContext]] and the membership checker built for the assigner (if any). Any
+   * dockerized etcd a driver needs is captured by the factory itself (the default binds the one the
+   * test environment threads in), so it is not a parameter here. See
+   * [[defaultPreferredAssignerDriverFactory]] for the conf-derived default.
+   */
+  type PreferredAssignerDriverFactory =
+    (SequentialExecutionContext, Option[KubernetesMembershipChecker]) => PreferredAssignerDriver
+
+  /**
+   * The default [[PreferredAssignerDriverFactory]]: builds the driver derived from `conf` and
+   * `driverConfig`, backed by `dockerizedEtcdOpt`.
+   */
+  def defaultPreferredAssignerDriverFactory(
+      conf: DicerAssignerConf,
+      driverConfig: EtcdPreferredAssignerDriver.Config,
+      dockerizedEtcdOpt: Option[EtcdTestEnvironment]): PreferredAssignerDriverFactory =
+    (sec: SequentialExecutionContext, membershipCheckerOpt: Option[KubernetesMembershipChecker]) =>
+      createPreferredAssignerDriver(
+        sec,
+        conf,
+        dockerizedEtcdOpt,
+        driverConfig,
+        membershipCheckerOpt
+      )
+
+  /**
    * Configuration for the test assigner.
    *
    * @param assignerConf Assigner configuration.
@@ -516,18 +589,38 @@ object TestAssigner {
    *                          Tests exercising a behavior the real migrator cannot serve yet (e.g.
    *                          an active migration) inject one here. Otherwise, a real
    *                          [[TargetMigrator]] is built against the no-op migration config.
+   * @param membershipCheckerFactoryOpt When defined, the test assigner runs the production
+   *                                    [[MigrationPreferredAssignerDriver]] (etcd-backed old driver
+   *                                    plus a consistent-hashing new driver from this factory),
+   *                                    exactly as production does; the stage is taken from
+   *                                    [[DicerAssignerConf.preferredAssignerMigrationMode]]. When
+   *                                    `None`, the assigner runs the etcd-backed driver alone,
+   *                                    preserving the historical default for suites that don't
+   *                                    exercise consistent-hashing membership.
+   * @param preferredAssignerDriverFactoryOverride When defined, builds the assigner's
+   *                                               [[PreferredAssignerDriver]] instead of the
+   *                                               conf-derived default, letting a test inject a
+   *                                               fake driver (e.g. one that always reports a
+   *                                               standby role) without the etcd-backed election
+   *                                               machinery. When `None`, the test environment
+   *                                               supplies the conf-derived default (see
+   *                                               [[defaultPreferredAssignerDriverFactory]]) bound
+   *                                               to its dockerized etcd.
    */
   class Config private (
       val assignerConf: TestableDicerAssignerConf,
       val preferredAssignerDriverConfig: EtcdPreferredAssignerDriver.Config,
-      val targetMigratorOpt: Option[TargetMigrator])
+      val targetMigratorOpt: Option[TargetMigrator],
+      val membershipCheckerFactoryOpt: Option[KubernetesMembershipChecker.Factory],
+      val preferredAssignerDriverFactoryOverride: Option[PreferredAssignerDriverFactory])
 
   /** Companion object for [[Config]]. */
   object Config {
 
-    /**
-     * Creates a configuration for a test Assigner based on the given parameters.
-     */
+    // If a field is added here, update
+    // [[InternalDicerTestEnvironment.restartAssignerWithSameConfig]] to forward it, otherwise a
+    // restarted Assigner silently drops it.
+    /** Creates a configuration for a test Assigner based on the given parameters. */
     def create(
         assignerConf: DicerAssignerConf = new DicerAssignerConf(Configs.empty),
         tlsOptionsOpt: Option[TLSOptions] = None,
@@ -535,7 +628,12 @@ object TestAssigner {
         expectRequestsThroughS2SProxy: Boolean = false,
         preferredAssignerDriverConfig: EtcdPreferredAssignerDriver.Config =
           EtcdPreferredAssignerDriver.Config(),
-        targetMigratorOpt: Option[TargetMigrator] = None): Config = {
+        targetMigratorOpt: Option[TargetMigrator] = None,
+        membershipCheckerFactoryOpt: Option[KubernetesMembershipChecker.Factory] = None,
+        // When `None`, the test environment supplies the conf-derived default bound to its
+        // dockerized etcd (which only the environment owns).
+        preferredAssignerDriverFactoryOverride: Option[PreferredAssignerDriverFactory] = None)
+        : Config = {
       // This is needed because Scala anonymous classes are not able to capture and refer to
       // variables with the same name as a method in the class.
       val expectRequestsThroughS2SProxyVar: Boolean = expectRequestsThroughS2SProxy
@@ -548,6 +646,10 @@ object TestAssigner {
         // Use a short poll interval for tests.
         override val dynamicConfigPollInterval: FiniteDuration = 100.milliseconds
 
+        // Likewise poll the target migration config quickly so SAFE-driven config changes
+        // propagate within a test's timeout.
+        override val dynamicTargetMigrationConfigPollInterval: FiniteDuration = 100.milliseconds
+
         override val dicerClientTlsOptions: Option[TLSOptions] =
           tlsOptionsOpt.orElse(TestTLSOptions.clientTlsOptionsOpt)
 
@@ -556,7 +658,6 @@ object TestAssigner {
 
         override val expectRequestsThroughS2SProxy: Boolean = expectRequestsThroughS2SProxyVar
       }
-
       // This is a temporary workaround until the real TargetMigrator implementation is complete.
       // For now, an injected `targetMigratorOpt` is always a [[FakeTargetMigrator]] used to
       // exercise a specific behavior (e.g. an active migration) that the real migrator cannot serve
@@ -573,7 +674,13 @@ object TestAssigner {
         )
       }
 
-      new Config(testConf, preferredAssignerDriverConfig, targetMigratorOpt)
+      new Config(
+        testConf,
+        preferredAssignerDriverConfig,
+        targetMigratorOpt,
+        membershipCheckerFactoryOpt,
+        preferredAssignerDriverFactoryOverride
+      )
     }
   }
 
@@ -636,19 +743,22 @@ object TestAssigner {
    * @param config The configuration for this test Assigner. See [[DicerAssignerConf]] for supported
    *               configurations.
    * @param configProvider The provider of target configurations for this test Assigner.
-   * @param dockerizedEtcdOpt When specified and the Assigner is configured to use preferred
-   *                          assigner mode, this test Assigner uses the etcd instance contained
-   *                          within for the preferred assigner store. See
-   *                          [[DicerAssignerConf.preferredAssignerEnabled]].
+   * @param preferredAssignerDriverFactory Builds the assigner's [[PreferredAssignerDriver]]. The
+   *                                       caller (the test environment) supplies it, binding the
+   *                                       dockerized etcd an etcd-backed driver needs; see
+   *                                       [[defaultPreferredAssignerDriverFactory]].
    * @param assignerClusterUri The URI of the kubernetes cluster that the assigner will be running
    *                           in (see <internal link>).
+   * @param assignerServiceInfoOpt The service info of the Assigner, used to uniquely identify an
+   *                               assigner instance, or [[None]] when not available.
    */
   def createAndStart(
       secPool: SequentialExecutionContextPool,
       config: Config,
-      configProvider: StaticTargetConfigProvider,
-      dockerizedEtcdOpt: Option[EtcdTestEnvironment] = None,
+      configProvider: TargetConfigProvider,
+      preferredAssignerDriverFactory: PreferredAssignerDriverFactory,
       assignerClusterUri: URI,
+      assignerServiceInfoOpt: Option[AssignerServiceInfo],
       dPageNamespaceOpt: Option[String] = None): TestAssigner = {
     logger.info(s"Starting TestAssigner")
     val sec: SequentialExecutionContext = secPool.createExecutionContext("test-assigner-store")
@@ -657,12 +767,25 @@ object TestAssigner {
 
     val paSec: SequentialExecutionContext =
       secPool.createExecutionContext("test-preferred-assigner-sec")
-    val preferredAssignerDriver: PreferredAssignerDriver = createPreferredAssignerDriver(
-      paSec,
-      config.assignerConf,
-      dockerizedEtcdOpt,
-      driverConfig = config.preferredAssignerDriverConfig
-    )
+    val uuid: UUID = UUID.randomUUID()
+    // The checker a supplied factory builds (typically backed by a FakeKubernetesServer), if any.
+    // This drives which preferred-assigner driver the test runs (see below).
+    val factoryMembershipCheckerOpt: Option[KubernetesMembershipChecker] =
+      config.membershipCheckerFactoryOpt.map { factory: KubernetesMembershipChecker.Factory =>
+        factory.create(uuid)
+      }
+    // The Assigner always requires a membership checker. Tests that don't supply a factory get an
+    // inert checker purely to satisfy the constructor; it is left unwired from the driver (the
+    // etcd-only driver above ignores it) and never polls (1-hour interval), so it has no effect on
+    // those tests. The Assigner stops it on teardown. This mirrors
+    // FakeKubernetesTestSupport.inertMembershipCheckerFactory but is kept local because that helper
+    // is 2.12-only (it depends on the fake K8s server), while TestAssigner also cross-builds 2.13.
+    val localClusterMembershipChecker: KubernetesMembershipChecker =
+      factoryMembershipCheckerOpt.getOrElse(buildInertMembershipChecker(secPool, uuid))
+    // The caller supplies the driver factory (binding any dockerized etcd it needs); here we just
+    // build the driver from the driver's SEC and the membership checker.
+    val preferredAssignerDriver: PreferredAssignerDriver =
+      preferredAssignerDriverFactory(paSec, factoryMembershipCheckerOpt)
 
     val minAssignmentGenerationInterval: FiniteDuration = secPool match {
       case _: FakeSequentialExecutionContextPool =>
@@ -677,19 +800,26 @@ object TestAssigner {
     }
 
     // This is a temporary workaround until the real TargetMigrator implementation is complete.
-    // For now, an injected `targetMigratorOpt` is always a [[FakeTargetMigrator]] used to exercise
-    // a specific behavior (e.g. an active migration) that the real migrator cannot serve yet. When
-    // no migrator is injected, we build the real migrator against the no-op migration config that
-    // `Config.create` seeded into SAFE.
+    // For now, if a `targetMigratorOpt` is injected, it is always a [[FakeTargetMigrator]] used
+    // to exercise a specific behavior (e.g. an active migration) that the real migrator cannot
+    // serve yet. When no migrator is injected, we build the real migrator against the no-op
+    // migration config that `Config.create` seeded into SAFE.
     //
     // TODO(<internal bug>): Once the real TargetMigrator supports active migrations, we will always build
-    // the real migrator here (see the corresponding TODO in `Config.create`).
+    // the real migrator here and no longer take in an injected `targetMigratorOpt` (see the
+    // corresponding TODO in `Config.create`).
     val targetMigrator: TargetMigrator = config.targetMigratorOpt.getOrElse {
       val targetMigratorSec: SequentialExecutionContext =
         secPool.createExecutionContext("test-target-migrator")
+      // Since we're only building a real migrator against the no-op migration config for now (see
+      // comments above), it never enters an active migration: we pass no remote membership checker
+      // factory, which is never invoked.
       TargetMigrator.create(
         targetMigratorSec,
         config.assignerConf,
+        assignerUuid = UUID.randomUUID(),
+        assignerClusterUri,
+        remoteClusterMembershipCheckerFactoryOpt = None,
         TargetMigrator.DEFAULT_INITIAL_TARGET_OWNERSHIP_RESOLVER_AWAIT_TIMEOUT
       )
     }
@@ -707,45 +837,127 @@ object TestAssigner {
       new FakeKubernetesTargetWatcherFactory(),
       new TestHealthWatcherFactory(config.assignerConf.storeIncarnation),
       configProvider,
+      uuid = uuid,
       assignerClusterUri = assignerClusterUri,
       minAssignmentGenerationInterval = minAssignmentGenerationInterval,
       dPageNamespaceOpt = dPageNamespaceOpt,
-      targetMigrator = targetMigrator
+      targetMigrator = targetMigrator,
+      localClusterMembershipChecker = localClusterMembershipChecker,
+      assignerServiceInfoOpt = assignerServiceInfoOpt
     )
     testAssigner.start()
     testAssigner
   }
 
   /**
-   * REQUIRES: when `conf.preferredAssignerEnabled` is true, `dockerizedEtcdOpt` must be defined.
+   * Builds the preferred-Assigner driver for the test assigner, backing the etcd driver with the
+   * dockerized etcd the test supplies. When the preferred-assigner mode is disabled, returns a
+   * [[DisabledPreferredAssignerDriver]]. When a `membershipCheckerOpt` is supplied, the assigner
+   * runs the [[MigrationPreferredAssignerDriver]] (etcd-backed old driver plus a
+   * [[ConsistentHashingPreferredAssignerDriver]] new driver), with the migration stage read from
+   * [[DicerAssignerConf.preferredAssignerMigrationMode]]; otherwise it runs the etcd-backed driver
+   * alone.
    *
-   * Creates a preferred Assigner driver.
+   * NOTE: this keys the driver on whether a checker *factory* was supplied, which production no
+   * longer does (production always builds the migration driver when the PA is enabled). Tests that
+   * don't exercise consistent-hashing membership pass no factory and get the etcd-only driver, so
+   * they aren't perturbed by a never-polling checker. PRECONDITION: when
+   * `conf.preferredAssignerEnabled` is true, `dockerizedEtcdOpt` is defined.
    */
   private def createPreferredAssignerDriver(
       sec: SequentialExecutionContext,
       conf: DicerAssignerConf,
       dockerizedEtcdOpt: Option[EtcdTestEnvironment],
-      storeConfig: EtcdPreferredAssignerStore.Config = EtcdPreferredAssignerStore.DEFAULT_CONFIG,
       driverConfig: EtcdPreferredAssignerDriver.Config,
-      random: Random = new Random): PreferredAssignerDriver = {
-    if (conf.preferredAssignerEnabled) {
-      require(
-        dockerizedEtcdOpt.isDefined,
-        "dockerizedEtcdOpt must be defined when preferred assigner is enabled."
-      )
-      val etcd: EtcdTestEnvironment = dockerizedEtcdOpt.get
-      val preferredAssignerEtcdNamespace = Assigner.getPreferredAssignerEtcdNamespace(conf)
-      val etcdClientConfig = EtcdClient.Config(preferredAssignerEtcdNamespace)
-      val storeIncarnation: Incarnation = Incarnation(conf.preferredAssignerStoreIncarnation)
-      val store = InterposingEtcdPreferredAssignerStore
-        .create(sec, storeIncarnation, etcd, etcdClientConfig, random, storeConfig)
-      logger.info("Initializing EtcdPreferredAssignerDriver.")
-      val tlsOptions: Option[TLSOptions] = conf.getDicerClientTlsOptions
-      new InterposingEtcdPreferredAssignerDriver(sec, tlsOptions, store, driverConfig)
-    } else {
+      membershipCheckerOpt: Option[KubernetesMembershipChecker]): PreferredAssignerDriver = {
+    if (!conf.preferredAssignerEnabled) {
       logger.info("Initializing DisabledPreferredAssignerDriver.")
       new DisabledPreferredAssignerDriver(Incarnation(conf.preferredAssignerStoreIncarnation))
+    } else {
+      iassert(
+        dockerizedEtcdOpt.isDefined,
+        "TestAssigner requires a dockerized etcd when preferredAssignerEnabled is true"
+      )
+      val etcdDriver: InterposingEtcdPreferredAssignerDriver =
+        buildInterposingEtcdDriver(sec, conf, dockerizedEtcdOpt.get, driverConfig)
+      membershipCheckerOpt match {
+        case Some(membershipChecker: KubernetesMembershipChecker) =>
+          // Run the migration driver (as production does when the PA is enabled): the etcd driver
+          // is the authoritative old driver and a consistent-hashing new driver runs alongside,
+          // with the migration stage read from conf rather than a test-only abstraction.
+          val newDriver: ConsistentHashingPreferredAssignerDriver =
+            new ConsistentHashingPreferredAssignerDriver(sec, membershipChecker)
+          val migrationMode: MigrationMode = conf.preferredAssignerMigrationMode
+          logger.info(
+            s"Initializing MigrationPreferredAssignerDriver in mode ${migrationMode.name}."
+          )
+          new MigrationPreferredAssignerDriver(
+            sec = sec,
+            migrationMode = migrationMode,
+            oldDriver = etcdDriver,
+            newDriver = newDriver
+          )
+        case None =>
+          logger.info("Initializing etcd-backed preferred-assigner driver.")
+          etcdDriver
+      }
     }
+  }
 
+  /**
+   * Builds an inert [[KubernetesMembershipChecker]] for tests that don't supply their own factory.
+   * It targets a bare `CoreV1Api` and uses a one-hour poll interval, so it never polls within a
+   * test; it exists only to satisfy the Assigner's required-checker constructor and is not wired
+   * into the driver, so tests that don't exercise membership never observe it.
+   */
+  private def buildInertMembershipChecker(
+      secPool: SequentialExecutionContextPool,
+      uuid: UUID): KubernetesMembershipChecker = {
+    val checkerSec: SequentialExecutionContext =
+      secPool.createExecutionContext("test-membership-checker")
+    new KubernetesMembershipChecker(
+      checkerSec,
+      new CoreV1Api(new ApiClient()),
+      assignerUuid = uuid,
+      namespace = "test-namespace",
+      appName = "test-app",
+      pollingInterval = 1.hour,
+      rpcPort = 1,
+      kubeContextLabelOpt = None
+    )
+  }
+
+  /**
+   * Builds an [[InterposingEtcdPreferredAssignerDriver]] backed by the given dockerized etcd. Used
+   * directly as the assigner's driver in the default (non-migration) case, and as the authoritative
+   * old driver inside the [[MigrationPreferredAssignerDriver]] otherwise.
+   */
+  private def buildInterposingEtcdDriver(
+      sec: SequentialExecutionContext,
+      conf: DicerAssignerConf,
+      dockerizedEtcd: EtcdTestEnvironment,
+      driverConfig: EtcdPreferredAssignerDriver.Config): InterposingEtcdPreferredAssignerDriver = {
+    val preferredAssignerEtcdNamespace: EtcdClient.KeyNamespace =
+      Assigner.getPreferredAssignerEtcdNamespace(conf)
+    val etcdClientConfig: EtcdClient.Config = EtcdClient.Config(preferredAssignerEtcdNamespace)
+    val storeIncarnation: Incarnation = Incarnation(conf.preferredAssignerStoreIncarnation)
+    // Each driver's store gets its own independent RNG instance so that the assigners' stores don't
+    // share random state.
+    val random: Random = new Random
+    val store: InterposingEtcdPreferredAssignerStore = InterposingEtcdPreferredAssignerStore
+      .create(
+        sec,
+        storeIncarnation,
+        dockerizedEtcd,
+        etcdClientConfig,
+        random,
+        EtcdPreferredAssignerStore.DEFAULT_CONFIG
+      )
+    new InterposingEtcdPreferredAssignerDriver(
+      sec,
+      conf.getDicerClientTlsOptions,
+      store,
+      driverConfig
+    )
   }
 }

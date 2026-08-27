@@ -12,6 +12,7 @@ import scala.concurrent.{Await, Future}
 import scala.concurrent.duration._
 import scala.util.matching.Regex
 
+import com.databricks.caching.util.AlertOwnerTeam
 import com.databricks.caching.util.MetricUtils.ChangeTracker
 import com.databricks.caching.util.TestUtils
 import com.databricks.caching.util.TestUtils.TestName
@@ -20,9 +21,11 @@ import com.databricks.caching.util.{
   AssertionWaiter,
   FakeProxy,
   FakeS2SProxyMetadataHandler,
+  KubernetesClusterUri,
   LogCapturer,
   LoggingStreamCallback,
   PrefixLogger,
+  RegionUri,
   SequentialExecutionContext
 }
 import com.databricks.conf.Configs
@@ -62,7 +65,8 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
   // Disable context propagation to replicate the behavior of the real SliceLookup.
   protected val sec: SequentialExecutionContext =
     SequentialExecutionContext.createWithDedicatedPool(
-      "SliceLookupSuite",
+      name = "SliceLookupSuite",
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
       enableContextPropagation = false
     )
   private val log = PrefixLogger.create(this.getClass, "")
@@ -154,6 +158,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
   protected def createUnstartedSliceLookup(
       testAssigner: TestAssigner,
       clientType: ClientType,
+      enableRateLimiting: Boolean = false,
       watchStubCacheTime: FiniteDuration = 20.seconds,
       sec: SequentialExecutionContext = sec): SliceLookupHarness
 
@@ -163,6 +168,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
    * the function returns. Other parameters are used for the lookup's [[InternalClientConfig]].
    *
    * @param testAssigner    the [[TestAssigner]] to connect the lookup to.
+   * @param enableRateLimiting whether rate limiting is enabled for watch RPC calls.
    * @param watchStubCacheTime how long gRPC stubs are cached before being evicted.
    * @param protoLoggerConf the proto logger configuration. Defaults to a test conf with 0% sampling
    *                        (logging disabled). Tests that want to verify logging should pass a
@@ -170,49 +176,90 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
    * @param testTarget      the [[Target]] to watch. Defaults to the suite's [[target]] field.
    * @param clientIdOpt     optional client UUID sent in watch requests. Defaults to
    *                        [[TEST_CLIENT_UUID]].
+   * @param senderClusterUriOpt optional sender pod Kubernetes cluster URI the lookup should
+   *                        populate its watch requests with (as it would derive from WhereAmI in
+   *                        production).
+   * @param senderRegionUriOpt optional sender pod region URI the lookup should populate its watch
+   *                        requests with (as it would derive from WhereAmI in production).
    * @param func            test body receiving the started [[SliceLookupHarness]] and its
    *                        [[LoggingStreamCallback]].
    */
   protected def withLookup(
       testAssigner: TestAssigner,
+      enableRateLimiting: Boolean = false,
       watchStubCacheTime: FiniteDuration = 20.seconds,
       protoLoggerConf: DicerClientProtoLoggerConf = TestClientUtils.createTestProtoLoggerConf(
         sampleFraction = 0.0
       ),
       testTarget: Target = target,
-      clientIdOpt: Option[UUID] = Some(TEST_CLIENT_UUID))(
+      clientIdOpt: Option[UUID] = Some(TEST_CLIENT_UUID),
+      senderClusterUriOpt: Option[String] = None,
+      senderRegionUriOpt: Option[String] = None)(
       func: (SliceLookupHarness, LoggingStreamCallback[Assignment]) => Unit): Unit
 
   /**
    * Creates the client configuration for a lookup for a local server listening on `assignerPort`.
    * Uses test SSL parameters. Other parameters are used for the lookup's [[InternalClientConfig]].
    *
-   * @param clientType       the [[ClientType]] (e.g. Clerk) for the [[SliceLookupConfig]].
-   * @param assignerPort     local port of the test assigner to connect to.
+   * @param clientType         the [[ClientType]] (e.g. Clerk) for the [[SliceLookupConfig]].
+   * @param assignerPort       local port of the test assigner to connect to.
    * @param watchStubCacheTime how long gRPC stubs are cached before being evicted.
-   * @param testTarget       the [[Target]] to watch. Defaults to the suite's [[target]] field.
-   * @param clientIdOpt      optional client UUID included in the [[SliceLookupConfig]]. Defaults to
-   *                         [[TEST_CLIENT_UUID]].
+   * @param enableRateLimiting whether rate limiting is enabled for watch RPC calls.
+   * @param testTarget         the [[Target]] to watch. Defaults to the suite's [[target]] field.
+   * @param clientIdOpt        optional client UUID included in the [[SliceLookupConfig]].
+   *                           Defaults to [[TEST_CLIENT_UUID]].
    */
   protected def createInternalClientConfig(
       clientType: ClientType,
       assignerPort: Int,
       watchStubCacheTime: FiniteDuration,
       subscriberDebugName: String,
+      enableRateLimiting: Boolean = false,
       testTarget: Target = target,
       clientIdOpt: Option[UUID] = Some(TEST_CLIENT_UUID)): InternalClientConfig = {
     val scheme: String = if (useSsl) "https" else "http"
+    createInternalClientConfig(
+      clientType,
+      new URI(s"$scheme://localhost:$assignerPort"),
+      watchStubCacheTime,
+      subscriberDebugName,
+      enableRateLimiting,
+      testTarget,
+      clientIdOpt
+    )
+  }
+
+  /**
+   * Creates the client configuration for a lookup that watches `watchAddress`, for tests that
+   * derive one config from another config's fields rather than from an assigner port.
+   *
+   * @param clientType         the [[ClientType]] (e.g. Clerk) for the [[SliceLookupConfig]].
+   * @param watchAddress       the address the client connects to in order to watch assignments.
+   * @param watchStubCacheTime how long gRPC stubs are cached before being evicted.
+   * @param enableRateLimiting whether rate limiting is enabled for watch RPC calls.
+   * @param testTarget         the [[Target]] to watch.
+   * @param clientIdOpt        optional client UUID included in the [[SliceLookupConfig]].
+   */
+  protected def createInternalClientConfig(
+      clientType: ClientType,
+      watchAddress: URI,
+      watchStubCacheTime: FiniteDuration,
+      subscriberDebugName: String,
+      enableRateLimiting: Boolean,
+      testTarget: Target,
+      clientIdOpt: Option[UUID]): InternalClientConfig = {
     InternalClientConfig(
       SliceLookupConfig(
         clientType,
-        watchAddress = new URI(s"$scheme://localhost:$assignerPort"),
+        watchAddress = watchAddress,
         tlsOptionsOpt = if (useSsl) TestTLSOptions.clientTlsOptionsOpt else None,
         testTarget,
         clientIdOpt = clientIdOpt,
         watchStubCacheTime,
         watchRpcTimeout = LOW_RPC_TIMEOUT,
         watchFromDataPlane = watchFromDataPlane,
-        enableRateLimiting = false
+        alternativeTargetOpt = None,
+        enableRateLimiting = enableRateLimiting
       ),
       subscriberDebugName = subscriberDebugName
     )
@@ -261,16 +308,26 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
    */
   protected def readPrometheusMetric(metricName: String, labels: Vector[(String, String)]): Double
 
+  /**
+   * The substring the `watchAddress` field in the SliceLookup's Slicez data is expected to
+   * contain when watching `assigner`. Defaults to the direct `http(s)://localhost:<port>` form
+   * used by tests that pass a direct URI as the watch address. Subclasses that route through DBNS
+   * names (and thus expose the DBNS string in the Slicez data) should override.
+   */
+  protected def expectedSlicezWatchAddressSubstring(assigner: TestAssigner): String = {
+    val scheme: String = if (useSsl) "https" else "http"
+    s"$scheme://localhost:${portToConnectTo(assigner)}"
+  }
+
   test("getSlicezData exposes expected dPage data") {
     // Test plan: Verify that SliceLookup exposes the expected dPage data. Do this by starting a
     // lookup and checking the returned Slicez data against the expected dPage data.
     val assigner: TestAssigner = singleAssignerTestEnv.testAssigner
     withLookup(assigner) { (lookup: SliceLookupHarness, _: LoggingStreamCallback[Assignment]) =>
       val data: ClientTargetSlicezData = lookup.getSlicezData
-      val scheme: String = if (useSsl) "https" else "http"
       assert(data.target == target)
       assert(
-        data.watchAddress.toString.contains(s"$scheme://localhost:${portToConnectTo(assigner)}")
+        data.watchAddress.toString.contains(expectedSlicezWatchAddressSubstring(assigner))
       )
     }
   }
@@ -278,14 +335,13 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
   test("getSlicezData returns appropriate watch address") {
     // Test plan: Verify that `watchAddress` from `lookup.getSlicezData` reflects the address used
     // by the lookup. In control-plane tests this is the assigner address; in data-plane tests this
-    // is the fake S2S proxy address.
+    // is the fake S2S proxy address. In DBNS-routing subclasses this is the DBNS resource string.
     val assigner1: TestAssigner = multiAssignerTestEnv.testAssigners(0)
 
     withLookup(assigner1) { (lookup: SliceLookupHarness, _: LoggingStreamCallback[Assignment]) =>
       val data: ClientTargetSlicezData = lookup.getSlicezData
-      val scheme: String = if (useSsl) "https" else "http"
       assert(
-        data.watchAddress.toString.contains(s"$scheme://localhost:${portToConnectTo(assigner1)}")
+        data.watchAddress.toString.contains(expectedSlicezWatchAddressSubstring(assigner1))
       )
     }
   }
@@ -902,6 +958,43 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
     assert(getNumSliceLookupsMetric(target, ClientType.Slicelet) == initialSliceletLookups + 1)
   }
 
+  test("starting a lookup and redirecting creates exactly two watch channels") {
+    // Test plan: Verify that a SliceLookup creates exactly two watch channels across startup
+    // and a redirect. Verify this by connecting to assigner2, then checking that the
+    // watch-channels-created metric increased by exactly two.
+    assume(
+      !watchFromDataPlane,
+      "This test may not apply to all data-plane clients because channels connect to a proxy " +
+      "instead of a specific Assigner pod, so the original channel may be reused for the redirect."
+    )
+
+    // Setup: assigner1 is the redirect target (configured by beforeEach).
+    val assigner1 = multiAssignerTestEnv.testAssigners(0)
+    val assigner2 = multiAssignerTestEnv.testAssigners(1)
+
+    val watchChannelsCreatedTracker = ChangeTracker[Double](
+      () =>
+        readPrometheusMetric(
+          "dicer_client_watch_channels_created_total",
+          labels = Vector("clientName" -> s"dicer-${ClientType.Clerk}-${target.name}")
+        )
+    )
+
+    // Setup: connect to assigner2, which redirects to assigner1. Set an assignment on assigner1
+    // so we can confirm the lookup followed the redirect.
+    withLookup(assigner2) { (lookup: SliceLookupHarness, _: LoggingStreamCallback[Assignment]) =>
+      val proposal: SliceMap[ProposedSliceAssignment] = sampleProposal()
+      val assignment: Assignment =
+        TestUtils.awaitResult(assigner1.setAndFreezeAssignment(target, proposal), Duration.Inf)
+      AssertionWaiter("Wait for redirected assignment from assigner1").await {
+        assert(lookup.generationOpt.get == assignment.generation)
+      }
+
+      // Verify: exactly two watch channels were created (one at startup, one for the redirect).
+      assert(watchChannelsCreatedTracker.totalChange() == 2)
+    }
+  }
+
   test("Redirect failure retries are backoff-bounded") {
     // Test plan: Verify that a persistent redirect/failure path does not create a tight retry loop.
     // Specifically, when the preferred assigner keeps failing requests, the lookup should enter
@@ -981,6 +1074,81 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
       )
     } finally {
       lookup.cancel()
+    }
+  }
+
+  test("Rate limiting bounds watch request rate") {
+    // Test plan: Verify that when rate limiting is enabled, the SliceLookup's sustained rate of
+    // watch requests is bounded, even when the server responds instantly. Verify the QPS is
+    // bounded by draining the token bucket, then timing how long it takes to make 4 additional
+    // watch requests. Compute the watch request rate and verify it's bounded to a reasonable value.
+
+    // Configure the assigner to respond immediately to every watch request.
+    singleAssignerTestEnv.testAssigner.setReplyType(
+      AssignerReplyType.FutureOverride(
+        Future.successful(
+          ClientResponse(
+            SyncAssignmentState.KnownGeneration(Generation.EMPTY),
+            LOW_RPC_TIMEOUT,
+            Redirect.EMPTY
+          ).toProto
+        )
+      )
+    )
+
+    val watchRequestsToMeasure: Long = 4
+    // We drain the token bucket before measuring so the result reflects the sustained QPS.
+    // With a token bucket refill rate of 1 token/sec, the sustained QPS can be as high as 1.0.
+    // We set maxWatchQps to 1.25 to allow for ample wiggle room.
+    val maxWatchQps: Double = 1.25
+
+    // Helper to read the number of watch requests.
+    def getWatchCount: Long = {
+      readPrometheusMetric(
+        "dicer_client_watch_requests_total",
+        Vector(
+          "targetCluster" -> target.getTargetClusterLabel,
+          "targetName" -> target.getTargetNameLabel,
+          "targetInstanceId" -> target.getTargetInstanceIdLabel,
+          "clientType" -> ClientType.Clerk.getMetricLabel,
+          "status" -> "success",
+          "grpc_status" -> "OK"
+        )
+      ).toLong
+    }
+
+    val watchTracker = ChangeTracker(() => getWatchCount)
+    assert(getWatchCount == 0)
+    assert(watchTracker.totalChange() == 0)
+
+    withLookup(singleAssignerTestEnv.testAssigner, enableRateLimiting = true) {
+      (_: SliceLookupHarness, _: LoggingStreamCallback[Assignment]) =>
+        // Drain the initial 2-token burst before counting watch requests.
+        AssertionWaiter("Wait for initial token bucket burst to drain").await {
+          assert(watchTracker.totalChange() >= 2)
+        }
+
+        // Record the start of the measurement.
+        val watchesAtStart: Long = watchTracker.totalChange()
+        val startNs: Long = System.nanoTime()
+
+        AssertionWaiter(
+          s"Wait for $watchRequestsToMeasure watch requests"
+        ).await {
+          assert(watchTracker.totalChange() - watchesAtStart >= watchRequestsToMeasure)
+        }
+
+        // Verify that the watch request rate does not exceed `maxWatchQps`.
+        val watchesAtEnd: Long = watchTracker.totalChange()
+        val endNs: Long = System.nanoTime()
+        val elapsedSeconds: Double = (endNs - startNs) / 1e9
+        val watchRequests: Long = watchesAtEnd - watchesAtStart
+        val watchQps: Double = watchRequests / elapsedSeconds
+        assert(
+          watchQps < maxWatchQps,
+          s"Watch QPS $watchQps exceeded $maxWatchQps while measuring " +
+          s"$watchRequests requests over $elapsedSeconds seconds"
+        )
     }
   }
 
@@ -1199,6 +1367,57 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
 
         assert(finalCount == initialCount + 1, "Histogram count should increment by 1")
         assert(finalSum > initialSum, "Histogram sum should increase")
+    }
+  }
+
+  namedGridTest("Watch requests carry sender cluster_uri / region_uri from WhereAmI")(
+    Map(
+      "populated" ->
+      (
+        (
+          Some("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01"),
+          Some("region:dev/cloud1/public/region1")
+        )
+      ),
+      "unavailable" -> ((None, None))
+    )
+  ) { senderUris: (Option[String], Option[String]) =>
+    // Test plan: Verify SliceLookup populates outgoing watch requests with the sender pod's
+    // cluster/region URIs, and leaves them as None when the sender location is not populated.
+    // Verify also that assignments still reach the watcher in both cases, so that populating
+    // WhereAmI cannot break the assignment flow.
+    val (senderClusterUriOpt, senderRegionUriOpt): (Option[String], Option[String]) = senderUris
+    // Setup: The emitted request should carry the same URIs resolved through the wrappers (each
+    // `None` when the sender URI is unset).
+    val expectedClusterOpt: Option[KubernetesClusterUri] =
+      senderClusterUriOpt.flatMap(KubernetesClusterUri.fromUri)
+    val expectedRegionOpt: Option[RegionUri] = senderRegionUriOpt.flatMap(RegionUri.fromUri)
+    withLookup(
+      singleAssignerTestEnv.testAssigner,
+      senderClusterUriOpt = senderClusterUriOpt,
+      senderRegionUriOpt = senderRegionUriOpt
+    ) { (_: SliceLookupHarness, callback: LoggingStreamCallback[Assignment]) =>
+      // Setup: Set an arbitrary assignment that the TestAssigner uses to respond to watch requests.
+      val numInitialElements: Int = callback.numElements
+      val assignment: Assignment =
+        TestUtils.awaitResult(
+          singleAssignerTestEnv.setAndFreezeAssignment(target, sampleProposal()),
+          Duration.Inf
+        )
+      // Verify: Assigner receives watch requests with the expected clusterUriOpt and regionUriOpt.
+      // Asserting inside the waiter avoids observing a stale request from a prior gridTest case,
+      // since TestAssigner retains the latest request across cases.
+      AssertionWaiter("Wait for the lookup's watch RPC to reach the test Assigner").await {
+        val (_, latestWatchRequest): (RequestHeaders, ClientRequest) =
+          singleAssignerTestEnv.testAssigner
+            .getLatestClerkWatchRequest(target)
+            .getOrElse(fail("No watch request received by the TestAssigner"))
+        assertResult(expectedClusterOpt)(latestWatchRequest.clusterUriOpt)
+        assertResult(expectedRegionOpt)(latestWatchRequest.regionUriOpt)
+      }
+      // Verify: The watcher still receives the assignment, so sending the sender URIs does not
+      // disrupt the assignment flow.
+      waitForGeneration(callback, assignment.generation, numInitialElements)
     }
   }
 

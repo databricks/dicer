@@ -15,6 +15,7 @@ scala_library(
     name = "infra_data_model_lib",
     srcs = [
         "src/InfraDataModel.scala",
+        "src/ResourcePath.scala",
     ],
     deps = [
         ":kubernetes_cluster",

@@ -1,9 +1,10 @@
 package com.databricks.dicer.assigner
 
 import com.databricks.dicer.common.Generation
-import com.databricks.conf.Configs
+import com.databricks.conf.{Config, Configs, RichConfig}
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
 import com.databricks.dicer.common.EtcdBootstrapper
+import com.databricks.caching.util.AlertOwnerTeam
 import com.databricks.caching.util.{EtcdTestEnvironment, EtcdClient, EtcdKeyValueMapper}
 import com.databricks.caching.util.UnixTimeVersion
 import com.databricks.rpc.DatabricksServerWrapper
@@ -22,12 +23,12 @@ import com.databricks.caching.util.{
 }
 import com.databricks.caching.util.TestUtils.TestName
 import java.util.UUID
-import java.util.concurrent.TimeUnit
 
 import scala.concurrent.Await
 import scala.concurrent.duration._
 
 import io.prometheus.client.CollectorRegistry
+import com.databricks.dicer.assigner.AssignerMainSuite.BASE_CONFIG
 import com.databricks.dicer.assigner.PreferredAssignerValue.SomeAssigner
 import com.databricks.rpc.DatabricksObjectMapper
 
@@ -39,14 +40,6 @@ class AssignerMainSuite extends DatabricksTest with TestName {
    * and clear DPage state. Only one Assigner per test is supported.
    */
   private var assignerOpt: Option[Assigner] = None
-
-  /** Factory that returns [[None]], disabling the [[KubernetesMembershipChecker]]. */
-  private val noOpMembershipCheckerFactory: KubernetesMembershipChecker.Factory =
-    new KubernetesMembershipChecker.Factory {
-      override def create(
-          assignerInfo: AssignerInfo,
-          assignerProtoLogger: AssignerProtoLogger): Option[KubernetesMembershipChecker] = None
-    }
 
   /** A [[LocationConf]] that includes cluster location. */
   private val LOCATION_CONFIG_WITH_CLUSTER_LOCATION: LocationConf =
@@ -77,9 +70,14 @@ class AssignerMainSuite extends DatabricksTest with TestName {
    */
   private def startAssignerService(
       conf: DicerAssignerConf,
-      factory: KubernetesMembershipChecker.Factory
+      localClusterMembershipCheckerFactory: KubernetesMembershipChecker.Factory,
+      remoteClusterMembershipCheckerFactoryOpt: Option[KubernetesMembershipChecker.Factory]
   ): Unit = {
-    AssignerMain.staticForTest.wrappedMainInternalWithCheckerFactory(conf, factory) match {
+    AssignerMain.staticForTest.wrappedMainInternalWithCheckerFactory(
+      conf,
+      localClusterMembershipCheckerFactory,
+      remoteClusterMembershipCheckerFactoryOpt
+    ) match {
       case Left(assigner: Assigner) => assignerOpt = Some(assigner)
       case Right(statusCode: Int) => fail(s"Expected Assigner, got exit code: $statusCode")
     }
@@ -104,7 +102,12 @@ class AssignerMainSuite extends DatabricksTest with TestName {
 
     val result: Either[Assigner, Int] =
       AssignerMain.staticForTest
-        .wrappedMainInternalWithCheckerFactory(conf, noOpMembershipCheckerFactory)
+        .wrappedMainInternalWithCheckerFactory(
+          conf,
+          localClusterMembershipCheckerFactory =
+            FakeKubernetesTestSupport.inertMembershipCheckerFactory,
+          remoteClusterMembershipCheckerFactoryOpt = None
+        )
     assert(result == Right(EtcdBootstrapper.ExitCode.SUCCESS.value))
 
     assert(
@@ -142,53 +145,23 @@ class AssignerMainSuite extends DatabricksTest with TestName {
 
     val result: Either[Assigner, Int] =
       AssignerMain.staticForTest
-        .wrappedMainInternalWithCheckerFactory(conf, noOpMembershipCheckerFactory)
+        .wrappedMainInternalWithCheckerFactory(
+          conf,
+          localClusterMembershipCheckerFactory =
+            FakeKubernetesTestSupport.inertMembershipCheckerFactory,
+          remoteClusterMembershipCheckerFactoryOpt = None
+        )
     assert(result == Right(EtcdBootstrapper.ExitCode.RETRYABLE_FAILURE.value))
   }
 
-  test("Assigner sources POD_UID and POD_IP environment variables correctly") {
-    // Test plan: Verify that the Assigner sources the POD_UID and POD_IP environment variables
-    // correctly for configuring its identify in the context of preferred assignership. Verify this
-    // by invoking wrappedMainInternal with a configuration that enables preferred assigner and
-    // checking that the assigner ultimately writes itself as the preferred assigner with the
-    // expected UUID and IP address. Note that POD_UID and POD_IP have been set to well known values
-    // by the `cross_databricks_test` rule that runs this test suite.
-    val conf = new DicerAssignerConf(
-      Configs.parseMap(
-        Map(
-          "databricks.dicer.assigner.preferredAssigner.modeEnabled" -> true,
-          "databricks.dicer.assigner.preferredAssigner.storeIncarnation" -> 42,
-          "databricks.dicer.assigner.preferredAssigner.etcd.sslEnabled" -> false,
-          "databricks.dicer.assigner.preferredAssigner.etcd.endpoints" ->
-          DatabricksObjectMapper.toJson(
-            Seq(etcd.endpoint)
-          ),
-          "databricks.dicer.assigner.rpc.port" -> 0 // Do not overlap with other tests.
-        )
-      )
-    ) {
-      // Needed so that the Assigner doesn't throw an exception when trying to start the watch
-      // server and thus fail this test.
-      override lazy val sslArgs: SslArguments = TestSslArguments.serverSslArgs
-    }
-    etcd.initializeStore(Assigner.getPreferredAssignerEtcdNamespace(conf))
+}
 
-    withLocationConfSingleton(LOCATION_CONFIG_WITH_CLUSTER_LOCATION) {
-      startAssignerService(conf, noOpMembershipCheckerFactory)
-    }
+object AssignerMainSuite {
 
-    val paStore: EtcdPreferredAssignerStore = Assigner.createPreferredAssignerStore(conf)
-    AssertionWaiter("Waiting for expected preferred assigner value").await {
-      paStore.getPreferredAssignerWatchCell.getLatestValueOpt
-        .getOrElse(fail("No preferred assigner value written to store yet")) match {
-        case SomeAssigner(assignerInfo: AssignerInfo, _: Generation) =>
-          assert(assignerInfo.uuid == UUID.fromString("67a738a6-0f47-49ab-97db-b3e9858f196f"))
-          // We don't know what port the assigner started on, so we just check that the host matches
-          // expectations.
-          assert(assignerInfo.uri.getHost == "127.0.0.1")
-        case _ => fail("Expected preferred assigner value with UUID and IP.")
-      }
-    }
-  }
-
+  /**
+   * Base config used in all tests that actually start the Assigner. The RPC port is set to 0 so the
+   * Assigner server binds to an ephemeral port, avoiding port conflicts with concurrent suites.
+   */
+  private[assigner] val BASE_CONFIG: Config =
+    Configs.parseMap(Map("databricks.dicer.assigner.rpc.port" -> 0))
 }

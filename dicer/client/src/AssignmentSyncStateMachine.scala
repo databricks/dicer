@@ -316,7 +316,6 @@ class AssignmentSyncStateMachine(config: InternalClientConfig, random: Random)
     if (!isLatestOpId(opId, s"read failure: $error")) {
       // This is a failure response to an old request. Ignore it.
     } else {
-      logger.info(s"Watch assignment failed: $error", every = 30.seconds)
       setupRetry(now)
     }
   }
@@ -483,6 +482,11 @@ object AssignmentSyncStateMachine {
   /**
    * Manages the scheduling of watch requests, taking into account both backoff delays and rate
    * limiting via the token bucket.
+   *
+   * Our intent in rate-limiting requests is to protect the server in case of unexpected issues
+   * (<internal bug>) but also the client; if we were to otherwise ensure an outstanding hanging get
+   * without any rate limiting, a malicious server could try to induce high load on a client by
+   * completing requests immediately.
    */
   private class ReadScheduler(
       enableRateLimiting: Boolean,
@@ -491,28 +495,23 @@ object AssignmentSyncStateMachine {
       maxRetryDelay: FiniteDuration,
       logger: PrefixLogger) {
 
+    /** The number of tokens consumed from the token bucket per read request. */
+    private val TOKENS_PER_READ: Long = 1
+
     /**
      * Token bucket for rate limiting watch requests. When rate limiting is enabled, the bucket is
      * configured with a specific rate and capacity. When disabled, the bucket is configured with an
      * unlimited rate (Long.MaxValue) so that `tryAcquire` always succeeds.
-     *
-     * Our intent in rate-limiting requests is to protect the server in case of unexpected issues
-     * (<internal bug>) but also the client; if we were to otherwise ensure an outstanding hanging get
-     * without any rate limiting, a malicious server could try to induce high load on a client by
-     * completing requests immediately.
      */
     private val tokenBucket: TokenBucket = if (enableRateLimiting) {
       TokenBucket.create(
-        // We allow a burst of up to 2 requests because when the PA changes, a successful response
-        // containing a redirect address can trigger two requests within the same second. The bucket
-        // then refills at a rate of 1 token per second. Since watch requests are typically sent
-        // every 2.5 seconds, this allows the bucket to regain 2 tokens in that interval, ensuring
-        // it can always handle an immediate redirect response. In practice, PA changes rarely occur
-        // more than once per second, so this rate should be sufficient.
-        capacityInSecondsOfRate = 2,
-        rate = 1,
-        // `initTime` is used to set the initial refill time for the token bucket. It's safe to set
-        // it to TickerTime.MIN here because we always perform a refill before calling `tryAcquire`.
+        // Allow a burst of 2 requests so a preferred assigner change can trigger an immediate
+        // redirect. At a rate of 1 token per second, the bucket regains this burst within the
+        // typical 2.5-second interval between watch requests.
+        capacityInSecondsOfRate = 2 * TOKENS_PER_READ,
+        rate = TOKENS_PER_READ,
+        // The token bucket requires an initial refill timestamp. TickerTime.MIN is a harmless
+        // placeholder because we always perform a refill before acquiring tokens.
         initTime = TickerTime.MIN
       )
     } else {
@@ -536,7 +535,7 @@ object AssignmentSyncStateMachine {
 
     /**
      * Checks if a read is allowed and acquires a token if it is. Returns `false` if the caller is
-     * still in the backoff period or if no token is available in the token bucket. (i.e., returns
+     * still in the backoff period or if no token is available in the token bucket (i.e., returns
      * false if `now` < [[getScheduledTime]]). Otherwise, refills the token bucket and acquires a
      * token, allowing the read to proceed.
      */
@@ -549,7 +548,7 @@ object AssignmentSyncStateMachine {
         // guarantees that the token bucket has at least one token when `nextReadScheduleTime` is
         // reached, `tryAcquire` should always succeed.
         tokenBucket.refill(now)
-        if (!tokenBucket.tryAcquire(count = 1)) {
+        if (!tokenBucket.tryAcquire(count = TOKENS_PER_READ)) {
           // $COVERAGE-OFF$: This alert is used to indicate potential future bugs in
           // `scheduleNextRead`, and it cannot be triggered by the current code in tests.
           logger.alert(
@@ -584,7 +583,7 @@ object AssignmentSyncStateMachine {
         Duration.Zero
       }
       val desiredTime: TickerTime = now + backoffDelay
-      val tokenAvailableTime: TickerTime = tokenBucket.timeWhenRefilled(desired = 1)
+      val tokenAvailableTime: TickerTime = tokenBucket.timeWhenRefilled(desired = TOKENS_PER_READ)
       // Schedule the next read no earlier than when a token is available.
       nextReadScheduleTime = if (desiredTime >= tokenAvailableTime) {
         desiredTime

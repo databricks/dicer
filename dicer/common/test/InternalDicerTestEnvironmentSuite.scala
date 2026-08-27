@@ -5,6 +5,8 @@ import java.util.UUID
 import scala.concurrent.duration.{Duration, _}
 
 import com.databricks.caching.util.AssertionWaiter
+import com.databricks.caching.util.{CachingErrorCode, MetricUtils, Severity}
+import com.databricks.caching.util.MetricUtils.ChangeTracker
 import com.databricks.caching.util.TestUtils.{TestName, assertThrow}
 import com.databricks.conf.Configs
 import com.databricks.dicer.assigner.config.InternalTargetConfig.{
@@ -29,6 +31,9 @@ import java.net.URI
 import com.databricks.caching.util.WhereAmITestUtils.withLocationConfSingleton
 import com.databricks.conf.trusted.LocationConf
 import com.databricks.conf.trusted.LocationConfTestUtils
+import com.databricks.dicer.client.TestClientUtils
+import com.databricks.dicer.client.featurerollouts.DicerClientFeatureRolloutFlag
+import com.databricks.dicer.external.{ClerkConf, SliceletConf}
 import com.databricks.rpc.DatabricksObjectMapper
 import com.databricks.caching.util.TestUtils
 
@@ -502,4 +507,68 @@ class InternalDicerTestEnvironmentSuite extends DatabricksTest with TestName {
     slicelet.forTest.stop()
   }
 
+  test("Test conf factories let tests inject DicerClientFeatureRolloutFlag values") {
+    // Test plan: Verify that injecting a DicerClientFeatureRolloutFlag into the Slicelet, Clerk,
+    // and DirectClerk conf factories used by InternalDicerTestEnvironment causes the resulting
+    // confs' isFeatureRolloutFlagEnabled to delegate to the injected flag (instead of consulting
+    // the process-wide singleton). Use a fake DicerClientFeatureRolloutFlag that returns true only
+    // for "feature-on" and assert isFeatureRolloutFlagEnabled returns true/false accordingly on
+    // each of the three conf shapes. Also assert the default (no injection) path continues to
+    // consult the singleton (returns false here because no rollout config is loaded in tests).
+    val target: Target = Target(getGlobalSafeName)
+    val fakeFlag: DicerClientFeatureRolloutFlag = new DicerClientFeatureRolloutFlag {
+      override def isEnabled(flagName: String, t: Target): Boolean = flagName == "feature-on"
+    }
+    val errorCount: ChangeTracker[Int] = ChangeTracker[Int] { () =>
+      MetricUtils.getPrefixLoggerErrorCount(
+        Severity.DEGRADED,
+        CachingErrorCode.DICER_CLIENT_FEATURE_ROLLOUT_ENV_UNAVAILABLE,
+        prefix = "dicer-client-feature-rollout"
+      )
+    }
+
+    val sliceletConfWithFakeFlag: SliceletConf = TestClientUtils.createTestSliceletConf(
+      assignerPort = 0,
+      sliceletHost = "localhost",
+      clientTlsFilePathsOpt = None,
+      serverTlsFilePathsOpt = None,
+      watchFromDataPlane = false,
+      featureRolloutFlagOpt = Some(fakeFlag)
+    )
+    assert(sliceletConfWithFakeFlag.isFeatureRolloutFlagEnabled("feature-on", target))
+    assert(!sliceletConfWithFakeFlag.isFeatureRolloutFlagEnabled("feature-off", target))
+
+    val clerkConfWithFakeFlag: ClerkConf = TestClientUtils.createTestClerkConf(
+      sliceletPort = 0,
+      clientTlsFilePathsOpt = None,
+      featureRolloutFlagOpt = Some(fakeFlag)
+    )
+    assert(clerkConfWithFakeFlag.isFeatureRolloutFlagEnabled("feature-on", target))
+    assert(!clerkConfWithFakeFlag.isFeatureRolloutFlagEnabled("feature-off", target))
+
+    val directClerkConfWithFakeFlag: ClerkConf = TestClientUtils.createTestDirectClerkConf(
+      assignerPort = 0,
+      clientTlsFilePathsOpt = None,
+      branchOpt = None,
+      featureRolloutFlagOpt = Some(fakeFlag)
+    )
+    assert(directClerkConfWithFakeFlag.isFeatureRolloutFlagEnabled("feature-on", target))
+    assert(!directClerkConfWithFakeFlag.isFeatureRolloutFlagEnabled("feature-off", target))
+
+    // The injected flag bypasses the singleton, so no caching_errors are recorded.
+    assert(errorCount.totalChange() == 0)
+
+    // Without injection, the conf falls back to the process-wide singleton. In tests no LOCATION
+    // env var is set, so the first call here triggers the singleton's lazy construction, which
+    // fires the env-unavailable alert.
+    val sliceletConfNoFakeFlag: SliceletConf = TestClientUtils.createTestSliceletConf(
+      assignerPort = 0,
+      sliceletHost = "localhost",
+      clientTlsFilePathsOpt = None,
+      serverTlsFilePathsOpt = None,
+      watchFromDataPlane = false
+    )
+    assert(!sliceletConfNoFakeFlag.isFeatureRolloutFlagEnabled("feature-on", target))
+    assert(errorCount.totalChange() == 1)
+  }
 }

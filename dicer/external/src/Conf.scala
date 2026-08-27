@@ -7,6 +7,10 @@ import scala.concurrent.duration._
 import com.databricks.conf.DbConf
 import com.databricks.conf.trusted.{LocationConf, RPCPortConf}
 import com.databricks.dicer.client.DicerClientProtoLoggerConf
+import com.databricks.dicer.client.featurerollouts.{
+  DicerClientFeatureRolloutFlag,
+  DicerClientFeatureRolloutFlagImpl
+}
 import com.databricks.dicer.common.{CommonSslConf, InternalClientConf, WatchServerConf}
 import com.databricks.rpc.tls.TLSOptions
 
@@ -55,6 +59,18 @@ trait SliceletConf extends DicerClientConf with WatchServerConf {
       "databricks.dicer.internal.cachingteamonly.blockedReadinessCheckStartDelayMillis",
       5000
     ).millis
+
+  /**
+   * Interval at which the readiness poller polls the readiness provider. See [[SliceletImpl]] for
+   * more details.
+   *
+   * **IMPORTANT**: This value should be set by Caching team only.
+   */
+  private[dicer] final val readinessProviderPollInterval: FiniteDuration =
+    configure[Long](
+      "databricks.dicer.internal.cachingteamonly.readinessProviderPollIntervalMillis",
+      1000
+    ).millis
 }
 
 /**
@@ -96,4 +112,30 @@ trait DicerClientConf
    */
   private[dicer] final val clientUuidOpt: Option[String] =
     configure("databricks.dicer.internal.cachingteamonly.clientUuid", envVars.get("POD_UID"))
+
+  /**
+   * Returns whether the rollout flag named `flagName` is enabled for `target` per the rollout
+   * configuration resolved for the current environment and region. See
+   * `dicer/client/feature-rollouts/proto/dicer_client_feature_rollout_config.proto` for the
+   * configuration schema.
+   *
+   * This method should be called only once at Slicelet or Clerk initialization for each feature,
+   * with the resulting Boolean passed down to lower-level components. Avoid relying on rollout
+   * flags from components lower than [[SliceletImpl]] or [[ClerkImpl]].
+   *
+   * Slicelets or Clerks should call this method to get the rollout flag values instead of directly
+   * querying the [[DicerCliengFeatureRolloutFlag]] singleton. This allows the
+   * InternalDicerTestEnvironment to inject controllable return values for
+   * `isFeatureRolloutFlagEnabled` for test purpose (by using its own implementation of
+   * DicerClientConf with `isFeatureRolloutFlagEnabled` overridden).
+   */
+  private[dicer] def isFeatureRolloutFlagEnabled(flagName: String, target: Target): Boolean =
+    DicerClientConf.featureRolloutFlagSingleton.isEnabled(flagName, target)
+}
+
+private object DicerClientConf {
+
+  /** Process-wide [[DicerClientFeatureRolloutFlag]] singleton. */
+  private val featureRolloutFlagSingleton: DicerClientFeatureRolloutFlag =
+    DicerClientFeatureRolloutFlagImpl.create()
 }

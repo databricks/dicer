@@ -14,8 +14,8 @@ private class AppTargetSuite extends DatabricksTest {
     loadTestData[TargetTestDataP]("dicer/common/test/data/target_test_data.textproto")
 
   /** A valid identifier that has the longest permitted length. */
-  private val LONGEST_APP_NAME: String = TEST_DATA.validAppTargetNames.last
-  assert(LONGEST_APP_NAME.length == 42)
+  private val LONGEST_NAME: String = TEST_DATA.validTargetNames.last
+  assert(LONGEST_NAME.length == 63)
 
   /** A valid instance ID that has the longest permitted length. */
   private val LONGEST_INSTANCE_ID: String = TEST_DATA.validInstanceIds.last
@@ -27,7 +27,7 @@ private class AppTargetSuite extends DatabricksTest {
   private val VALID_TARGETS: Seq[AppTarget] = {
     for {
       instanceId: String <- INSTANCE_IDS
-      name: String <- TEST_DATA.validAppTargetNames
+      name: String <- TEST_DATA.validTargetNames
       appTarget <- Target.createAppTarget(name, instanceId) match {
         case _: KubernetesTarget =>
           throw new IllegalStateException("Target.createAppTarget returns unexpected type")
@@ -37,13 +37,13 @@ private class AppTargetSuite extends DatabricksTest {
   }
 
   /** An invalid identifier that exceeds the length limit. */
-  private val TOO_LONG_APP_NAME = TEST_DATA.invalidAppTargetNames.last
-  assert(TOO_LONG_APP_NAME.length == 43)
+  private val TOO_LONG_NAME = TEST_DATA.invalidTargetNames.last
+  assert(TOO_LONG_NAME.length == 64)
 
   test("Valid names") {
     // Test plan: verify that we're able to construct AppTarget using valid names (i.e. names that
     // are valid DNS labels) and valid instance ids.
-    for (validName: String <- TEST_DATA.validAppTargetNames) {
+    for (validName: String <- TEST_DATA.validTargetNames) {
       val target = Target.createAppTarget(validName, "a123")
       assert(target.name == validName)
     }
@@ -52,8 +52,8 @@ private class AppTargetSuite extends DatabricksTest {
   test("Invalid names") {
     // Test plan: verify that `Target.createAppTarget(invalidName, _)` throws an
     // `IllegalArgumentException`.
-    for (invalidName: String <- TEST_DATA.invalidAppTargetNames) {
-      assertThrow[IllegalArgumentException]("Name is invalid") {
+    for (invalidName: String <- TEST_DATA.invalidTargetNames) {
+      assertThrow[IllegalArgumentException]("Target name must match regex") {
         Target.createAppTarget(invalidName, "a123")
       }
     }
@@ -61,7 +61,7 @@ private class AppTargetSuite extends DatabricksTest {
 
   test("Valid instance IDs") {
     // Test plan: verify that we're able to construct AppTarget using valid instance IDs that
-    // match the requirements for App Identifiers.
+    // are valid RFC 1123 labels.
     for (validInstanceId: String <- TEST_DATA.validInstanceIds) {
       val target = Target.createAppTarget("name", validInstanceId)
       target match {
@@ -97,12 +97,12 @@ private class AppTargetSuite extends DatabricksTest {
     }
   }
 
-  gridTest("Invalid app names (parse)")(TEST_DATA.invalidAppTargetNames) { invalidName: String =>
-    // Test plan: verify that TargetHelper.parse rejects AppTarget descriptions with invalid app
+  gridTest("Invalid names (parse)")(TEST_DATA.invalidTargetNames) { invalidName: String =>
+    // Test plan: verify that TargetHelper.parse rejects AppTarget descriptions with invalid
     // names.
     if (!invalidName.contains(":")) {
       // Names containing ':' are excluded because ':' is the parseable-description delimiter.
-      assertThrow[IllegalArgumentException]("Name is invalid") {
+      assertThrow[IllegalArgumentException]("Target name must match regex") {
         TargetHelper.parse(s"appTarget:$invalidName:a123")
       }
     }
@@ -188,7 +188,7 @@ private class AppTargetSuite extends DatabricksTest {
         TargetP(
           name = Some("name"),
           targetType = Some(TargetP.Type.APP),
-          instanceId = Some("12345")
+          instanceId = Some("invalid_id")
         )
       assertThrow[IllegalArgumentException]("Instance ID is invalid") {
         TargetHelper.fromProto(proto)

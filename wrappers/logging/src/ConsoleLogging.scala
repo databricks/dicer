@@ -2,10 +2,7 @@ package com.databricks.logging
 
 import com.typesafe.scalalogging.Logger
 
-/**
- * Open source implementation of ConsoleLogging that provides the minimal interface
- * needed by other logger implementations.
- */
+/** Provides basic console-level logging. */
 trait ConsoleLogging {
 
   /** Gets the name of the logger. */

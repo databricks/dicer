@@ -1,5 +1,5 @@
 # Build the Docker image with JDK 17.
-FROM eclipse-temurin:17-jdk
+FROM eclipse-temurin:17-jdk@sha256:859dc576f4af4fad89a179441e3f6dc9a549b86a2ffa5c740ed76b644810239b
 
 # Copy the pre-built Demo Server JAR into the container.
 COPY dicer/demo/demo-server.jar /app/demo-server.jar

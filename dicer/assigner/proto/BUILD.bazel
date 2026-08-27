@@ -32,3 +32,20 @@ scala_proto_library(
     visibility = ["//dicer:internal"],
     deps = [":preferred_assigner_proto_library"],
 )
+
+proto_library(
+    name = "gossip_proto_library",
+    srcs = ["gossip.proto"],
+    visibility = ["//dicer:internal"],
+    deps = [
+        ":preferred_assigner_proto_library",
+        "//dicer/assigner/config/proto:target_migration_config_proto",
+        "//wrappers/rpc:scalapb_proto",
+    ],
+)
+
+scala_proto_library(
+    name = "gossip_protolib",
+    visibility = ["//dicer:internal"],
+    deps = [":gossip_proto_library"],
+)

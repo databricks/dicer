@@ -33,4 +33,31 @@ object LocationConfTestUtils {
         )
     }
   }
+
+  /**
+   * Returns a materialized [[LocationConf]] with the given cluster and region URIs. Only the fields
+   * the open source [[KubernetesLocation]] models are honored; the remaining parameters exist to
+   * match the internal signature so shared tests compile against both. An empty URI string maps to
+   * `None`.
+   */
+  def newTestLocationConf(
+      confStr: String = "",
+      cloudProvider: String = "AWS",
+      cloudProviderRegion: String = "AWS_US_WEST_2",
+      environment: String = "DEV",
+      kubernetesClusterType: String = "GENERAL_CLASSIC",
+      kubernetesClusterUri: String =
+        "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01",
+      kubernetesClusterShortName: String = "reg1gc01",
+      regionUri: String = "region:dev/cloud1/public/region1",
+      regionShortName: String = "reg1",
+      regulatoryDomain: String = "PUBLIC"): LocationConf = {
+    new DbConfSingletonImpl with LocationConf {
+      override val location: KubernetesLocation =
+        KubernetesLocation(
+          kubernetesClusterUri = Option(kubernetesClusterUri).filter(_.nonEmpty),
+          regionUri = Option(regionUri).filter(_.nonEmpty)
+        )
+    }
+  }
 }

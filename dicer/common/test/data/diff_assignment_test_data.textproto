@@ -94,6 +94,10 @@ round_trip_test_cases: [
         resources: ["Pod2"]
       }
     ]
+    assigner_service_info {
+      name: "dicer-assigner"
+      instance_id: "test-instance"
+    }
   },
   {
     generation: { incarnation: 42 number: 100 }
@@ -216,6 +220,10 @@ valid_diff_assignment {
       resources: ["Pod2"]
     }
   ]
+  assigner_service_info {
+    name: "dicer-assigner"
+    instance_id: "test-instance"
+  }
 }
 
 from_proto_validity_test_cases: [
@@ -287,5 +295,23 @@ from_proto_validity_test_cases: [
       new_resource_indices: [-1]
     }
     expected_error: "Resource index -1 out of range"
+  }
+]
+
+invalid_assigner_service_infos: [
+  {
+    name: "dicer-assigner"
+  },
+  {
+    instance_id: "test-instance"
+  },
+  {},
+  {
+    name: "Invalid_Name"
+    instance_id: "test-instance"
+  },
+  {
+    name: "dicer-assigner"
+    instance_id: "Invalid_Instance_ID"
   }
 ]

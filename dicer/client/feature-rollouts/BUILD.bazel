@@ -1,6 +1,12 @@
 load("@rules_scala//scala:scala.bzl", "scala_library", "scala_test")
 
 filegroup(
+    name = "feature_rollout_configs",
+    srcs = glob(["**/*.textproto"], exclude = ["test/**"]),
+    visibility = ["//dicer:internal"],
+)
+
+filegroup(
     name = "test_feature_rollout_configs",
     srcs = [
         "test/testdata/all-disabled-feature.textproto",
@@ -26,13 +32,18 @@ scala_library(
     ],
     visibility = ["//dicer:internal"],
     deps = [
+        "//caching/util:caching_error_code",
+        "//caching/util:caching_error_metrics",
         "//caching/util:deterministic_sampling",
-        "//caching/util:prefix_logger",
+        "//caching/util:where_am_i_helper",
         "//dicer/client/feature-rollouts/proto:dicer_client_feature_rollout_config_scala_lib",
+        "//dicer/common:target_helper",
         "//dicer/common:target_name",
-        "//dicer/external:conf",
+        "//dicer/external:target",
         "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_code_findbugs_jsr305",
         "@maven//:com_google_guava_guava",
+        "@maven//:io_prometheus_simpleclient",
         "@scala_proto_rules_grpc_api",
         "@scala_proto_rules_grpc_netty",
         "@scala_proto_rules_grpc_stub",
@@ -59,6 +70,7 @@ scala_test(
         "//wrappers/util:async_test_helpers",
         "//wrappers/util:databricks-test",
         "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_code_findbugs_jsr305",
         "@maven//:com_google_guava_guava",
         "@scala_proto_rules_grpc_api",
         "@scala_proto_rules_grpc_netty",
@@ -70,14 +82,29 @@ scala_test(
 scala_test(
     name = "dicer_client_feature_rollout_flag_test",
     srcs = ["test/DicerClientFeatureRolloutFlagImplSuite.scala"],
-    data = [":test_feature_rollout_configs"],
+    data = [
+        ":feature_rollout_configs",
+        ":test_feature_rollout_configs",
+    ],
     timeout = "short",
     deps = [
         ":dicer_client_feature_rollout_config",
+        "//caching/util:caching_error_code",
         "//caching/util:metric_utils",
-        "//caching/util:prefix_logger",
+        "//caching/util:where_am_i_helper",
+        "//caching/util:where_am_i_test_utils",
         "//dicer/external:conf",
+        "//dicer/external:target",
+        "//wrappers/conf:core",
+        "//wrappers/conf:current_project",
+        "//wrappers/conf:dbconf",
+        "//wrappers/conf:location",
+        "//wrappers/conf:location_test",
+        "//wrappers/conf:project",
+        "//wrappers/conf:project-conf",
+        "//wrappers/rpc:rpc_tls",
         "//wrappers/util:async_test_helpers",
         "//wrappers/util:databricks-test",
+        "@maven//:io_prometheus_simpleclient",
     ],
 )

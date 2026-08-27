@@ -3,7 +3,7 @@ package com.databricks.caching.util
 import scala.concurrent.duration.DurationLong
 
 /**
- * A basic token bucket primitive that tracks available tokens (tokens). This class accepts the
+ * A basic token bucket primitive that tracks available tokens. This class accepts the
  * current [[TickerTime]] in its APIs and is designed to be used in contexts like
  * [[com.databricks.caching.util.StateMachine]] where time is managed externally. Otherwise,
  * [[RateLimiter]] should be used instead. Note that the caller needs to explicitly refill the
@@ -13,9 +13,7 @@ import scala.concurrent.duration.DurationLong
  * that it can start serving requests immediately.
  *
  * This class is not thread safe. It's the caller's responsibility to guarantee that only one thread
- * can access the token bucket instance at a time. Also note that we use Double internally in the
- * token bucket to simplify computation. Doubles are accurate up to 16 decimal places and we think
- * the relative error is acceptable.
+ * can access the token bucket instance at a time.
  *
  * Important note: all methods do NOT automatically refill the bucket. The caller must explicitly
  * call [[refill]] with the current time to ensure tokens are up to date, if needed. This is
@@ -26,9 +24,8 @@ import scala.concurrent.duration.DurationLong
  * @param initRate the rate at which the bucket is initially refilled in tokens per second
  * @param initTime the time at which the bucket is initially filled with tokens
  *
- * @throws IllegalArgumentException if `initCapacityInSecondsOfRate` <= 0 or >
- *                                   [[TokenBucket.MAX_CAPACITY_IN_SECONDS_OF_RATE]].
- * @throws IllegalArgumentException if `initRate` <= 0 or > [[TokenBucket.MAX_RATE]].
+ * @throws IllegalArgumentException if `initCapacityInSecondsOfRate` <= 0.
+ * @throws IllegalArgumentException if `initRate` <= 0.
  */
 class TokenBucket private (
     initCapacityInSecondsOfRate: Long,
@@ -43,10 +40,10 @@ class TokenBucket private (
   private var lastRefillTime: TickerTime = initTime
 
   /** The capacity of the bucket in terms of seconds of rate. */
-  private var capacityInSecondsOfRate: Double = initCapacityInSecondsOfRate
+  private var capacityInSecondsOfRate: Long = initCapacityInSecondsOfRate
 
   /** The rate at which the bucket is refilled in tokens per second. */
-  private var rate: Double = initRate
+  private var rate: Long = initRate
 
   /** The number of tokens currently available in the bucket. Bucket starts off full. */
   private var availableTokens: Double = getMaximumCapacity
@@ -85,7 +82,7 @@ class TokenBucket private (
    */
   @throws[IllegalArgumentException]("if count < 0.")
   def tryAcquire(count: Long): Boolean = {
-    require(count >= 0, "Requested token count must be non-negative.")
+    require(count >= 0, s"Requested token count should be non-negative, but was $count.")
     if (availableTokens >= count) {
       availableTokens -= count
       true
@@ -104,10 +101,10 @@ class TokenBucket private (
   @throws[IllegalArgumentException]("if desired < 0.")
   @throws[IllegalArgumentException]("if desired > getMaximumCapacity.")
   def timeWhenRefilled(desired: Long): TickerTime = {
-    require(desired >= 0, "Desired token number is negative.")
+    require(desired >= 0, s"Desired token number should be non-negative, but was $desired.")
     require(
       desired <= getMaximumCapacity,
-      s"Desired token number exceeds maximum capacity $getMaximumCapacity: " +
+      s"Desired token number $desired exceeds maximum capacity $getMaximumCapacity: " +
       s"rate $rate * capacityInSecondsOfRate $capacityInSecondsOfRate."
     )
 
@@ -119,14 +116,14 @@ class TokenBucket private (
       val tokensNeeded: Double = desired - availableTokens
       // Calculate how long it will take to generate those tokens.
       val secondsNeededToRefill: Double = tokensNeeded / rate
+      // `toLong` is a saturating cast, so it is safe. This saturation is acceptable because it
+      // would only occur if `secondsNeededToRefill` was unrealistically long.
       lastRefillTime + (secondsNeededToRefill * NANOS_PER_SECOND).toLong.nanoseconds
     }
   }
 
   /** Updates bucket capacity. */
-  @throws[IllegalArgumentException](
-    s"if newCapacityInSecondsOfRate <= 0 or > $MAX_CAPACITY_IN_SECONDS_OF_RATE."
-  )
+  @throws[IllegalArgumentException]("if newCapacityInSecondsOfRate <= 0.")
   def setCapacityInSecondsOfRate(newCapacityInSecondsOfRate: Long): Unit = {
     TokenBucket.validateCapacity(newCapacityInSecondsOfRate)
     capacityInSecondsOfRate = newCapacityInSecondsOfRate
@@ -137,7 +134,7 @@ class TokenBucket private (
   }
 
   /** Updates bucket rate. */
-  @throws[IllegalArgumentException](s"if newRate <= 0 or > $MAX_RATE.")
+  @throws[IllegalArgumentException]("if newRate <= 0.")
   def setRate(newRate: Long): Unit = {
     TokenBucket.validateRate(newRate)
     rate = newRate
@@ -147,14 +144,21 @@ class TokenBucket private (
     }
   }
 
-  /** Returns the current `capacityInSecondsOfRate` as a Long. */
-  def getCapacityInSecondsOfRate: Long = capacityInSecondsOfRate.toLong
+  /** Returns the current `capacityInSecondsOfRate`. */
+  def getCapacityInSecondsOfRate: Long = capacityInSecondsOfRate
 
-  /** Returns the current `rate` as a Long. */
-  def getRate: Long = rate.toLong
+  /** Returns the current `rate`. */
+  def getRate: Long = rate
+
+  /**
+   * Returns the current fraction of the bucket that has been consumed, in `[0.0, 1.0]`.
+   * A full bucket (no recent consumption) returns 0.0; an empty bucket (consumption at or above the
+   * configured rate over the bucket's capacity window) returns 1.0.
+   */
+  def getUsageRatio: Double = 1.0 - (availableTokens / getMaximumCapacity)
 
   /** Returns the maximum bucket capacity in terms of the number of tokens. */
-  private def getMaximumCapacity: Double = capacityInSecondsOfRate * rate
+  private def getMaximumCapacity: Double = capacityInSecondsOfRate.toDouble * rate.toDouble
 }
 
 object TokenBucket {
@@ -186,29 +190,18 @@ object TokenBucket {
     new TokenBucket(capacityInSecondsOfRate, rate, initTime)
   }
 
-  /** Validates that the capacity is within acceptable bounds.  */
-  @throws[IllegalArgumentException]("if capacity <= 0 or > MAX_CAPACITY_IN_SECONDS_OF_RATE")
+  /** Validates that the capacity is positive.  */
+  @throws[IllegalArgumentException]("if capacity <= 0")
   private def validateCapacity(capacity: Long): Unit = {
-    require(capacity > 0, "Bucket capacity in seconds of rate must be positive.")
-    // $COVERAGE-OFF$: This requirement cannot be violated because `MAX_CAPACITY_IN_SECONDS_OF_RATE`
-    // is Long.MaxValue. If this value is changed to be less than Long.MaxValue, we need to add
-    // tests against this upper bound.
     require(
-      capacity <= MAX_CAPACITY_IN_SECONDS_OF_RATE,
-      "Bucket capacity in seconds of rate must not exceed " +
-      s"$MAX_CAPACITY_IN_SECONDS_OF_RATE."
+      capacity > 0,
+      s"Bucket capacity in seconds of rate should be positive, but was $capacity."
     )
-    // $COVERAGE-ON$
   }
 
-  /** Validates that the rate is within acceptable bounds.  */
-  @throws[IllegalArgumentException]("if rateValue <= 0 or > MAX_RATE")
+  /** Validates that the rate is positive.  */
+  @throws[IllegalArgumentException]("if rateValue <= 0")
   private def validateRate(rateValue: Long): Unit = {
-    require(rateValue > 0, "Bucket refill rate must be positive.")
-    // $COVERAGE-OFF$: This requirement cannot be violated because `MAX_RATE` is Long.MaxValue. If
-    // this value is changed to be less than Long.MaxValue, we need to add tests against this upper
-    // bound.
-    require(rateValue <= MAX_RATE, s"Bucket refill rate must not exceed $MAX_RATE.")
-    // $COVERAGE-ON$
+    require(rateValue > 0, s"Bucket refill rate should be positive, but was $rateValue.")
   }
 }

@@ -26,9 +26,12 @@ class AssignmentFormatterSuite extends DatabricksTest {
     // readable. Each Slice Assignment only has Subslice Annotations for one resource.
 
     val assignmentGeneration: Generation = 43 ## 50
+    val assignerServiceInfo =
+      AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
       AssignmentConsistencyMode.Affinity,
+      Some(assignerServiceInfo),
       // No annotation.
       (("" -- "Balin") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(42.0),
       // Assigned multiple resource, with annotations for pod1.
@@ -50,14 +53,15 @@ class AssignmentFormatterSuite extends DatabricksTest {
     )
     assert(
       assignment.toString ==
-      s"""$assignmentGeneration
+      s"""Generating Assigner: test-assigner/test-instance
+  |$assignmentGeneration
   |
   |┌──────────────┬──────────────────────────────────────┬──────────────────────┬─────────────────┐
   |│ Address      │ Resource UUID                        │ Creation Time        │ Attributed Load │
   |├──────────────┼──────────────────────────────────────┼──────────────────────┼─────────────────┤
-  |│ https://pod1 │ d1eaf1f9-7b39-3651-bb77-1d10433dacfd │ 2023-03-31T16:12:12Z │ -               │
-  |│ https://pod2 │ 570ee4ff-e8ec-3177-a6bc-b726beb829c9 │ 2023-03-31T16:12:12Z │ -               │
-  |│ https://pod3 │ 5751882d-485c-3c8a-94ef-5166d2191616 │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod1 │ 32e0529c-2509-3212-9971-8cd9eea4a2f2 │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod2 │ cb034067-a92d-3c9d-9a05-84a64ddb159e │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod3 │ ada8a919-e5f7-3812-a292-c68f26e38d70 │ 2023-03-31T16:12:12Z │ -               │
   |└──────────────┴──────────────────────────────────────┴──────────────────────┴─────────────────┘
   |
   |┌──────────┬──────────────────────┬──────────────────┬───────┬─────────┐
@@ -95,9 +99,12 @@ class AssignmentFormatterSuite extends DatabricksTest {
     // thus creating a large number of intersected Subslices in the table.
 
     val assignmentGeneration: Generation = 43 ## 50
+    val assignerServiceInfo =
+      AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
       AssignmentConsistencyMode.Affinity,
+      Some(assignerServiceInfo),
       (("" -- "aa") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(42.0),
       (("aa" -- "zz") @@ (43 ## 20) ->
       Seq("https://pod1", "https://pod2", "https://pod3", "https://pod4") | Map(
@@ -131,7 +138,9 @@ class AssignmentFormatterSuite extends DatabricksTest {
     val expectedOutput =
       readFile("dicer/common/test/golden_files/assignment_with_many_intersections.txt")
     assert(
-      assignment.toString() == s"$assignmentGeneration\n\n" + expectedOutput
+      assignment.toString() ==
+      s"Generating Assigner: test-assigner/test-instance\n$assignmentGeneration\n\n" +
+      expectedOutput
     )
   }
 
@@ -148,7 +157,7 @@ class AssignmentFormatterSuite extends DatabricksTest {
         new Random
       )
     val assignment: Assignment =
-      ProposedAssignment(predecessorOpt = None, proposedSliceMap)
+      ProposedAssignment(predecessorOpt = None, proposedSliceMap, assignerServiceInfoOpt = None)
         .commit(
           isFrozen = false,
           AssignmentConsistencyMode.Affinity,
@@ -177,9 +186,12 @@ class AssignmentFormatterSuite extends DatabricksTest {
     // `loadPerSliceOverrideOpt` parameters, and validate against a golden snippet that these
     // stats are correctly overridden and displayed.
     val assignmentGeneration: Generation = 43 ## 50
+    val assignerServiceInfo =
+      AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment = createAssignment(
       generation = assignmentGeneration,
       AssignmentConsistencyMode.Affinity,
+      Some(assignerServiceInfo),
       (("" -- "Balin") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(42.0),
       (("Balin" -- "Kili") @@ (43 ## 20) -> Seq("https://pod1") | Map(
         "https://pod1" ->
@@ -220,13 +232,14 @@ class AssignmentFormatterSuite extends DatabricksTest {
     )
     assert(
       builder.toString() ==
-      s"""$assignmentGeneration
+      s"""Generating Assigner: test-assigner/test-instance
+  |$assignmentGeneration
   |
   |┌──────────────┬──────────────────────────────────────┬──────────────────────┬─────────────────┐
   |│ Address      │ Resource UUID                        │ Creation Time        │ Attributed Load │
   |├──────────────┼──────────────────────────────────────┼──────────────────────┼─────────────────┤
-  |│ https://pod1 │ d1eaf1f9-7b39-3651-bb77-1d10433dacfd │ 2023-03-31T16:12:12Z │ 130.5           │
-  |│ https://pod2 │ 570ee4ff-e8ec-3177-a6bc-b726beb829c9 │ 2023-03-31T16:12:12Z │ 12.0            │
+  |│ https://pod1 │ 32e0529c-2509-3212-9971-8cd9eea4a2f2 │ 2023-03-31T16:12:12Z │ 130.5           │
+  |│ https://pod2 │ cb034067-a92d-3c9d-9a05-84a64ddb159e │ 2023-03-31T16:12:12Z │ 12.0            │
   |└──────────────┴──────────────────────────────────────┴──────────────────────┴─────────────────┘
   |
   |┌──────────┬──────────────────────┬──────────────────┬───────┬─────────┐
@@ -250,9 +263,12 @@ class AssignmentFormatterSuite extends DatabricksTest {
   test("appendAssignmentToStringBuilder formats Assignment with truncation - even") {
     // Test plan: verify that an even number of slices is displayed correctly.
     val assignmentGeneration: Generation = 43 ## 50
+    val assignerServiceInfo =
+      AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
       AssignmentConsistencyMode.Affinity,
+      Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod1")).clearPrimaryRateLoad(),
       (("BBB" -- "CCC") @@ (43 ## 50) -> Seq("https://pod2")).withPrimaryRateLoad(20.0),
       (("CCC" -- "DDD") @@ (43 ## 50) -> Seq("https://pod3")).withPrimaryRateLoad(30.0),
@@ -275,14 +291,15 @@ class AssignmentFormatterSuite extends DatabricksTest {
 
     assert(
       builder.toString ==
-      s"""$assignmentGeneration
+      s"""Generating Assigner: test-assigner/test-instance
+  |$assignmentGeneration
   |
   |┌──────────────┬──────────────────────────────────────┬──────────────────────┬─────────────────┐
   |│ Address      │ Resource UUID                        │ Creation Time        │ Attributed Load │
   |├──────────────┼──────────────────────────────────────┼──────────────────────┼─────────────────┤
-  |│ https://pod1 │ d1eaf1f9-7b39-3651-bb77-1d10433dacfd │ 2023-03-31T16:12:12Z │ -               │
-  |│ https://pod2 │ 570ee4ff-e8ec-3177-a6bc-b726beb829c9 │ 2023-03-31T16:12:12Z │ -               │
-  |│ https://pod3 │ 5751882d-485c-3c8a-94ef-5166d2191616 │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod1 │ 32e0529c-2509-3212-9971-8cd9eea4a2f2 │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod2 │ cb034067-a92d-3c9d-9a05-84a64ddb159e │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod3 │ ada8a919-e5f7-3812-a292-c68f26e38d70 │ 2023-03-31T16:12:12Z │ -               │
   |└──────────────┴──────────────────────────────────────┴──────────────────────┴─────────────────┘
   |
   |4 of 6 slices with highest load:
@@ -305,9 +322,12 @@ class AssignmentFormatterSuite extends DatabricksTest {
   test("appendAssignmentToStringBuilder formats Assignment with truncation - odd") {
     // Test plan: verify that an odd number of slices is displayed correctly.
     val assignmentGeneration: Generation = 43 ## 50
+    val assignerServiceInfo =
+      AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
       AssignmentConsistencyMode.Affinity,
+      Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(10.0),
       (("BBB" -- "CCC") @@ (43 ## 50) -> Seq("https://pod2")).withPrimaryRateLoad(20.0),
       (("CCC" -- "DDD") @@ (43 ## 50) -> Seq("https://pod3")).withPrimaryRateLoad(30.0),
@@ -329,14 +349,15 @@ class AssignmentFormatterSuite extends DatabricksTest {
 
     assert(
       builder.toString ==
-      s"""$assignmentGeneration
+      s"""Generating Assigner: test-assigner/test-instance
+  |$assignmentGeneration
   |
   |┌──────────────┬──────────────────────────────────────┬──────────────────────┬─────────────────┐
   |│ Address      │ Resource UUID                        │ Creation Time        │ Attributed Load │
   |├──────────────┼──────────────────────────────────────┼──────────────────────┼─────────────────┤
-  |│ https://pod1 │ d1eaf1f9-7b39-3651-bb77-1d10433dacfd │ 2023-03-31T16:12:12Z │ -               │
-  |│ https://pod2 │ 570ee4ff-e8ec-3177-a6bc-b726beb829c9 │ 2023-03-31T16:12:12Z │ -               │
-  |│ https://pod3 │ 5751882d-485c-3c8a-94ef-5166d2191616 │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod1 │ 32e0529c-2509-3212-9971-8cd9eea4a2f2 │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod2 │ cb034067-a92d-3c9d-9a05-84a64ddb159e │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod3 │ ada8a919-e5f7-3812-a292-c68f26e38d70 │ 2023-03-31T16:12:12Z │ -               │
   |└──────────────┴──────────────────────────────────────┴──────────────────────┴─────────────────┘
   |
   |3 of 5 slices with highest load:
@@ -359,9 +380,12 @@ class AssignmentFormatterSuite extends DatabricksTest {
     // Test plan: Verify that when truncating middle slices with contiguous omitted slices, the
     // output is collapsed into a single summary row.
     val assignmentGeneration: Generation = 43 ## 50
+    val assignerServiceInfo =
+      AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
       AssignmentConsistencyMode.Affinity,
+      Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(10.0),
       (("BBB" -- "CCC") @@ (43 ## 50) -> Seq("https://pod2")).withPrimaryRateLoad(20.0),
       (("CCC" -- "DDD") @@ (43 ## 50) -> Seq("https://pod3")).withPrimaryRateLoad(30.0),
@@ -383,14 +407,15 @@ class AssignmentFormatterSuite extends DatabricksTest {
     )
     assert(
       builder.toString ==
-      s"""$assignmentGeneration
+      s"""Generating Assigner: test-assigner/test-instance
+  |$assignmentGeneration
   |
   |┌──────────────┬──────────────────────────────────────┬──────────────────────┬─────────────────┐
   |│ Address      │ Resource UUID                        │ Creation Time        │ Attributed Load │
   |├──────────────┼──────────────────────────────────────┼──────────────────────┼─────────────────┤
-  |│ https://pod1 │ d1eaf1f9-7b39-3651-bb77-1d10433dacfd │ 2023-03-31T16:12:12Z │ -               │
-  |│ https://pod2 │ 570ee4ff-e8ec-3177-a6bc-b726beb829c9 │ 2023-03-31T16:12:12Z │ -               │
-  |│ https://pod3 │ 5751882d-485c-3c8a-94ef-5166d2191616 │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod1 │ 32e0529c-2509-3212-9971-8cd9eea4a2f2 │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod2 │ cb034067-a92d-3c9d-9a05-84a64ddb159e │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod3 │ ada8a919-e5f7-3812-a292-c68f26e38d70 │ 2023-03-31T16:12:12Z │ -               │
   |└──────────────┴──────────────────────────────────────┴──────────────────────┴─────────────────┘
   |
   |4 of 6 slices with highest load:
@@ -412,9 +437,12 @@ class AssignmentFormatterSuite extends DatabricksTest {
   test("appendAssignmentToStringBuilder formats Assignment with truncation - empty") {
     // Test plan: verify that when truncating to 0 slices, the output is empty.
     val assignmentGeneration: Generation = 43 ## 50
+    val assignerServiceInfo =
+      AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
       AssignmentConsistencyMode.Affinity,
+      Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(10.0),
       (("BBB" -- "CCC") @@ (43 ## 50) -> Seq("https://pod2")).withPrimaryRateLoad(20.0),
       (("CCC" -- "DDD") @@ (43 ## 50) -> Seq("https://pod3")).withPrimaryRateLoad(30.0),
@@ -437,14 +465,15 @@ class AssignmentFormatterSuite extends DatabricksTest {
 
     assert(
       builder.toString ==
-      s"""$assignmentGeneration
+      s"""Generating Assigner: test-assigner/test-instance
+  |$assignmentGeneration
   |
   |┌──────────────┬──────────────────────────────────────┬──────────────────────┬─────────────────┐
   |│ Address      │ Resource UUID                        │ Creation Time        │ Attributed Load │
   |├──────────────┼──────────────────────────────────────┼──────────────────────┼─────────────────┤
-  |│ https://pod1 │ d1eaf1f9-7b39-3651-bb77-1d10433dacfd │ 2023-03-31T16:12:12Z │ -               │
-  |│ https://pod2 │ 570ee4ff-e8ec-3177-a6bc-b726beb829c9 │ 2023-03-31T16:12:12Z │ -               │
-  |│ https://pod3 │ 5751882d-485c-3c8a-94ef-5166d2191616 │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod1 │ 32e0529c-2509-3212-9971-8cd9eea4a2f2 │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod2 │ cb034067-a92d-3c9d-9a05-84a64ddb159e │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod3 │ ada8a919-e5f7-3812-a292-c68f26e38d70 │ 2023-03-31T16:12:12Z │ -               │
   |└──────────────┴──────────────────────────────────────┴──────────────────────┴─────────────────┘
   |
   |0 of 6 slices with highest load:
@@ -463,9 +492,12 @@ class AssignmentFormatterSuite extends DatabricksTest {
     // Test plan: verify that unassigned ranges are treated separately and not combined with
     // omitted slices
     val assignmentGeneration: Generation = 43 ## 50
+    val assignerServiceInfo =
+      AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
       AssignmentConsistencyMode.Affinity,
+      Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(10.0),
       (("BBB" -- "CCC") @@ (43 ## 50) -> Seq("https://pod1")).withPrimaryRateLoad(20.0),
       (("CCC" -- "DDD") @@ (43 ## 50) -> Seq("https://pod3")).withPrimaryRateLoad(30.0),
@@ -490,12 +522,13 @@ class AssignmentFormatterSuite extends DatabricksTest {
 
     assert(
       builder.toString ==
-      s"""$assignmentGeneration
+      s"""Generating Assigner: test-assigner/test-instance
+  |$assignmentGeneration
   |
   |┌──────────────┬──────────────────────────────────────┬──────────────────────┬─────────────────┐
   |│ Address      │ Resource UUID                        │ Creation Time        │ Attributed Load │
   |├──────────────┼──────────────────────────────────────┼──────────────────────┼─────────────────┤
-  |│ https://pod1 │ d1eaf1f9-7b39-3651-bb77-1d10433dacfd │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod1 │ 32e0529c-2509-3212-9971-8cd9eea4a2f2 │ 2023-03-31T16:12:12Z │ -               │
   |└──────────────┴──────────────────────────────────────┴──────────────────────┴─────────────────┘
   |
   |4 of 5 slices with highest load:
@@ -520,9 +553,12 @@ class AssignmentFormatterSuite extends DatabricksTest {
     // specified, and validate against a golden snippet that only stats related to the resource
     // defined in `squidFilterOpt` are displayed.
     val assignmentGeneration: Generation = 43 ## 50
+    val assignerServiceInfo =
+      AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
       AssignmentConsistencyMode.Affinity,
+      Some(assignerServiceInfo),
       (("" -- "Balin") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(42.0),
       // Assigned to 2 resources, and there are subslice annotations for each.
       (("Balin" -- "Fili") @@ (43 ## 20) -> Seq("https://pod1", "https://pod2") | Map(
@@ -560,12 +596,13 @@ class AssignmentFormatterSuite extends DatabricksTest {
     // "No Annotation Info".
     assert(
       builder.toString() ==
-      s"""$assignmentGeneration
+      s"""Generating Assigner: test-assigner/test-instance
+  |$assignmentGeneration
   |
   |┌──────────────┬──────────────────────────────────────┬──────────────────────┬─────────────────┐
   |│ Address      │ Resource UUID                        │ Creation Time        │ Attributed Load │
   |├──────────────┼──────────────────────────────────────┼──────────────────────┼─────────────────┤
-  |│ https://pod1 │ d1eaf1f9-7b39-3651-bb77-1d10433dacfd │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod1 │ 32e0529c-2509-3212-9971-8cd9eea4a2f2 │ 2023-03-31T16:12:12Z │ -               │
   |└──────────────┴──────────────────────────────────────┴──────────────────────┴─────────────────┘
   |
   |┌──────────┬──────────────────────┬──────────────────┬───────┬──────────────────────────────────────────────┐
@@ -591,9 +628,12 @@ class AssignmentFormatterSuite extends DatabricksTest {
     // the top keys are displayed in the "Details" column. The top keys must be listed in the same
     // row as the load for their containing slice.
     val assignmentGeneration: Generation = 43 ## 50
+    val assignerServiceInfo =
+      AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment = createAssignment(
       generation = assignmentGeneration,
       AssignmentConsistencyMode.Affinity,
+      Some(assignerServiceInfo),
       (("" -- "Balin") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(42.0),
       (("Balin" -- "Kili") @@ (43 ## 20) -> Seq("https://pod1") | Map(
         "https://pod1" ->
@@ -635,7 +675,9 @@ class AssignmentFormatterSuite extends DatabricksTest {
     val expectedOutput =
       readFile("dicer/common/test/golden_files/assignment_with_top_keys_defined.txt")
     assert(
-      builder.toString() == s"$assignmentGeneration\n\n" + expectedOutput
+      builder.toString() ==
+      s"Generating Assigner: test-assigner/test-instance\n$assignmentGeneration\n\n" +
+      expectedOutput
     )
   }
 
@@ -644,9 +686,12 @@ class AssignmentFormatterSuite extends DatabricksTest {
     // containing state transfer information, it is displayed in the "Details" column. If there are
     // both state transfer information and top keys, both are displayed.
     val assignmentGeneration: Generation = 43 ## 50
+    val assignerServiceInfo =
+      AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment = createAssignment(
       generation = assignmentGeneration,
       AssignmentConsistencyMode.Affinity,
+      Some(assignerServiceInfo),
       (("" -- "Balin") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(42.0),
       (("Balin" -- "Kili") @@ (43 ## 20) -> Seq("https://pod1") | Map(
         "https://pod1" ->
@@ -690,7 +735,9 @@ class AssignmentFormatterSuite extends DatabricksTest {
     val expectedOutput =
       readFile("dicer/common/test/golden_files/assignment_with_state_transfer.txt")
     assert(
-      builder.toString() == s"$assignmentGeneration\n\n" + expectedOutput
+      builder.toString() ==
+      s"Generating Assigner: test-assigner/test-instance\n$assignmentGeneration\n\n" +
+      expectedOutput
     )
   }
 
@@ -699,9 +746,12 @@ class AssignmentFormatterSuite extends DatabricksTest {
     // guarantees the resulting DiffAssignment is Full. Validate that DiffAssignment.toString
     // returns the expected value.
     val assignmentGeneration: Generation = 0 ## 50
+    val assignerServiceInfo =
+      AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
       AssignmentConsistencyMode.Affinity,
+      Some(assignerServiceInfo),
       (("" -- "Balin") @@ (0 ## 10) -> Seq("https://pod1", "https://pod2"))
         .withPrimaryRateLoad(42.0),
       (("Balin" -- "Kili") @@ (0 ## 20) -> Seq("https://pod1") | Map(
@@ -722,13 +772,14 @@ class AssignmentFormatterSuite extends DatabricksTest {
 
     assert(
       diffAssignment.toString ==
-      s"""$assignmentGeneration
+      s"""Generating Assigner: test-assigner/test-instance
+  |$assignmentGeneration
   |
   |┌──────────────┬──────────────────────────────────────┬──────────────────────┬─────────────────┐
   |│ Address      │ Resource UUID                        │ Creation Time        │ Attributed Load │
   |├──────────────┼──────────────────────────────────────┼──────────────────────┼─────────────────┤
-  |│ https://pod1 │ d1eaf1f9-7b39-3651-bb77-1d10433dacfd │ 2023-03-31T16:12:12Z │ -               │
-  |│ https://pod2 │ 570ee4ff-e8ec-3177-a6bc-b726beb829c9 │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod1 │ 32e0529c-2509-3212-9971-8cd9eea4a2f2 │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod2 │ cb034067-a92d-3c9d-9a05-84a64ddb159e │ 2023-03-31T16:12:12Z │ -               │
   |└──────────────┴──────────────────────────────────────┴──────────────────────┴─────────────────┘
   |
   |┌──────────┬──────────────────────┬──────────────────┬───────┬─────────┐
@@ -754,9 +805,12 @@ class AssignmentFormatterSuite extends DatabricksTest {
     // Test plan: create a Partial DiffAssignment and validate that the string representation is
     // readable.
     val assignmentGeneration: Generation = 2 ## 50
+    val assignerServiceInfo =
+      AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
       AssignmentConsistencyMode.Affinity,
+      Some(assignerServiceInfo),
       (("" -- "Balin") @@ (2 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(42.0),
       (("Balin" -- "Kili") @@ (2 ## 20) -> Seq("https://pod1") | Map(
         "https://pod1" ->
@@ -785,14 +839,15 @@ class AssignmentFormatterSuite extends DatabricksTest {
 
     assert(
       diffAssignment.toString ==
-      s"""$assignmentGeneration
+      s"""Generating Assigner: test-assigner/test-instance
+  |$assignmentGeneration
   |[Partial diff from $diffAssignmentGeneration]
   |
   |┌──────────────┬──────────────────────────────────────┬──────────────────────┬─────────────────┐
   |│ Address      │ Resource UUID                        │ Creation Time        │ Attributed Load │
   |├──────────────┼──────────────────────────────────────┼──────────────────────┼─────────────────┤
-  |│ https://pod1 │ d1eaf1f9-7b39-3651-bb77-1d10433dacfd │ 2023-03-31T16:12:12Z │ -               │
-  |│ https://pod2 │ 570ee4ff-e8ec-3177-a6bc-b726beb829c9 │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod1 │ 32e0529c-2509-3212-9971-8cd9eea4a2f2 │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod2 │ cb034067-a92d-3c9d-9a05-84a64ddb159e │ 2023-03-31T16:12:12Z │ -               │
   |└──────────────┴──────────────────────────────────────┴──────────────────────┴─────────────────┘
   |
   |┌─────────┬──────────────────────┬──────────────────┬───────┬─────────┐
@@ -812,9 +867,10 @@ class AssignmentFormatterSuite extends DatabricksTest {
   }
 
   test("DiffAssignment with frozen assignment") {
-    // Test plan: Verify that a DiffAssignment with a frozen assignment is displayed correctly.
-    // Verify this by creating a frozen assignment and generating a DiffAssignment. Check that the
-    // output of DiffAssignment.toString contains the correct information.
+    // Test plan: Verify that a DiffAssignment with a frozen assignment is displayed correctly,
+    // including that missing Assigner service info is shown as unknown. Verify this by creating a
+    // frozen assignment without service info and generating a DiffAssignment. Check that the output
+    // of DiffAssignment.toString contains the correct information.
 
     val assignmentGeneration: Generation = 43 ## 50
     val assignmentEntries = Vector(
@@ -837,21 +893,23 @@ class AssignmentFormatterSuite extends DatabricksTest {
       isFrozen = true,
       consistencyMode = AssignmentConsistencyMode.Affinity,
       generation = assignmentGeneration,
-      sliceMap = SliceMapHelper.ofSliceAssignments(assignmentEntries)
+      sliceMap = SliceMapHelper.ofSliceAssignments(assignmentEntries),
+      assignerServiceInfoOpt = None
     )
     val diffAssignment: DiffAssignment = assignment.toDiff(0 ## 49)
 
     assert(
       diffAssignment.toString ==
-      s"""$assignmentGeneration
+      s"""Generating Assigner: unknown
+  |$assignmentGeneration
   |FROZEN
   |
   |┌──────────────┬──────────────────────────────────────┬──────────────────────┬─────────────────┐
   |│ Address      │ Resource UUID                        │ Creation Time        │ Attributed Load │
   |├──────────────┼──────────────────────────────────────┼──────────────────────┼─────────────────┤
-  |│ https://pod1 │ d1eaf1f9-7b39-3651-bb77-1d10433dacfd │ 2023-03-31T16:12:12Z │ -               │
-  |│ https://pod2 │ 570ee4ff-e8ec-3177-a6bc-b726beb829c9 │ 2023-03-31T16:12:12Z │ -               │
-  |│ https://pod3 │ 5751882d-485c-3c8a-94ef-5166d2191616 │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod1 │ 32e0529c-2509-3212-9971-8cd9eea4a2f2 │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod2 │ cb034067-a92d-3c9d-9a05-84a64ddb159e │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod3 │ ada8a919-e5f7-3812-a292-c68f26e38d70 │ 2023-03-31T16:12:12Z │ -               │
   |└──────────────┴──────────────────────────────────────┴──────────────────────┴─────────────────┘
   |
   |┌──────────┬──────────────────────┬──────────────────┬───────┬─────────┐
@@ -881,9 +939,12 @@ class AssignmentFormatterSuite extends DatabricksTest {
     // correct number of slices.
 
     val assignmentGeneration: Generation = 43 ## 50
+    val assignerServiceInfo =
+      AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
       AssignmentConsistencyMode.Affinity,
+      Some(assignerServiceInfo),
       (("" -- "Balin") @@ (43 ## 10) -> Seq("https://pod1"))
         .withPrimaryRateLoad(42.0),
       (("Balin" -- "Kili") @@ (43 ## 20) -> Seq("https://pod1") | Map(
@@ -911,13 +972,14 @@ class AssignmentFormatterSuite extends DatabricksTest {
     )
     assert(
       builder.toString() ==
-      s"""$assignmentGeneration
+      s"""Generating Assigner: test-assigner/test-instance
+  |$assignmentGeneration
   |
   |┌──────────────┬──────────────────────────────────────┬──────────────────────┬─────────────────┐
   |│ Address      │ Resource UUID                        │ Creation Time        │ Attributed Load │
   |├──────────────┼──────────────────────────────────────┼──────────────────────┼─────────────────┤
-  |│ https://pod1 │ d1eaf1f9-7b39-3651-bb77-1d10433dacfd │ 2023-03-31T16:12:12Z │ -               │
-  |│ https://pod2 │ 570ee4ff-e8ec-3177-a6bc-b726beb829c9 │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod1 │ 32e0529c-2509-3212-9971-8cd9eea4a2f2 │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod2 │ cb034067-a92d-3c9d-9a05-84a64ddb159e │ 2023-03-31T16:12:12Z │ -               │
   |└──────────────┴──────────────────────────────────────┴──────────────────────┴─────────────────┘
   |
   |2 of 4 slices:
@@ -941,9 +1003,12 @@ class AssignmentFormatterSuite extends DatabricksTest {
     // Test plan: verify that formatAssignmentChunks with a budget large enough to hold the full
     // assignment produces exactly one chunk.
     val assignmentGeneration: Generation = 43 ## 50
+    val assignerServiceInfo =
+      AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
       AssignmentConsistencyMode.Affinity,
+      Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(10.0),
       (("BBB" -- "CCC") @@ (43 ## 20) -> Seq("https://pod1")).withPrimaryRateLoad(20.0),
       (("CCC" -- ∞) @@ (43 ## 30) -> Seq("https://pod1")).withPrimaryRateLoad(30.0)
@@ -962,12 +1027,13 @@ class AssignmentFormatterSuite extends DatabricksTest {
     assert(chunks.size == 1)
     assert(
       chunks(0).toString ==
-      s"""$assignmentGeneration
+      s"""Generating Assigner: test-assigner/test-instance
+    |$assignmentGeneration
     |
     |┌──────────────┬──────────────────────────────────────┬──────────────────────┬─────────────────┐
     |│ Address      │ Resource UUID                        │ Creation Time        │ Attributed Load │
     |├──────────────┼──────────────────────────────────────┼──────────────────────┼─────────────────┤
-    |│ https://pod1 │ d1eaf1f9-7b39-3651-bb77-1d10433dacfd │ 2023-03-31T16:12:12Z │ -               │
+    |│ https://pod1 │ 32e0529c-2509-3212-9971-8cd9eea4a2f2 │ 2023-03-31T16:12:12Z │ -               │
     |└──────────────┴──────────────────────────────────────┴──────────────────────┴─────────────────┘
     |
     |┌─────────┬─────────┬──────────────────┬──────┬─────────┐
@@ -996,9 +1062,12 @@ class AssignmentFormatterSuite extends DatabricksTest {
     //    separator) so every chunk is a readable table fragment on its own
     //  - the last chunk ends with the documentation footer (before the suffix)
     val assignmentGeneration: Generation = 43 ## 50
+    val assignerServiceInfo =
+      AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
       AssignmentConsistencyMode.Affinity,
+      Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(10.0),
       (("BBB" -- "CCC") @@ (43 ## 20) -> Seq("https://pod1")).withPrimaryRateLoad(20.0),
       (("CCC" -- "DDD") @@ (43 ## 30) -> Seq("https://pod3")).withPrimaryRateLoad(30.0),
@@ -1020,13 +1089,14 @@ class AssignmentFormatterSuite extends DatabricksTest {
     )
     assert(
       chunks(0).toString ==
-      s"""$assignmentGeneration
+      s"""Generating Assigner: test-assigner/test-instance
+    |$assignmentGeneration
     |
     |┌──────────────┬──────────────────────────────────────┬──────────────────────┬─────────────────┐
     |│ Address      │ Resource UUID                        │ Creation Time        │ Attributed Load │
     |├──────────────┼──────────────────────────────────────┼──────────────────────┼─────────────────┤
-    |│ https://pod1 │ d1eaf1f9-7b39-3651-bb77-1d10433dacfd │ 2023-03-31T16:12:12Z │ -               │
-    |│ https://pod3 │ 5751882d-485c-3c8a-94ef-5166d2191616 │ 2023-03-31T16:12:12Z │ -               │
+    |│ https://pod1 │ 32e0529c-2509-3212-9971-8cd9eea4a2f2 │ 2023-03-31T16:12:12Z │ -               │
+    |│ https://pod3 │ ada8a919-e5f7-3812-a292-c68f26e38d70 │ 2023-03-31T16:12:12Z │ -               │
     |└──────────────┴──────────────────────────────────────┴──────────────────────┴─────────────────┘
     |
     |┌─────────┬─────────┬──────────────────┬───────┬─────────┐
@@ -1061,9 +1131,12 @@ class AssignmentFormatterSuite extends DatabricksTest {
     // are not split into separate chunks and that the table rows are each split into separate
     // chunks.
     val assignmentGeneration: Generation = 43 ## 50
+    val assignerServiceInfo =
+      AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
       AssignmentConsistencyMode.Affinity,
+      Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(10.0),
       (("BBB" -- ∞) @@ (43 ## 50) -> Seq("https://pod3")).withPrimaryRateLoad(20.0)
     )
@@ -1080,12 +1153,13 @@ class AssignmentFormatterSuite extends DatabricksTest {
     )
     assert(
       chunks(0).toString ==
-      s"""$assignmentGeneration
+      s"""Generating Assigner: test-assigner/test-instance
+    |$assignmentGeneration
     |
     |┌──────────────┬──────────────────────────────────────┬──────────────────────┬─────────────────┐
     |│ Address      │ Resource UUID                        │ Creation Time        │ Attributed Load │
     |├──────────────┼──────────────────────────────────────┼──────────────────────┼─────────────────┤
-    |│ https://pod1 │ d1eaf1f9-7b39-3651-bb77-1d10433dacfd │ 2023-03-31T16:12:12Z │ -               │
+    |│ https://pod1 │ 32e0529c-2509-3212-9971-8cd9eea4a2f2 │ 2023-03-31T16:12:12Z │ -               │
     |└──────────────┴──────────────────────────────────────┴──────────────────────┴─────────────────┘
     |
     |<internal link>
@@ -1097,7 +1171,7 @@ class AssignmentFormatterSuite extends DatabricksTest {
     |┌──────────────┬──────────────────────────────────────┬──────────────────────┬─────────────────┐
     |│ Address      │ Resource UUID                        │ Creation Time        │ Attributed Load │
     |├──────────────┼──────────────────────────────────────┼──────────────────────┼─────────────────┤
-    |│ https://pod3 │ 5751882d-485c-3c8a-94ef-5166d2191616 │ 2023-03-31T16:12:12Z │ -               │
+    |│ https://pod3 │ ada8a919-e5f7-3812-a292-c68f26e38d70 │ 2023-03-31T16:12:12Z │ -               │
     |└──────────────┴──────────────────────────────────────┴──────────────────────┴─────────────────┘
     |
     |<internal link>
@@ -1135,9 +1209,12 @@ class AssignmentFormatterSuite extends DatabricksTest {
   ) {
     // Test plan: Verify that formatAssignmentChunks throws IllegalArgumentException when
     // maxCharsPerChunk is not positive.
+    val assignerServiceInfo =
+      AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = 43 ## 50,
       AssignmentConsistencyMode.Affinity,
+      Some(assignerServiceInfo),
       (("" -- "Balin") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(42.0),
       (("Balin" -- ∞) @@ (43 ## 20) -> Seq("https://pod2")).clearPrimaryRateLoad()
     )
@@ -1203,9 +1280,12 @@ class AssignmentFormatterSuite extends DatabricksTest {
     // Test plan: Verify that when truncating slices with the same load, the slices
     // with lower keys are preferred.
     val assignmentGeneration: Generation = 43 ## 50
+    val assignerServiceInfo =
+      AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
       AssignmentConsistencyMode.Affinity,
+      Some(assignerServiceInfo),
       (("" -- "Balin") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(42.0),
       (("Balin" -- "Kili") @@ (43 ## 20) -> Seq("https://pod1")).withPrimaryRateLoad(42.0),
       (("Kili" -- "Nori") @@ (43 ## 30) -> Seq("https://pod1")).withPrimaryRateLoad(42.0),
@@ -1222,13 +1302,14 @@ class AssignmentFormatterSuite extends DatabricksTest {
       topKeysOpt = None,
       squidFilterOpt = None
     )
-    assert(builder.toString == s"""$assignmentGeneration
+    assert(builder.toString == s"""Generating Assigner: test-assigner/test-instance
+  |$assignmentGeneration
   |
   |┌──────────────┬──────────────────────────────────────┬──────────────────────┬─────────────────┐
   |│ Address      │ Resource UUID                        │ Creation Time        │ Attributed Load │
   |├──────────────┼──────────────────────────────────────┼──────────────────────┼─────────────────┤
-  |│ https://pod1 │ d1eaf1f9-7b39-3651-bb77-1d10433dacfd │ 2023-03-31T16:12:12Z │ -               │
-  |│ https://pod2 │ 570ee4ff-e8ec-3177-a6bc-b726beb829c9 │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod1 │ 32e0529c-2509-3212-9971-8cd9eea4a2f2 │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod2 │ cb034067-a92d-3c9d-9a05-84a64ddb159e │ 2023-03-31T16:12:12Z │ -               │
   |└──────────────┴──────────────────────────────────────┴──────────────────────┴─────────────────┘
   |
   |2 of 4 slices with highest load:
@@ -1248,9 +1329,12 @@ class AssignmentFormatterSuite extends DatabricksTest {
     // Test plan: verifies that the formatter correctly handles long slice keys.
 
     val assignmentGeneration: Generation = 43 ## 50
+    val assignerServiceInfo =
+      AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
       AssignmentConsistencyMode.Affinity,
+      Some(assignerServiceInfo),
       (("" -- "BBBBBBBBBBBBBBBBBBBBBBBB") @@ (43 ## 10) -> Seq("https://pod1"))
         .withPrimaryRateLoad(10.0),
       (("BBBBBBBBBBBBBBBBBBBBBBBB" -- "CCCCCCCCCCCCCCCCCCCCCCCCCCCC") @@ (43 ## 50) -> Seq(
@@ -1280,14 +1364,15 @@ class AssignmentFormatterSuite extends DatabricksTest {
 
     assert(
       builder.toString ==
-      s"""$assignmentGeneration
+      s"""Generating Assigner: test-assigner/test-instance
+  |$assignmentGeneration
   |
   |┌──────────────┬──────────────────────────────────────┬──────────────────────┬─────────────────┐
   |│ Address      │ Resource UUID                        │ Creation Time        │ Attributed Load │
   |├──────────────┼──────────────────────────────────────┼──────────────────────┼─────────────────┤
-  |│ https://pod1 │ d1eaf1f9-7b39-3651-bb77-1d10433dacfd │ 2023-03-31T16:12:12Z │ -               │
-  |│ https://pod2 │ 570ee4ff-e8ec-3177-a6bc-b726beb829c9 │ 2023-03-31T16:12:12Z │ -               │
-  |│ https://pod3 │ 5751882d-485c-3c8a-94ef-5166d2191616 │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod1 │ 32e0529c-2509-3212-9971-8cd9eea4a2f2 │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod2 │ cb034067-a92d-3c9d-9a05-84a64ddb159e │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod3 │ ada8a919-e5f7-3812-a292-c68f26e38d70 │ 2023-03-31T16:12:12Z │ -               │
   |└──────────────┴──────────────────────────────────────┴──────────────────────┴─────────────────┘
   |
   |3 of 5 slices with highest load:
@@ -1310,9 +1395,12 @@ class AssignmentFormatterSuite extends DatabricksTest {
     // Test plan: Verify that slices with no primary rate load are treated as load 0.0 when
     // selecting which slices to keep.
     val assignmentGeneration: Generation = 43 ## 50
+    val assignerServiceInfo =
+      AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
       AssignmentConsistencyMode.Affinity,
+      Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod1")).clearPrimaryRateLoad(),
       (("BBB" -- "CCC") @@ (43 ## 20) -> Seq("https://pod1")).withPrimaryRateLoad(10.0),
       (("CCC" -- ∞) @@ (43 ## 30) -> Seq("https://pod1")).withPrimaryRateLoad(20.0)
@@ -1328,12 +1416,13 @@ class AssignmentFormatterSuite extends DatabricksTest {
       topKeysOpt = None,
       squidFilterOpt = None
     )
-    assert(builder.toString == s"""$assignmentGeneration
+    assert(builder.toString == s"""Generating Assigner: test-assigner/test-instance
+  |$assignmentGeneration
   |
   |┌──────────────┬──────────────────────────────────────┬──────────────────────┬─────────────────┐
   |│ Address      │ Resource UUID                        │ Creation Time        │ Attributed Load │
   |├──────────────┼──────────────────────────────────────┼──────────────────────┼─────────────────┤
-  |│ https://pod1 │ d1eaf1f9-7b39-3651-bb77-1d10433dacfd │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod1 │ 32e0529c-2509-3212-9971-8cd9eea4a2f2 │ 2023-03-31T16:12:12Z │ -               │
   |└──────────────┴──────────────────────────────────────┴──────────────────────┴─────────────────┘
   |
   |2 of 3 slices with highest load:
@@ -1353,9 +1442,12 @@ class AssignmentFormatterSuite extends DatabricksTest {
     // Test plan: Verify that when maxSlices is greater than or equal to the total number of
     // slices, all slices are shown without a truncation header.
     val assignmentGeneration: Generation = 43 ## 50
+    val assignerServiceInfo =
+      AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
       AssignmentConsistencyMode.Affinity,
+      Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(10.0),
       (("BBB" -- "CCC") @@ (43 ## 20) -> Seq("https://pod1")).withPrimaryRateLoad(20.0),
       (("CCC" -- ∞) @@ (43 ## 30) -> Seq("https://pod1")).withPrimaryRateLoad(30.0)
@@ -1371,12 +1463,13 @@ class AssignmentFormatterSuite extends DatabricksTest {
       topKeysOpt = None,
       squidFilterOpt = None
     )
-    assert(builder.toString == s"""$assignmentGeneration
+    assert(builder.toString == s"""Generating Assigner: test-assigner/test-instance
+  |$assignmentGeneration
   |
   |┌──────────────┬──────────────────────────────────────┬──────────────────────┬─────────────────┐
   |│ Address      │ Resource UUID                        │ Creation Time        │ Attributed Load │
   |├──────────────┼──────────────────────────────────────┼──────────────────────┼─────────────────┤
-  |│ https://pod1 │ d1eaf1f9-7b39-3651-bb77-1d10433dacfd │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod1 │ 32e0529c-2509-3212-9971-8cd9eea4a2f2 │ 2023-03-31T16:12:12Z │ -               │
   |└──────────────┴──────────────────────────────────────┴──────────────────────┴─────────────────┘
   |
   |┌─────────┬─────────┬──────────────────┬──────┬─────────┐
@@ -1394,9 +1487,12 @@ class AssignmentFormatterSuite extends DatabricksTest {
   test("appendAssignmentToStringBuilder throws IllegalArgumentException with negative maxSlices") {
     // Test plan: Verify that appendAssignmentToStringBuilder throws IllegalArgumentException
     // when maxSlices is negative.
+    val assignerServiceInfo =
+      AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = 43 ## 50,
       AssignmentConsistencyMode.Affinity,
+      Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(10.0),
       (("BBB" -- ∞) @@ (43 ## 20) -> Seq("https://pod1")).withPrimaryRateLoad(20.0)
     )
@@ -1420,9 +1516,12 @@ class AssignmentFormatterSuite extends DatabricksTest {
     // Test plan: Verify that appendDiffAssignmentToStringBuilder throws IllegalArgumentException
     // when maxSlices is negative.
     val assignmentGeneration: Generation = 0 ## 50
+    val assignerServiceInfo =
+      AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
       AssignmentConsistencyMode.Affinity,
+      Some(assignerServiceInfo),
       (("" -- "Balin") @@ (0 ## 10) -> Seq("https://pod1", "https://pod2"))
         .withPrimaryRateLoad(42.0),
       (("Balin" -- "Kili") @@ (0 ## 20) -> Seq("https://pod1") | Map(
@@ -1457,9 +1556,12 @@ class AssignmentFormatterSuite extends DatabricksTest {
     // Test plan: Verify that a contiguous gap containing an unassigned range and an omitted slice
     // at the start of the table is collapsed into a single summary row.
     val assignmentGeneration: Generation = 43 ## 50
+    val assignerServiceInfo =
+      AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
       AssignmentConsistencyMode.Affinity,
+      Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod3")).withPrimaryRateLoad(10.0),
       (("BBB" -- "CCC") @@ (43 ## 50) -> Seq("https://pod1")).withPrimaryRateLoad(20.0),
       (("CCC" -- "DDD") @@ (43 ## 20) -> Seq("https://pod1")).withPrimaryRateLoad(20.0),
@@ -1478,12 +1580,13 @@ class AssignmentFormatterSuite extends DatabricksTest {
       topKeysOpt = None,
       squidFilterOpt = squidFilterOpt
     )
-    assert(builder.toString == s"""$assignmentGeneration
+    assert(builder.toString == s"""Generating Assigner: test-assigner/test-instance
+  |$assignmentGeneration
   |
   |┌──────────────┬──────────────────────────────────────┬──────────────────────┬─────────────────┐
   |│ Address      │ Resource UUID                        │ Creation Time        │ Attributed Load │
   |├──────────────┼──────────────────────────────────────┼──────────────────────┼─────────────────┤
-  |│ https://pod1 │ d1eaf1f9-7b39-3651-bb77-1d10433dacfd │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod1 │ 32e0529c-2509-3212-9971-8cd9eea4a2f2 │ 2023-03-31T16:12:12Z │ -               │
   |└──────────────┴──────────────────────────────────────┴──────────────────────┴─────────────────┘
   |
   |2 of 4 slices with highest load:
@@ -1505,9 +1608,12 @@ class AssignmentFormatterSuite extends DatabricksTest {
     // Test plan: Verify that a gap containing an unassigned range followed by a kept slice
     // at the start of the table is handled as a summary row followed by the kept slice.
     val assignmentGeneration: Generation = 43 ## 50
+    val assignerServiceInfo =
+      AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
       AssignmentConsistencyMode.Affinity,
+      Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod3")).withPrimaryRateLoad(10.0),
       (("BBB" -- "CCC") @@ (43 ## 50) -> Seq("https://pod1")).withPrimaryRateLoad(50.0),
       (("CCC" -- "DDD") @@ (43 ## 50) -> Seq("https://pod1")).withPrimaryRateLoad(40.0),
@@ -1526,12 +1632,13 @@ class AssignmentFormatterSuite extends DatabricksTest {
       topKeysOpt = None,
       squidFilterOpt = squidFilterOpt
     )
-    assert(builder.toString == s"""$assignmentGeneration
+    assert(builder.toString == s"""Generating Assigner: test-assigner/test-instance
+  |$assignmentGeneration
   |
   |┌──────────────┬──────────────────────────────────────┬──────────────────────┬─────────────────┐
   |│ Address      │ Resource UUID                        │ Creation Time        │ Attributed Load │
   |├──────────────┼──────────────────────────────────────┼──────────────────────┼─────────────────┤
-  |│ https://pod1 │ d1eaf1f9-7b39-3651-bb77-1d10433dacfd │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod1 │ 32e0529c-2509-3212-9971-8cd9eea4a2f2 │ 2023-03-31T16:12:12Z │ -               │
   |└──────────────┴──────────────────────────────────────┴──────────────────────┴─────────────────┘
   |
   |2 of 4 slices with highest load:
@@ -1554,9 +1661,12 @@ class AssignmentFormatterSuite extends DatabricksTest {
     // Test plan: Verify that a contiguous gap containing both omitted slices and an unassigned
     // range at the end of the table is collapsed into a single summary row.
     val assignmentGeneration: Generation = 43 ## 50
+    val assignerServiceInfo =
+      AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
       AssignmentConsistencyMode.Affinity,
+      Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(50.0),
       (("BBB" -- "CCC") @@ (43 ## 20) -> Seq("https://pod1")).withPrimaryRateLoad(40.0),
       (("CCC" -- "DDD") @@ (43 ## 50) -> Seq("https://pod3")).withPrimaryRateLoad(99.0),
@@ -1575,12 +1685,13 @@ class AssignmentFormatterSuite extends DatabricksTest {
       topKeysOpt = None,
       squidFilterOpt = squidFilterOpt
     )
-    assert(builder.toString == s"""$assignmentGeneration
+    assert(builder.toString == s"""Generating Assigner: test-assigner/test-instance
+  |$assignmentGeneration
   |
   |┌──────────────┬──────────────────────────────────────┬──────────────────────┬─────────────────┐
   |│ Address      │ Resource UUID                        │ Creation Time        │ Attributed Load │
   |├──────────────┼──────────────────────────────────────┼──────────────────────┼─────────────────┤
-  |│ https://pod1 │ d1eaf1f9-7b39-3651-bb77-1d10433dacfd │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod1 │ 32e0529c-2509-3212-9971-8cd9eea4a2f2 │ 2023-03-31T16:12:12Z │ -               │
   |└──────────────┴──────────────────────────────────────┴──────────────────────┴─────────────────┘
   |
   |2 of 4 slices with highest load:
@@ -1602,9 +1713,12 @@ class AssignmentFormatterSuite extends DatabricksTest {
     // Test plan: Verify that a contiguous gap containing both omitted slices and an unassigned
     // range in the middle of the table is collapsed into a single summary row.
     val assignmentGeneration: Generation = 43 ## 50
+    val assignerServiceInfo =
+      AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
       AssignmentConsistencyMode.Affinity,
+      Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(50.0),
       (("BBB" -- "CCC") @@ (43 ## 20) -> Seq("https://pod1")).withPrimaryRateLoad(40.0),
       (("CCC" -- "DDD") @@ (43 ## 50) -> Seq("https://pod3")).withPrimaryRateLoad(10.0),
@@ -1623,12 +1737,13 @@ class AssignmentFormatterSuite extends DatabricksTest {
       topKeysOpt = None,
       squidFilterOpt = squidFilterOpt
     )
-    assert(builder.toString == s"""$assignmentGeneration
+    assert(builder.toString == s"""Generating Assigner: test-assigner/test-instance
+  |$assignmentGeneration
   |
   |┌──────────────┬──────────────────────────────────────┬──────────────────────┬─────────────────┐
   |│ Address      │ Resource UUID                        │ Creation Time        │ Attributed Load │
   |├──────────────┼──────────────────────────────────────┼──────────────────────┼─────────────────┤
-  |│ https://pod1 │ d1eaf1f9-7b39-3651-bb77-1d10433dacfd │ 2023-03-31T16:12:12Z │ -               │
+  |│ https://pod1 │ 32e0529c-2509-3212-9971-8cd9eea4a2f2 │ 2023-03-31T16:12:12Z │ -               │
   |└──────────────┴──────────────────────────────────────┴──────────────────────┴─────────────────┘
   |
   |2 of 4 slices with highest load:
@@ -1648,9 +1763,12 @@ class AssignmentFormatterSuite extends DatabricksTest {
     // Test plan: Verify that when truncating slices and chunking the output, the slices with
     // the highest load are chosen and correctly split across chunks.
     val assignmentGeneration: Generation = 43 ## 50
+    val assignerServiceInfo =
+      AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
       AssignmentConsistencyMode.Affinity,
+      Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(10.0),
       (("BBB" -- "CCC") @@ (43 ## 50) -> Seq("https://pod2")).withPrimaryRateLoad(20.0),
       (("CCC" -- "DDD") @@ (43 ## 50) -> Seq("https://pod3")).withPrimaryRateLoad(30.0),
@@ -1669,14 +1787,15 @@ class AssignmentFormatterSuite extends DatabricksTest {
       squidFilterOpt = None,
       maxCharsPerChunk = 2000
     )
-    assert(chunks(0).toString == s"""$assignmentGeneration
+    assert(chunks(0).toString == s"""Generating Assigner: test-assigner/test-instance
+    |$assignmentGeneration
     |
     |┌──────────────┬──────────────────────────────────────┬──────────────────────┬─────────────────┐
     |│ Address      │ Resource UUID                        │ Creation Time        │ Attributed Load │
     |├──────────────┼──────────────────────────────────────┼──────────────────────┼─────────────────┤
-    |│ https://pod1 │ d1eaf1f9-7b39-3651-bb77-1d10433dacfd │ 2023-03-31T16:12:12Z │ -               │
-    |│ https://pod2 │ 570ee4ff-e8ec-3177-a6bc-b726beb829c9 │ 2023-03-31T16:12:12Z │ -               │
-    |│ https://pod3 │ 5751882d-485c-3c8a-94ef-5166d2191616 │ 2023-03-31T16:12:12Z │ -               │
+    |│ https://pod1 │ 32e0529c-2509-3212-9971-8cd9eea4a2f2 │ 2023-03-31T16:12:12Z │ -               │
+    |│ https://pod2 │ cb034067-a92d-3c9d-9a05-84a64ddb159e │ 2023-03-31T16:12:12Z │ -               │
+    |│ https://pod3 │ ada8a919-e5f7-3812-a292-c68f26e38d70 │ 2023-03-31T16:12:12Z │ -               │
     |└──────────────┴──────────────────────────────────────┴──────────────────────┴─────────────────┘
     |
     |4 of 6 slices with highest load:

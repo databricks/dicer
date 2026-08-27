@@ -18,13 +18,25 @@ class PipelineSuite
     with TestUtils.TestName {
 
   /** Pool on which tests execution contexts are created. */
-  private val secPool = SequentialExecutionContextPool.create("test", 4)
+  private val secPool = SequentialExecutionContextPool.create(
+    poolName = "test",
+    numThreads = 4,
+    alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+  )
   private val sec1 = secPool.createExecutionContext("sec1")
   private val sec2 = secPool.createExecutionContext("sec2")
 
   /** Hybrid domains shared across tests to reduce thread creation overhead. */
-  private val hybrid1 = HybridConcurrencyDomain.create("hybrid1", enableContextPropagation = true)
-  private val hybrid2 = HybridConcurrencyDomain.create("hybrid2", enableContextPropagation = true)
+  private val hybrid1 = HybridConcurrencyDomain.create(
+    name = "hybrid1",
+    alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+    enableContextPropagation = true
+  )
+  private val hybrid2 = HybridConcurrencyDomain.create(
+    name = "hybrid2",
+    alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+    enableContextPropagation = true
+  )
 
   /** The thread on which the test is running. Used to assert that a callback is running inline. */
   private val testThread = Thread.currentThread()

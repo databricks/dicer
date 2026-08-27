@@ -9,6 +9,7 @@ import scala.concurrent.duration.Duration
 
 import io.prometheus.client.CollectorRegistry
 
+import com.databricks.caching.util.AlertOwnerTeam
 import com.databricks.caching.util.{
   AssertionWaiter,
   Cancellable,
@@ -34,34 +35,33 @@ class MigrationPreferredAssignerDriverSuite extends DatabricksTest {
   )
 
   private val sec: SequentialExecutionContext =
-    SequentialExecutionContext.createWithDedicatedPool(this.getClass.getName)
+    SequentialExecutionContext.createWithDedicatedPool(
+      name = this.getClass.getName,
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+    )
 
   /**
-   * Reads the current Phase 2.1 consistent-hashing-vs-etcd agreement gauge value from the
-   * default Prometheus registry, or `None` when the gauge is unset (e.g. cleared or never
+   * Reads the current consistent-hashing-vs-etcd agreement gauge value for the given `mode` label
+   * from the default Prometheus registry, or `None` when the gauge is unset (e.g. cleared or never
    * published).
    */
-  private def getAgreementGaugeValueOpt: Option[Double] = {
+  private def getAgreementGaugeValueOpt(modeLabel: String): Option[Double] = {
     MetricUtils.getMetricValueOpt(
       CollectorRegistry.defaultRegistry,
       "dicer_assigner_preferred_assigner_consistent_hashing_vs_etcd_agreement_gauge",
-      labels = Map(
-        "mode" -> PreferredAssignerMetrics.CONSISTENT_HASHING_VS_ETCD_AGREEMENT_MODE_PHASE_2_1
-      )
+      labels = Map("mode" -> modeLabel)
     )
   }
 
   /**
-   * Reads the current Phase 2.1 consistent-hashing-vs-etcd disagreement counter value from the
-   * default Prometheus registry.
+   * Reads the current consistent-hashing-vs-etcd disagreement counter value for the given `mode`
+   * label from the default Prometheus registry.
    */
-  private def getDisagreementCounterValue: Double = {
+  private def getDisagreementCounterValue(modeLabel: String): Double = {
     MetricUtils.getMetricValue(
       CollectorRegistry.defaultRegistry,
       "dicer_assigner_preferred_assigner_consistent_hashing_vs_etcd_disagreement_total",
-      labels = Map(
-        "mode" -> PreferredAssignerMetrics.CONSISTENT_HASHING_VS_ETCD_AGREEMENT_MODE_PHASE_2_1
-      )
+      labels = Map("mode" -> modeLabel)
     )
   }
 
@@ -259,17 +259,30 @@ class MigrationPreferredAssignerDriverSuite extends DatabricksTest {
       PreferredAssignerValue.SomeAssigner(agreeingInfo, Generation(Incarnation(1L), 0L))
     )
     AssertionWaiter("agreement gauge reaches 1.0 after matching picks").await {
-      assert(getAgreementGaugeValueOpt.contains(1.0))
+      assert(
+        getAgreementGaugeValueOpt(
+          PreferredAssignerMetrics.CONSISTENT_HASHING_VS_ETCD_AGREEMENT_MODE_PHASE_2_1
+        ).contains(1.0)
+      )
     }
 
     // Disagreeing UUIDs: gauge transitions to 0.0 and the disagreement counter increments by 1.
     val disagreementTracker: ChangeTracker[Double] =
-      ChangeTracker(() => getDisagreementCounterValue)
+      ChangeTracker(
+        () =>
+          getDisagreementCounterValue(
+            PreferredAssignerMetrics.CONSISTENT_HASHING_VS_ETCD_AGREEMENT_MODE_PHASE_2_1
+          )
+      )
     oldDriver.publishValue(
       PreferredAssignerValue.SomeAssigner(disagreeingInfo, Generation(Incarnation(2L), 0L))
     )
     AssertionWaiter("agreement gauge reaches 0.0 after disagreement").await {
-      assert(getAgreementGaugeValueOpt.contains(0.0))
+      assert(
+        getAgreementGaugeValueOpt(
+          PreferredAssignerMetrics.CONSISTENT_HASHING_VS_ETCD_AGREEMENT_MODE_PHASE_2_1
+        ).contains(0.0)
+      )
       assert(disagreementTracker.totalChange() == 1.0)
     }
 
@@ -277,8 +290,73 @@ class MigrationPreferredAssignerDriverSuite extends DatabricksTest {
     newDriver.publishValue(PreferredAssignerValue.NoAssigner(Generation(Incarnation(3L), 0L)))
     oldDriver.publishValue(PreferredAssignerValue.NoAssigner(Generation(Incarnation(3L), 0L)))
     AssertionWaiter("agreement gauge reaches 1.0 after both report no-PA").await {
-      assert(getAgreementGaugeValueOpt.contains(1.0))
+      assert(
+        getAgreementGaugeValueOpt(
+          PreferredAssignerMetrics.CONSISTENT_HASHING_VS_ETCD_AGREEMENT_MODE_PHASE_2_1
+        ).contains(1.0)
+      )
     }
+  }
+
+  test("ConsistentHashingPrimaryEtcdWritesMode tracks agreement under the phase22 label") {
+    // Test plan: In ConsistentHashingPrimaryEtcdWritesMode the agreement gauge/counter must be
+    // emitted under the phase22 label, because Phase 2.2 and Phase 2.1 carry different semantics
+    // and the Phase 2.1 disagreement alert filters on mode="phase21". Verify this by publishing
+    // consistent preferred-assigner info to the old and new driver, then publishing inconsistent
+    // info, and asserting the phase22 gauge moves 1.0 -> 0.0 (counter increments) while the phase21
+    // gauge stays unset.
+    val oldDriver: TestDriver = new TestDriver(sec = sec)
+    val newDriver: TestDriver = new TestDriver(sec = sec)
+    val migration: MigrationPreferredAssignerDriver = new MigrationPreferredAssignerDriver(
+      sec = sec,
+      migrationMode = MigrationMode.ConsistentHashingPrimaryEtcdWritesMode,
+      oldDriver = oldDriver,
+      newDriver = newDriver
+    )
+
+    migration.start(ASSIGNER_INFO, AssignerProtoLogger.createNoop(sec))
+
+    val phase22Label: String =
+      PreferredAssignerMetrics.CONSISTENT_HASHING_VS_ETCD_AGREEMENT_MODE_PHASE_2_2
+    val phase21Label: String =
+      PreferredAssignerMetrics.CONSISTENT_HASHING_VS_ETCD_AGREEMENT_MODE_PHASE_2_1
+
+    val agreeingInfo: AssignerInfo = AssignerInfo(
+      uuid = UUID.randomUUID(),
+      uri = new URI("http://agree:1111")
+    )
+    val disagreeingInfo: AssignerInfo = AssignerInfo(
+      uuid = UUID.randomUUID(),
+      uri = new URI("http://disagree:2222")
+    )
+
+    // Both drivers publish the same UUID: the phase22 gauge transitions to 1.0 (agree).
+    newDriver.publishValue(
+      PreferredAssignerValue.SomeAssigner(agreeingInfo, Generation(Incarnation(1L), 0L))
+    )
+    oldDriver.publishValue(
+      PreferredAssignerValue.SomeAssigner(agreeingInfo, Generation(Incarnation(1L), 0L))
+    )
+    AssertionWaiter("phase22 agreement gauge reaches 1.0 after matching picks").await {
+      assert(getAgreementGaugeValueOpt(phase22Label).contains(1.0))
+    }
+
+    // Disagreeing UUIDs: the phase22 gauge transitions to 0.0 and its counter increments by 1.
+    val disagreementTracker: ChangeTracker[Double] =
+      ChangeTracker(() => getDisagreementCounterValue(phase22Label))
+    oldDriver.publishValue(
+      PreferredAssignerValue.SomeAssigner(disagreeingInfo, Generation(Incarnation(2L), 0L))
+    )
+    AssertionWaiter("phase22 agreement gauge reaches 0.0 after disagreement").await {
+      assert(getAgreementGaugeValueOpt(phase22Label).contains(0.0))
+      assert(disagreementTracker.totalChange() == 1.0)
+    }
+
+    // The phase21-labeled gauge must never have been touched in this mode.
+    assert(
+      getAgreementGaugeValueOpt(phase21Label).isEmpty,
+      "phase21 gauge must stay unset in ConsistentHashingPrimaryEtcdWritesMode"
+    )
   }
 
   test("ShadowMode does not forward consistent-hashing picks") {
@@ -308,14 +386,11 @@ class MigrationPreferredAssignerDriverSuite extends DatabricksTest {
     assert(oldDriver.getPickUpdates.isEmpty)
   }
 
-  test(
-    "ShadowMode selectionEligibilityWatchCell holds true unconditionally regardless of the " +
-    "new driver's signal"
-  ) {
-    // Test plan: In ShadowMode the old driver is fully authoritative and the new driver does
-    // not gate any decision the system acts on. Verify that the migration driver's
-    // selectionEligibilityWatchCell holds true even when newDriver's eligibility cell holds
-    // false.
+  test("forwards the new driver's consistent-hashing state") {
+    // Test plan: Verify the migration driver surfaces the consistent-hashing snapshot from the new
+    // (CH) driver -- not the old driver -- so the Assigner debug page shows shadow-mode operation.
+    // Publish distinct CH snapshots on both inner drivers and confirm the migration driver reports
+    // the new driver's snapshot.
     val oldDriver: TestDriver = new TestDriver(sec = sec)
     val newDriver: TestDriver = new TestDriver(sec = sec)
     val migration: MigrationPreferredAssignerDriver = new MigrationPreferredAssignerDriver(
@@ -325,39 +400,104 @@ class MigrationPreferredAssignerDriverSuite extends DatabricksTest {
       newDriver = newDriver
     )
 
-    newDriver.setSelectionEligibilityForTest(isEligible = false)
-    assertResult(Some(true))(migration.selectionEligibilityWatchCell.getLatestValueOpt)
+    val oldState: ConsistentHashingState = ConsistentHashingState(
+      localAssignerInfo = ASSIGNER_INFO,
+      preferredAssignerInfoOpt = None,
+      eligiblePods = Seq(ASSIGNER_INFO),
+      k8sConnectionHealth = ConsistentHashingState.K8sConnectionHealth.Init
+    )
+    val newState: ConsistentHashingState = ConsistentHashingState(
+      localAssignerInfo = ASSIGNER_INFO,
+      preferredAssignerInfoOpt = Some(ASSIGNER_INFO),
+      eligiblePods = Seq(ASSIGNER_INFO, ASSIGNER_INFO, ASSIGNER_INFO),
+      k8sConnectionHealth = ConsistentHashingState.K8sConnectionHealth.Healthy
+    )
+    oldDriver.setConsistentHashingStateForTest(oldState)
+    newDriver.setConsistentHashingStateForTest(newState)
 
-    newDriver.setSelectionEligibilityForTest(isEligible = true)
-    assertResult(Some(true))(migration.selectionEligibilityWatchCell.getLatestValueOpt)
+    // The migration driver forwards the new driver's snapshot.
+    val stateOpt: Option[ConsistentHashingState] =
+      TestUtils.awaitResult(migration.consistentHashingStateView, Duration.Inf)
+    assertResult(Some(newState))(stateOpt)
   }
 
-  test(
-    "ConsistentHashingNominatedEtcdReadMode selectionEligibilityWatchCell delegates to the " +
-    "new driver's cell"
-  ) {
-    // Test plan: From mode 2.1 onward the new driver nominates the preferred-assigner
-    // candidate that the old driver writes, so its eligibility is load-bearing. Verify that
-    // the migration driver's selectionEligibilityWatchCell tracks newDriver's cell (true ⇒
-    // true, false ⇒ false), and is independent of oldDriver's cell.
+  test("ConsistentHashingPrimaryEtcdWritesMode watch exposes the new driver's stream") {
+    // Test plan: In ConsistentHashingPrimaryEtcdWritesMode the consistent-hashing driver is
+    // authoritative for reads, so watch() must expose the NEW driver's stream (not the old
+    // etcd driver's, as in the other modes). Publish several distinguishable values on each
+    // driver, interleaved, and confirm the callback receives exactly the new driver's
+    // sequence -- the old driver's values must never reach it. Odd-incarnation values
+    // originate from the old driver and even-incarnation values from the new driver, so any
+    // leakage from the old driver into the callback would be immediately visible.
     val oldDriver: TestDriver = new TestDriver(sec = sec)
     val newDriver: TestDriver = new TestDriver(sec = sec)
     val migration: MigrationPreferredAssignerDriver = new MigrationPreferredAssignerDriver(
       sec = sec,
-      migrationMode = MigrationMode.ConsistentHashingNominatedEtcdReadMode,
+      migrationMode = MigrationMode.ConsistentHashingPrimaryEtcdWritesMode,
       oldDriver = oldDriver,
       newDriver = newDriver
     )
+    migration.start(ASSIGNER_INFO, AssignerProtoLogger.createNoop(sec))
 
-    // newDriver eligible, oldDriver not — migration is eligible.
-    newDriver.setSelectionEligibilityForTest(isEligible = true)
-    oldDriver.setSelectionEligibilityForTest(isEligible = false)
-    assertResult(Some(true))(migration.selectionEligibilityWatchCell.getLatestValueOpt)
+    val callback: RecordingWatchCallback = new RecordingWatchCallback(sec)
+    val cancellable: Cancellable = migration.watch(callback)
 
-    // newDriver not eligible — migration is not eligible regardless of oldDriver.
-    newDriver.setSelectionEligibilityForTest(isEligible = false)
-    oldDriver.setSelectionEligibilityForTest(isEligible = true)
-    assertResult(Some(false))(migration.selectionEligibilityWatchCell.getLatestValueOpt)
+    val oldUpdates: Seq[PreferredAssignerValue] = Seq(
+      PreferredAssignerValue.ModeDisabled(Generation(Incarnation(1L), 0L)),
+      PreferredAssignerValue.ModeDisabled(Generation(Incarnation(3L), 0L))
+    )
+    for (value: PreferredAssignerValue <- oldUpdates) {
+      oldDriver.publishValue(value)
+    }
+
+    val newUpdates: Seq[PreferredAssignerValue] = Seq(
+      PreferredAssignerValue.ModeDisabled(Generation(Incarnation(2L), 0L)),
+      PreferredAssignerValue.ModeDisabled(Generation(Incarnation(4L), 0L)),
+      PreferredAssignerValue.ModeDisabled(Generation(Incarnation(6L), 0L))
+    )
+    for (value: PreferredAssignerValue <- newUpdates) {
+      newDriver.publishValue(value)
+    }
+
+    // The published values flow asynchronously through `watchCell` and back onto `sec` before
+    // landing in `callback`, so wait for the full expected sequence from the new driver.
+    AssertionWaiter("waiting for the new driver's values to reach the callback").await {
+      assert(callback.valuesSnapshot.map(_.knownPreferredAssigner) == newUpdates)
+    }
+    cancellable.cancel()
+  }
+
+  test(
+    "ConsistentHashingPrimaryEtcdWritesMode still forwards picks to the old driver for writing"
+  ) {
+    // Test plan: Even though etcd is no longer read back in ConsistentHashingPrimaryEtcdWritesMode,
+    // its pick is still WRITTEN: the migration driver must forward each elected AssignerInfo to
+    // the old driver via updateExternalPick (which the old driver writes to etcd for durability
+    // and rollback). Publish a `SomeAssigner` then a `NoAssigner` on the new driver and verify
+    // the old driver receives `Some(info)` then `None` in order, and that the migration driver
+    // subscribed exactly once to the new driver's watch stream.
+    val oldDriver: TestDriver = new TestDriver(sec = sec)
+    val newDriver: TestDriver = new TestDriver(sec = sec)
+    val migration: MigrationPreferredAssignerDriver = new MigrationPreferredAssignerDriver(
+      sec = sec,
+      migrationMode = MigrationMode.ConsistentHashingPrimaryEtcdWritesMode,
+      oldDriver = oldDriver,
+      newDriver = newDriver
+    )
+    migration.start(ASSIGNER_INFO, AssignerProtoLogger.createNoop(sec))
+
+    val externalPick: AssignerInfo = AssignerInfo(
+      uuid = UUID.randomUUID(),
+      uri = new URI("http://elected:9999")
+    )
+    val newDriverGen: Generation = Generation(Incarnation(1L), 0L)
+    newDriver.publishValue(PreferredAssignerValue.SomeAssigner(externalPick, newDriverGen))
+    newDriver.publishValue(PreferredAssignerValue.NoAssigner(newDriverGen))
+
+    AssertionWaiter("waiting for both forwarded picks to reach the old driver").await {
+      assert(oldDriver.getPickUpdates == Vector(Some(externalPick), None))
+    }
+    assert(newDriver.getWatchSubscriptionCount == 1)
   }
 }
 
@@ -508,22 +648,20 @@ object MigrationPreferredAssignerDriverSuite {
     }
 
     /**
-     * Test-only writable backing for [[selectionEligibilityWatchCell]]. Initialized to
-     * `true` at construction; tests publish via [[setSelectionEligibilityForTest]] and
-     * observers read through the override below.
+     * Test-only writable backing for [[consistentHashingStateView]]. Empty until a test publishes
+     * a snapshot via [[setConsistentHashingStateForTest]].
      */
-    private val selectionEligibilityWatchCellImpl: WatchValueCell[Boolean] = {
-      val cell: WatchValueCell[Boolean] = new WatchValueCell[Boolean]()
-      cell.setValue(true)
-      cell
-    }
+    private val consistentHashingStateWatchCellImpl: WatchValueCell[ConsistentHashingState] =
+      new WatchValueCell[ConsistentHashingState]()
 
-    /** Sets the value [[selectionEligibilityWatchCell]] will report on subsequent reads. */
-    def setSelectionEligibilityForTest(isEligible: Boolean): Unit =
-      selectionEligibilityWatchCellImpl.setValue(isEligible)
+    /** Publishes a [[ConsistentHashingState]] snapshot for this driver's later reads. */
+    def setConsistentHashingStateForTest(state: ConsistentHashingState): Unit =
+      consistentHashingStateWatchCellImpl.setValue(state)
 
-    override private[assigner] def selectionEligibilityWatchCell: WatchValueCell.Consumer[Boolean] =
-      selectionEligibilityWatchCellImpl
+    // Mirrors a standalone CH driver: reports its snapshot, or `None` until one is published.
+    override private[assigner] def consistentHashingStateView
+        : Future[Option[ConsistentHashingState]] =
+      Future.successful(consistentHashingStateWatchCellImpl.getLatestValueOpt)
   }
 
   /**

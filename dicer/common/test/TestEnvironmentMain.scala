@@ -82,7 +82,9 @@ object TestEnvironmentMain {
       if (runAssigner) {
         // Create a test environment. The default test environment configuration quickly produces an
         // initial assignment.
-        this.internalTestEnv = InternalDicerTestEnvironment.create()
+        this.internalTestEnv = InternalDicerTestEnvironment.create(
+          dPageNamespaceOpt = Some("dicer")
+        )
         val assignerPort: Int = this.internalTestEnv.getAssignerPort
         writeAssignerPort(assignerPortFile, assignerPort)
         (assignerPort, infoServicePort)

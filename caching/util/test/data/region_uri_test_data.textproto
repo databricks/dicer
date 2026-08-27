@@ -1,0 +1,18 @@
+# proto-file: caching/util/test/proto/test_data.proto
+# proto-message: RegionUriTestDataP
+
+# Canonical region URIs present in the embedded InfraDataModel (also asserted by
+# infra/lib/scala/ResourcePathSuite).
+valid_uris: [
+  "region:prod/cloud1/public/region1"
+]
+
+invalid_uris: [
+  # Wrong scheme (a valid IDM URI of another kind).
+  "kubernetes-cluster:prod/cloud1/public/region1/clustertype2/01",
+  # Structurally malformed.
+  "not a uri %",
+  "region:prod/cloud1",
+  # Well-formed region URI absent from the embedded model.
+  "region:prod/cloud1/public/nonexistent"
+]

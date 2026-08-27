@@ -35,6 +35,27 @@ abstract class ClerkMetricsSuiteBase extends DatabricksTest with TestName {
     )
   }
 
+  /**
+   * Returns the value of the getStubForKey call-count metric for the given target, factory context,
+   * and whether or not a secondary [[SliceKey]] for two-level sharding was provided.
+   */
+  private def getStubForKeyCallCount(
+      target: Target,
+      factoryContext: String,
+      secondaryKeyProvided: Boolean): Double = {
+    MetricUtils.getMetricValue(
+      registry,
+      "dicer_clerk_getstubforkey_call_count_total",
+      Map(
+        "targetCluster" -> target.getTargetClusterLabel,
+        "targetName" -> target.getTargetNameLabel,
+        "targetInstanceId" -> target.getTargetInstanceIdLabel,
+        "factoryContext" -> factoryContext,
+        "secondaryKeyProvided" -> secondaryKeyProvided.toString
+      )
+    )
+  }
+
   test("incrementClerkCreatedCount differentiates by factoryContext") {
     // Test plan: Verify that incrementClerkCreatedCount increments dicer_clerk_created_total for
     // the (target, factoryContext) labels and that counts for different factory contexts are
@@ -77,43 +98,56 @@ abstract class ClerkMetricsSuiteBase extends DatabricksTest with TestName {
 
     // Verify: Initial values are 0 for both factory contexts.
     assertResult(0.0)(
-      getMetric(
-        "dicer_clerk_getstubforkey_call_count_total",
-        defaultTarget,
-        clerkFactoryContext
-      )
+      getStubForKeyCallCount(defaultTarget, clerkFactoryContext, secondaryKeyProvided = false)
     )
     assertResult(0.0)(
-      getMetric(
-        "dicer_clerk_getstubforkey_call_count_total",
-        defaultTarget,
-        shardedStubFactoryContext
-      )
+      getStubForKeyCallCount(defaultTarget, shardedStubFactoryContext, secondaryKeyProvided = false)
     )
 
     // Setup: Create two ClerkMetrics instances and record getStubForKey calls; once for "clerk",
     // ten times for "shardedStub".
     val clerkMetrics = new ClerkMetrics(defaultTarget, clerkFactoryContext)
     val shardedStubMetrics = new ClerkMetrics(defaultTarget, shardedStubFactoryContext)
-    clerkMetrics.incrementClerkGetStubForKeyCallCount()
+    clerkMetrics.incrementClerkGetStubForKeyCallCount(secondaryKeyProvided = false)
     for (_ <- 0 until 10) {
-      shardedStubMetrics.incrementClerkGetStubForKeyCallCount()
+      shardedStubMetrics.incrementClerkGetStubForKeyCallCount(secondaryKeyProvided = false)
     }
 
     // Verify: The getStubForKey counts differentiate by factoryContext.
     assertResult(1.0)(
-      getMetric(
-        "dicer_clerk_getstubforkey_call_count_total",
-        defaultTarget,
-        clerkFactoryContext
-      )
+      getStubForKeyCallCount(defaultTarget, clerkFactoryContext, secondaryKeyProvided = false)
     )
     assertResult(10.0)(
-      getMetric(
-        "dicer_clerk_getstubforkey_call_count_total",
-        defaultTarget,
-        shardedStubFactoryContext
-      )
+      getStubForKeyCallCount(defaultTarget, shardedStubFactoryContext, secondaryKeyProvided = false)
+    )
+  }
+
+  test("incrementClerkGetStubForKeyCallCount differentiates by secondaryKeyProvided") {
+    // Test plan: Verify that incrementClerkGetStubForKeyCallCount records calls under the
+    // secondaryKeyProvided label independently, so single-key lookups (secondaryKeyProvided =
+    // false) and two-level sharding lookups (secondaryKeyProvided = true) are counted separately.
+    val factoryContext: String = "clerk"
+
+    // Verify: Initial values are 0 for both secondaryKeyProvided values.
+    assertResult(0.0)(
+      getStubForKeyCallCount(defaultTarget, factoryContext, secondaryKeyProvided = false)
+    )
+    assertResult(0.0)(
+      getStubForKeyCallCount(defaultTarget, factoryContext, secondaryKeyProvided = true)
+    )
+
+    // Setup: Record one single-key lookup and two two-level sharding lookups.
+    val clerkMetrics = new ClerkMetrics(defaultTarget, factoryContext)
+    clerkMetrics.incrementClerkGetStubForKeyCallCount(secondaryKeyProvided = false)
+    clerkMetrics.incrementClerkGetStubForKeyCallCount(secondaryKeyProvided = true)
+    clerkMetrics.incrementClerkGetStubForKeyCallCount(secondaryKeyProvided = true)
+
+    // Verify: The counts are recorded independently per secondaryKeyProvided value.
+    assertResult(1.0)(
+      getStubForKeyCallCount(defaultTarget, factoryContext, secondaryKeyProvided = false)
+    )
+    assertResult(2.0)(
+      getStubForKeyCallCount(defaultTarget, factoryContext, secondaryKeyProvided = true)
     )
   }
 }

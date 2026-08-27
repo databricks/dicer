@@ -90,6 +90,46 @@ class FakeSequentialExecutionContextSuite
     }
   }
 
+  test("pendingScheduledCount tracks scheduled commands by name") {
+    // Test plan: verify that pendingScheduledCount reports, per scheduling name, how many scheduled
+    // commands have neither run nor been cancelled. Do this by scheduling commands under different
+    // names and checking the counts as they are added, run, and cancelled, and that a repeating
+    // command keeps exactly one occurrence pending across reschedules.
+    val sec = FakeSequentialExecutionContext.create(getSafeName)
+    assertResult(0)(sec.pendingScheduledCount("reopen"))
+
+    // Scheduling increments the count for that name only.
+    sec.schedule("reopen", 10.minutes, () => ())
+    sec.schedule("reopen", 20.minutes, () => ())
+    sec.schedule("other", 10.minutes, () => ())
+    assertResult(2)(sec.pendingScheduledCount("reopen"))
+    assertResult(1)(sec.pendingScheduledCount("other"))
+
+    // Running a command clears it from the pending set.
+    sec.getClock.advanceBy(10.minutes)
+    AssertionWaiter("First reopen and other ran").await {
+      assertResult(1)(sec.pendingScheduledCount("reopen"))
+      assertResult(0)(sec.pendingScheduledCount("other"))
+    }
+    sec.getClock.advanceBy(10.minutes)
+    AssertionWaiter("Second reopen ran").await {
+      assertResult(0)(sec.pendingScheduledCount("reopen"))
+    }
+
+    val cancellable: Cancellable = sec.schedule("cancelme", 10.minutes, () => ())
+    assertResult(1)(sec.pendingScheduledCount("cancelme"))
+    cancellable.cancel()
+    assertResult(0)(sec.pendingScheduledCount("cancelme"))
+
+    // A repeating command keeps exactly one occurrence pending across reschedules.
+    sec.scheduleRepeating("repeat", 10.minutes, () => ())
+    assertResult(1)(sec.pendingScheduledCount("repeat"))
+    sec.getClock.advanceBy(10.minutes)
+    AssertionWaiter("Repeat rescheduled").await {
+      assertResult(1)(sec.pendingScheduledCount("repeat"))
+    }
+  }
+
   test("Single clock driving multiple executors") {
     // Test plan: create a fake clock and use it to create two fake executors. Verify that advancing
     // time (using all overloads supported by `FakeTypedClock`) has the expected effect on both

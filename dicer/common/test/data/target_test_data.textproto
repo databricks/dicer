@@ -37,45 +37,12 @@ invalid_uri_test_cases: [
   }
 ]
 
-valid_app_target_names: [
-  "a",
-  "aa",
-  "a0",
-  "softstore-storelet",
-  "has-1-digit-in-the-middle",
-  # This must be the last entry. We assert on its length in AppTargetSuite.
-  "name-with-42-characters-567890123456789012"
-]
-
-invalid_app_target_names: [
-  # Starts with [a-z]
-  "",
-  "0",
-  "12345678"
-  "-starts-with-dash",
-  # Ends with an alphanumeric character
-  "ends-with-dash-",
-  "some-id-.",
-  "some-id-!"
-  # Contains only lowercase alphanumeric characters or '-'
-  "contains_underscore",
-  "contains-Uppercase-letter",
-  "contains-misc!-punctuation",
-  "contains-unicode-characters-😀",
-  "contains-back/slash",
-  "contains.period",
-  "contains:colon",
-  # No two ‘-’ characters may follow one another
-  "has--double-dash",
-  # Contains at most 42 characters
-  # This must be the last entry. We assert on its length in AppTargetSuite.
-  "name-with-43-characters-5678901234567890123"
-]
-
 valid_instance_ids: [
   "a",
+  "0",
   "aa",
   "a0",
+  "12345678",
   "a-b",
   "a0-b1",
   "abcdefgh",
@@ -83,20 +50,20 @@ valid_instance_ids: [
   "my-instance-1",
   "prod-mt-oregon-prod",
   "prod-mt-cloud3-us-east1",
+  "has--double-dash",
   # This must be the last entry. We assert on its length in AppTargetSuite.
   "instance-id-with-63-characters-56789012345678901234567890123456"
 ]
 
 invalid_instance_ids: [
-  # Starts with [a-z]
+  # Must be non-empty
   "",
-  "0",
-  "12345678"
+  # Starts with an alphanumeric character
   "-starts-with-dash",
   # Ends with an alphanumeric character
   "ends-with-dash-",
   "some-id-.",
-  "some-id-!"
+  "some-id-!",
   # Contains only lowercase alphanumeric characters or '-'
   "contains_underscore",
   "contains-Uppercase-letter",
@@ -105,8 +72,6 @@ invalid_instance_ids: [
   "contains-back/slash",
   "contains.period",
   "contains:colon",
-  # No two ‘-’ characters may follow one another
-  "has--double-dash",
   # Contains at most 63 characters
   # This must be the last entry. We assert on its length in AppTargetSuite.
   "instance-id-with-64-characters-567890123456789012345678901234567"

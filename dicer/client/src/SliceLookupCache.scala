@@ -20,7 +20,7 @@ import com.databricks.dicer.external.Target
 @ThreadSafe
 class SliceLookupCache {
 
-  private val logger = PrefixLogger.create(getClass, "SliceLookupCache")
+  private val logger = PrefixLogger.create(getClass, "")
 
   /**
    * Map of [[SliceLookup]] indexed on [[Target]] and [[SliceLookupConfig]], to enable reuse of
@@ -59,7 +59,7 @@ class SliceLookupCache {
       sliceLookupMap.get(target) match {
         case Some(targetMap: mutable.Map[SliceLookupConfig, SliceLookup]) =>
           val configMatched: Boolean = targetMap.contains(config)
-          ClientMetrics.recordSliceLookupCacheResult(config.target, configMatched)
+          ClientMetrics.recordSliceLookupCacheTargetHit(config.target, configMatched)
           if (!configMatched) {
             logger.warn(
               s"SliceLookup cache miss due to config mismatch for $target. New config: $config",

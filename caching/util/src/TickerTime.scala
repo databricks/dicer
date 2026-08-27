@@ -44,8 +44,15 @@ case class TickerTime(nanos: Long) extends AnyVal with Ordered[TickerTime] {
 
   /** Prints the time in seconds, including all digits after the decimal. */
   override def toString: String = {
-    val seconds = nanos / NANOS_PER_SECOND
-    s"$seconds.${nanos % NANOS_PER_SECOND}"
+    val seconds = Math.abs(nanos / NANOS_PER_SECOND)
+    val subsecondNanos = Math.abs(nanos % NANOS_PER_SECOND)
+    val sign = if (nanos < 0) {
+      "-"
+    } else {
+      ""
+    }
+
+    f"$sign$seconds.$subsecondNanos%09d"
   }
 
   override def compare(that: TickerTime): Int = java.lang.Long.compare(this.nanos, that.nanos)

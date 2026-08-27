@@ -165,6 +165,287 @@ invalid_cases: [
       ]
       num_replicas: 1
     }
+  },
+  {
+    debug_name: "LoadDistribution max_error_fraction below the lower bound (negative)"
+    expected_error: "must be in [0, 1)"
+    slice_load: {
+      primary_rate_load: 1.0
+      window_low_inclusive_seconds: 10
+      window_high_exclusive_seconds: 20
+      slice: {
+        low_inclusive: "aaa"
+        high_exclusive: "zzz"
+      }
+      num_replicas: 1
+      load_distribution: {
+        max_error_fraction: -0.1
+      }
+    }
+  },
+  {
+    debug_name: "LoadDistribution max_error_fraction at the upper bound (1.0) of the half-open interval"
+    expected_error: "must be in [0, 1)"
+    slice_load: {
+      primary_rate_load: 1.0
+      window_low_inclusive_seconds: 10
+      window_high_exclusive_seconds: 20
+      slice: {
+        low_inclusive: "aaa"
+        high_exclusive: "zzz"
+      }
+      num_replicas: 1
+      load_distribution: {
+        max_error_fraction: 1.0
+      }
+    }
+  },
+  {
+    debug_name: "LoadDistribution points not strictly ascending by key (descending)"
+    expected_error: "strictly ascending by key"
+    slice_load: {
+      primary_rate_load: 1.0
+      window_low_inclusive_seconds: 10
+      window_high_exclusive_seconds: 20
+      slice: {
+        low_inclusive: "aaa"
+        high_exclusive: "zzz"
+      }
+      num_replicas: 1
+      load_distribution: {
+        points: [
+          {
+            key: "z"
+            cumulative_load_fraction: 0.5
+          },
+          {
+            key: "a"
+            cumulative_load_fraction: 0.9
+          }
+        ]
+        max_error_fraction: 0.1
+      }
+    }
+  },
+  {
+    debug_name: "LoadDistribution points with duplicate keys"
+    expected_error: "strictly ascending by key"
+    slice_load: {
+      primary_rate_load: 1.0
+      window_low_inclusive_seconds: 10
+      window_high_exclusive_seconds: 20
+      slice: {
+        low_inclusive: "aaa"
+        high_exclusive: "zzz"
+      }
+      num_replicas: 1
+      load_distribution: {
+        points: [
+          {
+            key: "a"
+            cumulative_load_fraction: 0.5
+          },
+          {
+            key: "a"
+            cumulative_load_fraction: 0.9
+          }
+        ]
+        max_error_fraction: 0.1
+      }
+    }
+  },
+  {
+    debug_name: "LoadDistribution cumulative fraction decreasing across points"
+    expected_error: "non-decreasing"
+    slice_load: {
+      primary_rate_load: 1.0
+      window_low_inclusive_seconds: 10
+      window_high_exclusive_seconds: 20
+      slice: {
+        low_inclusive: "aaa"
+        high_exclusive: "zzz"
+      }
+      num_replicas: 1
+      load_distribution: {
+        points: [
+          {
+            key: "a"
+            cumulative_load_fraction: 0.9
+          },
+          {
+            key: "z"
+            cumulative_load_fraction: 0.5
+          }
+        ]
+        max_error_fraction: 0.1
+      }
+    }
+  },
+  {
+    debug_name: "LoadDistribution point cumulative fraction out of range (> 1.0)"
+    expected_error: "must be in [0, 1]"
+    slice_load: {
+      primary_rate_load: 1.0
+      window_low_inclusive_seconds: 10
+      window_high_exclusive_seconds: 20
+      slice: {
+        low_inclusive: "aaa"
+        high_exclusive: "zzz"
+      }
+      num_replicas: 1
+      load_distribution: {
+        points: [
+          {
+            key: "a"
+            cumulative_load_fraction: 1.5
+          }
+        ]
+        max_error_fraction: 0.1
+      }
+    }
+  },
+  {
+    debug_name: "LoadDistribution point cumulative fraction out of range (< 0.0)"
+    expected_error: "must be in [0, 1]"
+    slice_load: {
+      primary_rate_load: 1.0
+      window_low_inclusive_seconds: 10
+      window_high_exclusive_seconds: 20
+      slice: {
+        low_inclusive: "aaa"
+        high_exclusive: "zzz"
+      }
+      num_replicas: 1
+      load_distribution: {
+        points: [
+          {
+            key: "a"
+            cumulative_load_fraction: -0.1
+          }
+        ]
+        max_error_fraction: 0.1
+      }
+    }
+  },
+  {
+    debug_name: "LoadDistribution missing max_error_fraction"
+    expected_error: "must have a max_error_fraction"
+    slice_load: {
+      primary_rate_load: 1.0
+      window_low_inclusive_seconds: 10
+      window_high_exclusive_seconds: 20
+      slice: {
+        low_inclusive: "aaa"
+        high_exclusive: "zzz"
+      }
+      num_replicas: 1
+      load_distribution: {
+        points: [
+          {
+            key: "a"
+            cumulative_load_fraction: 0.5
+          }
+        ]
+      }
+    }
+  },
+  {
+    debug_name: "LoadDistribution point missing key"
+    expected_error: "must have a key"
+    slice_load: {
+      primary_rate_load: 1.0
+      window_low_inclusive_seconds: 10
+      window_high_exclusive_seconds: 20
+      slice: {
+        low_inclusive: "aaa"
+        high_exclusive: "zzz"
+      }
+      num_replicas: 1
+      load_distribution: {
+        points: [
+          {
+            cumulative_load_fraction: 0.5
+          }
+        ]
+        max_error_fraction: 0.1
+      }
+    }
+  },
+  {
+    debug_name: "LoadDistribution point missing cumulative_load_fraction"
+    expected_error: "must have a cumulative_load_fraction"
+    slice_load: {
+      primary_rate_load: 1.0
+      window_low_inclusive_seconds: 10
+      window_high_exclusive_seconds: 20
+      slice: {
+        low_inclusive: "aaa"
+        high_exclusive: "zzz"
+      }
+      num_replicas: 1
+      load_distribution: {
+        points: [
+          {
+            key: "a"
+          }
+        ]
+        max_error_fraction: 0.1
+      }
+    }
+  },
+  {
+    debug_name: "Load distribution first key below the slice's low bound"
+    expected_error: "must be contained in slice"
+    slice_load: {
+      primary_rate_load: 1.0
+      window_low_inclusive_seconds: 10
+      window_high_exclusive_seconds: 20
+      slice: {
+        low_inclusive: "aaa"
+        high_exclusive: "zzz"
+      }
+      num_replicas: 1
+      load_distribution: {
+        points: [
+          {
+            key: "a"
+            cumulative_load_fraction: 0.4
+          },
+          {
+            key: "mmm"
+            cumulative_load_fraction: 1.0
+          }
+        ]
+        max_error_fraction: 0.1
+      }
+    }
+  },
+  {
+    debug_name: "Load distribution last key at or above the slice's high bound"
+    expected_error: "must be contained in slice"
+    slice_load: {
+      primary_rate_load: 1.0
+      window_low_inclusive_seconds: 10
+      window_high_exclusive_seconds: 20
+      slice: {
+        low_inclusive: "aaa"
+        high_exclusive: "zzz"
+      }
+      num_replicas: 1
+      load_distribution: {
+        points: [
+          {
+            key: "mmm"
+            cumulative_load_fraction: 0.4
+          },
+          {
+            key: "zzz"
+            cumulative_load_fraction: 1.0
+          }
+        ]
+        max_error_fraction: 0.1
+      }
+    }
   }
 ]
 
@@ -296,6 +577,72 @@ round_tripping_cases: [
       }
     ]
     num_replicas: 1
+  },
+  # Valid case with multi-point load distribution.
+  {
+    primary_rate_load: 100.0
+    window_low_inclusive_seconds: 10
+    window_high_exclusive_seconds: 20
+    slice: {
+      low_inclusive: "aaa"
+      high_exclusive: "zzz"
+    }
+    num_replicas: 1
+    load_distribution: {
+      points: [
+        {
+          key: "aaa"
+          cumulative_load_fraction: 0.0
+        },
+        {
+          key: "mmm"
+          cumulative_load_fraction: 0.4
+        },
+        {
+          key: "zzy"
+          cumulative_load_fraction: 1.0
+        }
+      ]
+      max_error_fraction: 0.1
+    }
+  },
+  # Valid case with no points (no load observed yet).
+  {
+    primary_rate_load: 0.0
+    window_low_inclusive_seconds: 10
+    window_high_exclusive_seconds: 20
+    slice: {
+      low_inclusive: "aaa"
+      high_exclusive: "zzz"
+    }
+    num_replicas: 1
+    load_distribution: {
+      max_error_fraction: 0.1
+    }
+  },
+  # Valid case with lossless load distribution (max_error_fraction at the lower bound, 0.0).
+  {
+    primary_rate_load: 100.0
+    window_low_inclusive_seconds: 10
+    window_high_exclusive_seconds: 20
+    slice: {
+      low_inclusive: "aaa"
+      high_exclusive: "zzz"
+    }
+    num_replicas: 1
+    load_distribution: {
+      points: [
+        {
+          key: "aaa"
+          cumulative_load_fraction: 0.4
+        },
+        {
+          key: "zzy"
+          cumulative_load_fraction: 1.0
+        }
+      ]
+      max_error_fraction: 0.0
+    }
   }
 ]
 

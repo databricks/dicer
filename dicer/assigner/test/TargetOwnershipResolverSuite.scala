@@ -1,20 +1,26 @@
 package com.databricks.dicer.assigner
 
 import java.net.URI
+import java.util.UUID
 
+import com.databricks.api.base.DatabricksServiceException
+import com.databricks.ErrorCode
 import com.databricks.caching.util.MetricUtils
 import com.databricks.caching.util.MetricUtils.ChangeTracker
-import com.databricks.caching.util.TestUtils.ParameterizedTestNameDecorator
+import com.databricks.caching.util.TestUtils.{ParameterizedTestNameDecorator, assertThrow}
 import com.databricks.dicer.assigner.config.{
   TargetMigrationConfig,
   TargetMigrationRole,
   TargetMigrationType
 }
+import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.common.TargetName
+import com.databricks.dicer.external.Target
 import com.databricks.testing.DatabricksTest
 import io.prometheus.client.CollectorRegistry
 import org.scalatest.Suite
 import scala.collection.immutable.IndexedSeq
+import scala.collection.mutable
 
 import TargetOwnershipResolverSuite._
 
@@ -50,30 +56,30 @@ class TargetOwnershipResolverSuite extends DatabricksTest {
       TargetMigrationSnapshot.ActiveMigration(
         targetMigrationConfig = config,
         targetMigrationRole = TargetMigrationRole.Source,
-        peerAssignerUri = EXAMPLE_DESTINATION_ASSIGNER_URI
+        peerAssignerUris = Seq(EXAMPLE_DESTINATION_ASSIGNER_URI)
       )
     )
     val destinationResolver: TargetOwnershipResolver = makeResolver(
       TargetMigrationSnapshot.ActiveMigration(
         targetMigrationConfig = config,
         targetMigrationRole = TargetMigrationRole.Destination,
-        peerAssignerUri = EXAMPLE_SOURCE_ASSIGNER_URI
+        peerAssignerUris = Seq(EXAMPLE_SOURCE_ASSIGNER_URI)
       )
     )
 
-    val targets: Seq[TargetName] = (0 until 100).map { i: Int =>
-      TargetName(s"target-$i")
+    val targets: Seq[Target] = (0 until 100).map { i: Int =>
+      Target(s"target-$i")
     }
-    val sourceVerdicts: Seq[RoutingVerdict] = targets.map { target: TargetName =>
+    val sourceVerdicts: Seq[RoutingVerdict] = targets.map { target: Target =>
       sourceResolver.getRoutingVerdict(target, inboundRedirectTokenOpt = None)
     }
-    val destinationVerdicts: Seq[RoutingVerdict] = targets.map { target: TargetName =>
+    val destinationVerdicts: Seq[RoutingVerdict] = targets.map { target: Target =>
       destinationResolver.getRoutingVerdict(target, inboundRedirectTokenOpt = None)
     }
 
     // Per-target invariant: the two resolvers must produce opposite verdicts for the same target.
     targets.indices.foreach { i: Int =>
-      val target: TargetName = targets(i)
+      val target: Target = targets(i)
       val sourceVerdict: RoutingVerdict = sourceVerdicts(i)
       val destinationVerdict: RoutingVerdict = destinationVerdicts(i)
       withClue(
@@ -144,7 +150,7 @@ class TargetOwnershipResolverSuite extends DatabricksTest {
     // `redirect_token` is always `None` regardless of any inbound token.
     val resolver: TargetOwnershipResolver =
       makeResolver(TargetMigrationSnapshot.NoActiveMigration(TargetMigrationConfig.NO_MIGRATION))
-    val targetName = TargetName("foo")
+    val target = Target("foo")
     // The expected verdict is always the same regardless of the inbound token.
     val expectedVerdict = RoutingVerdict.Handle(redirectTokenOpt = None)
     val inboundTokens: Seq[Option[RedirectToken]] = Seq(
@@ -154,9 +160,88 @@ class TargetOwnershipResolverSuite extends DatabricksTest {
     )
     for (inboundTokenOpt: Option[RedirectToken] <- inboundTokens) {
       assertResult(expectedVerdict)(
-        resolver.getRoutingVerdict(targetName, inboundRedirectTokenOpt = inboundTokenOpt)
+        resolver.getRoutingVerdict(target, inboundRedirectTokenOpt = inboundTokenOpt)
       )
     }
+  }
+
+  test("Reroute picks a peer from the full set of peer Assigner URIs") {
+    // Test plan: Verify that when multiple peer Assigner URIs are known, the resolver picks one at
+    // random. Do this by creating an active migration with multiple peer URIs, then repeatedly
+    // rerouting the same target until every peer URI has been chosen, confirming each reroute
+    // lands on a member of the set.
+    val peerAssignerUris: Set[URI] = Set(
+      URI.create("https://peer-1.test:24500"),
+      URI.create("https://peer-2.test:24500"),
+      URI.create("https://peer-3.test:24500")
+    )
+    // Pin the target to Destination while this resolver is the Source Assigner, so the baseline
+    // verdict is a Reroute to a peer.
+    val peerOwnedTargetName: TargetName = TargetName("pinned-to-destination")
+    val config: TargetMigrationConfig =
+      makeActiveTargetMigrationConfig(forceToDestinationTargetNames = Set(peerOwnedTargetName))
+    val resolver: TargetOwnershipResolver = makeResolver(
+      TargetMigrationSnapshot.ActiveMigration(
+        targetMigrationConfig = config,
+        targetMigrationRole = TargetMigrationRole.Source,
+        peerAssignerUris = peerAssignerUris.toSeq
+      )
+    )
+    val target: Target = Target.createAppTarget(peerOwnedTargetName.value, "instance-id")
+
+    // Maximum number of verdicts we will check, to see if all peer URIs are seen. If not, seen by
+    // then, the test fails.
+    val maxRerouteAttempts: Int = 1000
+    val chosenPeerUris: mutable.Set[URI] = mutable.Set.empty
+    var attempts: Int = 0
+    while (chosenPeerUris != peerAssignerUris) {
+      assert(
+        attempts < maxRerouteAttempts,
+        s"Did not observe every peer URI within $maxRerouteAttempts reroutes; only saw " +
+        s"$chosenPeerUris out of $peerAssignerUris"
+      )
+      attempts += 1
+      resolver.getRoutingVerdict(target, inboundRedirectTokenOpt = None) match {
+        case reroute: RoutingVerdict.Reroute =>
+          assert(
+            peerAssignerUris.contains(reroute.peerAssignerUri),
+            s"Reroute targeted ${reroute.peerAssignerUri}, which is not one of $peerAssignerUris"
+          )
+          chosenPeerUris.add(reroute.peerAssignerUri)
+        case handle: RoutingVerdict.Handle =>
+          fail(s"Expected a Reroute to a peer, but got $handle")
+      }
+    }
+  }
+
+  test("Reroute with no peer Assigner available fails with TEMPORARILY_UNAVAILABLE") {
+    // Test plan: Verify that when an active migration would Reroute but no peer Assigner URIs are
+    // provided, the resolver throws a DatabricksServiceException with
+    // ErrorCode.TEMPORARILY_UNAVAILABLE. Also verify the RerouteFailed verdict counter is
+    // incremented.
+    val peerOwnedTargetName: TargetName = TargetName("pinned-to-destination")
+    val config: TargetMigrationConfig =
+      makeActiveTargetMigrationConfig(forceToDestinationTargetNames = Set(peerOwnedTargetName))
+    val resolver: TargetOwnershipResolver = makeResolver(
+      TargetMigrationSnapshot.ActiveMigration(
+        targetMigrationConfig = config,
+        targetMigrationRole = TargetMigrationRole.Source,
+        peerAssignerUris = Seq.empty
+      )
+    )
+    val target: Target = Target.createAppTarget(peerOwnedTargetName.value, "instance-id")
+    val rerouteFailedTracker: ChangeTracker[Long] =
+      ChangeTracker[Long] { () =>
+        getRoutingVerdictCount(target, verdict = "RerouteFailed")
+      }
+
+    val exception: DatabricksServiceException = assertThrow[DatabricksServiceException](
+      EXAMPLE_ASSIGNER_UUID.toString
+    ) {
+      resolver.getRoutingVerdict(target, inboundRedirectTokenOpt = None)
+    }
+    assertResult(ErrorCode.TEMPORARILY_UNAVAILABLE)(exception.errorCode)
+    assertResult(1L)(rerouteFailedTracker.totalChange())
   }
 }
 
@@ -167,6 +252,9 @@ object TargetOwnershipResolverSuite {
     URI.create("https://source-assigner.test:24500")
   val EXAMPLE_DESTINATION_ASSIGNER_URI: URI =
     URI.create("https://destination-assigner.test:24500")
+
+  /** UUID identifying the Assigner that owns the resolver under test. */
+  val EXAMPLE_ASSIGNER_UUID = new UUID(123, 456)
 
   /**
    * [[TargetMigrationConfig.version]] used by every active migration config built in this suite.
@@ -203,6 +291,24 @@ object TargetOwnershipResolverSuite {
     )
 
   /**
+   * Returns the value of the [[TargetOwnershipResolver]] routing verdict counter for the given
+   * `target` and `verdict` label, or 0 if no value has been recorded.
+   */
+  def getRoutingVerdictCount(target: Target, verdict: String): Long =
+    MetricUtils
+      .getMetricValue(
+        CollectorRegistry.defaultRegistry,
+        metric = "dicer_assigner_target_migration_verdicts_total",
+        labels = Map(
+          "targetCluster" -> target.getTargetClusterLabel,
+          "targetName" -> target.getTargetNameLabel,
+          "targetInstanceId" -> target.getTargetInstanceIdLabel,
+          "verdict" -> verdict
+        )
+      )
+      .toLong
+
+  /**
    * Builds an active [[TargetMigrationConfig]] (i.e. one whose [[TargetMigrationType]] is not
    * [[TargetMigrationType.NoMigration]]) with the given overrides. The resolver's behavior is the
    * same for every active migration type, so any active type works here;
@@ -222,21 +328,24 @@ object TargetOwnershipResolverSuite {
 
   /** Builds a [[TargetOwnershipResolver]] pinned to the given snapshot. */
   def makeResolver(snapshot: TargetMigrationSnapshot): TargetOwnershipResolver =
-    new TargetOwnershipResolver(snapshot)
+    new TargetOwnershipResolver(EXAMPLE_ASSIGNER_UUID, snapshot)
 
   /**
    * Returns the value of the [[TargetOwnershipResolver]] override counter for the given
-   * `targetName`, or 0 if no value has been recorded.
+   * `target`, or 0 if no value has been recorded.
    */
-  def getOverrideCount(targetName: TargetName): Long =
+  def getOverrideCount(target: Target): Long =
     MetricUtils
       .getMetricValue(
         CollectorRegistry.defaultRegistry,
         metric = "dicer_assigner_target_migration_routing_overrides_total",
-        labels = Map("targetName" -> targetName.toString)
+        labels = Map(
+          "targetCluster" -> target.getTargetClusterLabel,
+          "targetName" -> target.getTargetNameLabel,
+          "targetInstanceId" -> target.getTargetInstanceIdLabel
+        )
       )
       .toLong
-
 }
 
 /**
@@ -268,7 +377,7 @@ class ParameterizedTargetOwnershipResolverSuite(assignerRole: TargetMigrationRol
       TargetMigrationSnapshot.ActiveMigration(
         targetMigrationConfig = config,
         targetMigrationRole = assignerRole,
-        peerAssignerUri = peerAssignerUri
+        peerAssignerUris = Seq(peerAssignerUri)
       )
     )
 
@@ -280,44 +389,95 @@ class ParameterizedTargetOwnershipResolverSuite(assignerRole: TargetMigrationRol
 
     val resolver: TargetOwnershipResolver =
       makeResolver(TargetMigrationSnapshot.NoActiveMigration(TargetMigrationConfig.NO_MIGRATION))
-    Seq(TargetName("foo"), TargetName("bar"), TargetName("baz")).foreach { target: TargetName =>
-      assertResult(expected)(resolver.getRoutingVerdict(target, inboundRedirectTokenOpt = None))
+    Seq(Target("foo"), Target("bar"), Target("baz")).foreach { target: Target =>
+      assertResult(expected)(
+        resolver.getRoutingVerdict(target, inboundRedirectTokenOpt = None)
+      )
     }
   }
 
   test("forceToSourceTargetNames pins targets to the Source Assigner") {
-    // Test plan: Targets in `forceToSourceTargetNames` have an owner role of Source.
+    // Test plan: Targets in `forceToSourceTargetNames` have an owner role of Source, and each
+    // verdict increments only the matching Handle/Reroute metric bucket.
     val expected: RoutingVerdict = assignerRole match {
       case TargetMigrationRole.Source => EXPECTED_HANDLE_LOCAL
       case TargetMigrationRole.Destination => EXPECTED_REROUTE_TO_SOURCE
     }
+    val expectedVerdict: String = assignerRole match {
+      case TargetMigrationRole.Source => "Handle"
+      case TargetMigrationRole.Destination => "Reroute"
+    }
+    val oppositeVerdict: String = assignerRole match {
+      case TargetMigrationRole.Source => "Reroute"
+      case TargetMigrationRole.Destination => "Handle"
+    }
 
-    val pinnedTargets: Set[TargetName] =
-      Set(TargetName("foo"), TargetName("bar"), TargetName("baz"))
+    val pinnedTargets: Seq[Target] =
+      Seq(Target("foo"), Target("bar"), Target.createAppTarget("baz", "instance-id"))
     val config: TargetMigrationConfig = makeActiveTargetMigrationConfig(
-      forceToSourceTargetNames = pinnedTargets
+      forceToSourceTargetNames = pinnedTargets.map(TargetName.forTarget).toSet
     )
     val resolver: TargetOwnershipResolver = makeActiveResolver(config)
-    pinnedTargets.foreach { target: TargetName =>
-      assertResult(expected)(resolver.getRoutingVerdict(target, inboundRedirectTokenOpt = None))
+    pinnedTargets.foreach { target: Target =>
+      val verdictTracker: ChangeTracker[Long] =
+        ChangeTracker[Long] { () =>
+          getRoutingVerdictCount(target, verdict = expectedVerdict)
+        }
+      val oppositeVerdictTracker: ChangeTracker[Long] =
+        ChangeTracker[Long] { () =>
+          getRoutingVerdictCount(target, verdict = oppositeVerdict)
+        }
+      assertResult(expected)(
+        resolver.getRoutingVerdict(target, inboundRedirectTokenOpt = None)
+      )
+      assertResult(1L)(verdictTracker.totalChange())
+      assertResult(0L)(oppositeVerdictTracker.totalChange())
     }
   }
 
   test("forceToDestinationTargetNames pins targets to the Destination Assigner") {
-    // Test plan: Targets in `forceToDestinationTargetNames` have an owner role of Destination.
+    // Test plan: Targets in `forceToDestinationTargetNames` have an owner role of Destination, and
+    // each verdict increments only the matching Handle/Reroute metric bucket.
     val expected: RoutingVerdict = assignerRole match {
       case TargetMigrationRole.Source => EXPECTED_REROUTE_TO_DESTINATION
       case TargetMigrationRole.Destination => EXPECTED_HANDLE_LOCAL
     }
+    val expectedVerdict: String = assignerRole match {
+      case TargetMigrationRole.Source => "Reroute"
+      case TargetMigrationRole.Destination => "Handle"
+    }
+    val oppositeVerdict: String = assignerRole match {
+      case TargetMigrationRole.Source => "Handle"
+      case TargetMigrationRole.Destination => "Reroute"
+    }
 
-    val pinnedTargets: Set[TargetName] =
-      Set(TargetName("foo"), TargetName("bar"), TargetName("baz"))
+    val pinnedTargets: Seq[Target] =
+      Seq(
+        Target.createKubernetesTarget(
+          URI.create("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01"),
+          "foo"
+        ),
+        Target.createAppTarget("bar", "instance-id"),
+        Target("baz")
+      )
     val config: TargetMigrationConfig = makeActiveTargetMigrationConfig(
-      forceToDestinationTargetNames = pinnedTargets
+      forceToDestinationTargetNames = pinnedTargets.map(TargetName.forTarget).toSet
     )
     val resolver: TargetOwnershipResolver = makeActiveResolver(config)
-    pinnedTargets.foreach { target: TargetName =>
-      assertResult(expected)(resolver.getRoutingVerdict(target, inboundRedirectTokenOpt = None))
+    pinnedTargets.foreach { target: Target =>
+      val verdictTracker: ChangeTracker[Long] =
+        ChangeTracker[Long] { () =>
+          getRoutingVerdictCount(target, verdict = expectedVerdict)
+        }
+      val oppositeVerdictTracker: ChangeTracker[Long] =
+        ChangeTracker[Long] { () =>
+          getRoutingVerdictCount(target, verdict = oppositeVerdict)
+        }
+      assertResult(expected)(
+        resolver.getRoutingVerdict(target, inboundRedirectTokenOpt = None)
+      )
+      assertResult(1L)(verdictTracker.totalChange())
+      assertResult(0L)(oppositeVerdictTracker.totalChange())
     }
   }
 
@@ -342,14 +502,13 @@ class ParameterizedTargetOwnershipResolverSuite(assignerRole: TargetMigrationRol
       destinationTargetNameFraction = 0.0
     )
     val resolver: TargetOwnershipResolver = makeActiveResolver(config)
-    Seq(TargetName("foo"), TargetName("bar"), TargetName("baz")).foreach { target: TargetName =>
+    Seq(Target("foo"), Target("bar"), Target("baz")).foreach { target: Target =>
       assertResult(expectedForUnpinned)(
         resolver.getRoutingVerdict(target, inboundRedirectTokenOpt = None)
       )
     }
     assertResult(expectedForPinnedToDestination)(
-      resolver
-        .getRoutingVerdict(TargetName("pinned-to-destination"), inboundRedirectTokenOpt = None)
+      resolver.getRoutingVerdict(Target("pinned-to-destination"), inboundRedirectTokenOpt = None)
     )
   }
 
@@ -374,13 +533,13 @@ class ParameterizedTargetOwnershipResolverSuite(assignerRole: TargetMigrationRol
       destinationTargetNameFraction = 1.0
     )
     val resolver: TargetOwnershipResolver = makeActiveResolver(config)
-    Seq(TargetName("foo"), TargetName("bar"), TargetName("baz")).foreach { target: TargetName =>
+    Seq(Target("foo"), Target("bar"), Target("baz")).foreach { target: Target =>
       assertResult(expectedForUnpinned)(
         resolver.getRoutingVerdict(target, inboundRedirectTokenOpt = None)
       )
     }
     assertResult(expectedForPinnedToSource)(
-      resolver.getRoutingVerdict(TargetName("pinned-to-source"), inboundRedirectTokenOpt = None)
+      resolver.getRoutingVerdict(Target("pinned-to-source"), inboundRedirectTokenOpt = None)
     )
   }
 
@@ -399,7 +558,7 @@ class ParameterizedTargetOwnershipResolverSuite(assignerRole: TargetMigrationRol
     )
     val resolver: TargetOwnershipResolver = makeActiveResolver(config)
     assertResult(expected)(
-      resolver.getRoutingVerdict(TargetName("pinned-to-source"), inboundRedirectTokenOpt = None)
+      resolver.getRoutingVerdict(Target("pinned-to-source"), inboundRedirectTokenOpt = None)
     )
   }
 
@@ -418,8 +577,7 @@ class ParameterizedTargetOwnershipResolverSuite(assignerRole: TargetMigrationRol
     )
     val resolver: TargetOwnershipResolver = makeActiveResolver(config)
     assertResult(expected)(
-      resolver
-        .getRoutingVerdict(TargetName("pinned-to-destination"), inboundRedirectTokenOpt = None)
+      resolver.getRoutingVerdict(Target("pinned-to-destination"), inboundRedirectTokenOpt = None)
     )
   }
 
@@ -436,17 +594,18 @@ class ParameterizedTargetOwnershipResolverSuite(assignerRole: TargetMigrationRol
     // token, the verdict must be Handle, the outbound token must echo the inbound token so
     // subsequent in-cluster hops can apply the same override, and the routing-overrides counter
     // must advance by exactly one.
-    val peerOwnedTarget: TargetName = assignerRole match {
+    val peerOwnedTargetName: TargetName = assignerRole match {
       // Pin the target to the role opposite to the receiving Assigner so that local routing's
       // baseline verdict for this target is Reroute to the peer.
       case TargetMigrationRole.Source => TargetName("pinned-to-destination")
       case TargetMigrationRole.Destination => TargetName("pinned-to-source")
     }
+    val peerOwnedTarget: Target = Target.createAppTarget(peerOwnedTargetName.value, "instance-id")
     val config: TargetMigrationConfig = assignerRole match {
       case TargetMigrationRole.Source =>
-        makeActiveTargetMigrationConfig(forceToDestinationTargetNames = Set(peerOwnedTarget))
+        makeActiveTargetMigrationConfig(forceToDestinationTargetNames = Set(peerOwnedTargetName))
       case TargetMigrationRole.Destination =>
-        makeActiveTargetMigrationConfig(forceToSourceTargetNames = Set(peerOwnedTarget))
+        makeActiveTargetMigrationConfig(forceToSourceTargetNames = Set(peerOwnedTargetName))
     }
     val resolver: TargetOwnershipResolver = makeActiveResolver(config)
     // If the local config is same or newer, the Reroute that we expect to receive.
@@ -473,8 +632,10 @@ class ParameterizedTargetOwnershipResolverSuite(assignerRole: TargetMigrationRol
       val sameOrOlderToken: RedirectToken =
         RedirectToken(targetMigrationConfigVersion = tokenVersion)
       assertResult(expectedReroute)(
-        resolver
-          .getRoutingVerdict(peerOwnedTarget, inboundRedirectTokenOpt = Some(sameOrOlderToken))
+        resolver.getRoutingVerdict(
+          peerOwnedTarget,
+          inboundRedirectTokenOpt = Some(sameOrOlderToken)
+        )
       )
       assertResult(0L)(overrideTracker.totalChange())
     }
@@ -499,16 +660,20 @@ class ParameterizedTargetOwnershipResolverSuite(assignerRole: TargetMigrationRol
     // target pinned to the receiving Assigner's own role so the baseline verdict is Handle, and
     // exercise the cases where the inbound token is absent, older, equal, and strictly newer
     // than the local config version.
-    val selfOwnedTarget: TargetName = assignerRole match {
+    val selfOwnedTarget: Target = assignerRole match {
       // Pin the target to the receiving Assigner's own role so the baseline verdict is Handle.
-      case TargetMigrationRole.Source => TargetName("pinned-to-source")
-      case TargetMigrationRole.Destination => TargetName("pinned-to-destination")
+      case TargetMigrationRole.Source => Target("pinned-to-source")
+      case TargetMigrationRole.Destination => Target("pinned-to-destination")
     }
     val config: TargetMigrationConfig = assignerRole match {
       case TargetMigrationRole.Source =>
-        makeActiveTargetMigrationConfig(forceToSourceTargetNames = Set(selfOwnedTarget))
+        makeActiveTargetMigrationConfig(
+          forceToSourceTargetNames = Set(TargetName.forTarget(selfOwnedTarget))
+        )
       case TargetMigrationRole.Destination =>
-        makeActiveTargetMigrationConfig(forceToDestinationTargetNames = Set(selfOwnedTarget))
+        makeActiveTargetMigrationConfig(
+          forceToDestinationTargetNames = Set(TargetName.forTarget(selfOwnedTarget))
+        )
     }
     val resolver: TargetOwnershipResolver = makeActiveResolver(config)
     // Track the change in the override counter for `selfOwnedTarget`.
@@ -540,6 +705,31 @@ class ParameterizedTargetOwnershipResolverSuite(assignerRole: TargetMigrationRol
       resolver.getRoutingVerdict(selfOwnedTarget, inboundRedirectTokenOpt = Some(newerToken))
     )
     assertResult(0L)(overrideTracker.totalChange())
+  }
+
+  test("wouldReroute is always false when no migration is active") {
+    // Test plan: A `NoActiveMigration` snapshot means this Assigner handles every target locally,
+    // so `wouldReroute` must be false for any target.
+    val resolver: TargetOwnershipResolver =
+      makeResolver(TargetMigrationSnapshot.NoActiveMigration(TargetMigrationConfig.NO_MIGRATION))
+    Vector(Target("foo"), Target("bar"), Target("baz")).foreach { target: Target =>
+      withClue(s"target=$target: ") {
+        assert(!resolver.wouldReroute(target))
+      }
+    }
+  }
+
+  test("configVersion reflects the backing config's version for active and inactive snapshots") {
+    // Test plan: Verify `configVersion` returns the version of the config backing the resolver, for
+    // both an active-migration snapshot (which carries the suite's MIGRATION_CONFIG_VERSION) and a
+    // no-active-migration snapshot (which carries NO_MIGRATION's version of 0).
+    val activeResolver: TargetOwnershipResolver =
+      makeActiveResolver(makeActiveTargetMigrationConfig())
+    assertResult(MIGRATION_CONFIG_VERSION)(activeResolver.configVersion)
+
+    val inactiveResolver: TargetOwnershipResolver =
+      makeResolver(TargetMigrationSnapshot.NoActiveMigration(TargetMigrationConfig.NO_MIGRATION))
+    assertResult(TargetMigrationConfig.NO_MIGRATION.version)(inactiveResolver.configVersion)
   }
 
 }

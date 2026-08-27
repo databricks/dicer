@@ -203,13 +203,15 @@ object PreferredAssignerConfig {
       preferredAssignerValue: PreferredAssignerValue,
       currentAssignerInfo: AssignerInfo): PreferredAssignerConfig = {
 
-    // If the preferred assigner mode is enabled, the current assigner is preferred only when it
-    // is the same as the preferred assigner (same `AssignerInfo`), and it always redirects the
-    // clients to the preferred assigner.
+    // If the preferred assigner mode is enabled, the current assigner is preferred only when it is
+    // the preferred assigner, identified by UUID, and it always redirects the clients to the
+    // preferred assigner. Self-recognition compares UUIDs (the stable assigner identity) rather
+    // than the full `AssignerInfo` so that a difference in the elected URI -- e.g. a stale or
+    // scheme-less URI, as in <internal bug> -- cannot stop a pod from recognizing itself.
     preferredAssignerValue match {
       case PreferredAssignerValue.SomeAssigner(assignerInfo: AssignerInfo, _) =>
         val role: AssignerRole =
-          if (assignerInfo == currentAssignerInfo) AssignerRole.Preferred
+          if (assignerInfo.uuid == currentAssignerInfo.uuid) AssignerRole.Preferred
           else AssignerRole.Standby
         PreferredAssignerConfig(
           role,

@@ -3,9 +3,8 @@ package com.databricks.logging.activity
 import com.databricks.context.Ctx
 
 /**
- * OSS-compatible version of ActivityContextFactory, which simply executes the thunk, without any
- * activity context tracking. All parameters exist for API compatibility but are ignored in this
- * implementation.
+ * Minimal ActivityContextFactory that simply executes the thunk, without any activity context
+ * tracking. All parameters exist for API compatibility but are ignored.
  */
 object ActivityContextFactory {
   def withBackgroundActivity[S](

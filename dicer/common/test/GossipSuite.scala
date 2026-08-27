@@ -69,7 +69,11 @@ class GossipSuite extends DatabricksTest with TestName {
    */
   private def createFrozenSuccessor(predecessor: Assignment, proposal: Proposal): Assignment = {
     val proposedAssignment =
-      ProposedAssignment(predecessorOpt = Some(predecessor), proposal)
+      ProposedAssignment(
+        predecessorOpt = Some(predecessor),
+        sliceMap = proposal,
+        assignerServiceInfoOpt = None
+      )
     val generation = Generation(
       predecessor.generation.incarnation,
       predecessor.generation.number.value + 42000

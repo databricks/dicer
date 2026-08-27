@@ -7,7 +7,6 @@ import java.util.concurrent.atomic.AtomicInteger
 
 import scala.concurrent.duration._
 import scala.concurrent.{Future, Promise}
-import scala.collection.immutable
 
 import javax.annotation.concurrent.ThreadSafe
 
@@ -38,11 +37,11 @@ import com.databricks.dicer.external.{
   ClerkConf,
   KubernetesTarget,
   ResourceAddress,
-  Slice,
   SliceKey,
-  Target
+  Target,
+  Slice
 }
-import com.databricks.dicer.friend.Squid
+import com.databricks.dicer.friend.{SliceMap, Squid}
 import com.databricks.rpc.tls.TLSOptions
 import javax.annotation.concurrent.GuardedBy
 
@@ -161,7 +160,7 @@ private[dicer] class ClerkImpl[Stub <: AnyRef] private (
    * [[stop]], the returned stub may not be to the most recently assigned resource.
    */
   def getStubForKey(key: SliceKey): Option[Stub] = {
-    clerkMetrics.incrementClerkGetStubForKeyCallCount()
+    clerkMetrics.incrementClerkGetStubForKeyCallCount(secondaryKeyProvided = false)
     resourceRouter.getStubForKey(key)
   }
 
@@ -171,8 +170,16 @@ private[dicer] class ClerkImpl[Stub <: AnyRef] private (
    * called after [[stop]], the returned stub may not be to the most recently assigned resource.
    */
   def getStubForKey(primaryKey: SliceKey, secondaryKey: SliceKey): Option[Stub] = {
-    clerkMetrics.incrementClerkGetStubForKeyCallCount()
+    clerkMetrics.incrementClerkGetStubForKeyCallCount(secondaryKeyProvided = true)
     resourceRouter.getStubForKey(primaryKey, secondaryKey)
+  }
+
+  /** See [[ResourceRouter.getNextStubForKey]] for spec details. */
+  def getNextStubForKey(
+      key: SliceKey,
+      retryTokenOpt: Option[RetryTokenImpl]): Option[(Stub, RetryTokenImpl)] = {
+    // TODO(<internal bug>): Add a getNextStubForKey metric and increment it here.
+    resourceRouter.getNextStubForKey(key, retryTokenOpt)
   }
 
   /**
@@ -282,6 +289,16 @@ private[dicer] object ClerkImpl {
         clientIdOpt = resolveClientUuid(clerkConf.clientUuidOpt, target),
         SliceLookupConfig.DEFAULT_WATCH_STUB_CACHE_TIME,
         watchFromDataPlane = false,
+        // We currently have no way to automatically infer the alternativeTargetOpt for the
+        // Clerk's target. This depends on support from DBNS, which will be the source-of-truth
+        // for this information. Until that functionality is available, it is OK to leave
+        // alternativeTargetOpt unpopulated.
+        // - Slicelets handling Clerk requests without alternativeTargetOpt will just respond with
+        //   their current assignments.
+        // - Clerks directly watching the Assigner will be manually updated to populate the
+        //   alternativeTargetOpt as part of the AppTarget migration.
+        // TODO(<internal bug>): Populate alternativeTargetOpt once DBNS can supply it for the target.
+        alternativeTargetOpt = None,
         // TODO(<internal bug>): Use client side feature flag to gradually rollout rate limiting.
         enableRateLimiting = false
       ),
@@ -391,6 +408,16 @@ private[dicer] object ClerkImpl {
         clientIdOpt = resolveClientUuid(clientUuidOpt, target),
         SliceLookupConfig.DEFAULT_WATCH_STUB_CACHE_TIME,
         watchFromDataPlane = false,
+        // We currently have no way to automatically infer the alternativeTargetOpt for the
+        // Clerk's target. This depends on support from DBNS, which will be the source-of-truth
+        // for this information. Until that functionality is available, it is OK to leave
+        // alternativeTargetOpt unpopulated.
+        // - Slicelets handling Clerk requests without alternativeTargetOpt will just respond with
+        //   their current assignments.
+        // - Clerks directly watching the Assigner will be manually updated to populate the
+        //   alternativeTargetOpt as part of the AppTarget migration.
+        // TODO(<internal bug>): Populate alternativeTargetOpt once DBNS can supply it for the target.
+        alternativeTargetOpt = None,
         // TODO(<internal bug>): Use client side feature flag to gradually rollout rate limiting.
         enableRateLimiting = false
       ),
@@ -543,7 +570,7 @@ private[dicer] object ClerkImpl {
         // This execution context does not propagate the context to the threads it creates to avoid
         // the overhead of unnecessarily copying the context to background threads.
         SequentialExecutionContext.createWithDedicatedPool(
-          secName,
+          name = secName,
           enableContextPropagation = false,
           alertOwnerTeam = AlertOwnerTeam.CachingTeam.toString
         )
@@ -602,6 +629,16 @@ private[dicer] object ClerkImpl {
         clientIdOpt = resolveClientUuid(clerkConf.clientUuidOpt, target),
         SliceLookupConfig.DEFAULT_WATCH_STUB_CACHE_TIME,
         watchFromDataPlane = true,
+        // We currently have no way to automatically infer the alternativeTargetOpt for the
+        // Clerk's target. This depends on support from DBNS, which will be the source-of-truth
+        // for this information. Until that functionality is available, it is OK to leave
+        // alternativeTargetOpt unpopulated.
+        // - Slicelets handling Clerk requests without alternativeTargetOpt will just respond with
+        //   their current assignments.
+        // - Clerks directly watching the Assigner will be manually updated to populate the
+        //   alternativeTargetOpt as part of the AppTarget migration.
+        // TODO(<internal bug>): Populate alternativeTargetOpt for Direct Clerks
+        alternativeTargetOpt = None,
         // TODO(<internal bug>): Use client side feature flag to gradually rollout rate limiting.
         enableRateLimiting = false
       ),
@@ -656,54 +693,81 @@ private[dicer] object ClerkImpl {
 }
 
 /**
- * An [[Assignment]] augmented with precomputed [[ConsistentHashRing]]s for multi-replica slices,
- * used for efficiently serving two-level sharding lookups. The primary key identifies the slice
- * and the set of resources it is assigned to, and the secondary key picks a specific resource
- * among those using the corresponding hash ring.
+ * The client-side routing information for a [[Slice]] used to serve [[ResourceRouter]] two-level
+ * sharding getStubForKey and getNextStubForKey.
  *
- * @param assignment        the underlying Dicer assignment.
- * @param hashRingsBySlice  per-slice consistent hash rings, populated only for slices with more
- *                          than one indexed resource.
+ * @param slice the slice being served by this SliceInfo.
+ * @param twoLevelHashRingOpt consistent hash ring for two-level sharding, populated only for slices
+ *                        with more than one assigned resource.
+ * @param fallbackSquidOpt the fallback squid for the slice, or None if the assignment has no squid
+ *                         that is unassigned to this slice. One fallback squid is constructed per
+ *                         slice to bound the blast radius of fallback traffic. For example, in the
+ *                         key-of-death scenario, a key-of-death can spread to at most one other
+ *                         slicelet. TODO(<internal bug>): Freeze fallback when key-of-death is detected
+ *                         to minimize the blast radius.
+ */
+private case class SliceInfo(
+    slice: Slice,
+    twoLevelHashRingOpt: Option[ConsistentHashRing[Squid, SliceKey]],
+    fallbackSquidOpt: Option[Squid])
+
+/**
+ * An [[Assignment]] augmented with precomputed per-slice routing information (a two-level sharding
+ * hash ring and a fallback squid per slice). Recreated on every assignment update.
+ *
+ * @param assignment   The underlying Dicer assignment.
+ * @param sliceInfoMap A sliceMap with client-side metadata computed for each assignment received.
  */
 private class ClerkAssignment private (
     val assignment: Assignment,
-    val hashRingsBySlice: immutable.Map[Slice, ConsistentHashRing[Squid, SliceKey]]) {
+    val sliceInfoMap: SliceMap[SliceInfo]) {
 
   object forTest {
 
     /**
-     * Checks that [[hashRingsBySlice]] contains entries for only the multi-replica slices in
-     * [[assignment]] and that the nodes on a hash ring are the same as the resources for the
-     * corresponding slice in the assignment.
+     * 1. Checks that [[sliceInfoMap]] has a hash ring ONLY for multi-replica slices
+     * and that the nodes on a hash ring are the same as the slice's assigned resources
+     * in [[assignment]].
+     *
+     * 2. Checks that `assignment.sliceMap` boundaries match [[sliceInfoMap]] slice boundaries.
+     *
+     * 3. Checks that a [[SliceInfo]] has a fallback squid if and only if the assignment has at
+     * least one resource unassigned to the slice.
+     *
+     * 4. Checks that each sliceInfo's fallback squid, if present, is one of the assignment's
+     * assigned resources, and is not assigned to the slice itself.
+     *
      */
     def checkInvariants(): Unit = {
-      val multipleReplicaSliceAssignments: Vector[SliceAssignment] =
-        assignment.sliceMap.entries.filter { sliceAssignment: SliceAssignment =>
-          sliceAssignment.indexedResources.size > 1
-        }
-
-      // Only multi-replica slices should have hash rings.
-      val multipleReplicaSlices: Set[Slice] =
-        multipleReplicaSliceAssignments
-          .map(
-            (sliceAssignment: SliceAssignment) => sliceAssignment.slice
-          )
-          .toSet
-      iassert(
-        hashRingsBySlice.keySet == multipleReplicaSlices,
-        s"hashRingsBySlice keys ${hashRingsBySlice.keySet} do not match multi-replica slices " +
-        s"$multipleReplicaSlices"
-      )
-
-      // The nodes on the hash rings should be the same as the resources for that slice in the
-      // assignment.
-      for (sliceAssignment: SliceAssignment <- multipleReplicaSliceAssignments) {
-        val ring: ConsistentHashRing[Squid, SliceKey] = hashRingsBySlice(sliceAssignment.slice)
-        val expectedNodes: Vector[Squid] = sliceAssignment.indexedResources
+      iassert(assignment.sliceMap.entries.size == sliceInfoMap.entries.size)
+      for (sliceAssignment: SliceAssignment <- assignment.sliceMap.entries) {
+        val sliceInfo: SliceInfo = sliceInfoMap.lookUp(sliceAssignment.slice.lowInclusive)
+        iassert(sliceInfo.slice == sliceAssignment.slice)
+        val isMultiReplica: Boolean = sliceAssignment.resources.size > 1
         iassert(
-          ring.nodes == expectedNodes,
-          s"ring nodes ${ring.nodes} do not match resources $expectedNodes"
+          sliceInfo.twoLevelHashRingOpt.isDefined == isMultiReplica,
+          s"slice ${sliceInfo.slice} hash ring presence " +
+          s"${sliceInfo.twoLevelHashRingOpt.isDefined} " +
+          s"doesn't match multi-replica status $isMultiReplica"
         )
+        for (ring: ConsistentHashRing[Squid, SliceKey] <- sliceInfo.twoLevelHashRingOpt) {
+          iassert(
+            ring.nodes.toSet == sliceAssignment.resources,
+            s"ring nodes ${ring.nodes.toSet} do not match sliceAssignment resources " +
+            s"${sliceAssignment.resources}"
+          )
+        }
+        // Whether the assignment has at least one resource unassigned to `sliceAssignment.slice`.
+        val assignmentHasFallbackResource: Boolean =
+          assignment.assignedResources.exists(!sliceAssignment.resources.contains(_))
+        iassert(sliceInfo.fallbackSquidOpt.isDefined == assignmentHasFallbackResource)
+
+        sliceInfo.fallbackSquidOpt match {
+          case Some(fallbackSquid: Squid) =>
+            iassert(assignment.assignedResources.contains(fallbackSquid))
+            iassert(!sliceAssignment.resources.contains(fallbackSquid))
+          case None => ()
+        }
       }
     }
   }
@@ -737,22 +801,94 @@ private object ClerkAssignment {
   }
 
   /**
-   * Builds a [[ClerkAssignment]] wrapping `assignment` together with the consistent hash rings
-   * precomputed for each multi-replica slice.
+   * Builds a [[ClerkAssignment]] wrapping `assignment` together with the per-slice routing
+   * information (two-level sharding hash ring, fallback squid) precomputed for each slice.
    */
   def create(assignment: Assignment): ClerkAssignment = {
-    val sliceToRingBuilder = Map.newBuilder[Slice, ConsistentHashRing[Squid, SliceKey]]
-    for (sliceAssignment: SliceAssignment <- assignment.sliceMap.entries) {
-      if (sliceAssignment.indexedResources.size > 1) {
-        val ring: ConsistentHashRing[Squid, SliceKey] =
-          ConsistentHashRing.create[Squid, SliceKey](
-            nodes = sliceAssignment.indexedResources,
-            vnodesPerNode = VNODES_PER_RESOURCE,
-            typeMapper = RingTypeMapper
+    val sliceAssignments: Vector[SliceAssignment] = assignment.sliceMap.entries
+
+    // A map of a slice to the slice's fallback squid (if any)
+    val sliceToFallbackSquid: Map[Slice, Squid] = buildSliceFallbackSquidMap(assignment)
+
+    val sliceInfoEntries: Vector[SliceInfo] =
+      sliceAssignments.map {
+        case (sliceAssignment: SliceAssignment) =>
+          val twoLevelHashRingOpt: Option[ConsistentHashRing[Squid, SliceKey]] =
+            if (sliceAssignment.indexedResources.size > 1) {
+              Some(
+                ConsistentHashRing.create[Squid, SliceKey](
+                  nodes = sliceAssignment.indexedResources,
+                  vnodesPerNode = VNODES_PER_RESOURCE,
+                  typeMapper = RingTypeMapper
+                )
+              )
+            } else {
+              None
+            }
+          SliceInfo(
+            sliceAssignment.slice,
+            twoLevelHashRingOpt,
+            sliceToFallbackSquid.get(sliceAssignment.slice)
           )
-        sliceToRingBuilder += (sliceAssignment.slice -> ring)
       }
-    }
-    new ClerkAssignment(assignment, sliceToRingBuilder.result())
+
+    /**
+     * [[SliceMap.validateCompleteSlices]] validates that `sliceInfoEntries` are valid
+     * (i.e. ordered, disjoint, and cover the full SliceKey space)
+     */
+    val sliceMap: SliceMap[SliceInfo] =
+      new SliceMap[SliceInfo](sliceInfoEntries, getSlice = (_: SliceInfo).slice)
+    new ClerkAssignment(assignment, sliceMap)
+  }
+
+  /**
+   * Builds a map from each slice in `assignment.sliceMap` to the fallback squid chosen for that
+   * slice, used as the fallback resource by [[ResourceRouter]]. A slice has a fallback squid if
+   * and only if the assignment has at least one resource unassigned to the slice.
+   *
+   * A consistent hash ring is built over all of the assignment's resources. For each slice a walk
+   * starts at the resource owning the `slice.lowInclusive` key and returns the first resource it
+   * encounters on the clock-wise walk that is not one of the slice's assigned resources. Using a
+   * consistent hashing algorithm (rather than picking a random unassigned squid) ensures every
+   * clerk picks the same fallback squid for a slice to ensure fallback traffic is affinitized.
+   *
+   * Only a single fallback squid is collected per slice today. This could be extended to collect a
+   * list of unassigned squids to fall back through, but we keep it to one for now, partly to
+   * limit the blast radius of a key-of-death scenario where such a key could take down all the
+   * fallback squids for a slice.
+   *
+   * @param assignment The assignment to construct fallback squids for.
+   * @return A map from a slice to its fallback squid, omitting slices that have none.
+   */
+  private def buildSliceFallbackSquidMap(assignment: Assignment): Map[Slice, Squid] = {
+    val assignmentResources: Vector[Squid] = assignment.assignedResources.toVector
+    val sliceAssignments: Vector[SliceAssignment] = assignment.sliceMap.entries
+
+    val fallbackRing: ConsistentHashRing[Squid, SliceKey] =
+      ConsistentHashRing.create[Squid, SliceKey](
+        nodes = assignmentResources,
+        // `vnodesPerNode` is irrelevant since the ring is not used for balancing keys across the
+        // ring. It is only used to construct a deterministic mapping from a slice to a resource.
+        vnodesPerNode = 1,
+        typeMapper = RingTypeMapper
+      )
+
+    sliceAssignments.iterator.flatMap {
+      case sliceAssignment: SliceAssignment =>
+        // Skip for slices that are assigned to all resources.
+        if (sliceAssignment.resources.size == assignmentResources.size) {
+          None
+        } else {
+          // Walk the ring from the resource owning the `slice.lowInclusive` key and take the first
+          // resource that is not one of the slice's own resources.
+          // Note: This walk has a bias in the case where the `slice.lowInclusive` key lands on an
+          // assigned resource, as it will always return the next unassigned resource on the ring.
+          // This is acceptable because balancing load across fallback squids is not a requirement.
+          fallbackRing
+            .lookupIterator(key = sliceAssignment.slice.lowInclusive)
+            .find((squid: Squid) => !sliceAssignment.resources.contains(squid))
+            .map((squid: Squid) => sliceAssignment.slice -> squid)
+        }
+    }.toMap
   }
 }

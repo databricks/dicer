@@ -16,6 +16,7 @@ scala_library(
         "//dicer/external:external_common",
         "//dicer/friend:slice_map",
         "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_code_findbugs_jsr305",
         "@maven//:com_google_guava_guava",
         "@scala_proto_rules_grpc_api",
         "@scala_proto_rules_grpc_netty",
@@ -201,6 +202,18 @@ scala_test(
         "//dicer/external:conf",
         "//dicer/external:external_common",
         "//dicer/friend:slice_map",
+        "//dicer/friend:squid",
+        "//wrappers/util:async_test_helpers",
+        "//wrappers/util:databricks-test",
+    ],
+)
+
+scala_test(
+    name = "resources_test",
+    srcs = ["test/ResourcesSuite.scala"],
+    deps = [
+        ":algorithm",
+        "//dicer/common:test_common",
         "//dicer/friend:squid",
         "//wrappers/util:async_test_helpers",
         "//wrappers/util:databricks-test",

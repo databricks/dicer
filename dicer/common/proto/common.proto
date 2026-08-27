@@ -2,6 +2,7 @@ syntax = "proto2";
 
 package dicer;
 
+import "caching/util/proto/hyper_log_log.proto";
 import "dicer/friend/proto/friend.proto";
 import "scalapb.proto";
 
@@ -68,6 +69,10 @@ message DiffAssignmentP {
   // `SliceletHandle.isContinuouslyAssigned` checks. Must only be set for assignments in durable or
   // "non-loose" incarnations (in which divergent assignment histories are not possible).
   optional bool is_consistent = 8;
+
+  // OPTIONAL (absent interpreted as no known assigner identity): information about the assigner
+  // service that generated this assignment.
+  optional AssignerServiceInfoP assigner_service_info = 9;
 
   // Represents an assignment of a Slice to one or more resources, e.g.,
   // ["Ax" ... "Bg") -> ("Pod2", "Pod3").
@@ -210,6 +215,18 @@ message DiffAssignmentP {
       int32 lease_recalled_grace_period_seconds = 3;
     }
   }
+
+  // Identifying information about an instance of the assigner service.
+  message AssignerServiceInfoP {
+
+    // The name of the assigner service (e.g., "dicer-assigner" or "dicer-assigner-untrusted").
+    // Must be a valid RFC-1123 label (https://tools.ietf.org/html/rfc1123).
+    optional string name = 1;
+
+    // A string such that a (name, instance_id) pair unambiguously identifies an Assigner globally.
+    // Must be a valid RFC-1123 label (https://tools.ietf.org/html/rfc1123).
+    optional string instance_id = 2;
+  }
 }
 
 // The assignment state that is exchanged across all messages where the caller indicates either the
@@ -344,7 +361,25 @@ message ClientRequestP {
   // received, this echoes back the `RedirectP.redirect_token` field.
   optional bytes redirect_token = 12;
 
-  // Next unused field number: 13
+  // The alternative target identifying the sharded set of resources whose assignment is being
+  // watched. This alternative is used to safely migrate existing `KubernetesTarget` identifiers
+  // to `AppTarget` identifiers. This field must have `target_type = APP`. This field must be set
+  // by clients that can determine the instance ID of the target.
+  // TODO(<internal bug>): Remove this field once all clients populate `target` with `AppTarget`.
+  optional TargetP alternative_target = 13;
+
+  // URI of the Kubernetes cluster in which the sender pod is running, e.g.
+  // "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01". This field must be set by clients with
+  // WhereAmI support, and the region it encodes is expected to match `region_uri`.
+  // TODO(<internal bug>): Remove this field once the Kubernetes API server termination-signal watch is
+  // replaced by the DBNS-based watch.
+  optional string cluster_uri = 14;
+
+  // URI of the region in which the sender pod is running, e.g. "region:dev/cloud1/public/region1".
+  // This field must be set by clients with WhereAmI support.
+  optional string region_uri = 15;
+
+  // Next unused field number: 16
 
   // Clerk-specific information sent by the Clerk.
   message ClerkDataP {
@@ -405,6 +440,13 @@ message ClientRequestP {
       // can use it to estimate the total load on `slice` (see
       // `com.databricks.dicer.assigner.LoadWatcher` for more information).
       optional int32 num_replicas = 6;
+
+      // OPTIONAL: the approximate distribution of load across keys within this Slice.
+      // Present only for range-sharded targets that enable histogram collection. This information
+      // allows the Assigner to choose split points based on the real load distribution rather than
+      // assuming load is uniform across the key space.
+      // (-- See <internal link> for design details. --)
+      optional LoadDistributionP load_distribution = 7;
     }
 
     // Reported load measurements for a particular key.
@@ -415,6 +457,34 @@ message ClientRequestP {
       // Estimated primary rate load for this particular key. Note this should be an underestimate,
       // i.e. the real time-weighted load is greater than or equal to this value.
       optional double underestimated_primary_rate_load = 2;
+    }
+
+    // Approximate distribution of load across keys within a Slice, used for range-sharded targets
+    // where where we cannot assume load is uniform within an assigned Slice. Reported by the
+    // Slicelet in SliceLoadP.
+    //
+    // The points form an approximate cumulative distribution function (CDF) of load over the
+    // Slice's keys: each point maps a key to the fraction of the Slice's total load attributed to
+    // keys at or below it.
+    message LoadDistributionP {
+      // A single point on the load CDF.
+      message CdfPointP {
+        // A key within the Slice's key space. Unique across points (which are key-ordered).
+        optional bytes key = 1;
+
+        // The cumulative fraction (quantile) of the Slice's load attributed to keys at or below
+        // `key`, in [0.0, 1.0]. Non-decreasing across points.
+        optional double cumulative_load_fraction = 2;
+      }
+
+      // Samples of the load CDF, ordered by `key` ascending (equivalently, by non-decreasing
+      // `cumulative_load_fraction`). Empty when no load has been observed for the Slice.
+      repeated CdfPointP points = 1;
+
+      // The maximum error in any `cumulative_load_fraction`, as a fraction of the Slice's total
+      // load. The true cumulative fraction at a returned key is within `max_error_fraction` of the
+      // reported value.
+      optional double max_error_fraction = 2;
     }
 
     // The load on the Slicelet attributed to each assigned Slice.
@@ -462,7 +532,7 @@ message ClientRequestP {
     // is being surrendered by the current owner.
     //
     // A Slicelet that has surrendered a Slice assignment (or that is aware of that surrender
-    // because the the original resource surrendered to it) must continue sending this surrender
+    // because the original resource surrendered to it) must continue sending this surrender
     // notice until it observes that the transition has been removed from the assignment.
     repeated SurrenderP surrenders = 10;
     message SurrenderP {
@@ -473,22 +543,10 @@ message ClientRequestP {
       optional int32 transfer_id = 2;
     }
 
-    // Approximate key cardinality measurement.
-    message KeyCardinalityP {
-      // The time window over which the cardinality measurements are aggregated, in seconds since
-      // the Unix epoch.
-      optional int64 window_low_inclusive_seconds = 1;
-      optional int64 window_high_exclusive_seconds = 2;
+    reserved 11, 12;
 
-      // The HyperLogLog sketch (HLL-4) representing the cardinality estimate.
-      optional bytes hll4_sketch = 3;
-    }
-
-    // Global cardinality measurement for all keys assigned to this Slicelet.
-    optional KeyCardinalityP attributed_key_cardinality = 11;
-
-    // Global cardinality measurement for all keys not assigned to this Slicelet.
-    optional KeyCardinalityP unattributed_key_cardinality = 12;
+    // Approximate cardinality of keys recently observed by this Slicelet.
+    optional databricks.caching.util.HyperLogLogP key_cardinality_estimate = 13;
   }
 
   // The set of features supported by the client. The server can use this information to determine

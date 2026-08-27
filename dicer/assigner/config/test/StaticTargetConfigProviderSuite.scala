@@ -41,16 +41,18 @@ class StaticTargetConfigProviderSuite extends DatabricksTest {
     )
   }
 
-  test("StaticTargetConfigProvider basic functionality") {
+  test("TargetConfigProviderFactory provides static config behavior") {
     // Test plan: verify that the static config provider always returns the same configuration
     // that was provided during construction, also including basic functionality like:
     //  - isDynamicConfigEnabled always returning false
     //  - watch delivering the current config once
-    //  - start being a no-op
     val staticConfigMap = createStaticTargetConfigMap()
-    val provider = StaticTargetConfigProvider.create(staticConfigMap, defaultAssignerConfig)
+    val provider = TargetConfigProviderFactory.createBlocking(
+      staticConfigMap,
+      defaultAssignerConfig,
+      5.seconds
+    )
 
-    // Should work even before start() is called (no requirement to call start first).
     val retrievedConfigMap = provider.getLatestTargetConfigMap
     assert(retrievedConfigMap === staticConfigMap)
 
@@ -68,12 +70,5 @@ class StaticTargetConfigProviderSuite extends DatabricksTest {
     assert(TestUtils.awaitResult(delivered.future, Duration.Inf) === staticConfigMap)
     // Should not throw when cancelled.
     cancellable.cancel()
-
-    // Start should be a no-op.
-    provider.startBlocking(5.seconds)
-
-    // Should still work after start() call.
-    val retrievedConfigMapAfterStart = provider.getLatestTargetConfigMap
-    assert(retrievedConfigMapAfterStart === staticConfigMap)
   }
 }

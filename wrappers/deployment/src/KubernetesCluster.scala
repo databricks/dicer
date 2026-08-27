@@ -12,6 +12,13 @@ class KubernetesClusterRelation(regionUri: String) {
   def getRegionUri: String = regionUri
 }
 
+/** Specification for a region. */
+class Region(uri: String) {
+
+  /** Returns the region's identifier URI. */
+  def getUri: String = uri
+}
+
 /** Specification for a Kubernetes cluster. */
 class KubernetesCluster(uri: String) {
 

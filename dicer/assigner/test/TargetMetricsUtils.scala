@@ -225,17 +225,23 @@ object TargetMetricsUtils {
 
   /**
    * Gets the number of times the Slicelet chose [[reportedStatus]] while the HealthWatcher chose
-   * [[computedStatus]].
+   * [[computedStatus]], summed over every `resourceHash`.
+   *
+   * Sums the emitted samples so that callers do not need to know which `resourceHash` an increment
+   * was labeled with, as the hash depends on the set of Squids present when it was computed. In
+   * production, there's no way to map a hash back to a specific Squid, so the exact hash is not
+   * very useful, and we don't test against it.
    */
   def getComputedStatusDiffers(
       target: Target,
       reportedStatus: String,
       computedStatus: String): Long = {
     MetricUtils
-      .getMetricValue(
+      .getMetricSamplesFilteredByLabels(
         registry,
-        "dicer_assigner_health_status_computed_differs_from_reported_total",
-        Map(
+        metric = "dicer_assigner_health_status_computed_differs_from_reported_total",
+        sampleName = "dicer_assigner_health_status_computed_differs_from_reported_total",
+        labels = Map(
           "targetCluster" -> target.getTargetClusterLabel,
           "targetName" -> target.getTargetNameLabel,
           "targetInstanceId" -> target.getTargetInstanceIdLabel,
@@ -243,7 +249,10 @@ object TargetMetricsUtils {
           "computedStatus" -> computedStatus
         )
       )
-      .toLong
+      .map { sample: MetricFamilySamples.Sample =>
+        sample.value.toLong
+      }
+      .sum
   }
 
   /**
@@ -270,7 +279,8 @@ object TargetMetricsUtils {
   def getGeneratorsRemovedTotalAllReasons(target: Target): Long = {
     getGeneratorsRemovedTotal(target, GeneratorShutdownReason.GENERATOR_INACTIVITY) +
     getGeneratorsRemovedTotal(target, GeneratorShutdownReason.PREFERRED_ASSIGNER_CHANGE) +
-    getGeneratorsRemovedTotal(target, GeneratorShutdownReason.TARGET_CONFIG_CHANGE)
+    getGeneratorsRemovedTotal(target, GeneratorShutdownReason.TARGET_CONFIG_CHANGE) +
+    getGeneratorsRemovedTotal(target, GeneratorShutdownReason.TARGET_MIGRATION_REROUTE)
   }
 
   /** Gets the current number of targets with active generators. */
@@ -425,5 +435,21 @@ object TargetMetricsUtils {
           "targetInstanceId" -> target.getTargetInstanceIdLabel
         )
       )
+  }
+
+  /**
+   * Returns the current key cardinality estimate gauge value for `target`, or `None` if no series
+   * exists for the target's labels.
+   */
+  def getKeyCardinalityEstimate(target: Target): Option[Double] = {
+    MetricUtils.getMetricValueOpt(
+      registry,
+      "dicer_assigner_recent_key_cardinality",
+      Map(
+        "targetName" -> target.getTargetNameLabel,
+        "targetInstanceId" -> target.getTargetInstanceIdLabel,
+        "targetCluster" -> target.getTargetClusterLabel
+      )
+    )
   }
 }

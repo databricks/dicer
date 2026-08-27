@@ -4,9 +4,9 @@ import com.databricks.caching.util.PrefixLogger
 import com.databricks.caching.util.EtcdClient
 import com.databricks.caching.util.UnixTimeVersion
 import com.databricks.threading.NamedExecutor
-import io.grpc.{Status, StatusException}
+import io.prometheus.client.Gauge
 
-import scala.concurrent.duration.Duration
+import scala.concurrent.duration._
 import scala.concurrent.{Await, Future}
 import scala.util.{Failure, Success}
 
@@ -18,6 +18,37 @@ import scala.util.{Failure, Success}
 object EtcdBootstrapper {
 
   private val logger = PrefixLogger.create(this.getClass, "")
+
+  /**
+   * Records the incarnation of the version high watermark the etcd bootstrapper writes or knows
+   * about.
+   */
+  private val knownWatermarkIncarnationGauge: Gauge = Gauge
+    .build()
+    .name("dicer_etcd_bootstrapper_known_watermark_incarnation")
+    .help(
+      "Incarnation (high bits) of the version high watermark the etcd bootstrap knows about for " +
+      "the labeled namespace, either from the observed existing watermark in etcd or the newly " +
+      "written one, distinguished by the labeled namespace. See " +
+      "dicer_etcd_bootstrapper_known_watermark_number for the low bits."
+    )
+    .labelNames("outcome", "namespace")
+    .register()
+
+  /**
+   * Records the number (low bits) of the version high watermark the etcd bootstrap knows about.
+   */
+  private val knownWatermarkNumberGauge: Gauge = Gauge
+    .build()
+    .name("dicer_etcd_bootstrapper_known_watermark_number")
+    .help(
+      "Number (low bits) of the version high watermark the etcd bootstrap knows about for " +
+      "the labeled namespace, either from the observed existing watermark in etcd or the newly " +
+      "written one, distinguished by the labeled namespace. See " +
+      "dicer_etcd_bootstrapper_known_watermark_incarnation for the high bits."
+    )
+    .labelNames("outcome", "namespace")
+    .register()
 
   /**
    * Indicates different results after trying to write initial metadata to the etcd cluster. The
@@ -56,9 +87,14 @@ object EtcdBootstrapper {
   case class BootstrapRequest(client: EtcdClient, incarnation: Incarnation)
 
   /**
-   * Attempts to initialize etcd metadata for each request in `requests`.
+   * Attempts to initialize etcd metadata for each request in `requests`, recording the outcome of
+   * each into [[resultGauge]].
    *
    * If any request fails, the first failed exit code is returned.
+   *
+   * After all requests complete, this blocks for `lingerAfterFinish` before returning so that
+   * [[resultGauge]] survives at least one Prometheus scrape when running as a short-lived
+   * Kubernetes job. Callers that do not need the linger (e.g. tests) should pass [[Duration.Zero]].
    */
   @SuppressWarnings(
     Array(
@@ -66,7 +102,9 @@ object EtcdBootstrapper {
       "reason:blocking is acceptable during application bootstrap"
     )
   )
-  def bootstrapEtcdBlocking(requests: Seq[BootstrapRequest]): ExitCode = {
+  def bootstrapEtcdBlocking(
+      requests: Seq[BootstrapRequest],
+      lingerAfterFinish: FiniteDuration): ExitCode = {
     // Kick off all bootstrap requests.
     val exitCodeFutures: Seq[Future[ExitCode]] = requests.map(bootstrapEtcdAsync)
 
@@ -76,12 +114,22 @@ object EtcdBootstrapper {
       Future.sequence(exitCodeFutures)(implicitly, NamedExecutor.globalImplicit)
     val exitCodes: Seq[ExitCode] = Await.result(exitCodesFuture, Duration.Inf)
 
-    // If any request failed, return the first failed code.
-    exitCodes
+    // If any request failed, take the first failed code; otherwise success.
+    val exitCode: ExitCode = exitCodes
       .find { exitCode: ExitCode =>
         exitCode != ExitCode.SUCCESS
       }
       .getOrElse(ExitCode.SUCCESS)
+
+    // Linger before returning so the result metric can be scraped before the short-lived job's
+    // process exits (log queries are not available in all clusters).
+    logger.info(
+      s"Etcd bootstrap finished; lingering $lingerAfterFinish before returning so the result " +
+      s"metric can be scraped."
+    )
+    Thread.sleep(lingerAfterFinish.toMillis)
+
+    exitCode
   }
 
   /**
@@ -101,17 +149,36 @@ object EtcdBootstrapper {
     request.client
       .initializeVersionHighWatermarkUnsafe(versionHighWatermark)
       .transform {
-        case Success(_) =>
+        case Success(None) =>
+          // We wrote the watermark, so the watermark now in etcd is the one we requested.
           logger.info(
             s"Successfully written high watermark: $versionHighWatermark for namespace $namespace"
           )
+          setWatermarkGauges(versionHighWatermark, outcome = "newly_written", namespace)
           Success(ExitCode.SUCCESS)
-        case Failure(ex: StatusException) if ex.getStatus.getCode == Status.Code.ALREADY_EXISTS =>
-          logger.info(s"High watermark already exists: ${ex.toString} for namespace $namespace")
+        case Success(Some(existingWatermark: EtcdClient.Version)) =>
+          // A watermark already existed, so the watermark now in etcd is the pre-existing one.
+          logger.info(
+            s"High watermark already exists: $existingWatermark for namespace $namespace"
+          )
+          setWatermarkGauges(existingWatermark, outcome = "existing", namespace)
           Success(ExitCode.SUCCESS)
         case Failure(ex: Throwable) =>
           logger.info(s"Bootstrapping failed with error: ${ex.toString} for namespace $namespace")
           Success(ExitCode.RETRYABLE_FAILURE)
-      }(NamedExecutor.globalImplicit) // Stateless transformation.
+      }(NamedExecutor.globalImplicit) // Only side effect is thread-safe metric recording.
+  }
+
+  /** Sets the known watermark gauges. */
+  private def setWatermarkGauges(
+      versionHighWatermark: EtcdClient.Version,
+      outcome: String,
+      namespace: EtcdClient.KeyNamespace): Unit = {
+    knownWatermarkIncarnationGauge
+      .labels(outcome, namespace.value)
+      .set(versionHighWatermark.highBits.toDouble)
+    knownWatermarkNumberGauge
+      .labels(outcome, namespace.value)
+      .set(versionHighWatermark.lowBits.value.toDouble)
   }
 }

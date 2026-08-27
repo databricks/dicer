@@ -9,6 +9,7 @@ import scala.concurrent.duration._
 
 import com.databricks.api.proto.dicer.common.ClientResponseP
 import com.databricks.caching.util.{FakeSequentialExecutionContext, Lock, MetricUtils, TestUtils}
+import com.databricks.caching.util.TestUtils.assertThrow
 import com.databricks.dicer.common.Assignment.AssignmentValueCell
 import com.databricks.dicer.common.SubscriberHandler.Location
 import com.databricks.dicer.common.TestSliceUtils._
@@ -106,7 +107,8 @@ class ScalaSubscriberHandlerSuite extends SubscriberHandlerSuiteBase {
       handlerTarget,
       getSuggestedClerkRpcTimeoutFn = () => TIMEOUT,
       suggestedSliceletRpcTimeout = TIMEOUT,
-      handlerLocation
+      handlerLocation,
+      maxSubscribersPromptedForAssignmentRecovery = 0
     )
     new ScalaDriver(sec, handler, cell)
   }
@@ -131,6 +133,27 @@ class ScalaSubscriberHandlerSuite extends SubscriberHandlerSuiteBase {
 
     /** Blocks until all pending commands on [[sec]] have drained. */
     def drainSec(): Unit = TestUtils.awaitResult(sec.call {}, Duration.Inf)
+
+    /** Asserts that `request` causes the subscriber to be eagerly prompted for its assignment. */
+    def assertEagerlyPrompted(request: ClientRequest): Unit = {
+      val fut: Future[ClientResponseP] = handler.handleWatch(createRPCContext(), request, cell)
+      // Drain twice to run both tasks in handleWatch: flatCall and the trailing map.
+      drainSec()
+      drainSec()
+      assert(fut.isCompleted)
+      val response: ClientResponse =
+        ClientResponse.fromProto(TestUtils.awaitResult(fut, Duration.Inf))
+      assert(response.syncState == SyncAssignmentState.KnownGeneration(Generation.EMPTY))
+    }
+
+    /** Asserts that `request` parks on the assignment cell. */
+    def assertParked(request: ClientRequest): Unit = {
+      val fut: Future[ClientResponseP] = handler.handleWatch(createRPCContext(), request, cell)
+      // Drain twice to run both tasks in handleWatch: flatCall and the trailing map.
+      drainSec()
+      drainSec()
+      assert(!fut.isCompleted)
+    }
   }
   private object TestState {
 
@@ -138,10 +161,16 @@ class ScalaSubscriberHandlerSuite extends SubscriberHandlerSuiteBase {
      * @param handlerTarget the [[Target]] for the handler, defaulted to [[target]].
      * @param handlerLocation the location of the handler, defaulted to Assigner. Tests that
      *                        care about the handler location should explicitly set this.
+     * @param maxSubscribersPromptedForAssignmentRecovery the maximum number of subscribers prompted
+     *                                                    to quickly sync their assignment, when the
+     *                                                    subscribers know a newer assignment,
+     *                                                    defaulted to 0, which disables the bound.
      */
+    @throws[IllegalArgumentException]("if maxSubscribersPromptedForAssignmentRecovery is negative")
     def apply(
         handlerTarget: Target = target,
-        handlerLocation: Location = Location.Assigner
+        handlerLocation: Location = Location.Assigner,
+        maxSubscribersPromptedForAssignmentRecovery: Int = 0
     ): TestState = {
       val sec = FakeSequentialExecutionContext.create(getSafeName)
       val cell = new AssignmentValueCell
@@ -150,7 +179,8 @@ class ScalaSubscriberHandlerSuite extends SubscriberHandlerSuiteBase {
         handlerTarget,
         getSuggestedClerkRpcTimeoutFn = () => TIMEOUT,
         suggestedSliceletRpcTimeout = TIMEOUT,
-        handlerLocation
+        handlerLocation,
+        maxSubscribersPromptedForAssignmentRecovery
       )
       TestState(sec, cell, handler)
     }
@@ -486,5 +516,121 @@ class ScalaSubscriberHandlerSuite extends SubscriberHandlerSuiteBase {
 
     val response = ClientResponse.fromProto(TestUtils.awaitResult(fut, Duration.Inf))
     assert(response.redirect.addressOpt.get == redirectURI)
+  }
+
+  test("Assignment sync bound is disabled when 0 and throws when negative") {
+    // Test plan: Verify that with bound 0, a request against an empty cell is parked, and with a
+    // negative bound, an exception is thrown.
+
+    val state = TestState(maxSubscribersPromptedForAssignmentRecovery = 0)
+    state.assertParked(createClientRequest(42, createSliceletData("pod0"), "pod0"))
+
+    assertThrow[IllegalArgumentException](
+      "maxSubscribersPromptedForAssignmentRecovery must be non-negative"
+    ) {
+      TestState(maxSubscribersPromptedForAssignmentRecovery = -1)
+    }
+  }
+
+  test("Assignment sync bound eagerly prompts the right subscribers") {
+    // Test plan: Verify with bound 2 against an empty cell, exercising every branch through a
+    // sequence of subscribers:
+    //  - gen EMPTY is parked
+    //  - KnownAssignment is parked
+    //  - gen 42 is prompted (under bound)
+    //  - gen 42 is prompted (under bound)
+    //  - gen 42 is parked (reached bound)
+    //  - gen 43 is prompted (greater than the greatest generation), resets prompt count
+    //  - gen 41 is parked (less than the greatest generation)
+    //  - gen 43 is prompted (under bound)
+    //  - gen 43 is parked (reached bound)
+    // Populate the cell with gen 43 (simulates subscriber sending its sync assignment).
+    // Verify the cell behaves normally now that it is non-empty:
+    //  - gen EMPTY is replied to immediately with the cell's assignment
+    //  - gen 42 is replied to immediately with the cell's assignment
+    //  - gen 43 is parked
+    //  - gen 44 is parked
+
+    val state = TestState(maxSubscribersPromptedForAssignmentRecovery = 2)
+
+    // Verify that gen EMPTY is parked.
+    state.assertParked(
+      createClientRequest(Generation.EMPTY, createSliceletData("pod0"), "pod0")
+    )
+
+    // Verify that KnownAssignment is parked.
+    val assignment: Assignment = createRandomAssignment(42, Vector("pod1"))
+    val knownAssignmentRequest: ClientRequest =
+      createClientRequest(Generation.EMPTY, createSliceletData("pod1"), "pod1").copy(
+        syncAssignmentState =
+          SyncAssignmentState.KnownAssignment(assignment.toDiff(Generation.EMPTY))
+      )
+    state.assertParked(knownAssignmentRequest)
+
+    // Verify that gen 42 is prompted (under bound), filling the first slot.
+    state.assertEagerlyPrompted(createClientRequest(42, createSliceletData("pod2"), "pod2"))
+
+    // Verify that gen 42 is prompted (under bound), filling the second slot.
+    state.assertEagerlyPrompted(createClientRequest(42, createSliceletData("pod3"), "pod3"))
+
+    // Verify that gen 42 is parked (reached bound).
+    state.assertParked(createClientRequest(42, createSliceletData("pod4"), "pod4"))
+
+    // Verify that gen 43 is prompted (greater than the greatest generation), filling the first slot
+    // since a greater generation resets the prompt count.
+    state.assertEagerlyPrompted(createClientRequest(43, createSliceletData("pod5"), "pod5"))
+
+    // Verify that gen 41 is parked (less than the greatest generation).
+    state.assertParked(createClientRequest(41, createSliceletData("pod6"), "pod6"))
+
+    // Verify that gen 43 is prompted (under bound), filling the second slot.
+    state.assertEagerlyPrompted(createClientRequest(43, createSliceletData("pod7"), "pod7"))
+
+    // Verify that gen 43 is parked (reached bound). This also verifies that the prompt count was
+    // properly reset when there was a greater generation request earlier.
+    state.assertParked(createClientRequest(43, createSliceletData("pod8"), "pod8"))
+
+    // Simulate the gen 43 subscriber sending its sync assignment by populating the cell.
+    val recoveredAssignment: Assignment = createRandomAssignment(43, Vector("pod8"))
+    state.cell.setValue(recoveredAssignment)
+
+    val expectedSyncState: SyncAssignmentState =
+      SyncAssignmentState.KnownAssignment(recoveredAssignment.toDiff(Generation.EMPTY))
+
+    // Verify that gen EMPTY is replied to immediately with the cell's assignment because the
+    // request's generation is less than the cell's.
+    val emptyGenResponse: ClientResponse =
+      ClientResponse.fromProto(
+        TestUtils.awaitResult(
+          state.handler.handleWatch(
+            createRPCContext(),
+            createClientRequest(Generation.EMPTY, createSliceletData("pod9"), "pod9"),
+            state.cell
+          ),
+          Duration.Inf
+        )
+      )
+    assert(emptyGenResponse.syncState == expectedSyncState)
+
+    // Verify that gen 42 is replied to immediately with the cell's assignment because the
+    // request's generation is less than the cell's.
+    val gen42Response: ClientResponse =
+      ClientResponse.fromProto(
+        TestUtils.awaitResult(
+          state.handler.handleWatch(
+            createRPCContext(),
+            createClientRequest(42, createSliceletData("pod10"), "pod10"),
+            state.cell
+          ),
+          Duration.Inf
+        )
+      )
+    assert(gen42Response.syncState == expectedSyncState)
+
+    // Verify that gen 43 is parked (cell is non-empty, not less than cell's generation).
+    state.assertParked(createClientRequest(43, createSliceletData("pod11"), "pod11"))
+
+    // Verify that gen 44 is parked (cell is non-empty, not less than cell's generation).
+    state.assertParked(createClientRequest(44, createSliceletData("pod12"), "pod12"))
   }
 }

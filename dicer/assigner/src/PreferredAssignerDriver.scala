@@ -1,6 +1,6 @@
 package com.databricks.dicer.assigner
 
-import com.databricks.caching.util.{Cancellable, ValueStreamCallback, WatchValueCell}
+import com.databricks.caching.util.{Cancellable, ValueStreamCallback}
 
 import scala.concurrent.Future
 
@@ -43,26 +43,10 @@ trait PreferredAssignerDriver {
   private[assigner] def updateExternalPick(externalPickOpt: Option[AssignerInfo]): Unit = ()
 
   /**
-   * Whether this process is currently eligible to be selected as the preferred assigner:
-   * `Some(true)` if eligible, `Some(false)` if disqualified by an eligibility factor (e.g.
-   * K8s membership-checker connection health, in-flight migration phase), and `None` when
-   * no signal has been observed yet -- callers decide how to interpret absence of a
-   * signal. Drivers with no factors publish `Some(true)` via
-   * [[PreferredAssignerDriver.ALWAYS_ELIGIBLE]]. The cell handles cross-thread reads;
-   * consumers can call `getLatestValueOpt` from any thread.
+   * Consistent-hashing election snapshot for the Assigner debug page, or `None` for drivers that
+   * do not run a consistent-hashing election (the etcd-backed and disabled drivers). TODO(<internal bug>):
+   * remove once the migration to consistent-hashing PA is complete and the debug page no longer
+   * needs a split view with the etcd preferred-assigner.
    */
-  private[assigner] def selectionEligibilityWatchCell: WatchValueCell.Consumer[Boolean]
-}
-
-private[assigner] object PreferredAssignerDriver {
-
-  /**
-   * Shared selection-eligibility cell for drivers with no eligibility factors -- always
-   * publishes `Some(true)`. Safe to share because [[WatchValueCell.Consumer]] is read-only.
-   */
-  val ALWAYS_ELIGIBLE: WatchValueCell.Consumer[Boolean] = {
-    val cell: WatchValueCell[Boolean] = new WatchValueCell[Boolean]()
-    cell.setValue(true)
-    cell
-  }
+  private[assigner] def consistentHashingStateView: Future[Option[ConsistentHashingState]]
 }

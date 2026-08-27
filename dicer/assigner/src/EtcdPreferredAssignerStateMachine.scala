@@ -226,6 +226,16 @@ class EtcdPreferredAssignerStateMachine(
             earliestWriteTime = tickerTime + config.writeRetryInterval
           }
           outputBuilder.ensureAdvanceBy(earliestWriteTime)
+        } else if (externalPickOpt.exists { pick: AssignerInfo =>
+            pick.uuid != selfAssignerInfo.uuid
+          }) {
+          // Phase 2.1 handoff: the external (consistent-hashing) pick names a different assigner,
+          // so install it as the new preferred. As the current preferred we are the sole writer of
+          // this value, so this is a direct CAS handoff against our own generation -- no
+          // split-brain window and no interval with no preferred. Once the write lands we learn the
+          // new preferred and transition to standby. Writing self would be a no-op, so we act only
+          // when the pick differs.
+          writePreferredAssignerCandidateUnlessTerminating(tickerTime, outputBuilder)
         }
 
       case standbyState: RunState.Standby =>
@@ -455,8 +465,10 @@ class EtcdPreferredAssignerStateMachine(
 
       preferredAssigner match {
         case PreferredAssignerValue.SomeAssigner(assignerInfo: AssignerInfo, generation: Generation)
-            if selfAssignerInfo == assignerInfo =>
-          // We are preferred.
+            if selfAssignerInfo.uuid == assignerInfo.uuid =>
+          // We are preferred. Recognize self by UUID (the stable assigner identity) rather than the
+          // full AssignerInfo, so a difference in the elected URI -- e.g. a stale or scheme-less
+          // URI, as in <internal bug> -- cannot stop this assigner from recognizing itself.
           updateRunState(RunState.Preferred(generation))
 
         case PreferredAssignerValue

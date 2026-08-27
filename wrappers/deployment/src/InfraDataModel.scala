@@ -1,6 +1,6 @@
 package com.databricks.infra.lib
 
-import com.databricks.api.proto.infra.infra.KubernetesCluster
+import com.databricks.api.proto.infra.infra.{KubernetesCluster, Region}
 
 /** Trait for accessing infrastructure definitions. */
 trait InfraDataModel {
@@ -16,30 +16,28 @@ trait InfraDataModel {
  */
 object InfraDataModel {
 
-  /** Returns some example Kubernetes clusters for testing. */
+  /** Returns some example Kubernetes clusters and regions for testing. */
   lazy val fromEmbedded: InfraDataModel = new InfraDataModel {
     override def getInfraDef: ComputeInfraDefinition = {
       val testClusters = Map(
-        "kubernetes-cluster:test-env1/cloud-provider1/domain1/region1/cluster-type1/01" ->
-        new KubernetesCluster(
-          "kubernetes-cluster:test-env1/cloud-provider1/domain1/region1/cluster-type1/01"
-        ),
-        "kubernetes-cluster:test-env2/cloud-provider2/domain2/region2/cluster-type2/02" ->
-        new KubernetesCluster(
-          "kubernetes-cluster:test-env2/cloud-provider2/domain2/region2/cluster-type2/02"
-        ),
-        "kubernetes-cluster:test-env3/cloud-provider3/domain3/region3/cluster-type3/03" ->
-        new KubernetesCluster(
-          "kubernetes-cluster:test-env3/cloud-provider3/domain3/region3/cluster-type3/03"
-        )
+        "kubernetes-cluster:prod/cloud1/public/region1/clustertype2/01" ->
+        new KubernetesCluster("kubernetes-cluster:prod/cloud1/public/region1/clustertype2/01"),
+        "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01" ->
+        new KubernetesCluster("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01")
       )
-      new ComputeInfraDefinition(testClusters)
+      val testRegions = Map(
+        "region:prod/cloud1/public/region1" ->
+        new Region("region:prod/cloud1/public/region1"),
+        "region:dev/cloud1/public/region1" ->
+        new Region("region:dev/cloud1/public/region1")
+      )
+      new ComputeInfraDefinition(testClusters, testRegions)
     }
 
     override def getKubernetesClusterByUri(uri: String): Option[KubernetesCluster] =
-      // First check the static map, then fall back to constructing a cluster from the URI
-      // directly. This allows the OSS implementation to handle any well-formed cluster URI
-      // without requiring all clusters to be listed in the embedded test data.
+      // First check the static map, then fall back to constructing a cluster from the URI directly.
+      // This allows the implementation to handle any well-formed cluster URI without requiring all
+      // clusters to be listed in the embedded test data.
       getInfraDef.kubernetesClusters
         .get(uri)
         .orElse(
@@ -49,8 +47,11 @@ object InfraDataModel {
 }
 
 /**
- * Container for infrastructure definitions, specifically Kubernetes clusters.
+ * Container for infrastructure definitions.
  *
- * @param kubernetesClusters Map of cluster identifiers to cluster metadata.
+ * @param kubernetesClusters Map of cluster URI to cluster metadata.
+ * @param regions Map of region URI to region metadata.
  */
-class ComputeInfraDefinition(val kubernetesClusters: Map[String, KubernetesCluster])
+class ComputeInfraDefinition(
+    val kubernetesClusters: Map[String, KubernetesCluster],
+    val regions: Map[String, Region])

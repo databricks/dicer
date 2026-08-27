@@ -98,12 +98,14 @@ class AssignmentStatsSuite extends DatabricksTest with TestName {
     val prevAsn: Assignment = createAssignment(
       12 ## 42,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- HALF_POINT) @@ (12 ## 42) -> Seq("pod0"),
       (HALF_POINT -- ∞) @@ (12 ## 42) -> Seq("pod1")
     )
     val curAsn: Assignment = createAssignment(
       12 ## 59,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- HALF_POINT) @@ (12 ## 59) -> Seq("pod2"),
       (HALF_POINT -- ∞) @@ (12 ## 59) -> Seq("pod3")
     )
@@ -138,6 +140,7 @@ class AssignmentStatsSuite extends DatabricksTest with TestName {
     val asn0: Assignment = createAssignment(
       12 ## 42,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- HALF_POINT) @@ (12 ## 42) -> Seq("pod0"),
       (HALF_POINT -- ∞) @@ (12 ## 42) -> Seq("pod1")
     )
@@ -148,6 +151,7 @@ class AssignmentStatsSuite extends DatabricksTest with TestName {
     val asn1: Assignment = createAssignment(
       12 ## 59,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- HALF_POINT / 2) @@ (12 ## 59) -> Seq("pod2"),
       (HALF_POINT / 2 -- HALF_POINT) @@ (12 ## 59) -> Seq("pod0"),
       (HALF_POINT -- ∞) @@ (12 ## 42) -> Seq("pod1")
@@ -167,6 +171,7 @@ class AssignmentStatsSuite extends DatabricksTest with TestName {
     val asn2: Assignment = createAssignment(
       12 ## 59,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- HALF_POINT / 2) @@ (12 ## 59) -> Seq("pod0"),
       (HALF_POINT / 2 -- HALF_POINT) @@ (12 ## 59) -> Seq("pod2"),
       (HALF_POINT -- ∞) @@ (12 ## 42) -> Seq("pod0")
@@ -198,12 +203,14 @@ class AssignmentStatsSuite extends DatabricksTest with TestName {
     val prevAsn: Assignment = createAssignment(
       12 ## 42,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- HALF_POINT) @@ (12 ## 42) -> Seq("pod0"),
       (HALF_POINT -- ∞) @@ (12 ## 42) -> Seq("pod1")
     )
     val curAsn: Assignment = createAssignment(
       12 ## 59,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- HALF_POINT) @@ (12 ## 59) -> Seq("pod1"),
       (HALF_POINT -- ∞) @@ (12 ## 59) -> Seq("pod0")
     )
@@ -239,11 +246,13 @@ class AssignmentStatsSuite extends DatabricksTest with TestName {
       val prevAsn: Assignment = createAssignment(
         12 ## 42,
         AssignmentConsistencyMode.Affinity,
+        assignerServiceInfoOpt = None,
         ("" -- ∞) @@ (12 ## 42) -> Seq("r1", "r2")
       )
       val curAsn: Assignment = createAssignment(
         12 ## 59,
         AssignmentConsistencyMode.Affinity,
+        assignerServiceInfoOpt = None,
         ("" -- ∞) @@ (12 ## 59) -> Seq("r2", "r3", "r4")
       )
       val assignmentChangeStats: AssignmentChangeStats =
@@ -276,12 +285,14 @@ class AssignmentStatsSuite extends DatabricksTest with TestName {
       val prevAsn: Assignment = createAssignment(
         12 ## 42,
         AssignmentConsistencyMode.Affinity,
+        assignerServiceInfoOpt = None,
         ("" -- "Kili") @@ (12 ## 42) -> Seq("r1", "r2"),
         ("Kili" -- ∞) @@ (12 ## 42) -> Seq("r2", "r3", "r4")
       )
       val curAsn: Assignment = createAssignment(
         12 ## 59,
         AssignmentConsistencyMode.Affinity,
+        assignerServiceInfoOpt = None,
         ("" -- "Kili") @@ (12 ## 59) -> Seq("r3", "r4"),
         ("Kili" -- ∞) @@ (12 ## 59) -> Seq("r1", "r2", "r3")
       )
@@ -313,12 +324,14 @@ class AssignmentStatsSuite extends DatabricksTest with TestName {
       val prevAsn: Assignment = createAssignment(
         12 ## 42,
         AssignmentConsistencyMode.Affinity,
+        assignerServiceInfoOpt = None,
         ("" -- "Fili") @@ (12 ## 42) -> Seq("r1", "r2", "r3"),
         ("Fili" -- ∞) @@ (12 ## 42) -> Seq("r1", "r2", "r3")
       )
       val curAsn: Assignment = createAssignment(
         12 ## 59,
         AssignmentConsistencyMode.Affinity,
+        assignerServiceInfoOpt = None,
         ("" -- "Fili") @@ (12 ## 59) -> Seq("r1", "r2", "r3"),
         ("Fili" -- "Kili") @@ (12 ## 59) -> Seq("r1", "r2", "r3"),
         ("Kili" -- ∞) @@ (12 ## 59) -> Seq("r1", "r2", "r3")
@@ -349,12 +362,14 @@ class AssignmentStatsSuite extends DatabricksTest with TestName {
     val prevAsn: Assignment = createAssignment(
       12 ## 42,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- "Kili") @@ (12 ## 42) -> Seq("r1", "r2"),
       ("Kili" -- ∞) @@ (12 ## 42) -> Seq("r2", "r3", "r4")
     )
     val curAsn: Assignment = createAssignment(
       12 ## 59,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- "Kili") @@ (12 ## 59) -> Seq("r3", "r4"),
       ("Kili" -- ∞) @@ (12 ## 59) -> Seq("r1", "r2", "r3")
     )
@@ -389,6 +404,7 @@ class AssignmentStatsSuite extends DatabricksTest with TestName {
     val prevAsn: Assignment = createAssignment(
       12 ## 42,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- HALF_POINT / 8) @@ (12 ## 42) -> Seq("pod0"),
       (HALF_POINT / 8 -- HALF_POINT / 4) @@ (12 ## 42) -> Seq("pod0"),
       (HALF_POINT / 4 -- ∞) @@ (12 ## 42) -> Seq("pod1")
@@ -396,6 +412,7 @@ class AssignmentStatsSuite extends DatabricksTest with TestName {
     val curAsn: Assignment = createAssignment(
       12 ## 59,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- HALF_POINT / 4) @@ (12 ## 59) -> Seq("pod0"),
       (HALF_POINT / 4 -- HALF_POINT / 2) @@ (12 ## 59) -> Seq("pod1"),
       (HALF_POINT / 2 -- ∞) @@ (12 ## 59) -> Seq("pod1")
@@ -430,12 +447,13 @@ class AssignmentStatsSuite extends DatabricksTest with TestName {
     var prevAsn: Assignment =
       ProposedAssignment(
         predecessorOpt = None,
-        createRandomProposal(
+        sliceMap = createRandomProposal(
           numSlices = 10,
           resources = resources,
           numMaxReplicas = numResources,
           rng
-        )
+        ),
+        assignerServiceInfoOpt = None
       ).commit(
         isFrozen = false,
         AssignmentConsistencyMode.Affinity,
@@ -453,12 +471,13 @@ class AssignmentStatsSuite extends DatabricksTest with TestName {
       val curAsn: Assignment =
         ProposedAssignment(
           predecessorOpt = None,
-          createRandomProposal(
+          sliceMap = createRandomProposal(
             numSlices = curAsnSlices,
             resources = resources,
             numMaxReplicas = numResources,
             rng
-          )
+          ),
+          assignerServiceInfoOpt = None
         ).commit(
           isFrozen = false,
           AssignmentConsistencyMode.Affinity,
@@ -490,6 +509,7 @@ class AssignmentStatsSuite extends DatabricksTest with TestName {
     val asn: Assignment = createAssignment(
       12 ## 59,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- HALF_POINT) @@ (12 ## 59) -> Seq("r1", "r2"),
       (HALF_POINT -- ∞) @@ (12 ## 59) -> Seq("r2", "r3")
     )
@@ -562,6 +582,7 @@ class AssignmentStatsSuite extends DatabricksTest with TestName {
     val asn: Assignment = createAssignment(
       12 ## 59,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- HALF_POINT) @@ (12 ## 59) -> Seq("r1", "r2"),
       (HALF_POINT -- ∞) @@ (12 ## 59) -> Seq("r2", "r3")
     )
@@ -635,6 +656,7 @@ class AssignmentStatsSuite extends DatabricksTest with TestName {
       val asn: Assignment = createAssignment(
         12 ## 59,
         AssignmentConsistencyMode.Affinity,
+        assignerServiceInfoOpt = None,
         ("" -- HALF_POINT / 4) @@ (12 ## 59) -> Seq("pod2"), // slice0
         (HALF_POINT / 4 -- HALF_POINT / 2) @@ (12 ## 59) -> Seq("pod2"), // slice1
         (HALF_POINT / 2 -- HALF_POINT) @@ (12 ## 59) -> Seq("pod0"), // slice2
@@ -699,6 +721,7 @@ class AssignmentStatsSuite extends DatabricksTest with TestName {
       val asn: Assignment = createAssignment(
         12 ## 59,
         AssignmentConsistencyMode.Affinity,
+        assignerServiceInfoOpt = None,
         ("" -- HALF_POINT) @@ (12 ## 59) -> Seq("pod0"),
         (HALF_POINT -- ∞) @@ (12 ## 59) -> Seq("pod1")
       )
@@ -772,6 +795,7 @@ class AssignmentStatsSuite extends DatabricksTest with TestName {
       val asn: Assignment = createAssignment(
         12 ## 59,
         AssignmentConsistencyMode.Affinity,
+        assignerServiceInfoOpt = None,
         ("" -- HALF_POINT / 4) @@ (12 ## 59) -> Seq("pod2"), // slice0
         (HALF_POINT / 4 -- HALF_POINT / 2) @@ (12 ## 59) -> Seq("pod2"), // slice1
         (HALF_POINT / 2 -- HALF_POINT) @@ (12 ## 59) -> Seq("pod0"), // slice2
@@ -841,6 +865,7 @@ class AssignmentStatsSuite extends DatabricksTest with TestName {
       val asn: Assignment = createAssignment(
         12 ## 59,
         AssignmentConsistencyMode.Affinity,
+        assignerServiceInfoOpt = None,
         ("" -- HALF_POINT) @@ (12 ## 59) -> Seq("pod0"),
         (HALF_POINT -- ∞) @@ (12 ## 59) -> Seq("pod1")
       )
@@ -905,6 +930,7 @@ class AssignmentStatsSuite extends DatabricksTest with TestName {
     val asn: Assignment = createAssignment(
       12 ## 59,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- "Kili") @@ (12 ## 59) -> Seq("r1"),
       ("Kili" -- ∞) @@ (12 ## 59) -> Seq("r2", "r3")
     )
@@ -965,6 +991,7 @@ class AssignmentStatsSuite extends DatabricksTest with TestName {
     val asn: Assignment = createAssignment(
       12 ## 59,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       (("" -- HALF_POINT) @@ (12 ## 59) -> Seq("r1", "r2")).withPrimaryRateLoad(1.0 / 3.0),
       ((HALF_POINT -- ∞) @@ (12 ## 59) -> Seq("r2", "r3")).withPrimaryRateLoad(2.0 / 3.0)
     )
@@ -1023,6 +1050,7 @@ class AssignmentStatsSuite extends DatabricksTest with TestName {
     val asn: Assignment = createAssignment(
       12 ## 59,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       (("" -- HALF_POINT) @@ (12 ## 59) -> Seq("r1", "r2")).clearPrimaryRateLoad,
       ((HALF_POINT -- ∞) @@ (12 ## 59) -> Seq("r2", "r3")).withPrimaryRateLoad(1.0)
     )
@@ -1088,6 +1116,7 @@ class AssignmentStatsSuite extends DatabricksTest with TestName {
     val asn: Assignment = createAssignment(
       12 ## 59,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       (("" -- HALF_POINT) @@ (12 ## 59) -> Seq("r1", "r2")).withPrimaryRateLoad(1.0 / 3.0),
       ((HALF_POINT -- ∞) @@ (12 ## 59) -> Seq("r2", "r3")).withPrimaryRateLoad(2.0 / 3.0)
     )
@@ -1159,6 +1188,7 @@ class AssignmentStatsSuite extends DatabricksTest with TestName {
     val asn: Assignment = createAssignment(
       12 ## 59,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       (("" -- HALF_POINT) @@ (12 ## 59) -> Seq("r1", "r2")).clearPrimaryRateLoad,
       ((HALF_POINT -- ∞) @@ (12 ## 59) -> Seq("r2", "r3")).withPrimaryRateLoad(1.0)
     )

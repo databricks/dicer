@@ -2,10 +2,7 @@ package com.databricks.api.base
 
 import com.databricks.ErrorCode
 
-/**
- * Open source implementation of DatabricksServiceException, which is a simple exception that
- * carries an ErrorCode.
- */
+/** A simple exception that carries an [[ErrorCode]]. */
 case class DatabricksServiceException(
     errorCode: ErrorCode,
     message: String,

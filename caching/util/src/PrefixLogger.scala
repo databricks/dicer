@@ -5,7 +5,6 @@ import java.util.concurrent.ConcurrentHashMap
 import scala.concurrent.duration.{Duration, FiniteDuration}
 
 import com.typesafe.scalalogging.{Logger => TrackingLogger}
-import io.prometheus.client.Counter
 import org.apache.logging.log4j.Level
 import org.apache.logging.log4j.core.appender.ConsoleAppender
 
@@ -178,11 +177,7 @@ class PrefixLogger private (className: String, prefix: String, clock: TypedClock
       case Severity.CRITICAL =>
         error(msg, every)(file, line)
     }
-
-    // Increment the metric.
-    PrefixLogger.errorCount
-      .labels(severity.toString, errorCode.toString, prefix, errorCode.alertOwnerTeam.toString)
-      .inc()
+    CachingErrorMetrics.recordError(severity, errorCode, prefix)
   }
 
   /**
@@ -217,14 +212,6 @@ object PrefixLogger {
 
   /** Clock used for checking with the `every` duration (if used) in the logging calls. */
   private val realClock = RealtimeTypedClock
-
-  /** Metric to record error code and severity. */
-  private val errorCount: Counter = Counter
-    .build()
-    .name("caching_errors")
-    .labelNames("severity", "error_code", "prefix", "owner_team")
-    .help("Counter for common errors with severity and error code.")
-    .register()
 
   /** A class to track a file name and line number of a logging statement.  */
   private case class FileLine(file: File, line: Line)

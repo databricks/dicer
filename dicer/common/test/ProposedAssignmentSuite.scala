@@ -27,35 +27,50 @@ class ProposedAssignmentSuite extends DatabricksTest {
     assert(actual == expected, s"unexpected commit outcome ($description)")
   }
 
-  test("ProposedAssignment toString") {
-    // Test plan: Verify that the output of `ProposedAssignment.toString` has the expected format.
-
+  namedGridTest("ProposedAssignment toString")(
+    Seq(
+      (
+        "with assigner service info",
+        (
+          Some(AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")),
+          "Generating Assigner: test-assigner/test-instance"
+        )
+      ),
+      ("without assigner service info", (None, "Generating Assigner: unknown"))
+    )
+  ) { testCase: (Option[AssignerServiceInfo], String) =>
+    // Test plan: Verify that the output of `ProposedAssignment.toString` has the expected format
+    // for both present and absent assigner service info.
+    val (assignerServiceInfoOpt, expectedGeneratingAssignerLine): (
+        Option[AssignerServiceInfo],
+        String) = testCase
     val proposedAssignment = ProposedAssignment(
       predecessorOpt = None,
       // Slice Assignments with one or multiple assigned resources, and with or without primary
       // rate load.
-      createProposal(
+      sliceMap = createProposal(
         ("" -- "Balin" -> Seq("Pod0", "Pod1")).copy(primaryRateLoadOpt = None),
         ("Balin" -- "Kili" -> Seq("Pod1")).copy(primaryRateLoadOpt = Some(1.0)),
         ("Kili" -- ∞ -> Seq("Pod2", "Pod3", "Pod4")).copy(primaryRateLoadOpt = Some(3.0))
-      )
+      ),
+      assignerServiceInfoOpt = assignerServiceInfoOpt
     )
-    val toStringLines: Seq[String] =
-      proposedAssignment.toString.linesIterator.toSeq
-    assert(toStringLines.size == 3)
+    val toStringLines: Seq[String] = proposedAssignment.toString.linesIterator.toSeq
+    assert(toStringLines.size == 4)
+    assert(toStringLines.head == expectedGeneratingAssignerLine)
     assert(
       """^\["" \.\. Balin\) -> \{\[Pod0.*], \[Pod1.*]}$""".r
-        .findFirstIn(toStringLines.head)
-        .isDefined
-    )
-    assert(
-      """^\[Balin \.\. Kili\) -> \[Pod1.*] load=1\.0$""".r
         .findFirstIn(toStringLines(1))
         .isDefined
     )
     assert(
-      """^\[Kili \.\. ∞\) -> \{\[Pod2.*], \[Pod3.*], \[Pod4.*]} load=3\.0$""".r
+      """^\[Balin \.\. Kili\) -> \[Pod1.*] load=1\.0$""".r
         .findFirstIn(toStringLines(2))
+        .isDefined
+    )
+    assert(
+      """^\[Kili \.\. ∞\) -> \{\[Pod2.*], \[Pod3.*], \[Pod4.*]} load=3\.0$""".r
+        .findFirstIn(toStringLines(3))
         .isDefined
     )
   }
@@ -67,9 +82,10 @@ class ProposedAssignmentSuite extends DatabricksTest {
     assert(
       ProposedAssignment(
         predecessorOpt = None,
-        createProposal(
+        sliceMap = createProposal(
           ("" -- ∞) -> Seq("Pod0", "Pod1")
-        )
+        ),
+        assignerServiceInfoOpt = None
       ).predecessorGenerationOrEmpty == Generation.EMPTY
     )
 
@@ -79,12 +95,14 @@ class ProposedAssignmentSuite extends DatabricksTest {
           createAssignment(
             2 ## 42,
             AssignmentConsistencyMode.Affinity,
+            assignerServiceInfoOpt = None,
             ("" -- ∞) @@ (2 ## 42) -> Seq("Pod0", "Pod1")
           )
         ),
-        createProposal(
+        sliceMap = createProposal(
           ("" -- ∞) -> Seq("Pod0", "Pod1")
-        )
+        ),
+        assignerServiceInfoOpt = None
       ).predecessorGenerationOrEmpty == 2 ## 42
     )
   }
@@ -97,9 +115,10 @@ class ProposedAssignmentSuite extends DatabricksTest {
     assertThrow[NotImplementedError]("Only Affinity is currently supported") {
       ProposedAssignment(
         predecessorOpt = None,
-        createProposal(
+        sliceMap = createProposal(
           ("" -- ∞) -> Seq("Pod0", "Pod1")
-        )
+        ),
+        assignerServiceInfoOpt = None
       ).commit(
         isFrozen = false,
         AssignmentConsistencyMode.Strong,
@@ -116,12 +135,14 @@ class ProposedAssignmentSuite extends DatabricksTest {
             createAssignment(
               42,
               AssignmentConsistencyMode.Affinity,
+              assignerServiceInfoOpt = None,
               ("" -- ∞) @@ 42 -> Seq("Pod1", "Pod2")
             )
           ),
-          createProposal(
+          sliceMap = createProposal(
             ("" -- ∞) -> Seq("Pod0", "Pod1")
-          )
+          ),
+          assignerServiceInfoOpt = None
         ).commit(
           isFrozen = false,
           AssignmentConsistencyMode.Affinity,
@@ -153,6 +174,7 @@ class ProposedAssignmentSuite extends DatabricksTest {
           createAssignment(
             2 ## 42,
             AssignmentConsistencyMode.Affinity,
+            assignerServiceInfoOpt = None,
             ("" -- "Balin") @@ (2 ## 42) -> Seq("Pod0", "Pod1"),
             ("Balin" -- ∞) @@ (2 ## 42) -> Seq("Pod2") | Map(
               "Pod2" -> Seq(
@@ -161,15 +183,17 @@ class ProposedAssignmentSuite extends DatabricksTest {
             )
           )
         ),
-        createProposal(
+        sliceMap = createProposal(
           ("" -- "Balin") -> Seq("Pod0", "Pod1"),
           ("Balin" -- ∞) -> Seq("Pod2")
-        )
+        ),
+        assignerServiceInfoOpt = None
       ),
       generation = 2 ## 47,
       expected = createAssignment(
         2 ## 47,
         AssignmentConsistencyMode.Affinity,
+        assignerServiceInfoOpt = None,
         // All the conditions for carrying forward Slice Assignment are satisfied. Slice Assignments
         // should not change.
         ("" -- "Balin") @@ (2 ## 42) -> Seq("Pod0", "Pod1"),
@@ -189,21 +213,24 @@ class ProposedAssignmentSuite extends DatabricksTest {
           createAssignment(
             2 ## 42,
             AssignmentConsistencyMode.Affinity,
+            assignerServiceInfoOpt = None,
             ("" -- "Fili") @@ (2 ## 42) -> Seq("Pod0", "Pod1"),
             ("Fili" -- ∞) @@ (2 ## 42) -> Seq("Pod1")
           )
         ),
-        createProposal(
+        sliceMap = createProposal(
           // The high boundary of the first Slice changed from Fili to Kili.
           ("" -- "Kili") -> Seq("Pod0", "Pod1"),
           ("Kili" -- ∞) -> Seq("Pod1")
-        )
+        ),
+        assignerServiceInfoOpt = None
       ),
       generation = 2 ## 47,
       expected = createAssignment(
         2 ## 47,
         // Both Slice Assignments should have new generation.
         AssignmentConsistencyMode.Affinity,
+        assignerServiceInfoOpt = None,
         (("" -- "Kili") @@ (2 ## 47) -> Seq("Pod0", "Pod1")) | Map(
           "Pod0" -> Seq(
             SubsliceAnnotation("" -- "Fili", 42, stateTransferOpt = None),
@@ -229,21 +256,24 @@ class ProposedAssignmentSuite extends DatabricksTest {
           createAssignment(
             2 ## 42,
             AssignmentConsistencyMode.Affinity,
+            assignerServiceInfoOpt = None,
             ("" -- "Fili") @@ (2 ## 42) -> Seq("Pod1", "Pod2"),
             ("Fili" -- "Kili") @@ (2 ## 42) -> Seq("Pod2"),
             ("Kili" -- ∞) @@ (2 ## 42) -> Seq("Pod2")
           )
         ),
-        createProposal(
+        sliceMap = createProposal(
           ("" -- "Fili") -> Seq("Pod1"), // Pod2 removed.
           ("Fili" -- "Kili") -> Seq("Pod2", "Pod3"), // Pod3 added.
           ("Kili" -- ∞) -> Seq("Pod3") // Changed from Pod2 to Pod3.
-        )
+        ),
+        assignerServiceInfoOpt = None
       ),
       generation = 2 ## 47,
       expected = createAssignment(
         2 ## 47,
         AssignmentConsistencyMode.Affinity,
+        assignerServiceInfoOpt = None,
         // All Slice generations are advanced.
         ("" -- "Fili") @@ (2 ## 47) -> Seq("Pod1") | Map(
           "Pod1" -> Seq(
@@ -273,20 +303,23 @@ class ProposedAssignmentSuite extends DatabricksTest {
           createAssignment(
             42,
             AssignmentConsistencyMode.Affinity,
+            assignerServiceInfoOpt = None,
             ("" -- "Balin") @@ 42 -> Seq("Pod0"),
             ("Balin" -- ∞) @@ 42 -> Seq("Pod1")
           )
         ),
         // Assigned exactly as before.
-        createProposal(
+        sliceMap = createProposal(
           ("" -- "Balin") -> Seq("Pod0"),
           ("Balin" -- ∞) -> Seq("Pod1")
-        )
+        ),
+        assignerServiceInfoOpt = None
       ),
       generation = 47,
       expected = createAssignment(
         47,
         AssignmentConsistencyMode.Affinity,
+        assignerServiceInfoOpt = None,
         // Slice generation updated.
         ("" -- "Balin") @@ 47 -> Seq("Pod0") | Map(
           "Pod0" -> Seq(
@@ -362,17 +395,19 @@ class ProposedAssignmentSuite extends DatabricksTest {
         val predecessorAssignment: Assignment = createAssignment(
           generation = incarnation ## 42,
           AssignmentConsistencyMode.Affinity,
+          assignerServiceInfoOpt = None,
           (("" -- "Balin") @@ (incarnation ## 42) -> Seq("Pod0", "Pod1"))
             .copy(primaryRateLoadOpt = testCase.previousLoadOpt),
           ("Balin" -- ∞) @@ (incarnation ## 42) -> Seq("Pod1")
         )
         val proposedAssignment: ProposedAssignment = ProposedAssignment(
           predecessorOpt = Some(predecessorAssignment),
-          createProposal(
+          sliceMap = createProposal(
             (("" -- "Balin") -> Seq("Pod0", "Pod1"))
               .copy(primaryRateLoadOpt = testCase.proposedLoadOpt),
             ("Balin" -- ∞) -> Seq("Pod2")
-          )
+          ),
+          assignerServiceInfoOpt = None
         )
         val committedAssignment: Assignment = proposedAssignment
           .commit(
@@ -400,6 +435,7 @@ class ProposedAssignmentSuite extends DatabricksTest {
         val expectedCommittedAssignment: Assignment = createAssignment(
           generation = incarnation ## 47,
           AssignmentConsistencyMode.Affinity,
+          assignerServiceInfoOpt = None,
           expectedSlice,
           ("Balin" -- ∞) @@ (incarnation ## 47) -> Seq("Pod2") | Map(
             "Pod2" -> Seq(
@@ -426,6 +462,7 @@ class ProposedAssignmentSuite extends DatabricksTest {
     val initialAssignment: Assignment = createAssignment(
       initialGeneration,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- "Balin") @@ initialGeneration -> Seq("pod0"),
       ("Balin" -- "Fili") @@ initialGeneration -> Seq("pod1"),
       ("Fili" -- ∞) @@ initialGeneration -> Seq("pod2")
@@ -437,12 +474,15 @@ class ProposedAssignmentSuite extends DatabricksTest {
       ("Kili" -- ∞) -> Seq("pod2")
     )
     val newAssignment: Assignment =
-      ProposedAssignment(predecessorOpt = Some(initialAssignment), proposal)
-        .commit(
-          isFrozen = false,
-          AssignmentConsistencyMode.Affinity,
-          newGeneration
-        )
+      ProposedAssignment(
+        predecessorOpt = Some(initialAssignment),
+        sliceMap = proposal,
+        assignerServiceInfoOpt = None
+      ).commit(
+        isFrozen = false,
+        AssignmentConsistencyMode.Affinity,
+        newGeneration
+      )
 
     assert(proposal.entries.size == newAssignment.sliceMap.entries.size)
     for (tuple <- proposal.entries.zip(newAssignment.sliceMap.entries)) {
@@ -471,6 +511,7 @@ class ProposedAssignmentSuite extends DatabricksTest {
           createAssignment(
             2 ## 42,
             AssignmentConsistencyMode.Affinity,
+            assignerServiceInfoOpt = None,
             ("" -- "Balin") @@ (2 ## 42) -> Seq("Pod0") | Map(
               "Pod0" -> Seq(
                 SubsliceAnnotation("" -- "Akka", 30, stateTransferOpt = None),
@@ -484,10 +525,11 @@ class ProposedAssignmentSuite extends DatabricksTest {
             )
           )
         ),
-        createProposal(
+        sliceMap = createProposal(
           ("" -- "Balin") -> Seq("Pod0"), // Same as in predecessor.
           ("Balin" -- ∞) -> Seq("Pod1", "Pod2") // Same as in predecessor.
-        )
+        ),
+        assignerServiceInfoOpt = None
       ),
       generation = 2 ## 47,
       // Both Slice Assignments are carried forward from previous and they should contain the same
@@ -495,6 +537,7 @@ class ProposedAssignmentSuite extends DatabricksTest {
       expected = createAssignment(
         2 ## 47,
         AssignmentConsistencyMode.Affinity,
+        assignerServiceInfoOpt = None,
         ("" -- "Balin") @@ (2 ## 42) -> Seq("Pod0") | Map(
           "Pod0" -> Seq(
             SubsliceAnnotation("" -- "Akka", 30, stateTransferOpt = None),
@@ -516,6 +559,7 @@ class ProposedAssignmentSuite extends DatabricksTest {
           createAssignment(
             2 ## 42,
             AssignmentConsistencyMode.Affinity,
+            assignerServiceInfoOpt = None,
             ("" -- "Balin") @@ (2 ## 42) -> Seq("Pod0") | Map(
               "Pod0" -> Seq(
                 SubsliceAnnotation("" -- "Akka", 30, stateTransferOpt = None),
@@ -529,7 +573,7 @@ class ProposedAssignmentSuite extends DatabricksTest {
             )
           )
         ),
-        createProposal(
+        sliceMap = createProposal(
           (("" -- "Balin") -> Seq("Pod0")).copy(
             // New primary rate load so generation will be advanced
             primaryRateLoadOpt = Some(1000.0)
@@ -539,7 +583,8 @@ class ProposedAssignmentSuite extends DatabricksTest {
               // New primary rate load so generation will be advanced
               primaryRateLoadOpt = Some(1000.0)
             )
-        )
+        ),
+        assignerServiceInfoOpt = None
       ),
       generation = 2 ## 47,
       expected = createAssignment(
@@ -547,6 +592,7 @@ class ProposedAssignmentSuite extends DatabricksTest {
         // Both Slice Assignments should have new generation, with Subslice Annotations either
         // newly created or carried forward from predecessor.
         AssignmentConsistencyMode.Affinity,
+        None,
         (("" -- "Balin") @@ (2 ## 47) -> Seq("Pod0")).withPrimaryRateLoad(1000.0) | Map(
           "Pod0" -> Seq(
             SubsliceAnnotation("" -- "Akka", 30, stateTransferOpt = None), // Carried forward.
@@ -575,6 +621,7 @@ class ProposedAssignmentSuite extends DatabricksTest {
           createAssignment(
             2 ## 42,
             AssignmentConsistencyMode.Affinity,
+            assignerServiceInfoOpt = None,
             ("" -- "Fili") @@ (2 ## 42) -> Seq("Pod0") | Map(
               "Pod0" -> Seq(
                 SubsliceAnnotation("Akka" -- "Fili", 20, stateTransferOpt = None)
@@ -587,11 +634,12 @@ class ProposedAssignmentSuite extends DatabricksTest {
             )
           )
         ),
-        createProposal(
+        sliceMap = createProposal(
           // The high boundary of the first Slice become Kili from Fili.
           ("" -- "Kili") -> Seq("Pod0"),
           ("Kili" -- ∞) -> Seq("Pod1")
-        )
+        ),
+        assignerServiceInfoOpt = None
       ),
       generation = 2 ## 47,
       expected = createAssignment(
@@ -599,6 +647,7 @@ class ProposedAssignmentSuite extends DatabricksTest {
         // Both Slice Assignments should have new generation, with Subslice Annotations either
         // newly created or carried forward from predecessor.
         AssignmentConsistencyMode.Affinity,
+        None,
         (("" -- "Kili") @@ (2 ## 47) -> Seq("Pod0")) | Map(
           "Pod0" -> Seq(
             SubsliceAnnotation("" -- "Akka", 42, stateTransferOpt = None), // Newly created.
@@ -625,21 +674,24 @@ class ProposedAssignmentSuite extends DatabricksTest {
           createAssignment(
             2 ## 42,
             AssignmentConsistencyMode.Affinity,
+            assignerServiceInfoOpt = None,
             ("" -- ∞) @@ (2 ## 42) -> Seq("Pod0", "Pod1") | Map(
               "Pod0" -> Seq(SubsliceAnnotation("Fili" -- "Kili", 20, stateTransferOpt = None)),
               "Pod1" -> Seq(SubsliceAnnotation("Fili" -- "Kili", 20, stateTransferOpt = None))
             )
           )
         ),
-        createProposal(
+        sliceMap = createProposal(
           // Pod0 remains assigned, Pod1 unassigned, Pod2 newly assigned.
           ("" -- ∞) -> Seq("Pod0", "Pod2")
-        )
+        ),
+        assignerServiceInfoOpt = None
       ),
       generation = 2 ## 47,
       expected = createAssignment(
         2 ## 47,
         AssignmentConsistencyMode.Affinity,
+        assignerServiceInfoOpt = None,
         (("" -- ∞) @@ (2 ## 47) -> Seq("Pod0", "Pod2")) | Map(
           "Pod0" -> Seq(
             SubsliceAnnotation("" -- "Fili", 42, stateTransferOpt = None), // Newly created.
@@ -712,7 +764,7 @@ class ProposedAssignmentSuite extends DatabricksTest {
           case None => createRandomProposal(numSlices, resources, numMaxReplicas, rng)
         }
         val assignment: Assignment =
-          ProposedAssignment(predecessorOpt, proposal)
+          ProposedAssignment(predecessorOpt, sliceMap = proposal, assignerServiceInfoOpt = None)
             .commit(
               isFrozen = false,
               AssignmentConsistencyMode.Affinity,
@@ -776,6 +828,7 @@ class ProposedAssignmentSuite extends DatabricksTest {
     val initialAssignment: Assignment = createAssignment(
       generation = 10,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- "Balin") @@ 10 -> Seq("pod0"),
       ("Balin" -- "Bofur") @@ 10 -> Seq("pod1"),
       ("Bofur" -- "Fili") @@ 10 -> Seq("pod2"),
@@ -791,16 +844,20 @@ class ProposedAssignmentSuite extends DatabricksTest {
       ("Kili" -- ∞) -> Seq("pod2")
     )
     val assignment1: Assignment =
-      ProposedAssignment(predecessorOpt = Some(initialAssignment), proposal1)
-        .commit(
-          isFrozen = false,
-          AssignmentConsistencyMode.Affinity,
-          20
-        )
+      ProposedAssignment(
+        predecessorOpt = Some(initialAssignment),
+        sliceMap = proposal1,
+        assignerServiceInfoOpt = None
+      ).commit(
+        isFrozen = false,
+        AssignmentConsistencyMode.Affinity,
+        20
+      )
     assert(
       assignment1 == createAssignment(
         generation = 20,
         AssignmentConsistencyMode.Affinity,
+        assignerServiceInfoOpt = None,
         ("" -- "Balin") @@ 20 -> Seq("pod0") | Map(
           "pod0" -> Seq(SubsliceAnnotation("" -- "Balin", 10, stateTransferOpt = None))
         ),
@@ -832,16 +889,20 @@ class ProposedAssignmentSuite extends DatabricksTest {
       ("Kili" -- ∞) -> Seq("pod2")
     )
     val assignment2: Assignment =
-      ProposedAssignment(predecessorOpt = Some(assignment1), proposal2)
-        .commit(
-          isFrozen = false,
-          AssignmentConsistencyMode.Affinity,
-          30
-        )
+      ProposedAssignment(
+        predecessorOpt = Some(assignment1),
+        sliceMap = proposal2,
+        assignerServiceInfoOpt = None
+      ).commit(
+        isFrozen = false,
+        AssignmentConsistencyMode.Affinity,
+        30
+      )
     assert(
       assignment2 == createAssignment(
         generation = 30,
         AssignmentConsistencyMode.Affinity,
+        assignerServiceInfoOpt = None,
         ("" -- "Dwalin") @@ 30 -> Seq("pod2") | Map(
           "pod2" -> Seq(
             SubsliceAnnotation("" -- "Balin", 30, stateTransferOpt = Some(Transfer(0, "pod0"))),
@@ -886,6 +947,7 @@ class ProposedAssignmentSuite extends DatabricksTest {
     val initialAssignment: Assignment = createAssignment(
       generation = 10,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- "Fili") @@ 10 -> Seq("pod0", "pod1", "pod2"),
       ("Fili" -- ∞) @@ 10 -> Seq("pod2", "pod3", "pod4")
     )
@@ -894,12 +956,15 @@ class ProposedAssignmentSuite extends DatabricksTest {
       ("Fili" -- ∞) -> Seq("pod3", "pod4", "pod5", "pod6", "pod7", "pod8")
     )
     val committedAssignment: Assignment =
-      ProposedAssignment(predecessorOpt = Some(initialAssignment), proposal)
-        .commit(
-          isFrozen = false,
-          AssignmentConsistencyMode.Affinity,
-          20
-        )
+      ProposedAssignment(
+        predecessorOpt = Some(initialAssignment),
+        sliceMap = proposal,
+        assignerServiceInfoOpt = None
+      ).commit(
+        isFrozen = false,
+        AssignmentConsistencyMode.Affinity,
+        20
+      )
 
     assert(committedAssignment.sliceAssignments.size == 2)
 
@@ -986,7 +1051,8 @@ class ProposedAssignmentSuite extends DatabricksTest {
     var assignment: Assignment =
       ProposedAssignment(
         predecessorOpt = None,
-        createRandomProposal(numSlices, resources, numMaxReplicas, rng)
+        sliceMap = createRandomProposal(numSlices, resources, numMaxReplicas, rng),
+        assignerServiceInfoOpt = None
       ).commit(
         isFrozen = false,
         AssignmentConsistencyMode.Affinity,
@@ -998,12 +1064,15 @@ class ProposedAssignmentSuite extends DatabricksTest {
       val previousSliceMap: SliceMap[SliceAssignment] = assignment.sliceMap
       val proposal: SliceMap[ProposedSliceAssignment] =
         createBiasedProposal(numSlices, assignment, resources, numMaxReplicas, rng)
-      assignment = ProposedAssignment(predecessorOpt = Some(assignment), proposal)
-        .commit(
-          isFrozen = false,
-          AssignmentConsistencyMode.Affinity,
-          generation = assignmentChangeIndex * 5 + 1
-        )
+      assignment = ProposedAssignment(
+        predecessorOpt = Some(assignment),
+        sliceMap = proposal,
+        assignerServiceInfoOpt = None
+      ).commit(
+        isFrozen = false,
+        AssignmentConsistencyMode.Affinity,
+        generation = assignmentChangeIndex * 5 + 1
+      )
 
       // Based on the diff between the previous and the new assignment, keep track of the expected
       // state provider for each newly assigned resources into `expectedProviderMapByAcquirer`.
@@ -1111,5 +1180,49 @@ class ProposedAssignmentSuite extends DatabricksTest {
         assert(actualProviderMap.toVector == expectedProviderMapOnAssignedSlices.toVector)
       }
     }
+  }
+
+  test("ProposedAssignment commit propagates assigner service info") {
+    // Test plan: Verify that `assignerServiceInfoOpt` on the proposal is propagated to the
+    // `Assignment` is committed (w/ and w/o a predecessor assignment).
+
+    val proposal: SliceMap[ProposedSliceAssignment] = createProposal(
+      ("" -- ∞) -> Seq("Pod0", "Pod1")
+    )
+
+    val assignerServiceInfo: AssignerServiceInfo =
+      AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
+
+    assert(
+      ProposedAssignment(
+        predecessorOpt = None,
+        sliceMap = proposal,
+        assignerServiceInfoOpt = Some(assignerServiceInfo)
+      ).commit(
+          isFrozen = false,
+          AssignmentConsistencyMode.Affinity,
+          generation = 1 ## 10
+        )
+        .assignerServiceInfoOpt == Some(assignerServiceInfo)
+    )
+
+    val predecessor: Assignment = createAssignment(
+      2 ## 42,
+      AssignmentConsistencyMode.Affinity,
+      None,
+      ("" -- ∞) @@ (2 ## 42) -> Seq("Pod0")
+    )
+    assert(
+      ProposedAssignment(
+        predecessorOpt = Some(predecessor),
+        sliceMap = proposal,
+        assignerServiceInfoOpt = Some(assignerServiceInfo)
+      ).commit(
+          isFrozen = false,
+          AssignmentConsistencyMode.Affinity,
+          generation = 2 ## 50
+        )
+        .assignerServiceInfoOpt == Some(assignerServiceInfo)
+    )
   }
 }

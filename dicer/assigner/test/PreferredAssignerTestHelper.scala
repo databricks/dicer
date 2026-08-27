@@ -1,5 +1,6 @@
 package com.databricks.dicer.assigner
 
+import com.databricks.caching.util.AlertOwnerTeam
 import com.databricks.caching.util.{
   AssertionWaiter,
   Cancellable,
@@ -56,17 +57,6 @@ object PreferredAssignerTestHelper {
     .uri("/")
     .build()
 
-  /**
-   * A [[KubernetesMembershipChecker.Factory]] for tests that always returns [[None]],
-   * disabling K8s pod membership checking.
-   */
-  val noOpMembershipCheckerFactory: KubernetesMembershipChecker.Factory =
-    new KubernetesMembershipChecker.Factory {
-      override def create(
-          assignerInfo: AssignerInfo,
-          assignerProtoLogger: AssignerProtoLogger): Option[KubernetesMembershipChecker] = None
-    }
-
   /** The [[CollectorRegistry]] for which to fetch metric samples for. */
   private val registry: CollectorRegistry = CollectorRegistry.defaultRegistry
 
@@ -110,7 +100,10 @@ object PreferredAssignerTestHelper {
       assigners.head
     } else {
       var preferredAssigner: TestAssigner = null // We'll never return null, but throw instead.
-      val ec = SequentialExecutionContext.createWithDedicatedPool("pa-discovery")
+      val ec = SequentialExecutionContext.createWithDedicatedPool(
+        name = "pa-discovery",
+        alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+      )
       AssertionWaiter("Await for preferred agreement").await {
         // Send a watch request to all assigners and wait for the first response with a redirect.
         // We can't send to a random assigner because:
@@ -217,17 +210,27 @@ object PreferredAssignerTestHelper {
   def createAssignerConfig(
       preferredAssignerStoreIncarnation: Incarnation,
       preferredAssignerEnabled: Boolean = true,
-      targetMigratorOpt: Option[TargetMigrator] = None): TestAssigner.Config = {
+      targetMigratorOpt: Option[TargetMigrator] = None,
+      migrationModeOpt: Option[MigrationMode] = None,
+      membershipCheckerFactoryOpt: Option[KubernetesMembershipChecker.Factory] = None)
+      : TestAssigner.Config = {
+    val baseConfigEntries: Seq[(String, Any)] = Seq(
+      "databricks.dicer.assigner.preferredAssigner.modeEnabled" -> preferredAssignerEnabled,
+      "databricks.dicer.assigner.preferredAssigner.storeIncarnation" ->
+      preferredAssignerStoreIncarnation.value,
+      "databricks.dicer.assigner.store.etcd.sslEnabled" -> false
+    )
+    // The migration stage is a conf bit, exactly as in production; tests vary behavior through it
+    // rather than by swapping driver implementations.
+    val migrationModeEntries: Seq[(String, Any)] =
+      migrationModeOpt.toSeq.map { mode: MigrationMode =>
+        "databricks.dicer.assigner.preferredAssigner.migrationMode" -> mode.name
+      }
     TestAssigner.Config.create(
-      assignerConf = new DicerAssignerConf(
-        Configs.parseMap(
-          "databricks.dicer.assigner.preferredAssigner.modeEnabled" -> preferredAssignerEnabled,
-          "databricks.dicer.assigner.preferredAssigner.storeIncarnation" ->
-          preferredAssignerStoreIncarnation.value,
-          "databricks.dicer.assigner.store.etcd.sslEnabled" -> false
-        )
-      ),
-      targetMigratorOpt = targetMigratorOpt
+      assignerConf =
+        new DicerAssignerConf(Configs.parseMap((baseConfigEntries ++ migrationModeEntries): _*)),
+      targetMigratorOpt = targetMigratorOpt,
+      membershipCheckerFactoryOpt = membershipCheckerFactoryOpt
     )
   }
 
@@ -272,10 +275,14 @@ object PreferredAssignerTestHelper {
         SliceletState.Running,
         "localhostNamespace",
         attributedLoads = Vector.empty,
-        unattributedLoadOpt = None
+        unattributedLoadOpt = None,
+        keyCardinalityEstimateOpt = None
       ),
       supportsSerializedAssignment = true,
-      redirectTokenOpt = None
+      redirectTokenOpt = None,
+      alternativeTargetOpt = None,
+      clusterUriOpt = None,
+      regionUriOpt = None
     )
   }
 
@@ -288,7 +295,10 @@ object PreferredAssignerTestHelper {
       WATCH_RPC_TIMEOUT,
       ClerkData,
       supportsSerializedAssignment = true,
-      redirectTokenOpt = None
+      redirectTokenOpt = None,
+      alternativeTargetOpt = None,
+      clusterUriOpt = None,
+      regionUriOpt = None
     )
   }
 
