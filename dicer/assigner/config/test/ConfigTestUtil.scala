@@ -1,10 +1,10 @@
 package com.databricks.dicer.assigner.config
 
 import java.io.File
+
 import scala.concurrent.duration._
 import io.prometheus.client.CollectorRegistry
 import org.scalatest.Assertions.assertResult
-import os.Path
 import com.databricks.api.proto.dicer.assigner.config.{
   AdvancedTargetConfigFieldsP,
   LoadWatcherConfigP
@@ -14,17 +14,21 @@ import com.databricks.api.proto.dicer.external.LoadBalancingMetricConfigP.{
   ReservationHintP
 }
 import com.databricks.api.proto.dicer.external.{LoadBalancingMetricConfigP, TargetConfigFieldsP}
+import com.databricks.caching.util.MetricUtils.SampleExtensions
 import com.databricks.caching.util.{AssertionWaiter, CachingErrorCode, MetricUtils, Severity}
+import com.databricks.caching.util.ConfigTestUtil.{ConfigWriter => SharedConfigWriter}
 import com.databricks.dicer.assigner.config.InternalTargetConfig.{
   HealthWatcherTargetConfig,
   KeyOfDeathProtectionConfig,
   KeyReplicationConfig,
+  KeySensitivityConfig,
   LoadBalancingConfig,
   LoadBalancingMetricConfig,
   LoadWatcherTargetConfig,
   TargetWatchRequestRateLimitConfig
 }
 import com.databricks.dicer.common.TargetHelper.TargetOps
+import com.databricks.dicer.common.TargetName
 import com.databricks.dicer.external.Target
 
 /**
@@ -37,33 +41,26 @@ import com.databricks.dicer.external.Target
  */
 object ConfigTestUtil {
 
-  /** Helper writing target configs to temporary directories. */
+  /**
+   * Helper writing target configs to temporary directories. Delegates to the shared
+   * [[com.databricks.caching.util.ConfigTestUtil.ConfigWriter]], and exists so that Dicer tests
+   * reach all of their configuration helpers through this one object.
+   */
   class ConfigWriter {
 
-    // Temporary directories created for this writer.
-    private val path: Path = os.temp.dir()
-    private val advancedPath: Path = os.temp.dir()
+    /** The shared writer owning the temporary directories this class writes into. */
+    private val writer = new SharedConfigWriter
 
     /**
      * Writes a file with the given `filename` and `contents` to the temporary directory from which
-     * target configuration files will be read. We intentionally take a [[String]] for the contents
-     * rather than [[TargetConfigP]] because we want the tests to clearly model what our customers
-     * will be doing when they write their own config files.
+     * target configuration files will be read. `filename` may include subdirectories (e.g.
+     * `snappy-matcher/snappy-matcher.textproto`), which lets tests exercise how deep the reader
+     * walks. We intentionally take a [[String]] for the contents rather than [[TargetConfigP]]
+     * because we want the tests to clearly model what our customers will be doing when they write
+     * their own config files.
      */
     def writeConfig(filename: String, contents: String): Unit = {
-      val configPath = path / filename
-      os.write(configPath, contents)
-    }
-
-    /**
-     * Writes a file with the given `directory`, `filename`, and `contents` to the temporary
-     * directory from which target configuration files will be read. `directory` may be several
-     * path segments deep (e.g. "a/b"), which lets tests exercise how deep the reader walks. See
-     * [[writeConfig]] for details.
-     */
-    def writeConfigInDirectory(directory: String, filename: String, contents: String): Unit = {
-      val configPath: Path = path / os.SubPath(directory) / filename
-      os.write(configPath, contents, createFolders = true)
+      writer.writeConfig(filename, contents)
     }
 
     /**
@@ -71,15 +68,14 @@ object ConfigTestUtil {
      * advanced configuration files will be read. See remarks on [[writeConfig]].
      */
     def writeAdvancedConfig(filename: String, contents: String): Unit = {
-      val configPath = advancedPath / filename
-      os.write(configPath, contents)
+      writer.writeAdvancedConfig(filename, contents)
     }
 
     /** Returns the directory for target configs. */
-    def getTargetConfigDirectory: File = new File(path.toString())
+    def getTargetConfigDirectory: File = writer.getConfigDirectory
 
     /** Returns the directory for advanced target configs. */
-    def getAdvancedTargetConfigDirectory: File = new File(advancedPath.toString())
+    def getAdvancedTargetConfigDirectory: File = writer.getAdvancedConfigDirectory
   }
 
   /**
@@ -115,7 +111,9 @@ object ConfigTestUtil {
       healthWatcherConfig = HealthWatcherTargetConfig.DEFAULT,
       keyOfDeathProtectionConfig = KeyOfDeathProtectionConfig.DEFAULT,
       targetRateLimitConfig = TargetWatchRequestRateLimitConfig.DEFAULT,
-      authorizer = AuthorizerHelper.DEFAULT_AUTHORIZER
+      authorizer = AuthorizerHelper.DEFAULT_AUTHORIZER,
+      keySensitivityConfig = KeySensitivityConfig.DEFAULT,
+      useAlternativeTarget = false
     )
     // Try parsing as well, just to make sure the assumptions in this helper are valid.
     val proto = TargetConfigFieldsP(
@@ -186,11 +184,37 @@ object ConfigTestUtil {
       )
       .toInt
 
+  /** Get the value of the static target missing dynamic config metric for `targetName`. */
+  def getStaticTargetMissingDynamicConfigValueOpt(targetName: TargetName): Option[Double] =
+    MetricUtils
+      .getMetricValueOpt(
+        registry,
+        metric = "dicer_static_target_missing_dynamic_config",
+        Map("targetName" -> targetName.value)
+      )
+
+  /** Returns targets currently marked as present only in the serving dynamic config. */
+  def getConfiguredDynamicOnlyTargetNames: Set[TargetName] =
+    MetricUtils
+      .getMetricSamples(registry, "dicer_assigner_dynamic_only_target")
+      .filter(_.value != 0.0)
+      .map(sample => TargetName(sample.getLabelValue("targetName")))
+      .toSet
+
   /**
    * Asserts that config values recorded in metrics are the same as in the expected config.
    * @param config the config being matched.
    */
   def assertMetricsMatchTargetConfig(target: Target, config: InternalTargetConfig): Unit = {
+    // The target is configured, so its indicator gauge should be set to 1.
+    val targetConfiguredValue: Double = MetricUtils
+      .getMetricValue(
+        registry,
+        "dicer_assigner_target_configured",
+        Map("targetName" -> target.getTargetNameLabel)
+      )
+    assertResult(expected = 1)(targetConfiguredValue)
+
     // Compare load balancing config.
     val loadBalancingConfigEnabledValue: Double = MetricUtils
       .getMetricValue(
@@ -241,10 +265,17 @@ object ConfigTestUtil {
         "dicer_assigner_advanced_target_config_load_watcher_config_use_top_keys",
         Map("targetName" -> target.getTargetNameLabel)
       )
+    val useLoadDistribution: Double = MetricUtils
+      .getMetricValue(
+        registry,
+        "dicer_assigner_advanced_target_config_load_watcher_config_use_load_distribution",
+        Map("targetName" -> target.getTargetNameLabel)
+      )
     val loadWatcherConfig: LoadWatcherTargetConfig = config.loadWatcherConfig
     assertResult(loadWatcherConfig.minDuration.toSeconds)(minDurationSeconds)
     assertResult(loadWatcherConfig.maxAge.toSeconds)(maxAgeSeconds)
     assertResult(loadWatcherConfig.useTopKeys)(useTopKeys == 1)
+    assertResult(loadWatcherConfig.useLoadDistribution)(useLoadDistribution == 1)
 
     val stateTransferConfigEnabledValue: Double = MetricUtils
       .getMetricValue(
@@ -283,5 +314,22 @@ object ConfigTestUtil {
     assertResult(config.targetRateLimitConfig.clientRequestsPerSecond.toDouble)(
       clientRequestsPerSecond
     )
+  }
+
+  /**
+   * Asserts that the per-target "configured" indicator gauge is not set for `target`, i.e. there is
+   * no sample for its `targetName` label. Used to confirm the gauge is exported only for targets
+   * that have a configuration.
+   */
+  def assertTargetConfiguredMetricNotSet(target: Target): Unit = {
+    // A missing sample is reported as `None` (as opposed to a value of 0), which is what we expect
+    // for an unconfigured target since the gauge is only ever set to 1.
+    val targetConfiguredValueOpt: Option[Double] = MetricUtils
+      .getMetricValueOpt(
+        registry,
+        "dicer_assigner_target_configured",
+        Map("targetName" -> target.getTargetNameLabel)
+      )
+    assertResult(expected = None)(targetConfiguredValueOpt)
   }
 }

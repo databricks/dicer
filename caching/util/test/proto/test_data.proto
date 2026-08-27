@@ -27,6 +27,30 @@ message Rfc1123TestDataP {
   repeated string invalid_strings = 4;
 }
 
+// Shared test data for the KubernetesClusterUri IDM-URI wrappers' `fromUri` contract against the
+// embedded InfraDataModel.
+message KubernetesClusterUriTestDataP {
+  // Canonical `kubernetes-cluster:` URIs present in the embedded InfraDataModel; `fromUri` must
+  // accept these and round-trip them back to the same string.
+  repeated string valid_uris = 1;
+
+  // Values `fromUri` must reject: URIs of another scheme, structurally malformed values, and
+  // well-formed cluster URIs absent from the embedded model.
+  repeated string invalid_uris = 2;
+}
+
+// Shared test data for the RegionUri IDM-URI wrappers' `fromUri` contract against the embedded
+// InfraDataModel.
+message RegionUriTestDataP {
+  // Canonical `region:` URIs present in the embedded InfraDataModel; `fromUri` must accept these
+  // and round-trip them back to the same string.
+  repeated string valid_uris = 1;
+
+  // Values `fromUri` must reject: URIs of another scheme, structurally malformed values, and
+  // well-formed region URIs absent from the embedded model.
+  repeated string invalid_uris = 2;
+}
+
 message BuildInfoTestDataP {
   message BuildInfoP {
     // The branch name of the build, e.g. "master", or empty.
@@ -368,6 +392,68 @@ message LossyEwmaCounterTestDataP {
   optional RandomizedReferenceTestCaseP randomized_with_reference_case = 3;
 }
 
+// Test data for [QuantileSummaries] implementations.
+message QuantileSummariesTestDataP {
+
+  // One returned entry from a QuantileSummaries `query` call: the chosen value paired with the
+  // cumulative-weight fraction at that value (the upper edge of the value's coverage range).
+  message CdfPoint {
+    optional int32 value = 1;
+    optional double cumulative_weight_fraction = 2;
+  }
+
+  // An action to insert a `(value, weight)` observation to the QuantileSummaries.
+  message InsertP {
+    optional int32 value = 1;
+    optional double weight = 2;
+  }
+
+  // Call `rescaleWeights` (Scala) / `rescale_weights` (Rust) of QuantileSummaries by `factor`.
+  message RescaleP {
+    optional double factor = 1;
+  }
+
+  // Call `query` of QuantileSummaries and assert the result of it. The test runner feeds
+  // `quantiles` into one call and verifies the returned `(value, cumulative_fraction)` pairs
+  // against `expected_results`. The returned sequence is expected to be in the same order as
+  // `quantiles`: the i-th returned pair answers `quantiles[i]`. If `expected_results` is empty,
+  // the query is expected to return an empty sequence (only when the summary has no
+  // observations).
+  message AssertQueryEqualsP {
+    // The `quantiles` to be given to the query() call.
+    repeated double quantiles = 1;
+
+    // The expected results from the `query()` call for each of the `quantiles` above.
+    repeated CdfPoint expected_results = 2;
+  }
+
+  // An action to call a method or to assert some results from QuantileSummaries.
+  message ActionP {
+    oneof action {
+      InsertP insert = 1;
+      AssertQueryEqualsP assert_query_equals = 2;
+      RescaleP rescale = 3;
+    }
+  }
+
+  // A test case with a name and the actions to perform against a QuantileSummaries.
+  message TestCaseP {
+    optional string test_case_name = 1;
+    repeated ActionP actions = 2;
+
+    // A logically optional error message to verify against for an invalid case. At least one of the
+    // actions above should cause the following error message thrown or returned for the test case
+    // to pass.
+    optional string error_message_opt = 3;
+  }
+
+  // The test cases with valid inputs.
+  repeated TestCaseP valid_cases = 1;
+
+  // The test cases with invalid inputs.
+  repeated TestCaseP invalid_cases = 2;
+}
+
 // Tests for verifying the correctness of ProtocolDuration parsing logic.
 message ProtocolDurationTestDataP {
 
@@ -383,4 +469,22 @@ message ProtocolDurationTestDataP {
       int64 seconds = 5; // Duration in seconds.
     }
   }
+}
+
+// Parameters for ExponentialBackoff test suites.
+message ExponentialBackoffTestDataP {
+  // Per-step interval multiplier.
+  optional double multiplier = 1;
+  // Jitter ratio: returned delay is within ±`jitter_ratio`/2 of the pre-jitter interval.
+  optional double jitter_ratio = 2;
+
+  optional int64 min_retry_delay_millis = 3;
+  optional int64 max_retry_delay_millis = 4;
+
+  // Number of initial `nextDelay` / `next_backoff` calls to verify doubling.
+  optional int32 initial_doubling_steps_to_verify = 5;
+  // Calls to verify while capped at `max_retry_delay_millis`.
+  optional int32 iterations_at_max_interval = 6;
+  // Additional calls that must keep returning a delay.
+  optional int32 max_elapsed_none_iterations = 7;
 }

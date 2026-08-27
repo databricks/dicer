@@ -1,5 +1,11 @@
 package com.databricks.caching.util
 
+import io.grpc.Status
+
+import com.databricks.caching.util.Lock.withLock
+import java.util.concurrent.locks.ReentrantLock
+import javax.annotation.concurrent.GuardedBy
+import scala.collection.mutable
 import scala.concurrent.Await
 import scala.concurrent.duration.{Duration, FiniteDuration}
 
@@ -31,13 +37,23 @@ trait FakeSequentialExecutionContext extends SequentialExecutionContext {
       getClock.advanceBy(duration)
     }, Duration.Inf)
   }
+
+  /**
+   * Returns the number of commands scheduled under `name` (the debugging label passed to
+   * [[schedule]] / [[scheduleRepeating]]) that have neither started running nor been cancelled.
+   */
+  def pendingScheduledCount(name: String): Int
 }
 
 /** Factory methods. */
 object FakeSequentialExecutionContext {
 
   /** The shared default pool for all fake contexts. */
-  private val defaultPool = SequentialExecutionContextPool.create("FakePool", numThreads = 2)
+  private val defaultPool = SequentialExecutionContextPool.create(
+    poolName = "FakePool",
+    numThreads = 2,
+    alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+  )
 
   /**
    * Creates a fake context running on a shared pool. The underlying implementation is shared with
@@ -71,6 +87,52 @@ object FakeSequentialExecutionContext {
     fakeClock.registerCallback(baseContext.forTest.tickle)
     new DelegatingSequentialExecutionContext(baseContext) with FakeSequentialExecutionContext {
       override def getClock: FakeTypedClock = fakeClock
+
+      /** Guards [[pendingCountsByName]]. */
+      private val lock = new ReentrantLock()
+
+      /** Count of currently-pending scheduled commands, keyed by their scheduling `name`. */
+      @GuardedBy("lock")
+      private val pendingCountsByName: mutable.Map[String, Int] =
+        mutable.Map.empty[String, Int].withDefaultValue(0)
+
+      override def schedule(
+          name: String,
+          delay: FiniteDuration,
+          runnable: Runnable): Cancellable = {
+        withLock(lock) { pendingCountsByName(name) += 1 }
+
+        // A scheduled command leaves the pending set exactly once, whichever comes first: it starts
+        // running or is cancelled (cancellation is best-effort, so both can still fire for one
+        // command).
+        var decremented: Boolean = false
+        def markNoLongerPending(): Unit = withLock(lock) {
+          if (!decremented) {
+            decremented = true
+            // Drop the entry when it returns to zero so the map doesn't retain a key per name for
+            // the fake's lifetime; `pendingScheduledCount` reads absent names as 0 anyway.
+            val newCount: Int = pendingCountsByName(name) - 1
+            if (newCount == 0) {
+              pendingCountsByName -= name
+            } else {
+              pendingCountsByName(name) = newCount
+            }
+          }
+        }
+
+        val trackedRunnable: Runnable = () => {
+          markNoLongerPending()
+          runnable.run()
+        }
+        val cancellable: Cancellable = super.schedule(name, delay, trackedRunnable)
+        (reason: Status) => {
+          markNoLongerPending()
+          cancellable.cancel(reason)
+        }
+      }
+
+      override def pendingScheduledCount(name: String): Int =
+        withLock(lock) { pendingCountsByName(name) }
     }
   }
 }

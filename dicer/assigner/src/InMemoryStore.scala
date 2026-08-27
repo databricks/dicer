@@ -156,9 +156,9 @@ class InMemoryStore private (sec: SequentialExecutionContext, val storeIncarnati
             AssignmentConsistencyMode.Affinity,
             generation
           )
-        assignment.toChunkedString().foreach { chunk: String =>
-          logger.info(s"Committed assignment: $chunk")
-        }
+        // We already log the formatted assignment in the generator, so we don't do it again here
+        // because it's expensive and adds unnecessary bulk.
+        logger.info(s"Committed assignment $generation")
 
         // Cache the new assignment and inform all watchers via the assignment cell.
         cell.setValue(assignment)

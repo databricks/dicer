@@ -40,7 +40,10 @@ class EtcdClientSuite extends DatabricksTest {
   private val jetcdClient: jetcd.Client =
     EtcdClient.createJetcdClient(Seq(etcd.endpoint), None)
 
-  private val sec = SequentialExecutionContext.createWithDedicatedPool("EtcdClientSuite")
+  private val sec = SequentialExecutionContext.createWithDedicatedPool(
+    name = "EtcdClientSuite",
+    alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+  )
 
   override def beforeEach(): Unit = {
     etcd.deleteAll()
@@ -2429,11 +2432,14 @@ class EtcdClientSuite extends DatabricksTest {
 
   test("initializeVersionHighWatermarkUnsafe writes requested version") {
     // Test plan: verify that `initializeVersionHighWatermarkUnsafe()` writes the requested
-    // version to etcd if the watermark is absent from the store.
+    // version to etcd if the watermark is absent from the store, and reports `None` since no
+    // watermark previously existed.
     val client: EtcdClient = etcd.createEtcdClient(EtcdClient.Config(NAMESPACE))
     val watermark = Version(2, 4)
 
-    Await.result(client.initializeVersionHighWatermarkUnsafe(watermark), Duration.Inf)
+    val existingWatermarkOpt: Option[Version] =
+      Await.result(client.initializeVersionHighWatermarkUnsafe(watermark), Duration.Inf)
+    assert(existingWatermarkOpt.isEmpty)
 
     assert(
       readVersionHighWatermark(NAMESPACE)
@@ -2441,23 +2447,26 @@ class EtcdClientSuite extends DatabricksTest {
     )
   }
 
-  test("initializeVersionHighWatermarkUnsafe fails and does not overwrite existing watermark") {
-    // Test plan: verify that `initializeVersionHighWatermarkUnsafe()` fails with ALREADY_EXISTS
-    // when a version high watermark is already present and does not overwrite the existing
-    // version.
+  test("initializeVersionHighWatermarkUnsafe returns existing watermark without overwriting it") {
+    // Test plan: verify that `initializeVersionHighWatermarkUnsafe()` returns the existing version
+    // high watermark (as `Some`) when one is already present, and does not overwrite it. Verify by
+    // initializing a watermark, then calling again with a different watermark and confirming the
+    // returned value is the original watermark and the stored value is unchanged.
     val client: EtcdClient = etcd.createEtcdClient(EtcdClient.Config(NAMESPACE))
     val watermark = Version(2, 4)
-    Await.result(client.initializeVersionHighWatermarkUnsafe(watermark), Duration.Inf)
+    val firstResultOpt: Option[Version] =
+      Await.result(client.initializeVersionHighWatermarkUnsafe(watermark), Duration.Inf)
+    assert(firstResultOpt.isEmpty)
     assert(
       readVersionHighWatermark(NAMESPACE)
         .contains("0000000000000002/0000000000000004")
     )
 
-    // Try to write another version and assert that a failure is reported.
+    // Try to write another version and assert that the pre-existing watermark is returned instead.
     val differentWatermark = Version(2, 5)
-    assertThrow[StatusException]("ALREADY_EXISTS") {
+    val existingWatermarkOpt: Option[Version] =
       Await.result(client.initializeVersionHighWatermarkUnsafe(differentWatermark), Duration.Inf)
-    }
+    assert(existingWatermarkOpt.contains(watermark))
 
     // The original value should still be there.
     assert(

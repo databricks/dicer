@@ -124,6 +124,7 @@ private[assigner] class ConsistentHashingPreferredAssignerStateMachine(
       // Rebuild the consistent hash ring only when the UUID keyset changes to avoid unnecessary
       // hash computations.
       if (resources.keySet != latestResources.keySet) {
+        logger.info(s"Got updated resource set with version=$version ($resources)")
         if (resources.keySet.isEmpty) {
           latestHashRingOpt = None
         } else {
@@ -219,6 +220,7 @@ private[assigner] class ConsistentHashingPreferredAssignerStateMachine(
       newRunState: RunState,
       eligibleAssigners: Seq[AssignerInfo],
       outputBuilder: StateMachineOutput.Builder[DriverAction]): Unit = {
+    logger.info(s"RunState changed from $runState to $newRunState")
     runState = newRunState
     val preferredInfoOpt: Option[AssignerInfo] = runState match {
       case RunState.Preferred(preferredAssignerInfo: AssignerInfo) =>

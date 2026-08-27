@@ -13,7 +13,7 @@ import com.databricks.dicer.assigner.algorithm.LoadMap
 import com.databricks.dicer.assigner.algorithm.LoadMap.{Entry, KeyLoadMap}
 import com.databricks.dicer.assigner.LoadWatcher.{LOAD_WEIGHT_DECAYING_HALFLIFE, Measurement}
 import com.databricks.dicer.common.SliceKeyHelper.RichSliceKey
-import com.databricks.dicer.common.SliceletData.KeyLoad
+import com.databricks.dicer.common.SliceletData.{KeyLoad, LoadDistribution}
 import com.databricks.dicer.common.TestSliceUtils._
 import com.databricks.dicer.common.{AssignmentConsistencyMode, Assignment, SliceAssignment}
 import com.databricks.dicer.external.{
@@ -27,7 +27,8 @@ import com.databricks.testing.DatabricksTest
 
 class LoadWatcherSuite extends DatabricksTest {
 
-  private val DEFAULT_STATIC_CONFIG = LoadWatcher.StaticConfig(allowTopKeys = true)
+  private val DEFAULT_STATIC_CONFIG =
+    LoadWatcher.StaticConfig(allowTopKeys = true, allowLoadDistribution = false)
 
   /**
    * Wrapper around [[LoadWatcher]] that checks invariants after all operations and includes
@@ -75,8 +76,18 @@ class LoadWatcherSuite extends DatabricksTest {
         resource: ResourceAddress,
         numReplicas: Int,
         load: Double,
-        topKeys: Seq[KeyLoad]): Measurement = {
-      watcher.createMeasurement(time, windowDuration, slice, resource, numReplicas, load, topKeys)
+        topKeys: Seq[KeyLoad],
+        loadDistributionOpt: Option[LoadDistribution] = None): Measurement = {
+      watcher.createMeasurement(
+        time,
+        windowDuration,
+        slice,
+        resource,
+        numReplicas,
+        load,
+        topKeys,
+        loadDistributionOpt
+      )
     }
 
     /**
@@ -148,7 +159,12 @@ class LoadWatcherSuite extends DatabricksTest {
     // Test plan: Verify that Measurement rejects invalid constructor parameters.
 
     val watcher = new LoadWatcherWrapper(
-      LoadWatcherTargetConfig(minDuration = 1.minute, maxAge = 1.minute, useTopKeys = true)
+      LoadWatcherTargetConfig(
+        minDuration = 1.minute,
+        maxAge = 1.minute,
+        useTopKeys = true,
+        useLoadDistribution = false
+      )
     )
 
     assertThrow[IllegalArgumentException]("windowDuration must be non-negative") {
@@ -201,13 +217,78 @@ class LoadWatcherSuite extends DatabricksTest {
     }
   }
 
+  test("allowLoadDistribution and useLoadDistribution conf is respected") {
+    // Test plan: verify that the load distribution is carried onto the returned Measurement only
+    // when both `LoadWatcher.StaticConfig.allowLoadDistribution` and
+    // `LoadWatcherTargetConfig.useLoadDistribution` are true, and is dropped (set to None) when
+    // either is false.
+    //
+    // TODO(<internal bug>): The distribution is currently always unused downstream, so this asserts on the
+    // Measurement field directly. Once it is consumed (incorporated into the LoadMap), verify the
+    // gate behaviorally via `getPrimaryRateLoadMap`, matching the other Measurement fields.
+    val distribution = LoadDistribution(
+      points = IndexedSeq(LoadDistribution.CdfPoint(identityKey("foo"), 1.0)),
+      maxErrorFraction = 0.1
+    )
+
+    def measurementWith(
+        useLoadDistribution: Boolean,
+        allowLoadDistribution: Boolean): Measurement = {
+      val targetConfig = LoadWatcherTargetConfig(
+        minDuration = 1.minute,
+        maxAge = 1.minute,
+        useTopKeys = true,
+        useLoadDistribution = useLoadDistribution
+      )
+      val staticConfig =
+        LoadWatcher.StaticConfig(allowTopKeys = true, allowLoadDistribution = allowLoadDistribution)
+      val watcher = new LoadWatcherWrapper(targetConfig, staticConfig)
+      watcher.createMeasurement(
+        time = TickerTime.ofNanos(1.day.toNanos),
+        windowDuration = 2.minutes,
+        slice = Slice.FULL,
+        resource = "pod0",
+        numReplicas = 1,
+        load = 20,
+        topKeys = Seq.empty,
+        loadDistributionOpt = Some(distribution)
+      )
+    }
+
+    // The distribution is carried onto the Measurement only when both flags are true, and dropped
+    // (set to None) when either is false.
+    for ((useLoadDistribution, allowLoadDistribution) <- Seq(
+        (true, true),
+        (true, false),
+        (false, true),
+        (false, false)
+      )) {
+      val loadDistributionOpt: Option[LoadDistribution] =
+        measurementWith(useLoadDistribution, allowLoadDistribution).loadDistributionOpt
+      withClue(
+        s"useLoadDistribution=$useLoadDistribution, allowLoadDistribution=$allowLoadDistribution: "
+      ) {
+        if (useLoadDistribution && allowLoadDistribution) {
+          assert(loadDistributionOpt.contains(distribution))
+        } else {
+          assert(loadDistributionOpt.isEmpty)
+        }
+      }
+    }
+  }
+
   test("Simulate initial assignment") {
     // Test plan: Supply an initial assignment (one with no historical load data) to the watcher.
     // Verify that None is returned by `getPrimaryRateLoadMap` until load has been recorded for
     // every Slice in the assignment.
 
     val watcher = new LoadWatcherWrapper(
-      LoadWatcherTargetConfig(minDuration = 1.minute, maxAge = 1.minute, useTopKeys = true)
+      LoadWatcherTargetConfig(
+        minDuration = 1.minute,
+        maxAge = 1.minute,
+        useTopKeys = true,
+        useLoadDistribution = false
+      )
     )
 
     // Try to record empty measurements. Just verify this doesn't throw and doesn't break the
@@ -219,6 +300,7 @@ class LoadWatcherSuite extends DatabricksTest {
     val assignment: Assignment = createAssignment(
       generation = 2 ## 42,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       (("" -- "fili") @@ (2 ## 42) -> Seq("pod0")).clearPrimaryRateLoad(),
       ("fili".andGreater @@ (2 ## 42) -> Seq("pod1")).clearPrimaryRateLoad()
     )
@@ -278,11 +360,17 @@ class LoadWatcherSuite extends DatabricksTest {
     // assignment.
 
     val watcher = new LoadWatcherWrapper(
-      LoadWatcherTargetConfig(minDuration = 1.minute, maxAge = 1.minute, useTopKeys = true)
+      LoadWatcherTargetConfig(
+        minDuration = 1.minute,
+        maxAge = 1.minute,
+        useTopKeys = true,
+        useLoadDistribution = false
+      )
     )
     val assignment: Assignment = createAssignment(
       42,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       (("" -- "fili") @@ 42 -> Seq("pod0")).withPrimaryRateLoad(10),
       ("fili".andGreater @@ 42 -> Seq("pod0")).withPrimaryRateLoad(20)
     )
@@ -414,11 +502,17 @@ class LoadWatcherSuite extends DatabricksTest {
     // most recent windows are preserved.
 
     val watcher = new LoadWatcherWrapper(
-      LoadWatcherTargetConfig(minDuration = 1.minute, maxAge = 1.minute, useTopKeys = true)
+      LoadWatcherTargetConfig(
+        minDuration = 1.minute,
+        maxAge = 1.minute,
+        useTopKeys = true,
+        useLoadDistribution = false
+      )
     )
     val assignment: Assignment = createAssignment(
       42,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- "fili") @@ 42 -> Seq("pod0"),
       "fili".andGreater @@ 42 -> Seq("pod0")
     )
@@ -489,11 +583,17 @@ class LoadWatcherSuite extends DatabricksTest {
 
     val minDuration: FiniteDuration = 10.seconds
     val watcher = new LoadWatcherWrapper(
-      LoadWatcherTargetConfig(minDuration, maxAge = 1.minute, useTopKeys = true)
+      LoadWatcherTargetConfig(
+        minDuration,
+        maxAge = 1.minute,
+        useTopKeys = true,
+        useLoadDistribution = false
+      )
     )
     val assignment: Assignment = createAssignment(
       42,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       (("" -- "fili") @@ 42 -> Seq("pod0")).clearPrimaryRateLoad(),
       ("fili".andGreater @@ 42 -> Seq("pod0")).clearPrimaryRateLoad()
     )
@@ -612,11 +712,17 @@ class LoadWatcherSuite extends DatabricksTest {
 
     val maxAge: FiniteDuration = 10.minutes
     val watcher = new LoadWatcherWrapper(
-      LoadWatcherTargetConfig(minDuration = 1.minute, maxAge, useTopKeys = true)
+      LoadWatcherTargetConfig(
+        minDuration = 1.minute,
+        maxAge,
+        useTopKeys = true,
+        useLoadDistribution = false
+      )
     )
     val assignment1: Assignment = createAssignment(
       42,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       (("" -- "fili") @@ 42 -> Seq("pod0")).withPrimaryRateLoad(11),
       ("fili".andGreater @@ 42 -> Seq("pod0")).withPrimaryRateLoad(12)
     )
@@ -660,6 +766,7 @@ class LoadWatcherSuite extends DatabricksTest {
     val assignment2: Assignment = createAssignment(
       43,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- "kili") @@ 43 -> Seq("pod0"),
       "kili".andGreater @@ 43 -> Seq("pod0")
     )
@@ -735,14 +842,20 @@ class LoadWatcherSuite extends DatabricksTest {
     // value of `LoadWatcher.StaticConfig.allowTopKeys` and `LoadWatcherTargetConfig.useTopKeys` -
     // both must be true.
     val watcher1 = new LoadWatcherWrapper(
-      LoadWatcherTargetConfig(minDuration = 1.minute, maxAge = 1.minute, useTopKeys = true),
-      LoadWatcher.StaticConfig(allowTopKeys = false)
+      LoadWatcherTargetConfig(
+        minDuration = 1.minute,
+        maxAge = 1.minute,
+        useTopKeys = true,
+        useLoadDistribution = false
+      ),
+      LoadWatcher.StaticConfig(allowTopKeys = false, allowLoadDistribution = false)
     )
 
     // Create an assignment with two Slices and no historical load data.
     val assignment: Assignment = createAssignment(
       12,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("".andGreater @@ 12 -> Seq("pod0")).clearPrimaryRateLoad()
     )
 
@@ -772,8 +885,13 @@ class LoadWatcherSuite extends DatabricksTest {
     )
 
     val watcher2 = new LoadWatcherWrapper(
-      LoadWatcherTargetConfig(minDuration = 1.minute, maxAge = 1.minute, useTopKeys = false),
-      LoadWatcher.StaticConfig(allowTopKeys = true)
+      LoadWatcherTargetConfig(
+        minDuration = 1.minute,
+        maxAge = 1.minute,
+        useTopKeys = false,
+        useLoadDistribution = false
+      ),
+      LoadWatcher.StaticConfig(allowTopKeys = true, allowLoadDistribution = false)
     )
     val now2: TickerTime = watcher2.now
     watcher2.recordSliceletLoad(
@@ -801,8 +919,13 @@ class LoadWatcherSuite extends DatabricksTest {
     )
 
     val watcher3 = new LoadWatcherWrapper(
-      LoadWatcherTargetConfig(minDuration = 1.minute, maxAge = 1.minute, useTopKeys = true),
-      LoadWatcher.StaticConfig(allowTopKeys = true)
+      LoadWatcherTargetConfig(
+        minDuration = 1.minute,
+        maxAge = 1.minute,
+        useTopKeys = true,
+        useLoadDistribution = false
+      ),
+      LoadWatcher.StaticConfig(allowTopKeys = true, allowLoadDistribution = false)
     )
     val now3: TickerTime = watcher3.now
     watcher3.recordSliceletLoad(
@@ -835,12 +958,18 @@ class LoadWatcherSuite extends DatabricksTest {
     // Test plan: verify that top keys information is scaled down if the top keys load exceeds the
     // total Slice load.
     val watcher = new LoadWatcherWrapper(
-      LoadWatcherTargetConfig(minDuration = 1.minute, maxAge = 1.minute, useTopKeys = true),
-      LoadWatcher.StaticConfig(allowTopKeys = true)
+      LoadWatcherTargetConfig(
+        minDuration = 1.minute,
+        maxAge = 1.minute,
+        useTopKeys = true,
+        useLoadDistribution = false
+      ),
+      LoadWatcher.StaticConfig(allowTopKeys = true, allowLoadDistribution = false)
     )
     val assignment: Assignment = createAssignment(
       42,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       "".andGreater @@ 42 -> Seq("pod0")
     )
     val now: TickerTime = watcher.now
@@ -878,12 +1007,18 @@ class LoadWatcherSuite extends DatabricksTest {
 
     val initialCount: Int = getTopKeysAlertCount("" -- ∞)
     val watcher1 = new LoadWatcherWrapper(
-      LoadWatcherTargetConfig(minDuration = 1.minute, maxAge = 1.minute, useTopKeys = true),
-      LoadWatcher.StaticConfig(allowTopKeys = true)
+      LoadWatcherTargetConfig(
+        minDuration = 1.minute,
+        maxAge = 1.minute,
+        useTopKeys = true,
+        useLoadDistribution = false
+      ),
+      LoadWatcher.StaticConfig(allowTopKeys = true, allowLoadDistribution = false)
     )
     val assignment: Assignment = createAssignment(
       42,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       "".andGreater @@ 42 -> Seq("pod0")
     )
     val now: TickerTime = watcher1.now
@@ -907,8 +1042,13 @@ class LoadWatcherSuite extends DatabricksTest {
     assert(newCount == initialCount + 1)
 
     val watcher2 = new LoadWatcherWrapper(
-      LoadWatcherTargetConfig(minDuration = 1.minute, maxAge = 1.minute, useTopKeys = true),
-      LoadWatcher.StaticConfig(allowTopKeys = true)
+      LoadWatcherTargetConfig(
+        minDuration = 1.minute,
+        maxAge = 1.minute,
+        useTopKeys = true,
+        useLoadDistribution = false
+      ),
+      LoadWatcher.StaticConfig(allowTopKeys = true, allowLoadDistribution = false)
     )
     // If load values are very small, alert should not fire.
     watcher2.recordSliceletLoad(
@@ -940,7 +1080,12 @@ class LoadWatcherSuite extends DatabricksTest {
     // reasoning for this test case.
 
     val watcher = new LoadWatcherWrapper(
-      LoadWatcherTargetConfig(minDuration = 1.minute, maxAge = 1.minute, useTopKeys = true)
+      LoadWatcherTargetConfig(
+        minDuration = 1.minute,
+        maxAge = 1.minute,
+        useTopKeys = true,
+        useLoadDistribution = false
+      )
     )
 
     val now: TickerTime = watcher.now
@@ -992,6 +1137,7 @@ class LoadWatcherSuite extends DatabricksTest {
     val assignment: Assignment = createAssignment(
       generation = 2 ## 42,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       (("" -- "dori") @@ (2 ## 42) -> Seq("pod0")).clearPrimaryRateLoad(),
       (("dori" -- "fili") @@ (2 ## 42) -> Seq("pod1")).clearPrimaryRateLoad(),
       (("fili" -- "nori") @@ (2 ## 42) -> Seq("pod2")).clearPrimaryRateLoad(),
@@ -1045,12 +1191,18 @@ class LoadWatcherSuite extends DatabricksTest {
     // reasoning of the expected results.
 
     val watcher = new LoadWatcherWrapper(
-      LoadWatcherTargetConfig(minDuration = 1.minute, maxAge = 1.minute, useTopKeys = true)
+      LoadWatcherTargetConfig(
+        minDuration = 1.minute,
+        maxAge = 1.minute,
+        useTopKeys = true,
+        useLoadDistribution = false
+      )
     )
 
     val assignment: Assignment = createAssignment(
       generation = 2 ## 42,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       (("" -- "fili") @@ (2 ## 42) -> Seq("pod0", "pod1", "pod2")).clearPrimaryRateLoad(),
       (("fili" -- ∞) @@ (2 ## 42) -> Seq("pod1", "pod2")).clearPrimaryRateLoad()
     )
@@ -1157,12 +1309,18 @@ class LoadWatcherSuite extends DatabricksTest {
     // is "closer" to the newer measurement.
 
     val watcher = new LoadWatcherWrapper(
-      LoadWatcherTargetConfig(minDuration = 1.minute, maxAge = 10.minute, useTopKeys = true)
+      LoadWatcherTargetConfig(
+        minDuration = 1.minute,
+        maxAge = 10.minute,
+        useTopKeys = true,
+        useLoadDistribution = false
+      )
     )
 
     val assignment: Assignment = createAssignment(
       generation = 2 ## 42,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       (Slice.FULL @@ (2 ## 42) -> Seq("pod0", "pod1")).clearPrimaryRateLoad()
     )
 
@@ -1350,7 +1508,12 @@ class LoadWatcherSuite extends DatabricksTest {
       // Create a watcher while randomly choosing whether using top keys.
       val useTopKeys: Boolean = random.nextBoolean()
       val watcher = new LoadWatcherWrapper(
-        LoadWatcherTargetConfig(minDuration = 1.minute, maxAge = 1.minute, useTopKeys)
+        LoadWatcherTargetConfig(
+          minDuration = 1.minute,
+          maxAge = 1.minute,
+          useTopKeys,
+          useLoadDistribution = false
+        )
       )
 
       // Tracking the expected load for Slices when supplying the random test Measurements to the
@@ -1493,6 +1656,7 @@ class LoadWatcherSuite extends DatabricksTest {
       val assignment: Assignment = createAssignment(
         generation = 2 ## 42,
         AssignmentConsistencyMode.Affinity,
+        assignerServiceInfoOpt = None,
         sliceAssignmentsBuilder.result()
       )
 
@@ -1523,11 +1687,17 @@ class LoadWatcherSuite extends DatabricksTest {
     // considered in calculation.
 
     val watcher = new LoadWatcherWrapper(
-      LoadWatcherTargetConfig(minDuration = 1.minute, maxAge = 10.minute, useTopKeys = true)
+      LoadWatcherTargetConfig(
+        minDuration = 1.minute,
+        maxAge = 10.minute,
+        useTopKeys = true,
+        useLoadDistribution = false
+      )
     )
     val assignment: Assignment = createAssignment(
       generation = 2 ## 42,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       (Slice.FULL @@ (2 ## 42) -> Seq("pod0", "pod1")).clearPrimaryRateLoad()
     )
 
@@ -1571,12 +1741,18 @@ class LoadWatcherSuite extends DatabricksTest {
     // the maximum number of replicas reported by the measurements it currently tracked.
 
     val watcher = new LoadWatcherWrapper(
-      LoadWatcherTargetConfig(minDuration = 1.minute, maxAge = 10.minute, useTopKeys = true)
+      LoadWatcherTargetConfig(
+        minDuration = 1.minute,
+        maxAge = 10.minute,
+        useTopKeys = true,
+        useLoadDistribution = false
+      )
     )
 
     val assignment: Assignment = createAssignment(
       generation = 2 ## 42,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       (Slice.FULL @@ (2 ## 42) -> Seq("pod1", "pod2", "pod3")).clearPrimaryRateLoad()
     )
 
@@ -1725,7 +1901,12 @@ class LoadWatcherSuite extends DatabricksTest {
     val random = new Random(seed)
 
     val watcher = new LoadWatcherWrapper(
-      LoadWatcherTargetConfig(minDuration = 1.minute, maxAge = 1.minute, useTopKeys = true)
+      LoadWatcherTargetConfig(
+        minDuration = 1.minute,
+        maxAge = 1.minute,
+        useTopKeys = true,
+        useLoadDistribution = false
+      )
     )
 
     // Create a ordered, disjoint and complete list of slices along with some candidate top keys for
@@ -1773,6 +1954,7 @@ class LoadWatcherSuite extends DatabricksTest {
       createAssignment(
         generation = 2 ## 42,
         AssignmentConsistencyMode.Affinity,
+        assignerServiceInfoOpt = None,
         sliceAssignments
       )
 

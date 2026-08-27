@@ -17,13 +17,13 @@ import com.databricks.logging.ConsoleLogging
 import javax.annotation.concurrent.ThreadSafe
 
 /**
- * Open source version of internal InfoService. Creates a single HTTP server hosting ZPages,
- * debug endpoints, a debugging dashboard, and an optional readiness endpoint.
+ * Creates a single HTTP server hosting ZPages, debug endpoints, a debugging dashboard, and an
+ * optional readiness endpoint.
  *
- * This object provides an API compatible with the internal ArmeriaInfoServer, so that
- * callers that depend on the ArmeriaInfoServer API can use it in OSS builds without code
- * changes. The optional status source and branch parameters are accepted but ignored since
- * the OSS debug server does not support health check endpoints.
+ * This object provides an API compatible with the internal ArmeriaInfoServer, so that callers that
+ * depend on the ArmeriaInfoServer API can use it in open source builds without code changes. The
+ * optional status source and branch parameters are accepted but ignored since this open source
+ * version of the debug server does not support health check endpoints.
  */
 @ThreadSafe
 object InfoService extends ConsoleLogging {

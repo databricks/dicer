@@ -7,8 +7,8 @@ import org.scalatest.BeforeAndAfterAll
 import com.typesafe.scalalogging.Logger
 
 /**
- * Open source version of DatabricksTest that provides the same interface as the internal version.
- * This extends AnyFunSuite and includes before and after all hooks.
+ * A common base class for all tests in Databricks. This class extends ScalaTest's AnyFunSuite and
+ * includes before and after all hooks.
  */
 abstract class DatabricksTest extends AnyFunSuite with BeforeAndAfterAll with BeforeAndAfterEach {
 

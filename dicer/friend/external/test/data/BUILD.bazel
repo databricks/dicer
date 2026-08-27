@@ -1,0 +1,6 @@
+
+filegroup(
+    name = "data",
+    srcs = ["two_level_sharding_headers_test_data.textproto"],
+    visibility = ["//dicer:internal"],
+)

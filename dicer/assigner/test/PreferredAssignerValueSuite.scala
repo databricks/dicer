@@ -267,7 +267,7 @@ class PreferredAssignerValueSuite extends DatabricksTest {
     }
 
     // - For `PreferredAssignerValue.SomeAssigner`, should be preferred if the assigner has the
-    // same `AssignerInfo` as the current assigner, and exposes the preferred assigner's URI.
+    // same UUID as the current assigner, and exposes the preferred assigner's URI.
 
     val config1 = PreferredAssignerConfig.create(
       thisAssignerPreferredValue,
@@ -296,6 +296,22 @@ class PreferredAssignerValueSuite extends DatabricksTest {
     )
     assert(config3.role == AssignerRole.Standby)
     assert(config3.preferredAssignerUriOpt.contains(thisAssignerInfo.uri))
+
+    // Special case: value is a `PreferredAssignerValue.SomeAssigner` with the same UUID but a
+    // different URI. This is still preferred -- self-recognition is by UUID, so a stale or
+    // scheme-less elected URI (as in <internal bug>) does not stop the pod from recognizing itself.
+    val differentUri = new URI("http://localhost:9999")
+    val sameUuidDifferentUriPreferredValue =
+      PreferredAssignerValue.SomeAssigner(
+        AssignerInfo(thisAssignerInfo.uuid, differentUri),
+        Generation(nonLooseIncarnation, 123)
+      )
+    val config4 = PreferredAssignerConfig.create(
+      sameUuidDifferentUriPreferredValue,
+      thisAssignerInfo
+    )
+    assert(config4.role == AssignerRole.Preferred)
+    assert(config4.preferredAssignerUriOpt.contains(differentUri))
   }
 
 }

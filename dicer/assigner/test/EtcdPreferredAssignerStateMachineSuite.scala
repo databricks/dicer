@@ -1284,9 +1284,10 @@ class EtcdPreferredAssignerStateMachineSuite extends DatabricksTest {
   }
 
   test("Preferred + terminating still abdicates regardless of ExternalPick") {
-    // Test plan: Verify that abdication semantics are preserved when an external pick is set:
-    // an assigner that is currently preferred and has received a termination notice still
-    // writes `None` (an abdication), not the pick.
+    // Test plan: Verify that abdication takes precedence over the Phase 2.1 handoff. A preferred,
+    // terminating assigner writes `None` (an abdication), never the pick, even when a pick is set.
+    // We terminate first (which emits the abdication write), then deliver a differing pick, and
+    // confirm it triggers no handoff write.
     val stateMachine = createStateMachine()
     val noAssignerTracker: MetricUtils.ChangeTracker[Int] =
       MetricUtils.ChangeTracker(() => getWriteCount(ValueSource.NoAssigner))
@@ -1297,20 +1298,15 @@ class EtcdPreferredAssignerStateMachineSuite extends DatabricksTest {
       PreferredAssignerValue.SomeAssigner(selfAssignerInfo, generation(clock))
     val externalPick: AssignerInfo = otherAssignerInfo
 
-    // Drive Startup -> Preferred -> record an external pick (silent while Preferred).
+    // Drive Startup -> Preferred.
     stateMachine.onAdvance(clock.tickerTime(), clock.instant())
     stateMachine.onEvent(
       clock.tickerTime(),
       clock.instant(),
       Event.PreferredAssignerReceived(selfPreferredAssigner)
     )
-    stateMachine.onEvent(
-      clock.tickerTime(),
-      clock.instant(),
-      Event.ExternalPickReceived(Some(externalPick))
-    )
 
-    // Receive termination. The abdication write should carry `None`, not the pick.
+    // Receive termination first. The abdication write should carry `None`, not the pick.
     val expectedWriteDeadline = clock.tickerTime() + config.writeRetryInterval
     assert(
       stateMachine.onEvent(clock.tickerTime(), clock.instant(), Event.TerminationNoticeReceived) ==
@@ -1327,8 +1323,77 @@ class EtcdPreferredAssignerStateMachineSuite extends DatabricksTest {
         )
       )
     )
+
+    // Deliver a differing pick while preferred and terminating. Abdication takes precedence, so
+    // no handoff write is emitted -- only the pending abdication retry remains scheduled.
+    assert(
+      stateMachine.onEvent(
+        clock.tickerTime(),
+        clock.instant(),
+        Event.ExternalPickReceived(Some(externalPick))
+      ) == StateMachineOutput(expectedWriteDeadline, Seq.empty[DriverAction])
+    )
     assert(noAssignerTracker.totalChange() == 1)
     assert(externalPickTracker.totalChange() == 0)
+  }
+
+  test("Preferred hands off to a differing ExternalPick") {
+    // Test plan: Verify that a healthy, non-terminating preferred assigner installs a differing
+    // external (consistent-hashing) pick as the new preferred via a single direct-handoff write.
+    // The write CASes against the assigner's own current generation and proposes the pick. A pick
+    // equal to self must produce no write.
+    val stateMachine = createStateMachine()
+    val externalPickTracker: MetricUtils.ChangeTracker[Int] =
+      MetricUtils.ChangeTracker(() => getWriteCount(ValueSource.ExternalPick))
+    val selfTracker: MetricUtils.ChangeTracker[Int] =
+      MetricUtils.ChangeTracker(() => getWriteCount(ValueSource.Self))
+
+    val selfPreferredAssigner =
+      PreferredAssignerValue.SomeAssigner(selfAssignerInfo, generation(clock))
+    val externalPick: AssignerInfo = otherAssignerInfo
+
+    // Drive Startup -> Preferred(self).
+    stateMachine.onAdvance(clock.tickerTime(), clock.instant())
+    stateMachine.onEvent(
+      clock.tickerTime(),
+      clock.instant(),
+      Event.PreferredAssignerReceived(selfPreferredAssigner)
+    )
+
+    // A differing pick triggers an immediate handoff write CASing against our own generation.
+    val handoffWriteTime = clock.tickerTime()
+    assert(
+      stateMachine.onEvent(
+        clock.tickerTime(),
+        clock.instant(),
+        Event.ExternalPickReceived(Some(externalPick))
+      ) ==
+      StateMachineOutput(
+        handoffWriteTime + config.writeRetryInterval,
+        Seq(
+          DriverAction.Write(
+            handoffWriteTime,
+            PreferredAssignerProposal(
+              predecessorGenerationOpt = Some(selfPreferredAssigner.generation),
+              newPreferredAssignerInfoOpt = Some(externalPick)
+            )
+          )
+        )
+      )
+    )
+    assert(externalPickTracker.totalChange() == 1)
+
+    // A pick equal to self is a no-op: no handoff write and no scheduled advance.
+    clock.advanceBy(config.writeRetryInterval)
+    assert(
+      stateMachine.onEvent(
+        clock.tickerTime(),
+        clock.instant(),
+        Event.ExternalPickReceived(Some(selfAssignerInfo))
+      ) == StateMachineOutput(TickerTime.MAX, Seq.empty[DriverAction])
+    )
+    assert(externalPickTracker.totalChange() == 1)
+    assert(selfTracker.totalChange() == 0)
   }
 
   test("Clearing the ExternalPick restores Self as the next write's preferred-assigner candidate") {
@@ -1465,7 +1530,9 @@ class EtcdPreferredAssignerStateMachineSuite extends DatabricksTest {
   test("ExternalPick is preserved across Preferred -> Standby transitions") {
     // Test plan: Become Preferred, record a pick while Preferred, transition to Standby, then
     // drive a takeover. The takeover write must propose the pick recorded while Preferred,
-    // confirming that the pick is not cleared by run-state transitions.
+    // confirming that the pick is not cleared by run-state transitions. Recording the pick while
+    // Preferred also emits an immediate handoff write (see the dedicated handoff test), so two
+    // ExternalPick writes are expected in total.
     val stateMachine = createStateMachine()
     val externalPickTracker: MetricUtils.ChangeTracker[Int] =
       MetricUtils.ChangeTracker(() => getWriteCount(ValueSource.ExternalPick))
@@ -1474,7 +1541,7 @@ class EtcdPreferredAssignerStateMachineSuite extends DatabricksTest {
     val selfPreferredAssigner =
       PreferredAssignerValue.SomeAssigner(selfAssignerInfo, generation(clock))
 
-    // Drive Startup -> Preferred -> record pick (silent while Preferred).
+    // Drive Startup -> Preferred -> record pick (emits a handoff write while Preferred).
     stateMachine.onAdvance(clock.tickerTime(), clock.instant())
     stateMachine.onEvent(
       clock.tickerTime(),
@@ -1521,7 +1588,7 @@ class EtcdPreferredAssignerStateMachineSuite extends DatabricksTest {
         )
       )
     )
-    assert(externalPickTracker.totalChange() == 1)
+    assert(externalPickTracker.totalChange() == 2)
   }
 
   /** Creates a generation for the current time on clock. */

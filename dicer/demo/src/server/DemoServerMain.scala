@@ -40,8 +40,8 @@ import com.databricks.dicer.external.{
 import com.databricks.rpc.tls.{TLSOptions, TLSOptionsMigration}
 
 /** Configuration for the Demo Server. */
-class DemoServerConf(project: Project.Project, rawConfig: Config)
-    extends ProjectConf(project, rawConfig)
+class DemoServerConf(projectName: String, rawConfig: Config)
+    extends ProjectConf(projectName, rawConfig)
     with SliceletConf
     with ServerConf {
 
@@ -64,7 +64,7 @@ object DemoServerMain extends DatabricksMain(Project.DemoServer) {
   private val SERVER_PORT: Int = 8080
 
   override def wrappedMain(args: Array[String]): Unit = {
-    val conf = new DemoServerConf(Project.DemoServer, rawConfig)
+    val conf = new DemoServerConf("dicer-demo-server", rawConfig)
     val target = Target(DemoCommon.TARGET_NAME)
 
     // Create the Slicelet for Dicer integration.

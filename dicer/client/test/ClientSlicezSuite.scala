@@ -7,6 +7,7 @@ import scala.concurrent.duration._
 
 import org.apache.commons.text.StringEscapeUtils
 
+import com.databricks.caching.util.AlertOwnerTeam
 import com.databricks.caching.util.AssertionWaiter
 import com.databricks.caching.util.SequentialExecutionContext
 import com.databricks.caching.util.TestUtils
@@ -20,7 +21,10 @@ import TestClientUtils.TEST_CLIENT_UUID
 
 class ClientSlicezSuite extends DatabricksTest with TestName {
 
-  private val sec = SequentialExecutionContext.createWithDedicatedPool("client-slicez-suite")
+  private val sec = SequentialExecutionContext.createWithDedicatedPool(
+    name = "client-slicez-suite",
+    alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+  )
 
   test("Check ClientTargetSlicezData data table HTML contents") {
     // Test plan: Directly create ClientTargetSlicezData and use golden snippets to verify
@@ -160,7 +164,7 @@ class ClientSlicezSuite extends DatabricksTest with TestName {
     val cluster: URI = URI.create("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01")
     val target: Target = Target.createKubernetesTarget(cluster, "softstore-storelet")
     val renderedHtml: String =
-      createClientTargetSlicezData(target, clientClusterOpt = Some(cluster)).getHtml.render
+      createClientTargetSlicezData(target, clientClusterOpt = Some(cluster.toString)).getHtml.render
 
     assert(renderedHtml.contains(s"<td>${target.toParseableDescription}</td>"))
     assert(!renderedHtml.contains("[Cross-cluster]"))
@@ -174,7 +178,7 @@ class ClientSlicezSuite extends DatabricksTest with TestName {
     // (same region, different cluster code), render it, and verify the target cell contains the
     // target description followed by a bold [Cross-cluster] tag.
     val targetCluster: URI = URI.create("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01")
-    val clientCluster: URI = URI.create("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/02")
+    val clientCluster: String = "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/02"
     val target: Target = Target.createKubernetesTarget(targetCluster, "softstore-storelet")
     val renderedHtml: String =
       createClientTargetSlicezData(target, clientClusterOpt = Some(clientCluster)).getHtml.render
@@ -192,7 +196,7 @@ class ClientSlicezSuite extends DatabricksTest with TestName {
     // KubernetesTarget in region1 and region8 as the client cluster, render it, and verify
     // the target cell contains the target description followed by a bold [Cross-region] tag.
     val targetCluster: URI = URI.create("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01")
-    val clientCluster: URI = URI.create("kubernetes-cluster:test-env/cloud1/public/region8/clustertype2/01")
+    val clientCluster: String = "kubernetes-cluster:test-env/cloud1/public/region8/clustertype2/01"
     val target: Target = Target.createKubernetesTarget(targetCluster, "softstore-storelet")
     val renderedHtml: String =
       createClientTargetSlicezData(target, clientClusterOpt = Some(clientCluster)).getHtml.render
@@ -209,7 +213,7 @@ class ClientSlicezSuite extends DatabricksTest with TestName {
     // (a KubernetesTarget created via Target.apply, which sets clusterOpt = None). The target
     // cell should contain only the bare target description even when the client has cluster info.
     val target: Target = Target("softstore-storelet")
-    val clientCluster: URI = URI.create("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01")
+    val clientCluster: String = "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01"
     val renderedHtml: String =
       createClientTargetSlicezData(target, clientClusterOpt = Some(clientCluster)).getHtml.render
 
@@ -251,6 +255,7 @@ class ClientSlicezSuite extends DatabricksTest with TestName {
           clientIdOpt = Some(TEST_CLIENT_UUID),
           watchStubCacheTime = 20.seconds,
           watchFromDataPlane = false,
+          alternativeTargetOpt = None,
           enableRateLimiting = false
         ),
         subscriberDebugName = subscriberDebugName

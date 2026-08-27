@@ -1,6 +1,7 @@
 package com.databricks.dicer.assigner
 
 import scala.concurrent.{Future, Promise}
+import com.databricks.caching.util.AlertOwnerTeam
 import com.databricks.caching.util.{
   Cancellable,
   PrefixLogger,
@@ -160,8 +161,10 @@ object EtcdPreferredAssignerStore {
       client: EtcdClient,
       random: Random,
       config: EtcdPreferredAssignerStore.Config = EtcdPreferredAssignerStore.DEFAULT_CONFIG,
-      sec: SequentialExecutionContext =
-        SequentialExecutionContext.createWithDedicatedPool("preferred-assigner-store")
+      sec: SequentialExecutionContext = SequentialExecutionContext.createWithDedicatedPool(
+        name = "preferred-assigner-store",
+        alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+      )
   ): EtcdPreferredAssignerStore = {
     Impl.create(sec, storeIncarnation, client, random, config)
   }
@@ -201,7 +204,8 @@ object EtcdPreferredAssignerStore {
       new StateMachineDriver[Event, DriverAction, EtcdPreferredAssignerStoreStateMachine](
         sec,
         new EtcdPreferredAssignerStoreStateMachine(storeIncarnation, random, config),
-        performAction
+        performAction,
+        AlertOwnerTeam.CACHING_TEAM_NAME
       )
 
     def getPreferredAssignerWatchCell: PreferredAssignerWatchCellConsumer = {

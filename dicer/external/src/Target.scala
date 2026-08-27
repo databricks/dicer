@@ -61,30 +61,22 @@ object Target {
   /**
    * REQUIRES: `name` and `instanceId` are valid according to the parameter descriptions.
    *
-   * Creates a new [[Target]] for a Dicer-sharded service that is uniquely identified by a 
-   * App Identifier (<internal link>) with the given `name` and `instanceId`. The given
-   * name is the app name and the given instance ID is the app instance ID.
+   * Creates a new [[Target]] for a Dicer-sharded service that is identified by the given `name` and
+   * `instanceId`.
    *
-   * @param name The name of the Dicer-sharded service. Corresponds to the app name of the service
-   *             that is uniquely identified by a App Identifier. This name must meet the
-   *             following requirements:
-   *             - contains at most 42 characters
-   *             - contains only lowercase alphanumeric characters or '-'
-   *             - starts with [a-z]
-   *             - ends with an alphanumeric character
-   *             - no two ‘-’ characters may follow one another
-   * @param instanceId The app instance ID of the Dicer-sharded service instance (as defined in
-   *                   <internal link>). This instance ID must meet the following
-   *                   requirements of a App Identifier:
-   *                   - contains at most 63 characters
-   *                   - contains only lowercase alphanumeric characters or '-'
-   *                   - starts with [a-z]
-   *                   - ends with an alphanumeric character
-   *                   - no two ‘-’ characters may follow one another
-   *
-   *                   These requirements are similar to the requirements for RFC 1123 label names,
-   *                   but are more strict because of the last three requirements listed above.
+   * @param name The name of the Dicer-sharded service. Must meet the requirements for RFC 1123
+   *             label names:
+   *                - contain at most 63 characters
+   *                - contain only lowercase alphanumeric characters or '-'
+   *                - start with an alphanumeric character
+   *                - end with an alphanumeric character
+   * @param instanceId The identifier of the running instance of a Dicer-sharded service. A running
+   *                   instance is a deployment of the service whose pods should be sharded together
+   *                   by Dicer as a single group. Must satisfy the same RFC 1123 label name
+   *                   requirements as `name`.
    */
+  // TODO(<internal bug>): "App" is a legacy concept; rename AppTarget to Target once KubernetesTarget is
+  // removed and only one Target type remains.
   private[dicer] def createAppTarget(name: String, instanceId: String): Target =
     new AppTarget(name, instanceId)
 
@@ -150,8 +142,9 @@ private[dicer] class KubernetesTarget private[external] (
 }
 
 /**
- * Identifier for a Dicer-sharded service that is uniquely identified by a App Identifier
- * (<internal link>). See [[Target.createAppTarget]] for more details.
+ * Identifier for a Dicer-sharded service that is globally uniquely identified by a `name` and
+ * `instanceId` pair. See [[Target.createAppTarget]] for the validity requirements (any RFC 1123
+ * label).
  *
  * Note: unlike KubernetesTargets, AppTargets do not need to encode location information (e.g.,
  * cluster URI) about the Dicer-sharded service because the `instanceId` is globally unique across
@@ -182,51 +175,19 @@ private[dicer] class AppTarget private[external] (val name: String, val instance
   override private[dicer] def toParseableDescription: String = canonicalStringRep
 
   private def validate(): Unit = {
-
-    AppTarget.validateAppName(name)
-    AppTarget.validateAppInstanceId(instanceId)
+    Target.validateName(name)
+    AppTarget.validateInstanceId(instanceId)
   }
 }
 
 private[dicer] object AppTarget {
 
   /**
-   * Validates that the given `name` conforms with the requirements for App Names. See
-   * [[Target.createAppTarget]] for more details.
+   * Validates that the given `instanceId` is a valid RFC 1123 label. See [[Target.createAppTarget]]
+   * for more details.
    */
-  @throws[IllegalArgumentException]("if name is not a conformant App Name")
-  private def validateAppName(name: String): Unit = {
-    // RFC 1123 requires that the string is at least 1 character and that it starts and
-    // ends with a lowercase alpha or numeric character.
-    require(
-      Rfc1123.isValid(name) &&
-      // Additionally check that the first character is [a-z] (RFC 1123 already validated that the
-      // string is non-empty and does not contain [A-Z]).
-      name.head.isLetter &&
-      // Additionally check that the string does not contain consecutive '-'.
-      !name.contains("--") &&
-      // Additionally check that the string is at most 42 characters.
-      name.length <= 42,
-      s"Name is invalid: $name"
-    )
-  }
-
-  /**
-   * Validates that the given `instanceId` conforms with the requirements for App Instance IDs. See
-   * [[Target.createAppTarget]] for more details.
-   */
-  @throws[IllegalArgumentException]("if instanceId is not a conformant App Instance ID")
-  private def validateAppInstanceId(instanceId: String): Unit = {
-    require(
-      // RFC 1123 requires that the string is between 1 and 63 characters and that it starts and
-      // ends with a lowercase alpha or numeric character.
-      Rfc1123.isValid(instanceId) &&
-      // Additionally check that the first character is [a-z] (RFC 1123 already validated that the
-      // string is non-empty and does not contain [A-Z]).
-      instanceId.head.isLetter &&
-      // Additionally check that the string does not contain consecutive '-'.
-      !instanceId.contains("--"),
-      s"Instance ID is invalid: $instanceId"
-    )
+  @throws[IllegalArgumentException]("if instanceId is not a valid RFC 1123 label")
+  private def validateInstanceId(instanceId: String): Unit = {
+    require(Rfc1123.isValid(instanceId), s"Instance ID is invalid: $instanceId")
   }
 }

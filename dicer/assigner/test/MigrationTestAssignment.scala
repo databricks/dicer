@@ -214,7 +214,8 @@ class MigrationTestAssignment(resourceAssignments: Seq[TestResourceAssignment]) 
         isFrozen = false,
         AssignmentConsistencyMode.Affinity,
         generation,
-        SliceMapHelper.ofSliceAssignments(sliceAssignmentsBuilder.result())
+        SliceMapHelper.ofSliceAssignments(sliceAssignmentsBuilder.result()),
+        assignerServiceInfoOpt = None
       ),
       loadMapBuilder.build()
     )

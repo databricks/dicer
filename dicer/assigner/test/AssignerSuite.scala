@@ -4,7 +4,6 @@ import java.net.URI
 import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 import java.util.UUID
 
-import com.databricks.dicer.assigner.conf.DicerAssignerConf
 import scala.concurrent.duration._
 import scala.concurrent.{Await, Future}
 
@@ -14,18 +13,28 @@ import io.grpc.Deadline
 
 import com.databricks.api.proto.dicer.common.AssignmentServiceGrpc.AssignmentServiceStub
 import com.databricks.api.proto.dicer.common.{ClientRequestP, ClientResponseP}
-import com.databricks.backend.common.util.Project
-import com.databricks.caching.util.{AssertionWaiter, MetricUtils, PrefixLogger, TestUtils}
+import com.databricks.caching.util.{
+  AssertionWaiter,
+  CachingErrorCode,
+  MetricUtils,
+  PrefixLogger,
+  SequentialExecutionContext,
+  Severity,
+  TestUtils
+}
+import com.databricks.caching.util.MetricUtils.ChangeTracker
 import com.databricks.caching.util.TestUtils.{TestName, assertThrow}
 import com.databricks.conf.Configs
+import com.databricks.dicer.assigner.conf.DicerAssignerConf
 import com.databricks.dicer.client.WatchStubManager
 import com.databricks.rpc.tls.TLSOptionsMigration
 import com.databricks.dicer.assigner.config.{
   ChurnConfig,
-  StaticTargetConfigProvider,
   InternalTargetConfig,
   InternalTargetConfigMap,
-  InternalTargetConfigMetrics
+  InternalTargetConfigMetrics,
+  TargetConfigProvider,
+  TargetConfigProviderFactory
 }
 import com.databricks.dicer.common.TargetName
 import com.databricks.dicer.assigner.config.InternalTargetConfig.{
@@ -36,6 +45,7 @@ import com.databricks.dicer.common.TestSliceUtils.sampleProposal
 import com.databricks.dicer.common.Version.LATEST_VERSION
 import com.databricks.dicer.common.{
   Assignment,
+  AssignerServiceInfo,
   ClerkData,
   ClientRequest,
   ClientResponse,
@@ -51,7 +61,7 @@ import com.databricks.dicer.common.{
   TestSliceUtils
 }
 import com.databricks.dicer.common.TargetHelper.TargetOps
-import com.databricks.dicer.external.{Clerk, ResourceAddress, Slicelet, Target}
+import com.databricks.dicer.external.{AppTarget, Clerk, ResourceAddress, Slicelet, Target}
 import com.databricks.dicer.friend.SliceMap
 import com.databricks.rpc.testing.TestSslArguments
 import com.databricks.rpc.testing.TestTLSOptions
@@ -175,13 +185,11 @@ class AssignerSuite extends DatabricksTest with TestName {
 
   /** Manages the creation of watch stubs for this test suite. */
   private val watchStubManager = new WatchStubManager(
-    clientName = Project.DicerAssigner.name,
+    clientName = "dicer-assigner",
     subscriberDebugName = "assigner-suite-test",
     defaultWatchAddress = URI.create(s"http://localhost:${testEnv.getAssignerPort}"),
     tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
-    watchFromDataPlane = false,
-    target = Target("test"),
-    clientIdOpt = None
+    watchFromDataPlane = false
   )
   override def beforeAll(): Unit = {
     super.beforeAll()
@@ -195,7 +203,11 @@ class AssignerSuite extends DatabricksTest with TestName {
       readinessStatusSourceOpt = None,
       branchOpt = None
     )
-    stub = watchStubManager.createWatchStub(redirectAddressOpt = None)
+    stub = watchStubManager.createWatchStub(
+      redirectAddressOpt = None,
+      target = Target("test"),
+      clientIdOpt = None
+    )
   }
 
   override def afterAll(): Unit = {
@@ -220,6 +232,13 @@ class AssignerSuite extends DatabricksTest with TestName {
     (response.statusCode(), response.body())
   }
 
+  /** Builds an [[AppTarget]] with the given `name` and `instanceId`, failing the test otherwise. */
+  private def createAppTargetOrFail(name: String, instanceId: String): AppTarget =
+    Target.createAppTarget(name, instanceId) match {
+      case appTarget: AppTarget => appTarget
+      case other => fail(s"expected an AppTarget, got ${other.getClass.getName}")
+    }
+
   test("backend returns the correct test result") {
     // Test plan: call the watch RPC and verify that the returned assignment is the expected value.
     val proposal: SliceMap[ProposedSliceAssignment] = sampleProposal()
@@ -233,7 +252,10 @@ class AssignerSuite extends DatabricksTest with TestName {
       WATCH_RPC_TIMEOUT,
       ClerkData,
       supportsSerializedAssignment = true,
-      redirectTokenOpt = None
+      redirectTokenOpt = None,
+      alternativeTargetOpt = None,
+      clusterUriOpt = None,
+      regionUriOpt = None
     )
     val asnResponse: ClientResponse = performWatchCallSync(stub, request)
     assert(
@@ -267,7 +289,9 @@ class AssignerSuite extends DatabricksTest with TestName {
     // assignment is returned since it has not been set yet.
     val shortTimeout = 1.second
     val stub2: AssignmentServiceStub = watchStubManager.createWatchStub(
-      Some(URI.create(s"http://localhost:${testEnv.getAssignerPort}"))
+      redirectAddressOpt = Some(URI.create(s"http://localhost:${testEnv.getAssignerPort}")),
+      target = Target("test"),
+      clientIdOpt = None
     )
 
     // Send the request with a short timeout and let the assigner return an empty assignment.
@@ -281,7 +305,10 @@ class AssignerSuite extends DatabricksTest with TestName {
       shortTimeout,
       ClerkData,
       supportsSerializedAssignment = true,
-      redirectTokenOpt = None
+      redirectTokenOpt = None,
+      alternativeTargetOpt = None,
+      clusterUriOpt = None,
+      regionUriOpt = None
     )
     log.info(s"Starting watch call from AssignmentWatcher: $target")
     val response2: ClientResponse = performWatchCallSync(stub2, request2)
@@ -301,7 +328,10 @@ class AssignerSuite extends DatabricksTest with TestName {
       WATCH_RPC_TIMEOUT,
       ClerkData,
       supportsSerializedAssignment = true,
-      redirectTokenOpt = None
+      redirectTokenOpt = None,
+      alternativeTargetOpt = None,
+      clusterUriOpt = None,
+      regionUriOpt = None
     )
     val asn: ClientResponse = performWatchCallSync(stub, request1)
     assert(
@@ -343,7 +373,10 @@ class AssignerSuite extends DatabricksTest with TestName {
       WATCH_RPC_TIMEOUT,
       ClerkData,
       supportsSerializedAssignment = true,
-      redirectTokenOpt = None
+      redirectTokenOpt = None,
+      alternativeTargetOpt = None,
+      clusterUriOpt = None,
+      regionUriOpt = None
     )
     val request2 = ClientRequest(
       target2,
@@ -352,7 +385,10 @@ class AssignerSuite extends DatabricksTest with TestName {
       WATCH_RPC_TIMEOUT,
       ClerkData,
       supportsSerializedAssignment = true,
-      redirectTokenOpt = None
+      redirectTokenOpt = None,
+      alternativeTargetOpt = None,
+      clusterUriOpt = None,
+      regionUriOpt = None
     )
 
     // Send the requests and wait for their respective assignments.
@@ -367,17 +403,77 @@ class AssignerSuite extends DatabricksTest with TestName {
     )
   }
 
-  // TODO(<internal bug>): Re-enable after fixing DatabricksServiceException to gRPC status mapping in
-  //  the OSS WatchServerHelper.
-  test("createAndStart() completes successfully") {
-    // Test plan: create an Assigner with the default k8s watcher and health watcher. This test
-    // is very basic, it only verifies that the method completes without throwing any exceptions.
+  gridTest("Unknown targets are rejected")(
+    Seq(
+      Target.apply(_: String),
+      (name: String) => Target.createAppTarget(transformToSafeAppTargetName(name), "instance-id")
+    )
+  ) { (targetFactory: String => Target) =>
+    // Test plan: Verify that the Assigner rejects watch requests for unknown targets (i.e., targets
+    // that do not have a config). Verify this by sending a watch request for an unknown target and
+    // checking that the Assigner returns an error and increments the appropriate metric.
+
+    // Create a local test environment with default target configs disabled.
+    val localTestEnv = InternalDicerTestEnvironment.create(withDefaultTargetConfig = false)
+    val localStub: AssignmentServiceStub = watchStubManager.createWatchStub(
+      redirectAddressOpt = Some(URI.create(s"http://localhost:${localTestEnv.getAssignerPort}")),
+      target = Target("test"),
+      clientIdOpt = None
+    )
+
+    val target: Target = targetFactory(getSafeName)
+    val request = ClientRequest(
+      target,
+      SyncAssignmentState.KnownGeneration(Generation.EMPTY),
+      "unknown-target",
+      WATCH_RPC_TIMEOUT,
+      ClerkData,
+      supportsSerializedAssignment = true,
+      redirectTokenOpt = None,
+      alternativeTargetOpt = None,
+      clusterUriOpt = None,
+      regionUriOpt = None
+    )
+    val exception: StatusRuntimeException =
+      assertThrow[StatusRuntimeException]("Missing target config") {
+        TestUtils.awaitResult(localStub.watch(request.toProto), Duration.Inf)
+      }
+    assert(exception.getStatus.getCode == Code.NOT_FOUND)
+
+    // Verify that the Assigner incremented the appropriate metric.
+    val registry: CollectorRegistry = CollectorRegistry.defaultRegistry
+
+    assertResult(1)(
+      MetricUtils
+        .getMetricValue(
+          registry,
+          metric = "dicer_assigner_num_watch_errors_total",
+          labels = Map(
+            "targetCluster" -> target.getTargetClusterLabel,
+            "targetName" -> target.getTargetNameLabel,
+            "targetInstanceId" -> target.getTargetInstanceIdLabel,
+            "reason" -> "NO_CONFIG"
+          )
+        )
+        .toInt
+    )
+  }
+
+  namedGridTest("createAndStart() completes successfully")(
+    Seq(
+      "static-required-target-config-provider" -> false,
+      "dynamic-target-config-provider" -> true
+    )
+  ) { serveDynamicOnlyTargets: Boolean =>
+    // Test plan: create an Assigner with the default k8s watcher and health watcher under each
+    // target config provider mode. This verifies that Assigner startup works with both providers.
 
     val assignerConf = new DicerAssignerConf(
       Configs.parseMap(
         "databricks.dicer.assigner.rpc.port" -> 0,
         "databricks.dicer.library.server.keystore" -> TestTLSOptions.serverKeystorePath,
-        "databricks.dicer.library.server.truststore" -> TestTLSOptions.serverTruststorePath
+        "databricks.dicer.library.server.truststore" -> TestTLSOptions.serverTruststorePath,
+        "databricks.dicer.assigner.serveDynamicOnlyTargets" -> serveDynamicOnlyTargets
       )
     )
 
@@ -386,10 +482,16 @@ class AssignerSuite extends DatabricksTest with TestName {
       configScopeOpt = None,
       targetConfigMap = Map.empty
     )
-    val dynamicConfigProvider: StaticTargetConfigProvider =
-      StaticTargetConfigProvider.create(staticTargetConfigMap, assignerConf)
-    dynamicConfigProvider.startBlocking(1.second)
+    val dynamicConfigProvider: TargetConfigProvider =
+      TargetConfigProviderFactory.createBlocking(
+        staticTargetConfigMap,
+        assignerConf,
+        initialPollTimeout = 1.second
+      )
 
+    // The Assigner requires a checker to start; this one never polls (see the factory).
+    val checkerFactory: KubernetesMembershipChecker.Factory =
+      FakeKubernetesTestSupport.inertMembershipCheckerFactory
     val assigner = Assigner.createAndStart(
       assignerConf,
       dynamicConfigProvider,
@@ -397,7 +499,9 @@ class AssignerSuite extends DatabricksTest with TestName {
       "localhost",
       ASSIGNER_CLUSTER_URI,
       KubernetesTargetWatcher.NoOpFactory,
-      PreferredAssignerTestHelper.noOpMembershipCheckerFactory
+      localClusterMembershipCheckerFactory = checkerFactory,
+      remoteClusterMembershipCheckerFactoryOpt = None,
+      assignerServiceInfoOpt = None
     )
 
     Await.result(assigner.forTest.stopAsync(), Duration.Inf)
@@ -652,7 +756,8 @@ class AssignerSuite extends DatabricksTest with TestName {
             requestTarget = target,
             callerService = "unknown",
             metricsKey = MetricsKey(isClerk = true, LATEST_VERSION),
-            handlerLocation = handlerLocations(i)
+            handlerLocation = handlerLocations(i),
+            alternativeTargetOpt = None
           )
       )
 
@@ -736,7 +841,10 @@ class AssignerSuite extends DatabricksTest with TestName {
       timeout = 1.second,
       ClerkData,
       supportsSerializedAssignment = true,
-      redirectTokenOpt = None
+      redirectTokenOpt = None,
+      alternativeTargetOpt = None,
+      clusterUriOpt = None,
+      regionUriOpt = None
     )
     val sliceletRequest = ClientRequest(
       target,
@@ -748,10 +856,14 @@ class AssignerSuite extends DatabricksTest with TestName {
         SliceletState.Running,
         "localhostNamespace",
         attributedLoads = Vector.empty,
-        unattributedLoadOpt = None
+        unattributedLoadOpt = None,
+        keyCardinalityEstimateOpt = None
       ),
       supportsSerializedAssignment = true,
-      redirectTokenOpt = None
+      redirectTokenOpt = None,
+      alternativeTargetOpt = None,
+      clusterUriOpt = None,
+      regionUriOpt = None
     )
 
     // Verify: The assigner returns the default suggested RPC timeout.
@@ -771,7 +883,9 @@ class AssignerSuite extends DatabricksTest with TestName {
     )
     val (testAssigner2, index2): (TestAssigner, Int) = testEnv.addAssigner(testAssignerConf2)
     val stub2: AssignmentServiceStub = watchStubManager.createWatchStub(
-      Some(URI.create(s"http://localhost:${testAssigner2.localUri.getPort}"))
+      redirectAddressOpt = Some(URI.create(s"http://localhost:${testAssigner2.localUri.getPort}")),
+      target = Target("test"),
+      clientIdOpt = None
     )
     // Verify: The assigner should return different watch server suggested RPC timeout
     // configurations for the Clerk and the Slicelet.
@@ -960,6 +1074,453 @@ class AssignerSuite extends DatabricksTest with TestName {
 
     configuredSlicelet.forTest.stop()
     unconfiguredSlicelet.forTest.stop()
+  }
+
+  test("Assigner-generated assignments carry provided assigner service information") {
+    // Test plan: Start an Assigner with service information and a Slicelet that causes the Assigner
+    // to generate an initial assignment. Verify that the generated assignment carries the same
+    // service information.
+    val assignerServiceInfo: AssignerServiceInfo =
+      AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
+    val localTestEnv: InternalDicerTestEnvironment = InternalDicerTestEnvironment.create(
+      assignerServiceInfoOpt = Some(assignerServiceInfo)
+    )
+    val target = Target(getSafeName)
+
+    try {
+      localTestEnv.createSlicelet(target).start(selfPort = 1234, listenerOpt = None)
+
+      AssertionWaiter("Waiting for assignment with Assigner service information").await {
+        val assignment: Assignment = TestUtils
+          .awaitResult(localTestEnv.testAssigner.getAssignment(target), Duration.Inf)
+          .getOrElse(fail("Assigner has not yet generated an assignment"))
+
+        assert(assignment.assignerServiceInfoOpt == Some(assignerServiceInfo))
+      }
+    } finally {
+      localTestEnv.stop()
+    }
+  }
+
+  test("use_alternative_target on: canonicalize when present; reject when absent or mismatched") {
+    // Test plan: Verify the Assigner's KubernetesTarget -> AppTarget canonicalization at the
+    // handleWatch ingress when a target's advanced config has use_alternative_target enabled:
+    // (1) a watch carrying alternative_target is served, and is canonicalized to the AppTarget
+    //     identity (the watch returns the assignment frozen under the AppTarget identity);
+    // (2) a watch omitting alternative_target fires a Caching.CRITICAL alert
+    //     (ASSIGNER_MISSING_EXPECTED_ALTERNATIVE_TARGET) and is rejected with FAILED_PRECONDITION;
+    // (3) for a target with it disabled, a watch omitting alternative_target is served unchanged;
+    //     and
+    // (4) a watch whose alternative_target names a different target fires a Caching.CRITICAL alert
+    //     (ASSIGNER_MISMATCHED_ALTERNATIVE_TARGET_NAME) and is rejected with INVALID_ARGUMENT.
+    // Do this by configuring one target for which using the alternative target is enabled, and one
+    // for which it is disabled, freezing an assignment for each so watches return promptly, driving
+    // watch RPCs, and checking the returned assignment identity, the rejection statuses, and the
+    // PrefixLogger error_count metric. The enabled target's name must be a valid AppTarget name
+    // (stricter than KubernetesTarget), since it is reused for the canonicalized AppTarget
+    // identity.
+    val enabledTargetName: TargetName = TargetName(getSafeAppTargetName)
+    val enabledTarget: Target = Target(enabledTargetName.value)
+    val disabledTargetName: TargetName = TargetName(getSuffixedSafeName(suffix = "disabled"))
+    val disabledTarget: Target = Target(disabledTargetName.value)
+    val alternativeInstanceId: String = "inst-1"
+    val alternativeTarget: AppTarget = Target.createAppTarget(
+      enabledTargetName.value,
+      alternativeInstanceId
+    ) match {
+      case appTarget: AppTarget => appTarget
+      case other => fail(s"expected an AppTarget, got ${other.getClass.getName}")
+    }
+
+    val enabledConfig: InternalTargetConfig =
+      InternalTargetConfig.forTest.DEFAULT.copy(useAlternativeTarget = true)
+    val disabledConfig: InternalTargetConfig =
+      InternalTargetConfig.forTest.DEFAULT.copy(useAlternativeTarget = false)
+    val staticTargetConfigMap: InternalTargetConfigMap = InternalTargetConfigMap.create(
+      configScopeOpt = None,
+      targetConfigMap = Map(
+        enabledTargetName -> enabledConfig,
+        disabledTargetName -> disabledConfig
+      )
+    )
+    val localTestEnv = InternalDicerTestEnvironment.create(
+      targetConfigMap = staticTargetConfigMap,
+      withDefaultTargetConfig = false
+    )
+
+    try {
+      // Freeze an assignment for each target identity that will be served so the single watch per
+      // scenario below returns at once instead of long-polling: each watch carries
+      // Generation.EMPTY, and a frozen assignment sits at a newer generation, so the server always
+      // has something newer to return. A re-watch that already held the frozen generation would
+      // find nothing newer and long-poll until WATCH_RPC_TIMEOUT - 5s (see
+      // WatchServerHelper.getWatchProcessingTimeout); no scenario re-watches, so none block. The
+      // enabled target is served under its canonicalized AppTarget, so the assignment is frozen
+      // under the AppTarget; the disabled target is served as-is. A watch that returns the
+      // AppTarget's frozen assignment is direct evidence that the request was canonicalized, since
+      // no assignment exists under the enabled target's KubernetesTarget identity.
+      val canonicalizedAssignment: Assignment = TestUtils.awaitResult(
+        localTestEnv.setAndFreezeAssignment(alternativeTarget, sampleProposal()),
+        Duration.Inf
+      )
+      val disabledAssignment: Assignment = TestUtils.awaitResult(
+        localTestEnv.setAndFreezeAssignment(disabledTarget, sampleProposal()),
+        Duration.Inf
+      )
+
+      val localStubManager = new WatchStubManager(
+        clientName = "dicer-assigner",
+        subscriberDebugName = "alternative-target-canonicalize-test",
+        defaultWatchAddress = URI.create(s"http://localhost:${localTestEnv.getAssignerPort}"),
+        tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
+        watchFromDataPlane = false
+      )
+      val enabledStub: AssignmentServiceStub = localStubManager.createWatchStub(
+        redirectAddressOpt = None,
+        target = enabledTarget,
+        clientIdOpt = None
+      )
+
+      // Builds a Clerk watch request for `target` with the given alternativeTarget.
+      // Canonicalization is client-agnostic, so a Clerk request exercises the same ingress path as
+      // a Slicelet request.
+      def watchRequest(target: Target, alternativeTargetOpt: Option[AppTarget]): ClientRequest = {
+        ClientRequest(
+          target,
+          SyncAssignmentState.KnownGeneration(Generation.EMPTY),
+          "alternative-target-canonicalize-test",
+          WATCH_RPC_TIMEOUT,
+          ClerkData,
+          supportsSerializedAssignment = true,
+          redirectTokenOpt = None,
+          alternativeTargetOpt = alternativeTargetOpt,
+          clusterUriOpt = None,
+          regionUriOpt = None
+        )
+      }
+
+      // The Assigner's alert logger uses an empty prefix (it is on the Assigner companion object).
+      val missingAlertTracker: MetricUtils.ChangeTracker[Int] = MetricUtils.ChangeTracker { () =>
+        MetricUtils.getPrefixLoggerErrorCount(
+          Severity.CRITICAL,
+          CachingErrorCode.ASSIGNER_MISSING_EXPECTED_ALTERNATIVE_TARGET,
+          prefix = ""
+        )
+      }
+      val mismatchAlertTracker: MetricUtils.ChangeTracker[Int] = MetricUtils.ChangeTracker { () =>
+        MetricUtils.getPrefixLoggerErrorCount(
+          Severity.CRITICAL,
+          CachingErrorCode.ASSIGNER_MISMATCHED_ALTERNATIVE_TARGET_NAME,
+          prefix = ""
+        )
+      }
+
+      // (1) Enabled target carrying alternative_target: served, no alert, and canonicalized. The
+      // watch is sent with the enabled target's KubernetesTarget but returns the assignment frozen
+      // under the AppTarget, which is only possible if the request was canonicalized to the
+      // AppTarget identity.
+      val enabledResponse: ClientResponse =
+        performWatchCallSync(enabledStub, watchRequest(enabledTarget, Some(alternativeTarget)))
+      assert(
+        enabledResponse.syncState == SyncAssignmentState.KnownAssignment(canonicalizedAssignment)
+      )
+      assert(missingAlertTracker.totalChange() == 0)
+
+      // (2) Enabled target omitting alternative_target: fires the alert and is rejected.
+      val exception: StatusRuntimeException =
+        assertThrow[StatusRuntimeException]("must set alternative_target") {
+          performWatchCallSync(
+            enabledStub,
+            watchRequest(enabledTarget, alternativeTargetOpt = None)
+          )
+        }
+      assert(exception.getStatus.getCode == Code.FAILED_PRECONDITION)
+      assert(missingAlertTracker.totalChange() == 1)
+
+      // (3) Disabled target omitting alternative_target: served unchanged under its own identity,
+      // no alert.
+      val disabledStub: AssignmentServiceStub = localStubManager.createWatchStub(
+        redirectAddressOpt = None,
+        target = disabledTarget,
+        clientIdOpt = None
+      )
+      val disabledResponse: ClientResponse =
+        performWatchCallSync(
+          disabledStub,
+          watchRequest(disabledTarget, alternativeTargetOpt = None)
+        )
+      assert(disabledResponse.syncState == SyncAssignmentState.KnownAssignment(disabledAssignment))
+      assert(missingAlertTracker.totalChange() == 1)
+
+      // (4) Enabled target carrying an alternative_target that names a different target: fires a
+      // Caching.CRITICAL alert (ASSIGNER_MISMATCHED_ALTERNATIVE_TARGET_NAME) and is rejected with
+      // INVALID_ARGUMENT, since routing is decided on the incoming target name but the request
+      // would otherwise be served under a differently-named target.
+      val mismatchedAlternativeTarget: AppTarget = Target.createAppTarget(
+        disabledTargetName.value,
+        alternativeInstanceId
+      ) match {
+        case appTarget: AppTarget => appTarget
+        case other => fail(s"expected an AppTarget, got ${other.getClass.getName}")
+      }
+      val mismatchException: StatusRuntimeException =
+        assertThrow[StatusRuntimeException]("names a different target") {
+          performWatchCallSync(
+            enabledStub,
+            watchRequest(enabledTarget, Some(mismatchedAlternativeTarget))
+          )
+        }
+      assert(mismatchException.getStatus.getCode == Code.INVALID_ARGUMENT)
+      assert(mismatchAlertTracker.totalChange() == 1)
+      // The missing-alternative_target alert count is unchanged: the mismatch fires a distinct
+      // alert.
+      assert(missingAlertTracker.totalChange() == 1)
+    } finally {
+      localTestEnv.stop()
+    }
+  }
+
+  test("Standby does not fire the missing-alternative-target alert; it redirects first") {
+    // Test plan: Verify that a standby Assigner does not fire the
+    // ASSIGNER_MISSING_EXPECTED_ALTERNATIVE_TARGET alert for a use_alternative_target-enabled
+    // target whose watch omits alternative_target -- the alert is checked only on the Preferred
+    // branch of handleWatch, while a standby redirects the request before reaching it. Do this by
+    // building a single Assigner whose preferred-assigner driver always reports a standby role (a
+    // test driver publishing NoAssigner, which avoids the etcd-backed election machinery a real
+    // standby needs), driving a watch for a use_alternative_target-enabled target with no
+    // alternative_target, and asserting the watch is redirected (not served or rejected) and the
+    // alert count is unchanged.
+    val enabledTargetName: TargetName = TargetName(getSafeAppTargetName)
+    val enabledTarget: Target = Target(enabledTargetName.value)
+    val enabledConfig: InternalTargetConfig =
+      InternalTargetConfig.forTest.DEFAULT.copy(useAlternativeTarget = true)
+    val staticTargetConfigMap: InternalTargetConfigMap = InternalTargetConfigMap.create(
+      configScopeOpt = None,
+      targetConfigMap = Map(enabledTargetName -> enabledConfig)
+    )
+
+    // A driver that always reports this Assigner as a standby, so handleWatch takes the standby
+    // branch and redirects without evaluating the alert. The membership checker the factory
+    // receives is unused, since this fake driver runs no election.
+    val standbyDriverConfig: TestAssigner.Config = TestAssigner.Config.create(
+      preferredAssignerDriverFactoryOverride =
+        Some((_: SequentialExecutionContext, _) => new StandbyPreferredAssignerDriver)
+    )
+    val standbyTestEnv: InternalDicerTestEnvironment = InternalDicerTestEnvironment.create(
+      config = standbyDriverConfig,
+      targetConfigMap = staticTargetConfigMap,
+      withDefaultTargetConfig = false
+    )
+    try {
+      val standbyStubManager = new WatchStubManager(
+        clientName = "dicer-assigner",
+        subscriberDebugName = "standby-alternative-target-alert-test",
+        defaultWatchAddress = URI.create(s"http://localhost:${standbyTestEnv.getAssignerPort}"),
+        tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
+        watchFromDataPlane = false
+      )
+      val standbyStub: AssignmentServiceStub = standbyStubManager.createWatchStub(
+        redirectAddressOpt = None,
+        target = enabledTarget,
+        clientIdOpt = None
+      )
+
+      // The Assigner's alert logger uses an empty prefix (it is on the Assigner companion object).
+      val alertCountTracker: ChangeTracker[Int] = ChangeTracker { () =>
+        MetricUtils.getPrefixLoggerErrorCount(
+          Severity.CRITICAL,
+          CachingErrorCode.ASSIGNER_MISSING_EXPECTED_ALTERNATIVE_TARGET,
+          prefix = ""
+        )
+      }
+
+      // A standby redirects the watch before the alert check. With a NoAssigner value there is no
+      // known preferred assigner, so the redirect carries an empty address (the client is sent to a
+      // random assigner) rather than pointing at a specific URI.
+      val standbyResponse: ClientResponse = performWatchCallSync(
+        standbyStub,
+        ClientRequest(
+          enabledTarget,
+          SyncAssignmentState.KnownGeneration(Generation.EMPTY),
+          "standby-alternative-target-alert-test",
+          WATCH_RPC_TIMEOUT,
+          ClerkData,
+          supportsSerializedAssignment = true,
+          redirectTokenOpt = None,
+          alternativeTargetOpt = None,
+          clusterUriOpt = None,
+          regionUriOpt = None
+        )
+      )
+      assert(standbyResponse.redirect.addressOpt.isEmpty)
+      assert(alertCountTracker.totalChange() == 0)
+    } finally {
+      standbyTestEnv.stop()
+    }
+  }
+
+  test("Divergent alternative_targets for one target are recorded under distinct labels") {
+    // Test plan: Verify that the Assigner records the reported-alternative-targets counter once per
+    // distinct (incoming target, reported alternative_target) label set with each of its five
+    // labels wired to the right source, and that a watch reporting no alternative_target is
+    // recorded under empty identity labels. Verify this by sending watches for one KubernetesTarget
+    // reporting two distinct alternative_targets (the divergence case), one AppTarget reporting a
+    // third, a separate KubernetesTarget reporting none, and a Slicelet in the assigner's own
+    // cluster reporting a fourth, then asserting the per-label-set counts (a foreign-cluster
+    // KubernetesTarget keeps its cluster while a same-cluster one has it stripped, and the
+    // AppTarget carries an instance id, so every label takes an empty and a non-empty value) and
+    // that a never-reported label set is absent. Each incoming target exercises a single scenario
+    // so per-target counts cannot mix.
+    val kubernetesTarget: Target =
+      Target.createKubernetesTarget(DP1_CLUSTER_URI, "incoming-k8s-name")
+    val appTarget: AppTarget = createAppTargetOrFail("incoming-app-name", "incoming-app-inst")
+    // A separate KubernetesTarget used only for the watch that reports no alternative_target.
+    val notReportingTarget: Target =
+      Target.createKubernetesTarget(DP1_CLUSTER_URI, "not-reporting-k8s-name")
+    // A Slicelet in the assigner's own cluster. The assigner unmarshaller strips the cluster on
+    // ingest since it matches the assigner's own, so the request is recorded under the short-form
+    // target (empty targetCluster); `sameClusterTarget` is that canonical form used for assertions.
+    val sameClusterSliceletTarget: Target =
+      Target.createKubernetesTarget(ASSIGNER_CLUSTER_URI, "same-cluster-slicelet")
+    val sameClusterTarget: Target = Target("same-cluster-slicelet")
+    val reportedIdentityA: AppTarget = createAppTargetOrFail("reported-a", "reported-inst-a")
+    val reportedIdentityB: AppTarget = createAppTargetOrFail("reported-b", "reported-inst-b")
+    val reportedForAppTarget: AppTarget = createAppTargetOrFail("reported-c", "reported-inst-c")
+    val reportedForSameCluster: AppTarget = createAppTargetOrFail("reported-d", "reported-inst-d")
+
+    // Freeze an assignment under each incoming target so its watches return at once instead of
+    // long-polling: the watch carries Generation.EMPTY and a frozen assignment sits at a newer
+    // generation, so the server always has something newer to return.
+    for (incomingTarget: Target <- Seq(
+        kubernetesTarget,
+        appTarget,
+        notReportingTarget,
+        sameClusterSliceletTarget
+      )) {
+      TestUtils.awaitResult(
+        testAssigner.setAndFreezeAssignment(incomingTarget, sampleProposal()),
+        Duration.Inf
+      )
+    }
+
+    // Builds a Slicelet watch for `incomingTarget` reporting `alternativeTargetOpt`. The metric is
+    // client-agnostic, but a Slicelet request models the common case: a Slicelet derives its
+    // alternative_target from its own App Identifier.
+    def watchRequest(
+        incomingTarget: Target,
+        alternativeTargetOpt: Option[AppTarget]): ClientRequest =
+      ClientRequest(
+        incomingTarget,
+        SyncAssignmentState.KnownGeneration(Generation.EMPTY),
+        "reported-alternative-target-test",
+        WATCH_RPC_TIMEOUT,
+        SliceletData(
+          TestSliceUtils.createTestSquid("reported-alternative-target-test"),
+          SliceletState.Running,
+          "localhostNamespace",
+          attributedLoads = Vector.empty,
+          unattributedLoadOpt = None,
+          keyCardinalityEstimateOpt = None
+        ),
+        supportsSerializedAssignment = true,
+        redirectTokenOpt = None,
+        alternativeTargetOpt = alternativeTargetOpt,
+        clusterUriOpt = None,
+        regionUriOpt = None
+      )
+
+    def watchStubFor(incomingTarget: Target): AssignmentServiceStub =
+      watchStubManager.createWatchStub(
+        redirectAddressOpt = None,
+        target = incomingTarget,
+        clientIdOpt = None
+      )
+
+    // Tracks the change in the reported-alternative-targets counter for `incomingTarget` reporting
+    // `alternativeTargetOpt` (a None models a watch that reported no alternative_target, which
+    // records empty identity labels). A change tracker is used instead of an absolute assertion so
+    // the counts are independent of any other test that watched the same targets against the
+    // process-global registry. Label values are computed from the target objects with the same
+    // accessors as the production code.
+    def reportedCountTracker(
+        incomingTarget: Target,
+        alternativeTargetOpt: Option[AppTarget]): ChangeTracker[Double] = {
+      val (alternativeTargetName, alternativeTargetInstanceId): (String, String) =
+        alternativeTargetOpt match {
+          case Some(alternativeTarget) =>
+            (alternativeTarget.getTargetNameLabel, alternativeTarget.getTargetInstanceIdLabel)
+          case None => ("", "")
+        }
+      ChangeTracker[Double](
+        () =>
+          MetricUtils.getMetricValue(
+            CollectorRegistry.defaultRegistry,
+            metric = "dicer_assigner_watch_requests_alternative_targets_total",
+            labels = Map(
+              "targetCluster" -> incomingTarget.getTargetClusterLabel,
+              "targetName" -> incomingTarget.getTargetNameLabel,
+              "targetInstanceId" -> incomingTarget.getTargetInstanceIdLabel,
+              "alternativeTargetName" -> alternativeTargetName,
+              "alternativeTargetInstanceId" -> alternativeTargetInstanceId
+            )
+          )
+      )
+    }
+
+    // Capture counter baselines before sending any watches so the assertions below measure only
+    // the change caused by this test.
+    val kubernetesReportsA: ChangeTracker[Double] =
+      reportedCountTracker(kubernetesTarget, Some(reportedIdentityA))
+    val kubernetesReportsB: ChangeTracker[Double] =
+      reportedCountTracker(kubernetesTarget, Some(reportedIdentityB))
+    val appReportsIdentity: ChangeTracker[Double] =
+      reportedCountTracker(appTarget, Some(reportedForAppTarget))
+    val notReportingReportsNone: ChangeTracker[Double] =
+      reportedCountTracker(notReportingTarget, alternativeTargetOpt = None)
+    val sameClusterReports: ChangeTracker[Double] =
+      reportedCountTracker(sameClusterTarget, Some(reportedForSameCluster))
+    val appNeverReportsKubernetesIdentity: ChangeTracker[Double] =
+      reportedCountTracker(appTarget, Some(reportedIdentityA))
+
+    val kubernetesStub: AssignmentServiceStub = watchStubFor(kubernetesTarget)
+    val appStub: AssignmentServiceStub = watchStubFor(appTarget)
+    val notReportingStub: AssignmentServiceStub = watchStubFor(notReportingTarget)
+    val sameClusterStub: AssignmentServiceStub = watchStubFor(sameClusterSliceletTarget)
+
+    // The one KubernetesTarget reports identity A twice and a divergent identity B once; the
+    // AppTarget reports a third identity; a separate KubernetesTarget reports no
+    // alternative_target; and the same-cluster Slicelet reports a fourth identity once.
+    performWatchCallSync(kubernetesStub, watchRequest(kubernetesTarget, Some(reportedIdentityA)))
+    performWatchCallSync(kubernetesStub, watchRequest(kubernetesTarget, Some(reportedIdentityA)))
+    performWatchCallSync(kubernetesStub, watchRequest(kubernetesTarget, Some(reportedIdentityB)))
+    performWatchCallSync(appStub, watchRequest(appTarget, Some(reportedForAppTarget)))
+    performWatchCallSync(
+      notReportingStub,
+      watchRequest(notReportingTarget, alternativeTargetOpt = None)
+    )
+    performWatchCallSync(
+      sameClusterStub,
+      watchRequest(sameClusterSliceletTarget, Some(reportedForSameCluster))
+    )
+
+    // The KubernetesTarget's two divergent reported identities land under separate label sets, so
+    // the divergence is observable; its non-empty targetCluster and empty targetInstanceId are
+    // exercised here.
+    assert(kubernetesReportsA.totalChange() == 2.0)
+    assert(kubernetesReportsB.totalChange() == 1.0)
+    // The AppTarget row exercises the empty targetCluster and non-empty targetInstanceId.
+    assert(appReportsIdentity.totalChange() == 1.0)
+    // The separate KubernetesTarget's watch that reported no alternative_target is recorded under
+    // empty identity labels, so a client not reporting one at all is observable alongside outright
+    // divergence.
+    assert(notReportingReportsNone.totalChange() == 1.0)
+    // The same-cluster Slicelet's cluster is stripped on ingest, so it is recorded under the
+    // short-form target with an empty targetCluster, matching `sameClusterTarget`.
+    assert(sameClusterReports.totalChange() == 1.0)
+    // A never-reported label set is unchanged, confirming the incoming-target and
+    // alternative_target labels are recorded as one coupled set rather than smeared independently
+    // across watches.
+    assert(appNeverReportsKubernetesIdentity.totalChange() == 0.0)
   }
 
 }

@@ -33,6 +33,15 @@ service ClerkTestHarness {
   // Calls the `get_stub_for_key` method on a previously created Rust `Clerk` instance.
   rpc ClerkGetStubForKey(ClerkGetStubForKeyRequestP) returns (ClerkGetStubForKeyResponseP);
 
+  // Calls the two-level sharding `get_stub_for_key` friend accessor for a previously created Rust
+  // `Clerk` instance.
+  rpc ClerkGetStubForKeyTwoLevel(ClerkGetStubForKeyTwoLevelRequestP)
+      returns (ClerkGetStubForKeyTwoLevelResponseP);
+
+  // Checks the invariants of the precomputed two-level sharding state for a previously created
+  // Rust `Clerk` instance, failing the RPC if an invariant is violated.
+  rpc ClerkCheckInvariants(ClerkCheckInvariantsRequestP) returns (ClerkCheckInvariantsResponseP);
+
   // Samples `get_stub_for_key` multiple times and returns a histogram of results.
   rpc ClerkSampleStubForKey(ClerkSampleStubForKeyRequestP) returns (ClerkSampleStubForKeyResponseP);
 
@@ -42,6 +51,10 @@ service ClerkTestHarness {
 
   // Gets the debug name of a Rust `Clerk` instance.
   rpc GetClerkDebugName(GetClerkDebugNameRequestP) returns (GetClerkDebugNameResponseP);
+
+  // Gets the latest assignment generation known to a Rust `Clerk`.
+  rpc GetClerkLatestGeneration(GetClerkLatestGenerationRequestP)
+      returns (GetClerkLatestGenerationResponseP);
 }
 
 // A request to create a Rust `Clerk`.
@@ -90,6 +103,33 @@ message ClerkGetStubForKeyResponseP {
   // The resource address for the key, if one is assigned.
   optional string resource_address = 1;
 }
+
+// A request to call the two-level sharding `get_stub_for_key` accessor on a Rust `Clerk`.
+message ClerkGetStubForKeyTwoLevelRequestP {
+  // The ID for the Clerk that was previously returned by a `CreateClerk` request.
+  optional int64 clerk_id = 1;
+
+  // The raw bytes of the primary slice key, which selects the set of resources.
+  optional bytes primary_slice_key = 2;
+
+  // The raw bytes of the secondary slice key, which selects one resource among the set.
+  optional bytes secondary_slice_key = 3;
+}
+
+// The response to a `ClerkGetStubForKeyTwoLevel` request.
+message ClerkGetStubForKeyTwoLevelResponseP {
+  // The resource address for the key pair, if one is assigned.
+  optional string resource_address = 1;
+}
+
+// A request to check the two-level sharding invariants on a Rust `Clerk`.
+message ClerkCheckInvariantsRequestP {
+  // The ID for the Clerk that was previously returned by a `CreateClerk` request.
+  optional int64 clerk_id = 1;
+}
+
+// The response to a `ClerkCheckInvariants` request.
+message ClerkCheckInvariantsResponseP {}
 
 // A request to sample `get_stub_for_key` multiple times for statistical testing.
 message ClerkSampleStubForKeyRequestP {
@@ -147,4 +187,16 @@ message GetClerkDebugNameRequestP {
 message GetClerkDebugNameResponseP {
   // The debug name of the Clerk.
   optional string debug_name = 1;
+}
+
+// A request to get the latest assignment generation known to a Rust `Clerk`.
+message GetClerkLatestGenerationRequestP {
+  // The ID for the Clerk that was previously returned by a `CreateClerk` request.
+  optional int64 clerk_id = 1;
+}
+
+// The response to a `GetClerkLatestGeneration` request.
+message GetClerkLatestGenerationResponseP {
+  // The latest assignment generation known to the Clerk.
+  optional GenerationP generation = 1;
 }

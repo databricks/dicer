@@ -8,21 +8,21 @@ trait ProbeStatusSource {
   def getStatus: ProbeStatus
 }
 
-/**
- * OSS wrapper for ProbeStatuses.
- *
- * Re-exports ProbeStatuses from the ReadinessProbeTracker wrapper to maintain the same import
- * path as the internal version.
- */
+/** ProbeStatuses contains various probe status definitions. */
 object ProbeStatuses {
   val OK_STATUS: Int =
     com.databricks.rpc.armeria.ProbeStatuses.OK_STATUS
   val NOT_YET_READY_STATUS: Int =
     com.databricks.rpc.armeria.ProbeStatuses.NOT_YET_READY_STATUS
+  val NEED_RESTART_STATUS: Int = 503
 
   def notYetReady(serviceName: String): ProbeStatus =
     ProbeStatus(NOT_YET_READY_STATUS, s"The $serviceName has not yet been initialized")
 
   def ok(serviceName: String): ProbeStatus =
     ProbeStatus(OK_STATUS, s"$serviceName is available")
+
+  /** Returns the ProbeStatus that should be returned from a failed liveness probe. */
+  def needRestart(serviceName: String): ProbeStatus =
+    ProbeStatus(NEED_RESTART_STATUS, s"$serviceName needs restart")
 }

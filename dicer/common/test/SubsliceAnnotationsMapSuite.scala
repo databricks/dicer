@@ -23,6 +23,7 @@ class SubsliceAnnotationsMapSuite extends DatabricksTest {
     val assignment: Assignment = createAssignment(
       generation = 50,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- "Balin") @@ 10 -> Seq("pod1"),
       ("Balin" -- "Kili") @@ 20 -> Seq("pod1") | Map(
         "pod1" -> Seq(
@@ -64,6 +65,7 @@ class SubsliceAnnotationsMapSuite extends DatabricksTest {
       val assignment: Assignment = createAssignment(
         generation = 42 ## 67,
         consistencyMode,
+        assignerServiceInfoOpt = None,
         ("" -- fp("Dori")) @@ (42 ## 34) -> Seq("Pod2"),
         (fp("Dori") -- fp("Fili")) @@ (42 ## 24) -> Seq("Pod0"),
         (fp("Fili") -- fp("Kili")) @@ (42 ## 45) -> Seq("Pod1"),
@@ -83,10 +85,10 @@ class SubsliceAnnotationsMapSuite extends DatabricksTest {
       // In addition to assigned resources, produce variant SQUIDs with the same address to test
       // behavior that needs to be different depending on the consistency mode.
       val altIncarnationResources = Seq[Squid](
-        createTestSquid("Pod0", salt = "'"),
-        createTestSquid("Pod1", salt = "'"),
-        createTestSquid("Pod2", salt = "'"),
-        createTestSquid("Pod3", salt = "'")
+        createTestSquid("Pod0", creationTimeOffset = 1),
+        createTestSquid("Pod1", creationTimeOffset = 1),
+        createTestSquid("Pod2", creationTimeOffset = 1),
+        createTestSquid("Pod3", creationTimeOffset = 1)
       )
       for (tuple <- testData) {
         val (key, assignedResourceUri, sliceGeneration): (SliceKey, String, Generation) = tuple
@@ -158,7 +160,7 @@ class SubsliceAnnotationsMapSuite extends DatabricksTest {
           case None => createRandomProposal(numSlices, resources, numMaxReplicas, rng)
         }
         val assignment: Assignment =
-          ProposedAssignment(predecessorOpt, proposal)
+          ProposedAssignment(predecessorOpt, sliceMap = proposal, assignerServiceInfoOpt = None)
             .commit(
               isFrozen = false,
               AssignmentConsistencyMode.Affinity,
@@ -221,6 +223,7 @@ class SubsliceAnnotationsMapSuite extends DatabricksTest {
       createAssignment(
         generation = 1,
         AssignmentConsistencyMode.Affinity,
+        assignerServiceInfoOpt = None,
         ("" -- ∞) @@ 1 -> Seq(resource1)
       )
 
@@ -230,11 +233,12 @@ class SubsliceAnnotationsMapSuite extends DatabricksTest {
       ("foo" -- ∞) -> Seq(resource1)
     )
     val assignment2: Assignment =
-      ProposedAssignment(Some(assignment1), proposal2).commit(
-        isFrozen = false,
-        AssignmentConsistencyMode.Affinity,
-        generation = 32
-      )
+      ProposedAssignment(Some(assignment1), sliceMap = proposal2, assignerServiceInfoOpt = None)
+        .commit(
+          isFrozen = false,
+          AssignmentConsistencyMode.Affinity,
+          generation = 32
+        )
     assert(TestSliceUtils.hasStateTransfers(assignment2))
 
     val resource1Map = SubsliceAnnotationsMap(assignment2, resource1)

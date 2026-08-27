@@ -28,7 +28,6 @@ import com.databricks.dicer.common.{
 }
 import com.databricks.dicer.assigner.config.InternalTargetConfigMetrics
 import com.databricks.api.proto.dicer.common.ClientResponseP
-import com.databricks.backend.common.util.Project
 import com.databricks.caching.util.TestUtils.TestName
 import com.databricks.conf.Configs
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
@@ -88,13 +87,11 @@ class AssignerGeneratorGCSuite extends DatabricksTest with TestName {
 
   /** Manages the creation of watch stubs for this test suite. */
   private val watchStubManager = new WatchStubManager(
-    clientName = Project.DicerAssigner.name,
+    clientName = "dicer-assigner",
     subscriberDebugName = "assigner-generator-clustertype2-test",
     defaultWatchAddress = URI.create(s"http://localhost:${testEnv.getAssignerPort}"),
     tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
-    watchFromDataPlane = false,
-    target = Target("test"),
-    clientIdOpt = None
+    watchFromDataPlane = false
   )
 
   /** RPC stub for sending Watch requests to the Assigner.  */
@@ -102,7 +99,11 @@ class AssignerGeneratorGCSuite extends DatabricksTest with TestName {
 
   override def beforeAll(): Unit = {
     // Create a stub that can be used to communicate with the Assigner to get the assignment.
-    stub = watchStubManager.createWatchStub(redirectAddressOpt = None)
+    stub = watchStubManager.createWatchStub(
+      redirectAddressOpt = None,
+      target = Target("test"),
+      clientIdOpt = None
+    )
   }
 
   /** Issue a watch request as if sent by a Clerk. */
@@ -117,7 +118,10 @@ class AssignerGeneratorGCSuite extends DatabricksTest with TestName {
       timeout = 5.seconds,
       subscriberData = ClerkData,
       supportsSerializedAssignment = true,
-      redirectTokenOpt = None
+      redirectTokenOpt = None,
+      alternativeTargetOpt = None,
+      clusterUriOpt = None,
+      regionUriOpt = None
     )
     issueWatchCall(stub, request)
   }
@@ -137,10 +141,14 @@ class AssignerGeneratorGCSuite extends DatabricksTest with TestName {
         SliceletState.Running,
         "localhostNamespace",
         attributedLoads = Vector.empty,
-        unattributedLoadOpt = None
+        unattributedLoadOpt = None,
+        keyCardinalityEstimateOpt = None
       ),
       supportsSerializedAssignment = true,
-      redirectTokenOpt = None
+      redirectTokenOpt = None,
+      alternativeTargetOpt = None,
+      clusterUriOpt = None,
+      regionUriOpt = None
     )
     issueWatchCall(stub, request)
   }

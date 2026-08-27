@@ -49,6 +49,9 @@ message SimpleDiffAssignmentP {
   optional GenerationP partial_diff_generation = 3;
 
   repeated SimpleSliceAssignmentP slice_assignments = 4;
+
+  // OPTIONAL. The service identity of the Assigner that produced this assignment.
+  optional DiffAssignmentP.AssignerServiceInfoP assigner_service_info = 5;
 }
 
 message GenerationTestDataP {
@@ -234,11 +237,8 @@ message TargetTestDataP {
     optional string expected_error_message = 3;
   }
 
-  // Valid identifiers that can be used as app target names.
-  repeated string valid_app_target_names = 4;
-
-  // Invalid identifiers that cannot be used as app target names.
-  repeated string invalid_app_target_names = 5;
+  reserved 4, 5;
+  reserved "valid_app_target_names", "invalid_app_target_names";
 
   // Valid identifiers that can be used as app target instance IDs.
   repeated string valid_instance_ids = 6;
@@ -310,6 +310,9 @@ message DiffAssignmentTestDataP {
 
     optional string expected_error = 5;
   }
+
+  // Invalid Assigner service info protos that DiffAssignment.fromProto should ignore.
+  repeated DiffAssignmentP.AssignerServiceInfoP invalid_assigner_service_infos = 6;
 }
 
 message AssignmentTestDataP {
@@ -368,7 +371,7 @@ message AssignmentTestDataP {
     message CallP {
       optional string slice_key = 1;
       optional string resource = 2;
-      optional string resource_salt = 3;
+      optional int64 resource_creation_time_offset = 3;
       optional bool expected_result = 4;
     }
 
@@ -382,7 +385,7 @@ message AssignmentTestDataP {
     // A resource to call the method for, and its expected assigned slices.
     message CallP {
       optional string resource = 1;
-      optional string resource_salt = 2;
+      optional int64 resource_creation_time_offset = 2;
       repeated friend.SliceP expected_slices = 3;
     }
 
@@ -444,6 +447,31 @@ message TransferTestDataP {
   message ProtoValidityTestCaseP {
     optional string expected_error = 1;
     optional DiffAssignmentP.TransferP transfer = 2;
+  }
+}
+
+message AssignerServiceInfoTestDataP {
+  // A valid proto for round-trip serialization tests.
+  optional DiffAssignmentP.AssignerServiceInfoP round_trip_proto = 1;
+
+  // Test cases for validating that the AssignerServiceInfo constructor rejects invalid name and/or
+  // instance ID values.
+  repeated ConstructorValidationTestCaseP constructor_validation_test_cases = 2;
+  message ConstructorValidationTestCaseP {
+    optional string name = 1;
+    optional string instance_id = 2;
+    optional string expected_error = 3;
+  }
+
+  // Test cases for Rust field-getter tests and Scala/Rust string-representation tests.
+  repeated ValidInfoTestCaseP valid_info_test_cases = 3;
+  message ValidInfoTestCaseP {
+    // A valid proto to deserialize into an AssignerServiceInfo.
+    optional DiffAssignmentP.AssignerServiceInfoP proto = 1;
+
+    optional string expected_name = 2;
+    optional string expected_instance_id = 3;
+    optional string expected_to_string = 4;
   }
 }
 
@@ -597,6 +625,10 @@ message ClientRequestTestDataP {
 
   // Test cases for verifying that ClientRequest can round trip through the proto representation.
   repeated ClientRequestP round_tripping_cases = 2;
+
+  // Test cases for verifying that ClientRequest.fromProto parses successfully but drops an
+  // unrecognized (malformed, or well-formed but absent from IDM) cluster_uri / region_uri to None.
+  repeated ClientRequestP dropped_uri_cases = 3;
 
   message InvalidClientRequestTestCaseP {
     // Name of the test case, logically required.
@@ -868,8 +900,6 @@ message DpageViewHelpersTestDataP {
         optional bytes key = 1;
         optional double load = 2;
       }
-
-      // TODO(<internal bug>): Add more input fields.
     }
   }
 }

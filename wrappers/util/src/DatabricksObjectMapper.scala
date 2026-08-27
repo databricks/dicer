@@ -4,10 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.scala.DefaultScalaModule
 import com.fasterxml.jackson.module.scala.experimental.ScalaObjectMapper
 
-/**
- * Open source compatible version of DatabricksObjectMapper, providing JSON serialization and
- * deserialization with support for Scala types. Internally it delegates to a Jackson ObjectMapper.
- */
+/** Provides JSON serialization and deserialization with support for Scala types. */
 final class DatabricksObjectMapper private (delegate: ObjectMapper with ScalaObjectMapper) {
 
   /** Deserializes JSON string to a Scala type. */

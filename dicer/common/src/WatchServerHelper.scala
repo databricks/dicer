@@ -2,8 +2,11 @@ package com.databricks.dicer.common
 
 import scala.concurrent.duration._
 
+import com.databricks.ErrorCode
+import com.databricks.api.base.DatabricksServiceException
 import com.databricks.rpc.DatabricksServerWrapper
-import scala.concurrent.{ExecutionContext, Future}
+import scala.concurrent.Future
+import scala.util.control.NonFatal
 import java.util.concurrent.ExecutorService
 
 import com.databricks.rpc.RPCContext
@@ -12,8 +15,11 @@ import io.grpc.Grpc
 import io.grpc.InsecureServerCredentials
 import io.grpc.ServerBuilder
 import io.grpc.ServerCredentials
+import io.grpc.Status
 
+import com.databricks.caching.util.AlertOwnerTeam
 import com.databricks.caching.util.GenericRpcServiceBuilder
+import com.databricks.caching.util.SequentialExecutionContext
 import com.databricks.api.proto.dicer.common.{
   AssignmentServiceGrpc,
   ClientRequestP,
@@ -45,6 +51,25 @@ object WatchServerHelper {
    * It is used for both the server-side request limit and the client-side response limit.
    */
   val MAX_WATCH_MESSAGE_CONTENT_LENGTH_BYTES: Int = 4 * 1024 * 1024
+
+  /**
+   * Maps Databricks [[ErrorCode]]s to gRPC [[Status]]es. See [[normalizeExceptions]] for why this
+   * is needed.
+   */
+  private val STATUS_MAP: Map[ErrorCode, Status] = Map(
+    ErrorCode.UNKNOWN -> Status.UNKNOWN,
+    ErrorCode.NOT_FOUND -> Status.NOT_FOUND,
+    ErrorCode.INTERNAL_ERROR -> Status.INTERNAL,
+    ErrorCode.REQUEST_LIMIT_EXCEEDED -> Status.RESOURCE_EXHAUSTED,
+    ErrorCode.TEMPORARILY_UNAVAILABLE -> Status.UNAVAILABLE
+  )
+
+  /** Context used for all server's minor post-processing logic. */
+  private val assignmentServiceSec =
+    SequentialExecutionContext.createWithDedicatedPool(
+      name = "watch-server-helper",
+      alertOwnerTeam = AlertOwnerTeam.CachingTeam.toString
+    )
 
   /**
    * REQUIRES: `watchRpcTimeout` is at least 500 milliseconds
@@ -112,6 +137,22 @@ object WatchServerHelper {
     new DatabricksServerWrapper(serviceHandlerBuilder.build(), executor)
   }
 
+  /**
+   * Normalize [[DatabricksServiceException]]s used internally, into
+   * [[io.grpc.StatusRuntimeException]]s which is propagated by the gRPC server to the client. Other
+   * exceptions are preserved as is.
+   */
+  private def normalizeExceptions(throwable: Throwable): Throwable = {
+    throwable match {
+      case exception: DatabricksServiceException if STATUS_MAP.contains(exception.errorCode) =>
+        val status: Status = STATUS_MAP(exception.errorCode)
+        status
+          .withDescription(exception.getMessage)
+          .asRuntimeException()
+      case other: Throwable => other
+    }
+  }
+
   /** Registers an AssignmentService with the provided service builder. */
   def registerAssignmentService(
       serviceBuilder: GenericRpcServiceBuilder,
@@ -120,12 +161,20 @@ object WatchServerHelper {
       AssignmentServiceGrpc.bindService(
         new AssignmentServiceGrpc.AssignmentService {
           override def watch(req: ClientRequestP): Future[ClientResponseP] = {
-            watchHandler(RPCContext(), req)
+            try {
+              watchHandler(RPCContext(), req).recover {
+                case NonFatal(ex: Throwable) =>
+                  // Normalize exceptions yielded by this future. The thrown exception will then be
+                  // in the returned Future.
+                  throw normalizeExceptions(ex)
+              }(assignmentServiceSec)
+            } catch {
+              // Normalize exceptions thrown directly by `watchHandler`.
+              case NonFatal(ex: Throwable) => Future.failed(normalizeExceptions(ex))
+            }
           }
         },
-        // Use global ExecutionContext for ScalaPB's internal (lightweight) processing. The actual
-        // watch handler execution is managed by the provided watchHandler on a separate EC.
-        ExecutionContext.global
+        assignmentServiceSec
       )
     )
   }

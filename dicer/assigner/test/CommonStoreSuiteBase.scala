@@ -9,6 +9,7 @@ import scala.util.Random
 
 import io.grpc.Status
 
+import com.databricks.caching.util.AlertOwnerTeam
 import com.databricks.caching.util.TestUtils
 import com.databricks.caching.util.TestUtils.TestName
 import com.databricks.caching.util.{
@@ -39,7 +40,11 @@ import com.databricks.testing.DatabricksTest
  */
 abstract class CommonStoreSuiteBase extends DatabricksTest with TestName {
   protected val pool: SequentialExecutionContextPool =
-    SequentialExecutionContextPool.create("test-pool", numThreads = 2)
+    SequentialExecutionContextPool.create(
+      poolName = "test-pool",
+      numThreads = 2,
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+    )
   protected val rng: Random = new Random(42)
 
   /** Returns an instance of the particular [[Store]] implementation under test. */
@@ -98,7 +103,11 @@ abstract class CommonStoreSuiteBase extends DatabricksTest with TestName {
    * are agnostic about proposal contents, the assignments are created at random.
    */
   protected def createProposal(predecessorOpt: Option[Assignment]): ProposedAssignment = {
-    ProposedAssignment(predecessorOpt, createProposal())
+    ProposedAssignment(
+      predecessorOpt,
+      sliceMap = createProposal(),
+      assignerServiceInfoOpt = None
+    )
   }
 
   /** Returns a proposed Slice map. */
@@ -213,7 +222,8 @@ abstract class CommonStoreSuiteBase extends DatabricksTest with TestName {
       // iteration as the base.
       val proposal = ProposedAssignment(
         predecessorOpt = prevAssignmentOpt,
-        createRandomProposal(numSlices = 10, resources, numMaxReplicas = 5, Random)
+        sliceMap = createRandomProposal(numSlices = 10, resources, numMaxReplicas = 5, Random),
+        assignerServiceInfoOpt = None
       )
       val storeCommittedAssignment: Assignment = awaitCommitted(
         store.writeAssignment(target, shouldFreeze = false, proposal)
@@ -308,7 +318,11 @@ abstract class CommonStoreSuiteBase extends DatabricksTest with TestName {
             previousGen
           )
       val proposedAssignment =
-        ProposedAssignment(predecessorOpt = Some(predecessor), proposal2)
+        ProposedAssignment(
+          predecessorOpt = Some(predecessor),
+          sliceMap = proposal2,
+          assignerServiceInfoOpt = None
+        )
       val existingAssignmentGeneration: Generation =
         awaitOccFailure(
           store.writeAssignment(
@@ -321,7 +335,11 @@ abstract class CommonStoreSuiteBase extends DatabricksTest with TestName {
     }
     // Repeat the write attempt with the correct previous generation, which should succeed.
     val proposedAssignment2 =
-      ProposedAssignment(predecessorOpt = Some(assignment1), proposal2)
+      ProposedAssignment(
+        predecessorOpt = Some(assignment1),
+        sliceMap = proposal2,
+        assignerServiceInfoOpt = None
+      )
     val assignment2: Assignment = awaitCommitted(
       store.writeAssignment(
         target,
@@ -455,7 +473,7 @@ abstract class CommonStoreSuiteBase extends DatabricksTest with TestName {
                 sliceAssignment.primaryRateLoadOpt
               )
             }
-          ProposedAssignment(Some(predecessor), sliceAssignments)
+          ProposedAssignment(Some(predecessor), sliceAssignments, assignerServiceInfoOpt = None)
         case None => createProposal(predecessorOpt = None)
       }
       val assignment: Assignment =

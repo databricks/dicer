@@ -1,11 +1,10 @@
 package com.databricks.dicer.external
 
-import com.databricks.backend.common.util.Project
 import com.databricks.caching.util.TestUtils.{TestName, assertThrow}
 import com.databricks.conf.Config
 import com.databricks.conf.Configs
 import com.databricks.conf.RichConfig
-import com.databricks.conf.trusted.ProjectConf
+import com.databricks.conf.trusted.ProjectConfByName
 import com.databricks.dicer.client.TestClientUtils
 import com.databricks.dicer.common.{InternalClientConf, InternalDicerTestEnvironment}
 import com.databricks.testing.DatabricksTest
@@ -48,8 +47,7 @@ private class SingletonSliceletSuite extends DatabricksTest with TestName {
           InternalClientConf.allowMultipleSliceletInstancesPropertyName -> false
         )
       )
-    val sliceletConf: SliceletConf = new ProjectConf(Project.TestProject, rawConf)
-    with SliceletConf {
+    val sliceletConf: SliceletConf = new ProjectConfByName("test", rawConf) with SliceletConf {
       override def dicerTlsOptions: Option[TLSOptions] = None
     }
 

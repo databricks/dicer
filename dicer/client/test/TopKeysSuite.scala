@@ -74,7 +74,12 @@ class TopKeysSuite extends DatabricksTest {
     // churn minimization), and max load hint of 1 - this is an arbitrary value that we will
     // exceed for certain keys in the test.
     val loadWatcherConfig =
-      LoadWatcherTargetConfig(minDuration = 1.second, maxAge = 5.minutes, useTopKeys = true)
+      LoadWatcherTargetConfig(
+        minDuration = 1.second,
+        maxAge = 5.minutes,
+        useTopKeys = true,
+        useLoadDistribution = false
+      )
     val loadBalancingConfig = LoadBalancingConfig(
       loadBalancingInterval = 1.second, // Use a shorter interval to speed up the test.
       ChurnConfig.ZERO_PENALTY,

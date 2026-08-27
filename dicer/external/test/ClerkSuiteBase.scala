@@ -2,6 +2,7 @@ package com.databricks.dicer.external
 
 import java.net.URI
 
+import scala.concurrent.Future
 import scala.concurrent.duration.Duration
 
 import com.databricks.caching.util.{AssertionWaiter, MetricUtils}
@@ -201,10 +202,11 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
       createClerk(target, Some(LOCATION_CONFIG_MAP_DEV_AWS_US_WEST_2))
 
     // Verify that the Clerk is not ready. We add a short delay here, because the Rust Clerk harness
-    // observes the readiness via RPC. If we immediately check the readiness after creating the
-    // Clerk, there is a chance that the RPC is not sent yet, causing false positives.
+    // observes the readiness via RPC. If we immediately check the readiness, there is a greater
+    // chance that the ClerkReady RPC is still in-flight, causing false positives.
+    val readyFuture: Future[Unit] = clerk.ready
     TestUtils.shamefullyAwait200msForNonEventInAsyncTest()
-    assert(!clerk.ready.isCompleted)
+    assert(!readyFuture.isCompleted)
 
     // Verify that keys are not assigned before ready.
     assert(clerk.getStubForKey(fp("Fili")).isEmpty)
@@ -399,9 +401,21 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
     )
   }
 
-  /** Returns the number of times Clerk.getStubForKey was called for the given target. */
+  /**
+   * Returns the number of times Clerk.getStubForKey was called for the given target without a
+   * secondary SliceKey being provided.
+   */
   private def getClerkGetStubForKeyCallCount(targetIdentifier: Target): Double = {
-    getClerkMetric("dicer_clerk_getstubforkey_call_count_total", targetIdentifier)
+    readPrometheusMetric(
+      "dicer_clerk_getstubforkey_call_count_total",
+      Vector(
+        "targetCluster" -> targetIdentifier.getTargetClusterLabel,
+        "targetName" -> targetIdentifier.getTargetNameLabel,
+        "targetInstanceId" -> targetIdentifier.getTargetInstanceIdLabel,
+        "factoryContext" -> "clerk",
+        "secondaryKeyProvided" -> "false"
+      )
+    )
   }
 
   /** Returns the number of Clerk instances created for the given target. */

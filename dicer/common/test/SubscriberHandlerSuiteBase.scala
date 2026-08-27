@@ -14,7 +14,7 @@ import com.databricks.caching.util.TestUtils.TestName
 import com.databricks.dicer.common.SubscriberHandler.{Location, MetricsKey}
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.common.TestSliceUtils._
-import com.databricks.dicer.external.Target
+import com.databricks.dicer.external.{AppTarget, Target}
 import com.databricks.testing.DatabricksTest
 import io.grpc.Status
 import java.net.URI
@@ -76,7 +76,8 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
       SliceletState.Running,
       "localhostNamespace",
       attributedLoads = Vector.empty,
-      unattributedLoadOpt = None
+      unattributedLoadOpt = None,
+      keyCardinalityEstimateOpt = None
     )
   }
 
@@ -86,7 +87,8 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
       data: SubscriberData,
       debugName: String,
       requestTarget: Target = target,
-      version: Long = Version.LATEST_VERSION): ClientRequest = {
+      version: Long = Version.LATEST_VERSION,
+      alternativeTargetOpt: Option[AppTarget] = None): ClientRequest = {
     ClientRequest(
       requestTarget,
       SyncAssignmentState.KnownGeneration(knownGeneration),
@@ -95,7 +97,10 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
       data,
       supportsSerializedAssignment = true,
       redirectTokenOpt = None,
-      version = version
+      version = version,
+      alternativeTargetOpt = alternativeTargetOpt,
+      clusterUriOpt = None,
+      regionUriOpt = None
     )
   }
 
@@ -105,15 +110,17 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
    */
   protected final def createRandomAssignment(
       generation: Generation,
-      uris: Seq[String]): Assignment = {
+      uris: Seq[String],
+      numSlices: Int = 10): Assignment = {
     ProposedAssignment(
       predecessorOpt = None,
-      createRandomProposal(
-        10,
+      sliceMap = createRandomProposal(
+        numSlices,
         uris.map(uri => createTestSquid(uri)).toVector,
         numMaxReplicas = 1,
         new scala.util.Random
-      )
+      ),
+      assignerServiceInfoOpt = None
     ).commit(
       isFrozen = false,
       AssignmentConsistencyMode.Affinity,
@@ -180,12 +187,33 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
     )
   }
 
-  /** Gets the number of watch requests for the given handler and request targets. */
+  /**
+   * Helper to get the count of the `caching_errors` alert counter fired for the watch-response
+   * near-or-exceeding-limit error code.
+   */
+  private def getWatchResponseNearLimitAlertCount(): Double = {
+    val labels: Vector[(String, String)] = Vector(
+      "error_code" -> "SUBSCRIBER_HANDLER_WATCH_RESPONSE_NEAR_OR_EXCEEDING_LIMIT"
+    )
+    // Note: The Rust prometheus_client crate appends `_total` to counter names, so we try to read
+    // both metrics
+    readPrometheusMetric("caching_errors", labels) +
+    readPrometheusMetric("caching_errors_total", labels)
+  }
+
+  /**
+   * Gets the number of watch requests matching the given `handlerTarget`, `requestTarget`, and
+   * `alternativeTargetOpt` parameters (an unpopulated request matches `alternativeTargetOpt` =
+   * `None`).
+   */
   private def getNumWatchRequests(
       handlerTarget: Target,
       requestTarget: Target,
       metricsKey: MetricsKey,
-      handlerLocation: Location): Double = {
+      handlerLocation: Location,
+      alternativeTargetOpt: Option[AppTarget]): Double = {
+    val (alternativeTargetName, alternativeTargetInstanceId): (String, String) =
+      SubscriberHandlerMetrics.getAlternativeTargetLabels(alternativeTargetOpt)
     readPrometheusMetric(
       "dicer_watch_requests_total",
       Vector(
@@ -197,7 +225,9 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
         "requestTargetInstanceId" -> requestTarget.getTargetInstanceIdLabel,
         "type" -> metricsKey.typeLabel,
         "version" -> metricsKey.versionLabel,
-        "handlerLocation" -> handlerLocation.toString
+        "handlerLocation" -> handlerLocation.toString,
+        "alternativeTargetName" -> alternativeTargetName,
+        "alternativeTargetInstanceId" -> alternativeTargetInstanceId
       )
     )
   }
@@ -588,7 +618,8 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
           handlerTarget = testCase.target1,
           requestTarget = testCase.target1,
           metricsKey = MetricsKey(isClerk = true, LATEST_VERSION),
-          handlerLocation = handlerLocation
+          handlerLocation = handlerLocation,
+          alternativeTargetOpt = None
         )
     )
 
@@ -599,7 +630,8 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
           handlerTarget = testCase.target1,
           requestTarget = testCase.target2,
           metricsKey = MetricsKey(isClerk = true, LATEST_VERSION),
-          handlerLocation = handlerLocation
+          handlerLocation = handlerLocation,
+          alternativeTargetOpt = None
         )
     )
 
@@ -655,6 +687,75 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
 
       assert(numClerksForHandlerTarget.totalChange() == 1)
       assert(numClerksForRequesterTarget.totalChange() == 1)
+    }
+  }
+
+  test("alternativeTarget is recorded on the watch request metric") {
+    // Test plan: Verify that a request's alternativeTarget is recorded on the watch request metric,
+    // and that a request without one is recorded under the empty labels. Verify this by sending one
+    // watch request of each kind and confirming each label set's counter increments exactly once.
+
+    // Setup: a handler with an assignment, and change trackers for the populated and empty label
+    // sets of the watch request counter.
+    val handlerLocation: Location = Location.Slicelet
+    val driver: SubscriberHandlerHarness = createDriver(handlerLocation, target)
+    driver.setAssignment(createRandomAssignment(9, Vector("pod0")))
+
+    val alternativeTarget: AppTarget = Target.createAppTarget("alt-app", "alt-instance") match {
+      case appTarget: AppTarget => appTarget
+      case other: Target => fail(s"Expected an AppTarget, got: $other")
+    }
+    val metricsKey = MetricsKey(isClerk = true, LATEST_VERSION)
+
+    val numRequestsWithAlternativeTarget = MetricUtils.ChangeTracker(
+      () =>
+        getNumWatchRequests(
+          handlerTarget = target,
+          requestTarget = target,
+          metricsKey = metricsKey,
+          handlerLocation = handlerLocation,
+          alternativeTargetOpt = Some(alternativeTarget)
+        )
+    )
+    val numRequestsWithoutAlternativeTarget = MetricUtils.ChangeTracker(
+      () =>
+        getNumWatchRequests(
+          handlerTarget = target,
+          requestTarget = target,
+          metricsKey = metricsKey,
+          handlerLocation = handlerLocation,
+          alternativeTargetOpt = None
+        )
+    )
+
+    // Verify: sending a request of each kind moves only its own label set's counter, by one.
+    val requestWithAlternativeTarget: ClientRequest = createClientRequest(
+      Generation.EMPTY,
+      ClerkData,
+      "subscriber-with-alt",
+      alternativeTargetOpt = Some(alternativeTarget)
+    )
+    Await.ready(driver.handleWatch(requestWithAlternativeTarget, redirectOpt = None), Duration.Inf)
+    AssertionWaiter(
+      "alternativeTarget metric recorded",
+      pollInterval = METRICS_ASSERTION_POLL_INTERVAL
+    ).await {
+      assert(numRequestsWithAlternativeTarget.totalChange() == 1)
+      assert(numRequestsWithoutAlternativeTarget.totalChange() == 0)
+    }
+
+    val requestWithoutAlternativeTarget: ClientRequest =
+      createClientRequest(Generation.EMPTY, ClerkData, "subscriber-without-alt")
+    Await.ready(
+      driver.handleWatch(requestWithoutAlternativeTarget, redirectOpt = None),
+      Duration.Inf
+    )
+    AssertionWaiter(
+      "empty alternativeTarget metric recorded",
+      pollInterval = METRICS_ASSERTION_POLL_INTERVAL
+    ).await {
+      assert(numRequestsWithoutAlternativeTarget.totalChange() == 1)
+      assert(numRequestsWithAlternativeTarget.totalChange() == 1)
     }
   }
 
@@ -769,7 +870,10 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
       TIMEOUT,
       ClerkData,
       supportsSerializedAssignment = false,
-      redirectTokenOpt = None
+      redirectTokenOpt = None,
+      alternativeTargetOpt = None,
+      clusterUriOpt = None,
+      regionUriOpt = None
     )
     assert(!structuredRequest.supportsSerializedAssignment)
     val structuredResponseP: ClientResponseP =
@@ -846,6 +950,78 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
 
       // Update the known generation for the next request.
       knownGeneration = assignment.generation
+    }
+  }
+
+  test("Alerts when watch response is near or exceeding the content length limit") {
+    // Test plan: Verify that SubscriberHandler fires the
+    // SUBSCRIBER_HANDLER_WATCH_RESPONSE_NEAR_OR_EXCEEDING_LIMIT alert (observed via the
+    // `caching_errors` counter) only when a distributed watch response reaches 80% of the 4 MiB
+    // content length limit. First serve a small assignment and confirm the alert does not fire,
+    // then serve a large assignment (~90k slices, comfortably above the threshold).
+    val location = Location.Assigner
+    val driver: SubscriberHandlerHarness = createDriver(location, target)
+
+    // The alert threshold: 80% of the max watch message content length. Matches
+    // WATCH_RESPONSE_SIZE_ALERT_THRESHOLD_BYTES in SubscriberHandler.
+    val thresholdBytes: Int = WatchServerHelper.MAX_WATCH_MESSAGE_CONTENT_LENGTH_BYTES * 4 / 5
+
+    // A small response must not fire the alert.
+    driver.setAssignment(
+      createRandomAssignment(Generation(Incarnation(1), 1L), Vector("pod0", "pod1"), numSlices = 10)
+    )
+    val smallResponseP: ClientResponseP = TestUtils.awaitResult(
+      driver.handleWatch(
+        createClientRequest(Generation.EMPTY, ClerkData, "small"),
+        redirectOpt = None
+      ),
+      Duration.Inf
+    )
+    assert(
+      smallResponseP.serializedSize < thresholdBytes,
+      s"expected the small response to be below the threshold, but was " +
+      s"${smallResponseP.serializedSize} bytes"
+    )
+    AssertionWaiter(
+      "Alert does not fire for a small response",
+      pollInterval = METRICS_ASSERTION_POLL_INTERVAL
+    ).await {
+      assert(
+        getWatchResponseNearLimitAlertCount() == 0.0,
+        s"expected no near-limit alert, but count was ${getWatchResponseNearLimitAlertCount()}"
+      )
+    }
+
+    // A large response (~90k slices ~= 3.6 MiB, above the 80%-of-4-MiB threshold) must fire the
+    // alert.
+    driver.setAssignment(
+      createRandomAssignment(
+        Generation(Incarnation(1), 2L),
+        Vector("pod0", "pod1"),
+        numSlices = 90000
+      )
+    )
+    val largeResponseP: ClientResponseP = TestUtils.awaitResult(
+      driver.handleWatch(
+        createClientRequest(Generation.EMPTY, ClerkData, "large"),
+        redirectOpt = None
+      ),
+      Duration.Inf
+    )
+    assert(
+      largeResponseP.serializedSize >= thresholdBytes,
+      s"expected the large response to be at or above the threshold, but was " +
+      s"${largeResponseP.serializedSize} bytes"
+    )
+    AssertionWaiter(
+      "Alert fires for a response near or exceeding the limit",
+      pollInterval = METRICS_ASSERTION_POLL_INTERVAL
+    ).await {
+      assert(
+        getWatchResponseNearLimitAlertCount() >= 1.0,
+        s"expected the near-limit alert to fire, but count was " +
+        s"${getWatchResponseNearLimitAlertCount()}"
+      )
     }
   }
 

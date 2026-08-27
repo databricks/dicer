@@ -1,0 +1,78 @@
+syntax = "proto2";
+
+package dicer.friend.external.test;
+
+import "scalapb.proto";
+
+option java_package = "com.databricks.dicer.friend.external.test";
+option java_multiple_files = true;
+
+option java_generate_equals_and_hash = true;
+option (scalapb.options) = {
+  flat_package: true,
+  package_name: "com.databricks.dicer.friend.external.test"
+};
+
+// Test data for TwoLevelShardingHeaders, shared by the Scala and Rust suites. Sharing the data
+// guarantees that both languages serialize and parse the secondary-slice-key header identically,
+// ensuring consistent behavior across the language boundary.
+message TwoLevelShardingHeadersTestDataP {
+
+  // Asserts that serializing `secondary_slice_key` yields exactly `expected_header_value`.
+  message EncodeCaseP {
+
+    // Description of the test case.
+    optional string description = 1;
+
+    // The raw bytes of the secondary slice key to serialize into a header.
+    optional bytes secondary_slice_key = 2;
+
+    // The name the secondary-slice-key header must be written under.
+    optional string expected_header_name = 3;
+
+    // The base64-encoded value the secondary-slice-key header must carry.
+    optional string expected_header_value = 4;
+  }
+
+  // Asserts the outcome of extracting a secondary slice key from `headers`.
+  message DecodeCaseP {
+
+    // A single entry in a request header map.
+    message HeaderEntryP {
+      optional string name = 1;
+      optional string value = 2;
+    }
+
+    // Description of the test case.
+    optional string description = 1;
+
+    // The request header map to decode.
+    repeated HeaderEntryP headers = 2;
+
+    // The expected outcome of decoding `headers`.
+    oneof expected_outcome {
+      // The raw bytes of the slice key expected to be extracted from the header.
+      bytes expected_slice_key = 3;
+
+      // No secondary-slice-key header is present, so decoding yields no key.
+      bool expected_absent = 4;
+
+      // The header value is malformed; decoding must fail with an error message containing this
+      // substring.
+      string expected_error_message = 5;
+    }
+  }
+
+  // Asserts that serializing then parsing a slice key yields back the original key.
+  message RoundTripCaseP {
+    // Description of the test case.
+    optional string description = 1;
+
+    // The raw bytes of the secondary slice key to round-trip through a header.
+    optional bytes secondary_slice_key = 2;
+  }
+
+  repeated EncodeCaseP encode_cases = 1;
+  repeated DecodeCaseP decode_cases = 2;
+  repeated RoundTripCaseP round_trip_cases = 3;
+}

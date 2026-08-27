@@ -15,13 +15,17 @@ import scala.concurrent.{Future, Promise}
 import scala.util.Using
 import scala.util.matching.Regex
 import io.prometheus.client.CollectorRegistry
-import com.databricks.backend.common.util.Project
+
+import com.databricks.caching.util.AlertOwnerTeam
 import com.databricks.caching.util.TestUtils.{TestName, assertThrow, loadTestData}
 import com.databricks.caching.util.{
   AssertionWaiter,
+  CachingErrorCode,
   FakeSequentialExecutionContext,
+  HyperLogLog,
   MetricUtils,
   SequentialExecutionContextPool,
+  Severity,
   TestUtils,
   UnixTimeVersion
 }
@@ -31,8 +35,9 @@ import com.databricks.dicer.common.ClientType
 import com.databricks.rpc.RequestHeaders
 import com.databricks.api.proto.dicer.common.ClientRequestP.SliceletDataP
 import com.databricks.common.web.InfoService
+import com.google.protobuf.ByteString
 import com.databricks.conf.Configs
-import com.databricks.conf.trusted.ProjectConf
+import com.databricks.conf.trusted.ProjectConfByName
 import com.databricks.conf.trusted.LocationConf
 import com.databricks.conf.trusted.LocationConfTestUtils
 import com.databricks.dicer.client.{ClerkImpl, SliceletImpl, TestClientUtils, WatchAddressHelper}
@@ -40,6 +45,7 @@ import com.databricks.dicer.client.TestClientUtils.FakeBlockingReadinessProvider
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.common.TestSliceUtils._
 import com.databricks.dicer.common.{
+  AppIdentifierTestUtils,
   Assignment,
   AssignmentMetricsSource,
   ClientRequest,
@@ -126,6 +132,31 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
   override def afterAll(): Unit = {
     testEnv.stop()
   }
+
+  /**
+   * Configures the process-wide App Identifier source to return an App Identifier with the given
+   * `name` and `instanceId`.
+   *
+   * The configured identifier is not restored afterwards, so it stays visible to every test case
+   * that runs later in this process.
+   */
+  // TODO(SAFE<internal bug>): AppConf only exposes a process-global test seam, which creates a
+  // structural mismatch with how app identifiers are used in production. In production a Slicelet's
+  // app instance corresponds to its target, but this seam sets a single app instance for the whole
+  // process, while each test case deliberately uses a unique target to isolate target-specific
+  // state. We therefore cannot emulate that correspondence here: the configured app instance is a
+  // fixed constant unrelated to any test's target. Once AppConf supports scoped test utilities,
+  // this can configure an app identifier scoped to the calling test, and that test can set an app
+  // instance matching its target.
+  protected def configureAppIdentifierForTest(name: String, instanceId: String): Unit
+
+  /**
+   * Configures the process-wide App Identifier source to yield no App Identifier, as is the case
+   * for an unassigned warmpool pod or a process without the app-metadata mount.
+   *
+   * See the note on [[configureAppIdentifierForTest]] about the process-global seam.
+   */
+  protected def clearAppIdentifierForTest(): Unit
 
   /**
    * The default collection of extra environment variables (in addition to the current process's
@@ -333,6 +364,13 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
         "clientType" -> clientType.toString
       )
     )
+  }
+
+  /**
+   * Returns the value of the key cardinality estimate gauge.
+   */
+  protected def getKeyCardinalityEstimate: Double = {
+    readPrometheusMetric("dicer_assigner_recent_key_cardinality", targetMetricLabels)
   }
 
   /** Waits for an assignment to be delivered to `slicelet` in which it is assigned `key`. */
@@ -570,7 +608,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     // SSL arguments are used.
 
     val rawConf: Config = TestClientUtils.createAllowMultipleClientsConfig()
-    val sliceletConf = new ProjectConf(Project.TestProject, rawConf) with SliceletConf {
+    val sliceletConf = new ProjectConfByName("test", rawConf) with SliceletConf {
       override protected def dicerTlsOptions: Option[TLSOptions] =
         TestTLSOptions.clientTlsOptionsOpt
 
@@ -1979,6 +2017,103 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
       testEnv.stop()
     }
   }
+
+  test("Slicelet omits alternativeTarget when there is no App Identifier") {
+    // Test plan: Verify that a Slicelet still starts and gets assigned when there is no App
+    // Identifier, and that it sends no alternativeTarget. This is the case for a process whose App
+    // Identifier source has none to offer. Do this by configuring the App Identifier source to
+    // yield nothing, then confirming the Slicelet is assigned and that the watch request the
+    // Assigner received carries no alternativeTarget.
+
+    // Setup: Configure the App Identifier source to yield no App Identifier.
+    clearAppIdentifierForTest()
+
+    // Setup: Start a Slicelet.
+    val slicelet: SliceletHarness = createSlicelet(testEnv)()
+    slicelet.start(selfPort = 0, listenerOpt = None)
+    try {
+      // Verify: The Slicelet still gets assigned without an App Identifier.
+      waitForAnySquid(testEnv)
+      val request: ClientRequest =
+        getLatestSliceletWatchRequest(testEnv).getOrElse(
+          fail("Expected the Slicelet to have sent a watch request")
+        )
+
+      // Verify: No alternativeTarget is populated.
+      assert(
+        request.alternativeTargetOpt.isEmpty,
+        s"Expected alternativeTargetOpt to be empty without an App Identifier, got: $request"
+      )
+    } finally {
+      slicelet.stop()
+    }
+  }
+
+  test(
+    "use_alternative_target on: the Assigner alerts and rejects a Slicelet with no App Identifier"
+  ) {
+    // Test plan: Verify end-to-end that when a target has use_alternative_target enabled but a real
+    // Slicelet omits alternative_target (it has no App Identifier), the Assigner fires the
+    // ASSIGNER_MISSING_EXPECTED_ALTERNATIVE_TARGET alert and rejects the watch, so the Slicelet is
+    // never assigned. Do this by enabling use_alternative_target for the Slicelet's target,
+    // clearing the App Identifier so the Slicelet sends no alternative_target, freezing an
+    // assignment so the watch would otherwise be served, and confirming the alert count increments
+    // while the Slicelet does not receive the assignment.
+    clearAppIdentifierForTest()
+
+    val enabledConfig: InternalTargetConfig =
+      InternalTargetConfig.forTest.DEFAULT.copy(useAlternativeTarget = true)
+    val localTestEnv: InternalDicerTestEnvironment = InternalDicerTestEnvironment.create(
+      config = sharedSliceletTestAssignerConfig,
+      targetConfigMap = InternalTargetConfigMap.create(
+        configScopeOpt = None,
+        targetConfigMap = Map(TargetName.forTarget(defaultTarget) -> enabledConfig)
+      ),
+      withDefaultTargetConfig = false,
+      assignerClusterUri = ASSIGNER_CLUSTER_URI
+    )
+
+    // Tracks the Severity.CRITICAL error count of the ASSIGNER_MISSING_EXPECTED_ALTERNATIVE_TARGET
+    // alert, which the Assigner fires when a use_alternative_target-enabled target's watch omits
+    // alternative_target. The Assigner's alert logger uses an empty prefix (it is on the Assigner
+    // companion object).
+    val alertCountTracker: MetricUtils.ChangeTracker[Int] = MetricUtils.ChangeTracker { () =>
+      MetricUtils.getPrefixLoggerErrorCount(
+        Severity.CRITICAL,
+        CachingErrorCode.ASSIGNER_MISSING_EXPECTED_ALTERNATIVE_TARGET,
+        prefix = ""
+      )
+    }
+    try {
+      // Freeze an assignment under the Slicelet's own target so that, absent canonicalization, the
+      // watch would be served. This isolates the rejection to the missing alternative_target.
+      TestUtils.awaitResult(
+        localTestEnv.testAssigner.setAndFreezeAssignment(
+          defaultTarget,
+          createProposal(("" -- ∞) -> Seq("other_pod"))
+        ),
+        Duration.Inf
+      )
+
+      val slicelet: SliceletHarness = createSlicelet(localTestEnv)()
+      slicelet.start(selfPort = 0, listenerOpt = None)
+      try {
+        // Verify: The Assigner fires the missing_alternative_target alert for the rejected watch.
+        AssertionWaiter("Wait for the missing_alternative_target alert to fire").await {
+          assert(alertCountTracker.totalChange() > 0)
+        }
+        // Verify: The Slicelet is never assigned, since its watch is rejected rather than served.
+        assert(
+          !slicelet.hasReceivedAssignment,
+          s"Expected the Slicelet not to be assigned, got: ${slicelet.latestAssignmentOpt}"
+        )
+      } finally {
+        slicelet.stop()
+      }
+    } finally {
+      localTestEnv.stop()
+    }
+  }
 }
 
 /**
@@ -2014,6 +2149,16 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
   /** Gets the assigner address for sending watch requests from the slicelet conf. */
   private def getAssignerAddress(sliceletConf: SliceletConf): URI = {
     WatchAddressHelper.getAssignerURI(sliceletConf.assignerHost, sliceletConf.dicerAssignerRpcPort)
+  }
+
+  final override protected def configureAppIdentifierForTest(
+      name: String,
+      instanceId: String): Unit = {
+    AppIdentifierTestUtils.configureForTest(name, instanceId)
+  }
+
+  final override protected def clearAppIdentifierForTest(): Unit = {
+    AppIdentifierTestUtils.clearForTest()
   }
 
   override def beforeAll(): Unit = {
@@ -2067,6 +2212,7 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
       // produced a status, so tests don't have to wait on real time.
       "databricks.dicer.internal.cachingteamonly.blockedReadinessCheckStartDelayMillis" -> 1000
     )
+    rawConf ++= extraDbConfFlags
     for (sliceletHostname: String <- sliceletHostname) {
       rawConf += "databricks.dicer.slicelet.hostname" -> sliceletHostname
     }
@@ -2080,7 +2226,7 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
       rawConf += "databricks.branch.name" -> branch
     }
 
-    val conf = new ProjectConf(Project.TestProject, Configs.parseMap(rawConf)) with SliceletConf {
+    val conf = new ProjectConfByName("test", Configs.parseMap(rawConf)) with SliceletConf {
       override def dicerTlsOptions: Option[TLSOptions] = None
       override def dicerClientTlsOptions: Option[TLSOptions] =
         TestTLSOptions.clientTlsOptionsOpt
@@ -2293,8 +2439,9 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
     // Create a fake sec and a fake pool with context propagation disabled to match the behavior of
     // the real Slicelet.
     val pool = SequentialExecutionContextPool.create(
-      "FakePool",
+      poolName = "FakePool",
       numThreads = 2,
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
       enableContextPropagation = false
     )
     val fakeSec =
@@ -2639,6 +2786,89 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
         )
         .toInt
     )
+  }
+
+  test("Readiness polls after start do not keep creating watch channels") {
+    // Test plan: Verify that the Slicelet creates at most 2 watch channels after starting
+    // when no redirects occur. Verify this by starting a Slicelet with a very short readiness
+    // poll interval, waiting for the first watch channel to be created, then waiting a further
+    // small amount of time and checking the counter has not climbed past 2.
+    //
+    // This is a regression test for a combination of bugs that caused a new watch channel to be
+    // created every time the readiness poller looped.
+    // - The first bug attempted to start the SliceLookup on every poller loop instead of on
+    //   just the first iteration.
+    // - The second bug created a new WatchStubManager (and thus, new watch channel) on each
+    //   call to SliceLookup::start, regardless of whether the SliceLookup's
+    //   AssignmentSyncStateMachine driver had already been started.
+    val clientNameLabels: Vector[(String, String)] =
+      Vector("clientName" -> s"dicer-slicelet-${defaultTarget.name}")
+
+    // Setup: Configure the readiness poller to cycle very quickly so that our subsequent shameful
+    // sleep for 200 ms is very likely to span multiple polls (the default interval is 1 s).
+    val slicelet: SliceletHarness = createSlicelet(testEnv)(
+      extraDbConfFlags =
+        Map("databricks.dicer.internal.cachingteamonly.readinessProviderPollIntervalMillis" -> 10)
+    )
+    slicelet.start(selfPort = 1234, listenerOpt = None)
+
+    // Setup: wait for the first watch channel, created when the readiness watcher starts the lookup
+    // on the first poll.
+    AssertionWaiter("Wait for the first watch channel to be created").await {
+      assert(
+        readPrometheusMetric("dicer_client_watch_channels_created_total", clientNameLabels) >= 1.0
+      )
+    }
+
+    // Setup: the readiness poller period is configured to 10 ms above. Waiting for 200 ms
+    // makes it very likely that the poller will loop more than 2 times, which would have
+    // triggered the redundant watch channel creation before the bugs were fixed. Since we
+    // are waiting for an event (watch channel creation) to not happen, waiting is the best
+    // we can do and may be flaky under high CPU contention.
+    TestUtils.shamefullyAwait200msForNonEventInAsyncTest()
+
+    // Verify: watch channels created metric is at most 2. The first channel should be created
+    // on the first loop of the readiness poller. The second channel may be created when the
+    // readiness poller timeout is reached (see the implementation for details on why a
+    // timeout helps defend against a blocked readiness provider). This validation does not
+    // assume that the second bug in the test plan comment above has been fixed.
+    val watchChannelsCreated: Double =
+      readPrometheusMetric("dicer_client_watch_channels_created_total", clientNameLabels)
+    assert(watchChannelsCreated >= 1.0 && watchChannelsCreated <= 2.0)
+  }
+
+  test("key cardinality estimation") {
+    // Test plan: verify that a slicelet's observed key end up in the key cardinality estimate
+    // metric.
+    val slicelet: SliceletHarness = createSlicelet(testEnv)()
+    slicelet.start(selfPort = 1234, listenerOpt = None)
+
+    val assignment1: Assignment = TestUtils.awaitResult(
+      setAndFreezeAssignment(
+        testEnv,
+        createProposal(("" -- ∞) -> Seq(slicelet.squid))
+      ),
+      Duration.Inf
+    )
+    AssertionWaiter("Wait for assignment1").await {
+      assert(slicelet.latestAssignmentOpt.contains(assignment1))
+    }
+
+    val oracle = new HyperLogLog()
+    for (i <- 0 until 1000) {
+      val key = ByteString.copyFrom(BigInt(i.toLong).toByteArray)
+      val sliceKey = SliceKey.fromRawBytes(key)
+
+      oracle.add(key)
+
+      Using.resource(slicelet.createHandle(sliceKey)) { handle =>
+        handle.incrementLoadBy(1)
+      }
+    }
+
+    AssertionWaiter("wait for key cardinality estimate metric report").await {
+      assert(getKeyCardinalityEstimate == oracle.estimate().toDouble)
+    }
   }
 }
 

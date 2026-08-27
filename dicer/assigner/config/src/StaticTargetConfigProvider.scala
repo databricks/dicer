@@ -1,6 +1,7 @@
 package com.databricks.dicer.assigner.config
 
 import scala.concurrent.duration.FiniteDuration
+
 import com.databricks.caching.util.{Cancellable, ValueStreamCallback}
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
 
@@ -16,12 +17,6 @@ import com.databricks.dicer.assigner.conf.DicerAssignerConf
  */
 class StaticTargetConfigProvider(staticTargetConfigMap: InternalTargetConfigMap)
     extends TargetConfigProvider {
-
-  /**
-   * Initializes the static target config provider. For static providers, this is essentially
-   * a no-op except for marking the provider as started.
-   */
-  override def startBlocking(initialPollTimeout: FiniteDuration): Unit = {}
 
   /** Returns false: dynamic config is always disabled for the static config provider. */
   override def isDynamicConfigEnabled: Boolean = false
@@ -46,15 +41,19 @@ class StaticTargetConfigProvider(staticTargetConfigMap: InternalTargetConfigMap)
 object StaticTargetConfigProvider {
 
   /**
-   * Creates a [[StaticTargetConfigProvider]] instance.
+   * Creates a [[StaticTargetConfigProvider]]. This method does not block, but intentionally matches
+   * the signature of the internal code.
    *
    * @param staticTargetConfigMap the static config map constructed on textprotos that will
    *                              be served by this provider.
    * @param assignerConf the assigner configuration (not used but kept for API compatibility).
+   * @param initialPollTimeout the initial configuration poll timeout (not used but kept for API
+   *                           compatibility).
    */
-  def create(
+  def createBlocking(
       staticTargetConfigMap: InternalTargetConfigMap,
-      assignerConf: DicerAssignerConf): StaticTargetConfigProvider = {
+      assignerConf: DicerAssignerConf,
+      initialPollTimeout: FiniteDuration): StaticTargetConfigProvider = {
     new StaticTargetConfigProvider(staticTargetConfigMap)
   }
 }

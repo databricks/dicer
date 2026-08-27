@@ -268,7 +268,10 @@ object InterposingJetcdWrapper {
    * Returns a new instance using `client` and `clock`.
    */
   def create(client: jetcd.Client, clock: TypedClock): InterposingJetcdWrapper = {
-    val sec = SequentialExecutionContext.createWithDedicatedPool("interposing-jetcd-wrapper")
+    val sec = SequentialExecutionContext.createWithDedicatedPool(
+      name = "interposing-jetcd-wrapper",
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+    )
     new InterposingJetcdWrapper(sec, client, clock)
   }
 

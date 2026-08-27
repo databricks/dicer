@@ -25,7 +25,12 @@ class BaseHybridConcurrencyDomainSuite(enableContextPropagation: Boolean)
     with TestUtils.TestName {
 
   private val pool =
-    SequentialExecutionContextPool.create(s"test-pool", numThreads = 2, enableContextPropagation)
+    SequentialExecutionContextPool.create(
+      poolName = s"test-pool",
+      numThreads = 2,
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+      enableContextPropagation = enableContextPropagation
+    )
 
   /**
    * Creates and returns a new [[Thread]] which executes `thunk`.
@@ -43,7 +48,11 @@ class BaseHybridConcurrencyDomainSuite(enableContextPropagation: Boolean)
   test("concurrency test - serializes sync and async tasks") {
     // Test plan: verify that both sync and async tasks executed in the concurrency domain are
     // serialized with other tasks.
-    val domain = HybridConcurrencyDomain.create(getSafeName, enableContextPropagation)
+    val domain = HybridConcurrencyDomain.create(
+      name = getSafeName,
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+      enableContextPropagation = enableContextPropagation
+    )
 
     // Simulate concurrent callers that each attempt to increment a shared counter and verify that
     // the count is equal to the total number of callers. This is likely to flake if there's a
@@ -144,7 +153,11 @@ class BaseHybridConcurrencyDomainSuite(enableContextPropagation: Boolean)
     // implementation which delegates to an internal SES, as that has its own internal task queue
     // lock, but is important to verify nonetheless in case the implementation evolves to manage its
     // own task queue.
-    val domain = HybridConcurrencyDomain.create(getSafeName, enableContextPropagation)
+    val domain = HybridConcurrencyDomain.create(
+      name = getSafeName,
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+      enableContextPropagation = enableContextPropagation
+    )
 
     // Put a blocking task in the domain.
     val latch = new CountDownLatch(1)

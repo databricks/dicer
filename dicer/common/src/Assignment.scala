@@ -53,12 +53,17 @@ object AssignmentConsistencyMode {
  *                        Assigner.
  * @param sliceMap        Map from [[Slice]]s to the incarnations of their assigned resources.
  *                        Covers the full key space.
+ * @param assignerServiceInfoOpt The service info of the Assigner that generated this assignment.
+ *                               It should be populated by the generating assigner, but may be
+ *                               absent if the Assigner cannot determine the service info or if
+ *                               an outdated Assigner binary is deployed.
  */
 case class Assignment(
     isFrozen: Boolean,
     consistencyMode: AssignmentConsistencyMode,
     generation: Generation,
-    sliceMap: SliceMap[SliceAssignment]) {
+    sliceMap: SliceMap[SliceAssignment],
+    assignerServiceInfoOpt: Option[AssignerServiceInfo]) {
 
   require(generation != Generation.EMPTY, "Assignment must have non-empty generation.")
   require(
@@ -116,7 +121,13 @@ case class Assignment(
           )
         )
       }
-    DiffAssignment(isFrozen, consistencyMode, generation, diffSliceMap)
+    DiffAssignment(
+      isFrozen,
+      consistencyMode,
+      generation,
+      diffSliceMap,
+      assignerServiceInfoOpt
+    )
   }
 
   /**
@@ -305,7 +316,8 @@ object Assignment {
                 diffAssignment.isFrozen,
                 diffAssignment.consistencyMode,
                 diffAssignment.generation,
-                SliceMapHelper.ofSliceAssignments(newSliceAssignments.result())
+                SliceMapHelper.ofSliceAssignments(newSliceAssignments.result()),
+                diffAssignment.assignerServiceInfoOpt
               )
             )
           case DiffAssignmentSliceMap.Full(
@@ -317,7 +329,8 @@ object Assignment {
                 diffAssignment.isFrozen,
                 diffAssignment.consistencyMode,
                 diffAssignment.generation,
-                sliceMap
+                sliceMap,
+                diffAssignment.assignerServiceInfoOpt
               )
             )
         }
@@ -334,7 +347,8 @@ object Assignment {
                 diffAssignment.isFrozen,
                 diffAssignment.consistencyMode,
                 diffAssignment.generation,
-                sliceMap
+                sliceMap,
+                diffAssignment.assignerServiceInfoOpt
               )
             )
         }

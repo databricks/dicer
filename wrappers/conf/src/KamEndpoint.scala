@@ -1,8 +1,6 @@
 package com.databricks.backend.k8sauthmanagerclient
 
-/**
- * OSS stub for [[KamEndpoint]].
- */
+/** OSS stub for [[KamEndpoint]]. */
 sealed trait KamEndpoint
 
 object KamEndpoint {

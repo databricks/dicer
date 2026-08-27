@@ -300,7 +300,11 @@ private trait StateMachineDriverSuiteBase extends DatabricksTest with TestName {
 private final class SequentialDomainStateMachineDriverSuite(secIgnoresCancellation: Boolean)
     extends StateMachineDriverSuiteBase {
 
-  private val pool = SequentialExecutionContextPool.create("machine-test", numThreads = 2)
+  private val pool = SequentialExecutionContextPool.create(
+    poolName = "machine-test",
+    numThreads = 2,
+    alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+  )
 
   override def createTestDriver(fakeClockOpt: Option[FakeTypedClock]): TestDriver = {
     var sec: SequentialExecutionContext = fakeClockOpt match {
@@ -323,9 +327,10 @@ private final class SequentialDomainStateMachineDriverSuite(secIgnoresCancellati
       asDomainExecutor(sec),
       (performAction: (String) => Unit) =>
         new StateMachineDriver[String, String, TestStateMachine](
-          sec,
-          new TestStateMachine(Some(domain)),
-          performAction
+          sec = sec,
+          stateMachine = new TestStateMachine(Some(domain)),
+          performAction = performAction,
+          alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
         )
     ) {
 
@@ -341,9 +346,10 @@ private final class SequentialDomainStateMachineDriverSuite(secIgnoresCancellati
       : (StateMachineDriver[String, String, ThrowingStateMachine.type], DomainExecutor) = {
     val sec: SequentialExecutionContext = pool.createExecutionContext("throwing-machine-test")
     val driver = new StateMachineDriver[String, String, ThrowingStateMachine.type](
-      sec,
-      ThrowingStateMachine,
-      performAction = (_: String) => ()
+      sec = sec,
+      stateMachine = ThrowingStateMachine,
+      performAction = (_: String) => (),
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
     )
 
     (driver, asDomainExecutor(sec))
@@ -364,8 +370,9 @@ private final class HybridDomainStateMachineDriverSuite(
     extends StateMachineDriverSuiteBase {
 
   private val pool = SequentialExecutionContextPool.create(
-    "machine-test",
+    poolName = "machine-test",
     numThreads = 2,
+    alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
     enableContextPropagation = true
   )
 
@@ -401,7 +408,12 @@ private final class HybridDomainStateMachineDriverSuite(
       domain,
       asDomainExecutor(hybrid),
       (performAction: (String) => Unit) =>
-        StateMachineDriver.inHybridDomain(hybrid, new TestStateMachine(Some(domain)), performAction)
+        StateMachineDriver.inHybridDomain(
+          hybrid,
+          new TestStateMachine(Some(domain)),
+          performAction,
+          alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+        )
     ) {
 
       override def awaitReadyScheduledTasksComplete(): Unit = {
@@ -416,12 +428,17 @@ private final class HybridDomainStateMachineDriverSuite(
   override def createDriverWithThrowingStateMachine()
       : (StateMachineDriver[String, String, ThrowingStateMachine.type], DomainExecutor) = {
     val hybrid =
-      HybridConcurrencyDomain.create("throwing-machine-test", enableContextPropagation = true)
+      HybridConcurrencyDomain.create(
+        name = "throwing-machine-test",
+        alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
+        enableContextPropagation = true
+      )
     val driver: StateMachineDriver[String, String, ThrowingStateMachine.type] =
       StateMachineDriver.inHybridDomain(
         hybrid,
         ThrowingStateMachine,
-        performAction = (_: String) => ()
+        performAction = (_: String) => (),
+        alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
       )
 
     (driver, asDomainExecutor(hybrid))

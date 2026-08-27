@@ -12,7 +12,10 @@ import com.databricks.testing.DatabricksTest
 class AssertionWaiterSuite extends DatabricksTest {
 
   /** Context on which assertions run in some test variations. */
-  private val sec = SequentialExecutionContext.createWithDedicatedPool("assertion_waiter_suite")
+  private val sec = SequentialExecutionContext.createWithDedicatedPool(
+    name = "assertion_waiter_suite",
+    alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+  )
 
   /**
    * Supplier that returns a "wrong" result (3) the first time is called, and continues to return

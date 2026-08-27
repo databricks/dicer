@@ -5,29 +5,16 @@ import scala.collection.mutable.ArrayBuffer
 import io.grpc.{Server, ServerBuilder, ServerServiceDefinition}
 
 /**
- * RPC server builder. Open source version has empty parameters because
- * [[io.grpc.ServerBuilder.forPort]] is a static method. Not threadsafe.
+ * Wrapper around an RPC server builder to insulate Dicer from specific dependencies. Not
+ * threadsafe.
  */
-class GenericRpcServiceBuilder private () {
+class GenericRpcServiceBuilder private {
 
   /** The delegate to the underlying builder, immutable once set. */
   private var delegate: Option[ServerBuilder[_]] = None
 
   /** The services added to the builder */
   private val services: ArrayBuffer[ServerServiceDefinition] = ArrayBuffer.empty
-
-  /**
-   * PRECONDITION: Builder must not be initialized more than once.
-   *
-   * Initializes the builder for the given port.
-   */
-  def initBuilderForPort(port: Int): Unit = {
-    require(delegate.isEmpty, "Builder already initialized")
-    delegate = Some(ServerBuilder.forPort(port))
-    for (service: ServerServiceDefinition <- services) {
-      delegate.get.addService(service)
-    }
-  }
 
   /**
    * PRECONDITION: Builder must not be initialized more than once.

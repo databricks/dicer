@@ -1,6 +1,6 @@
 package com.databricks.backend.common.util
 
-/** Enum containing different services. Minimal open source version. */
+/** Enum containing different services. */
 object Project extends Enumeration {
   type Project = ProjectDetails
 

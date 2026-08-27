@@ -3,7 +3,10 @@ package com.databricks.dicer.common
 import scala.collection.mutable
 import scala.concurrent.duration._
 
-import com.databricks.api.proto.dicer.common.DiffAssignmentP.SliceAssignmentP
+import com.databricks.api.proto.dicer.common.DiffAssignmentP.{
+  AssignerServiceInfoP,
+  SliceAssignmentP
+}
 import com.databricks.api.proto.dicer.common.{DiffAssignmentP, GenerationP}
 import com.databricks.api.proto.dicer.friend.SquidP
 import com.databricks.caching.util.PrefixLogger
@@ -11,6 +14,7 @@ import com.databricks.dicer.common.Assignment.ResourceMap
 import com.databricks.dicer.friend.{SliceMap, Squid}
 import com.databricks.dicer.friend.SliceMap.GapEntry
 import scalapb.TextFormat
+import io.prometheus.client.Counter
 import scala.util.control.NonFatal
 
 /**
@@ -32,12 +36,18 @@ import scala.util.control.NonFatal
  *                        [[Assignment.consistencyMode]]).
  * @param generation      The generation of the assignment.
  * @param sliceMap        Either a "full" or "partial" mapping from Slices to assigned resources.
+ * @param assignerServiceInfoOpt The service info of the Assigner that generated the assignment
+ *                               this diff is based on. It should be populated by the generating
+ *                               assigner, but may be absent if the Assigner cannot determine the
+ *                               service info or if an outdated Assigner binary is deployed.
  */
 case class DiffAssignment(
     isFrozen: Boolean,
     consistencyMode: AssignmentConsistencyMode,
     generation: Generation,
-    sliceMap: DiffAssignmentSliceMap) {
+    sliceMap: DiffAssignmentSliceMap,
+    assignerServiceInfoOpt: Option[AssignerServiceInfo]
+) {
   require(generation != Generation.EMPTY, "Assignment must have non-empty generation.")
   require(
     consistencyMode != AssignmentConsistencyMode.Strong
@@ -107,12 +117,17 @@ case class DiffAssignment(
     }
     val resourceProtos: Seq[SquidP] = resourceBuilder.toProtos
     val isFrozenProto: Option[Boolean] = if (this.isFrozen) Some(true) else None
+    val assignerServiceInfoProto: Option[AssignerServiceInfoP] = assignerServiceInfoOpt.map {
+      assignerServiceInfo: AssignerServiceInfo =>
+        assignerServiceInfo.toProto
+    }
     new DiffAssignmentP(
       generationProto,
       sliceAssignmentProtos.result(),
       resourceProtos,
       isFrozenProto,
-      diffGenerationProto
+      diffGenerationProto,
+      assignerServiceInfo = assignerServiceInfoProto
     )
   }
 
@@ -150,7 +165,53 @@ case class DiffAssignment(
 }
 
 object DiffAssignment {
+
+  /**
+   * The outcome of attempting to parse an [[AssignerServiceInfo]] out of a [[DiffAssignmentP]] in
+   * [[DiffAssignment.fromProto]]. Used as the `outcome` label value on the
+   * `dicer_assignment_service_info_parse_total` metric.
+   */
+  private sealed trait AssignerServiceInfoParseOutcome
+
+  private object AssignerServiceInfoParseOutcome {
+
+    /**
+     * The `assigner_service_info` field was present and parsed into a valid
+     * [[AssignerServiceInfo]].
+     */
+    case object Valid extends AssignerServiceInfoParseOutcome {
+      override def toString: String = "valid"
+    }
+
+    /** The `assigner_service_info` field was absent from the proto. */
+    case object Absent extends AssignerServiceInfoParseOutcome {
+      override def toString: String = "absent"
+    }
+
+    /**
+     * The `assigner_service_info` field was present but could not be parsed into a valid
+     * [[AssignerServiceInfo]] (e.g. a missing or non-RFC-1123 name or instance id).
+     */
+    case object Invalid extends AssignerServiceInfoParseOutcome {
+      override def toString: String = "invalid"
+    }
+  }
+
   private val logger = PrefixLogger.create(getClass, "")
+
+  /**
+   * Counter tracking the number of attempts to parse an assigner service.
+   */
+  // TODO(<internal bug>): Temporary metric until all assignments have a valid assigner service info.
+  private val assignerServiceInfoParse: Counter = Counter
+    .build()
+    .name("dicer_assignment_service_info_parse_total")
+    .labelNames("outcome", "assignerName", "assignerInstanceId")
+    .help(
+      "Count of assigner service info parse attempts in DiffAssignment.fromProto, labeled by " +
+      "outcome (valid/absent/invalid). assignerName and assignerInstanceId are set if available."
+    )
+    .register()
 
   def fromProto(proto: DiffAssignmentP): DiffAssignment = {
     try {
@@ -193,13 +254,79 @@ object DiffAssignment {
           )
       )
     }
+    // Parses `DiffAssignmentP.AssignerServiceInfoP` and handles logging/metrics based on the
+    // outcome.
+    val assignerServiceInfoOpt: Option[AssignerServiceInfo] = proto.assignerServiceInfo match {
+      case None =>
+        // The service info is absent, so an "absent" label is recorded.
+        recordParseOutcome(
+          AssignerServiceInfoParseOutcome.Absent,
+          assignerNameOpt = None,
+          assignerInstanceIdOpt = None
+        )
+        None
+      case Some(assignerServiceInfoProto: AssignerServiceInfoP) =>
+        try {
+          val info: AssignerServiceInfo = AssignerServiceInfo.fromProto(assignerServiceInfoProto)
+          // The service info is valid, so a "valid" label is recorded with the `name` and
+          // `instanceId`.
+          recordParseOutcome(
+            AssignerServiceInfoParseOutcome.Valid,
+            Some(info.name),
+            Some(info.instanceId)
+          )
+          Some(info)
+        } catch {
+          case e: IllegalArgumentException =>
+            // The service info is invalid, so an "invalid" label is recorded with the proto's
+            // `name` and `instanceId` if available.
+            recordParseOutcome(
+              AssignerServiceInfoParseOutcome.Invalid,
+              assignerServiceInfoProto.name,
+              assignerServiceInfoProto.instanceId
+            )
+            // Every 5 minutes, log the invalid assigner service info that was dropped, so invalid
+            // assigner service info can be debugged.
+            logger.warn(
+              s"Dropping invalid AssignerServiceInfo: $e, " +
+              s"Proto: ${TextFormat.printToString(assignerServiceInfoProto)}",
+              every = 5.minutes
+            )
+            None
+        }
+    }
     // TODO(<internal bug>) support strongly consistent assignments
     DiffAssignment(
       proto.getIsFrozen,
       AssignmentConsistencyMode.Affinity,
       assignmentGeneration,
-      sliceMap
+      sliceMap,
+      assignerServiceInfoOpt
     )
+  }
+
+  /**
+   * Records the outcome of an [[AssignerServiceInfo]] parse attempt. Absent names and instance ids
+   * are recorded as empty string labels.
+   *
+   * @param outcome               The parse outcome as defined in
+   *                              [[AssignerServiceInfoParseOutcome]] (e.g., "valid", "absent",
+   *                              "invalid").
+   * @param assignerNameOpt       The name of the Assigner the outcome was recorded for if known.
+   * @param assignerInstanceIdOpt The instance id of the Assigner the outcome was recorded for if
+   *                              known.
+   */
+  private def recordParseOutcome(
+      outcome: AssignerServiceInfoParseOutcome,
+      assignerNameOpt: Option[String],
+      assignerInstanceIdOpt: Option[String]): Unit = {
+    assignerServiceInfoParse
+      .labels(
+        outcome.toString,
+        assignerNameOpt.getOrElse(""),
+        assignerInstanceIdOpt.getOrElse("")
+      )
+      .inc()
   }
 }
 

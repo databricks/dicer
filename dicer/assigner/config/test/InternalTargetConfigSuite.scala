@@ -14,20 +14,25 @@ import com.databricks.api.proto.dicer.external.LoadBalancingMetricConfigP.{
   ReservationHintP
 }
 import com.databricks.api.proto.dicer.external.{
+  KeySensitivityConfigP,
+  KeyReplicationConfigP,
   LoadBalancingMetricConfigP,
-  TargetConfigFieldsP,
-  KeyReplicationConfigP
+  TargetConfigFieldsP
 }
+import com.databricks.api.proto.dicer.external.KeySensitivityConfigP.SliceKeySensitivityP
+
 import com.databricks.caching.util.TestUtils.assertThrow
 import com.databricks.dicer.assigner.config.InternalTargetConfig.{
   HealthWatcherTargetConfig,
   KeyOfDeathProtectionConfig,
   KeyReplicationConfig,
+  KeySensitivityConfig,
   LoadBalancingConfig,
   LoadBalancingMetricConfig,
   LoadWatcherTargetConfig,
   TargetWatchRequestRateLimitConfig
 }
+import com.databricks.dicer.common.SliceKeySensitivity
 import com.databricks.dicer.common.TargetName
 import com.databricks.dicer.common.TestSliceUtils._
 import com.databricks.dicer.common.{SliceAssignment, SubsliceAnnotation}
@@ -113,7 +118,9 @@ class InternalTargetConfigSuite extends DatabricksTest {
           HealthWatcherTargetConfig.DEFAULT,
           KeyOfDeathProtectionConfig.DEFAULT,
           TargetWatchRequestRateLimitConfig.DEFAULT,
-          AuthorizerHelper.DEFAULT_AUTHORIZER
+          AuthorizerHelper.DEFAULT_AUTHORIZER,
+          KeySensitivityConfig.DEFAULT,
+          useAlternativeTarget = false
         )
       ),
       TestCase(
@@ -136,7 +143,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
           LoadWatcherTargetConfig(
             minDuration = 42.seconds,
             maxAge = 47.seconds,
-            useTopKeys = true
+            useTopKeys = true,
+            useLoadDistribution = false
           ),
           LoadBalancingConfig(
             loadBalancingInterval = 1.minute,
@@ -147,7 +155,9 @@ class InternalTargetConfigSuite extends DatabricksTest {
           HealthWatcherTargetConfig.DEFAULT,
           KeyOfDeathProtectionConfig.DEFAULT,
           TargetWatchRequestRateLimitConfig.DEFAULT,
-          AuthorizerHelper.DEFAULT_AUTHORIZER
+          AuthorizerHelper.DEFAULT_AUTHORIZER,
+          KeySensitivityConfig.DEFAULT,
+          useAlternativeTarget = false
         )
       ),
       TestCase(
@@ -174,7 +184,38 @@ class InternalTargetConfigSuite extends DatabricksTest {
           HealthWatcherTargetConfig.DEFAULT,
           KeyOfDeathProtectionConfig.DEFAULT,
           TargetWatchRequestRateLimitConfig.DEFAULT,
-          AuthorizerHelper.DEFAULT_AUTHORIZER
+          AuthorizerHelper.DEFAULT_AUTHORIZER,
+          KeySensitivityConfig.DEFAULT,
+          useAlternativeTarget = false
+        )
+      ),
+      TestCase(
+        TargetConfigFieldsP(
+          primaryRateMetricConfig = Some(
+            LoadBalancingMetricConfigP(
+              maxLoadHint = Some(1000)
+            )
+          )
+        ),
+        AdvancedTargetConfigFieldsP(
+          loadWatcherConfig = Some(
+            LoadWatcherConfigP(useLoadDistribution = Some(true))
+          )
+        ),
+        InternalTargetConfig(
+          LoadWatcherTargetConfig.DEFAULT.copy(useLoadDistribution = true),
+          LoadBalancingConfig(
+            loadBalancingInterval = 1.minute,
+            ChurnConfig.DEFAULT,
+            LoadBalancingMetricConfig(1000, ImbalanceToleranceHintP.DEFAULT)
+          ),
+          KeyReplicationConfig.DEFAULT_SINGLE_REPLICA,
+          HealthWatcherTargetConfig.DEFAULT,
+          KeyOfDeathProtectionConfig.DEFAULT,
+          TargetWatchRequestRateLimitConfig.DEFAULT,
+          AuthorizerHelper.DEFAULT_AUTHORIZER,
+          KeySensitivityConfig.DEFAULT,
+          useAlternativeTarget = false
         )
       ),
       TestCase(
@@ -198,7 +239,9 @@ class InternalTargetConfigSuite extends DatabricksTest {
           HealthWatcherTargetConfig.DEFAULT,
           KeyOfDeathProtectionConfig.DEFAULT,
           TargetWatchRequestRateLimitConfig.DEFAULT,
-          AuthorizerHelper.DEFAULT_AUTHORIZER
+          AuthorizerHelper.DEFAULT_AUTHORIZER,
+          KeySensitivityConfig.DEFAULT,
+          useAlternativeTarget = false
         )
       ),
       TestCase(
@@ -226,7 +269,9 @@ class InternalTargetConfigSuite extends DatabricksTest {
           HealthWatcherTargetConfig.DEFAULT,
           KeyOfDeathProtectionConfig.DEFAULT,
           TargetWatchRequestRateLimitConfig.DEFAULT,
-          AuthorizerHelper.DEFAULT_AUTHORIZER
+          AuthorizerHelper.DEFAULT_AUTHORIZER,
+          KeySensitivityConfig.DEFAULT,
+          useAlternativeTarget = false
         )
       ),
       TestCase(
@@ -254,7 +299,9 @@ class InternalTargetConfigSuite extends DatabricksTest {
           HealthWatcherTargetConfig.DEFAULT,
           KeyOfDeathProtectionConfig.DEFAULT,
           TargetWatchRequestRateLimitConfig.DEFAULT,
-          AuthorizerHelper.DEFAULT_AUTHORIZER
+          AuthorizerHelper.DEFAULT_AUTHORIZER,
+          KeySensitivityConfig.DEFAULT,
+          useAlternativeTarget = false
         )
       ),
       TestCase(
@@ -283,7 +330,103 @@ class InternalTargetConfigSuite extends DatabricksTest {
           HealthWatcherTargetConfig.DEFAULT,
           KeyOfDeathProtectionConfig.DEFAULT,
           TargetWatchRequestRateLimitConfig(clientRequestsPerSecond = 500L),
-          AuthorizerHelper.DEFAULT_AUTHORIZER
+          AuthorizerHelper.DEFAULT_AUTHORIZER,
+          KeySensitivityConfig.DEFAULT,
+          useAlternativeTarget = false
+        )
+      ),
+      TestCase(
+        TargetConfigFieldsP(
+          primaryRateMetricConfig = Some(LoadBalancingMetricConfigP(maxLoadHint = Some(1000)))
+        ),
+        AdvancedTargetConfigFieldsP(),
+        InternalTargetConfig(
+          LoadWatcherTargetConfig.DEFAULT,
+          LoadBalancingConfig(
+            loadBalancingInterval = 1.minute,
+            ChurnConfig.DEFAULT,
+            LoadBalancingMetricConfig(1000, ImbalanceToleranceHintP.DEFAULT)
+          ),
+          KeyReplicationConfig.DEFAULT_SINGLE_REPLICA,
+          HealthWatcherTargetConfig.DEFAULT,
+          KeyOfDeathProtectionConfig.DEFAULT,
+          TargetWatchRequestRateLimitConfig.DEFAULT,
+          AuthorizerHelper.DEFAULT_AUTHORIZER,
+          keySensitivityConfig = KeySensitivityConfig.DEFAULT,
+          useAlternativeTarget = false
+        )
+      ),
+      TestCase(
+        TargetConfigFieldsP(
+          primaryRateMetricConfig = Some(LoadBalancingMetricConfigP(maxLoadHint = Some(1000))),
+          keySensitivityConfig = Some(
+            KeySensitivityConfigP(Some(SliceKeySensitivityP.SENSITIVE))
+          )
+        ),
+        AdvancedTargetConfigFieldsP(),
+        InternalTargetConfig(
+          LoadWatcherTargetConfig.DEFAULT,
+          LoadBalancingConfig(
+            loadBalancingInterval = 1.minute,
+            ChurnConfig.DEFAULT,
+            LoadBalancingMetricConfig(1000, ImbalanceToleranceHintP.DEFAULT)
+          ),
+          KeyReplicationConfig.DEFAULT_SINGLE_REPLICA,
+          HealthWatcherTargetConfig.DEFAULT,
+          KeyOfDeathProtectionConfig.DEFAULT,
+          TargetWatchRequestRateLimitConfig.DEFAULT,
+          AuthorizerHelper.DEFAULT_AUTHORIZER,
+          keySensitivityConfig =
+            KeySensitivityConfig(sliceKeySensitivity = SliceKeySensitivity.Sensitive),
+          useAlternativeTarget = false
+        )
+      ),
+      TestCase(
+        TargetConfigFieldsP(
+          primaryRateMetricConfig = Some(LoadBalancingMetricConfigP(maxLoadHint = Some(1000))),
+          keySensitivityConfig = Some(
+            KeySensitivityConfigP(Some(SliceKeySensitivityP.NON_SENSITIVE))
+          )
+        ),
+        AdvancedTargetConfigFieldsP(),
+        InternalTargetConfig(
+          LoadWatcherTargetConfig.DEFAULT,
+          LoadBalancingConfig(
+            loadBalancingInterval = 1.minute,
+            ChurnConfig.DEFAULT,
+            LoadBalancingMetricConfig(1000, ImbalanceToleranceHintP.DEFAULT)
+          ),
+          KeyReplicationConfig.DEFAULT_SINGLE_REPLICA,
+          HealthWatcherTargetConfig.DEFAULT,
+          KeyOfDeathProtectionConfig.DEFAULT,
+          TargetWatchRequestRateLimitConfig.DEFAULT,
+          AuthorizerHelper.DEFAULT_AUTHORIZER,
+          keySensitivityConfig =
+            KeySensitivityConfig(sliceKeySensitivity = SliceKeySensitivity.NonSensitive),
+          useAlternativeTarget = false
+        )
+      ),
+      // use_alternative_target is parsed from the advanced config; unset (above) yields false,
+      // and an explicit true is reflected in the parsed InternalTargetConfig.
+      TestCase(
+        TargetConfigFieldsP(
+          primaryRateMetricConfig = Some(LoadBalancingMetricConfigP(maxLoadHint = Some(1000)))
+        ),
+        AdvancedTargetConfigFieldsP(useAlternativeTarget = Some(true)),
+        InternalTargetConfig(
+          LoadWatcherTargetConfig.DEFAULT,
+          LoadBalancingConfig(
+            loadBalancingInterval = 1.minute,
+            ChurnConfig.DEFAULT,
+            LoadBalancingMetricConfig(1000, ImbalanceToleranceHintP.DEFAULT)
+          ),
+          KeyReplicationConfig.DEFAULT_SINGLE_REPLICA,
+          HealthWatcherTargetConfig.DEFAULT,
+          KeyOfDeathProtectionConfig.DEFAULT,
+          TargetWatchRequestRateLimitConfig.DEFAULT,
+          AuthorizerHelper.DEFAULT_AUTHORIZER,
+          KeySensitivityConfig.DEFAULT,
+          useAlternativeTarget = true
         )
       )
     )
@@ -386,12 +529,42 @@ class InternalTargetConfigSuite extends DatabricksTest {
     }
   }
 
+  test("InternalTargetConfig use_alternative_target defaults false and serializes only when set") {
+    // Test plan: verify that use_alternative_target defaults to false when unset in
+    // AdvancedTargetConfigFieldsP, and that NamedInternalTargetConfig.toProto emits the field only
+    // when it is enabled (so configs left at the default are not churned). Parse coverage for the
+    // field lives in "InternalTargetConfig.fromProto" and toString coverage in
+    // "InternalTargetConfig.toString".
+    val targetConfig = TargetConfigFieldsP(
+      primaryRateMetricConfig = Some(LoadBalancingMetricConfigP(maxLoadHint = Some(1000)))
+    )
+    val name = TargetName("softstore-storelet")
+
+    // The default (unset) is false.
+    val disabledConfig =
+      InternalTargetConfig.fromProtos(targetConfig, AdvancedTargetConfigFieldsP())
+    assert(!disabledConfig.useAlternativeTarget)
+
+    val enabledConfig = InternalTargetConfig.fromProtos(
+      targetConfig,
+      AdvancedTargetConfigFieldsP(useAlternativeTarget = Some(true))
+    )
+
+    // toProto emits the field only when enabled.
+    assertResult(Some(true))(
+      NamedInternalTargetConfig(name, enabledConfig).toProto.getAdvancedConfig.useAlternativeTarget
+    )
+    assertResult(None)(
+      NamedInternalTargetConfig(name, disabledConfig).toProto.getAdvancedConfig.useAlternativeTarget
+    )
+  }
+
   test("InternalTargetConfig.toString") {
-    // Test plan: Verify that InternalTargetConfig.toString correctly prints the non-default
-    // configurations and emits default configurations. Verify this by checking the toString()
-    // results of 2 InternalTargetConfigs, where the first InternalTargetConfig has non-default
-    // values for all fields, and the second IntervalTargetConfig has the default
-    // KeyReplicationConfig and non-default values for other fields.
+    // Test plan: Verify that InternalTargetConfig.toString prints non-default configurations and
+    // omits default ones. Verify this by checking the toString() results of 2 configs: the first
+    // has non-default values for all fields (so useAlternativeTarget=true is surfaced),
+    // and the second has the default KeyReplicationConfig and default useAlternativeTarget (both
+    // omitted) with non-default values for other fields.
 
     val nonDefaultLoadBalancingConfig = LoadBalancingConfig(
       LoadBalancingConfig.DEFAULT_LOAD_BALANCING_INTERVAL + 1.minute,
@@ -399,7 +572,12 @@ class InternalTargetConfigSuite extends DatabricksTest {
       LoadBalancingMetricConfig(maxLoadHint = 1.0)
     )
     val nonDefaultLoadWatcherConfig =
-      LoadWatcherTargetConfig(minDuration = 2.minutes, maxAge = 20.minutes, useTopKeys = false)
+      LoadWatcherTargetConfig(
+        minDuration = 2.minutes,
+        maxAge = 20.minutes,
+        useTopKeys = false,
+        useLoadDistribution = true
+      )
     val nonDefaultKeyReplicationConfig = KeyReplicationConfig(minReplicas = 5, maxReplicas = 10)
     val nonDefaultHealthWatcherConfig =
       HealthWatcherTargetConfig(
@@ -419,16 +597,22 @@ class InternalTargetConfigSuite extends DatabricksTest {
       nonDefaultHealthWatcherConfig,
       nonDefaultKeyOfDeathProtectionConfig,
       nonDefaultTargetWatchRequestRateLimitConfig,
-      AuthorizerHelper.DEFAULT_AUTHORIZER
+      AuthorizerHelper.DEFAULT_AUTHORIZER,
+      keySensitivityConfig =
+        KeySensitivityConfig(sliceKeySensitivity = SliceKeySensitivity.NonSensitive),
+      useAlternativeTarget = true
     )
     val expectedStringWithAllNonDefault = "InternalTargetConfig(, " +
-      "LoadWatcherTargetConfig(minDuration=2 minutes, maxAge=20 minutes, useTopKeys=false), " +
+      "LoadWatcherTargetConfig(minDuration=2 minutes, maxAge=20 minutes, useTopKeys=false, " +
+      "useLoadDistribution=true), " +
       "LoadBalancingConfig(primaryRate=LoadBalancingMetricConfig(maxLoadHint=1.0), " +
       "LoadBalancingInterval=2 minutes), " +
       "KeyReplicationConfig(minReplicas=5, maxReplicas=10), " +
       "HealthWatcherConfig(observeSliceletReadiness=true, permitRunningToNotReady=true), " +
       "KeyOfDeathProtectionConfig(homomorphicGenerationEnabled=true), " +
-      "TargetWatchRequestRateLimitConfig(clientRequestsPerSecond=1000, burstCapacity=10000))"
+      "TargetWatchRequestRateLimitConfig(clientRequestsPerSecond=1000, burstCapacity=10000), " +
+      "KeySensitivityConfig(sliceKeySensitivity=NonSensitive), " +
+      "useAlternativeTarget=true)"
     assert(
       internalTargetConfigWithAllNonDefault.toString ==
       expectedStringWithAllNonDefault
@@ -441,10 +625,13 @@ class InternalTargetConfigSuite extends DatabricksTest {
       nonDefaultHealthWatcherConfig,
       nonDefaultKeyOfDeathProtectionConfig,
       nonDefaultTargetWatchRequestRateLimitConfig,
-      AuthorizerHelper.DEFAULT_AUTHORIZER
+      AuthorizerHelper.DEFAULT_AUTHORIZER,
+      KeySensitivityConfig.DEFAULT,
+      useAlternativeTarget = false
     )
     val expectedStringWithDefaultKeyReplication = "InternalTargetConfig(, " +
-      "LoadWatcherTargetConfig(minDuration=2 minutes, maxAge=20 minutes, useTopKeys=false), " +
+      "LoadWatcherTargetConfig(minDuration=2 minutes, maxAge=20 minutes, useTopKeys=false, " +
+      "useLoadDistribution=true), " +
       "LoadBalancingConfig(primaryRate=LoadBalancingMetricConfig(maxLoadHint=1.0), " +
       "LoadBalancingInterval=2 minutes), " +
       "HealthWatcherConfig(observeSliceletReadiness=true, permitRunningToNotReady=true), " +
@@ -524,6 +711,60 @@ class InternalTargetConfigSuite extends DatabricksTest {
     // Test fromProto with empty proto (should return default).
     val emptyProto = HealthWatcherConfigP()
     assertResult(config2)(HealthWatcherTargetConfig.fromProto(emptyProto))
+  }
+
+  test("KeySensitivityConfig verification and round-trip") {
+    // Test plan: Verify that KeySensitivityConfig.fromProto maps each proto classification to
+    // the corresponding SliceKeySensitivity (and an unset field to Unspecified), that only
+    // NON_SENSITIVE decodes as non-sensitive, and that KeySensitivityConfig round-trips
+    // through proto.
+
+    // Only NON_SENSITIVE is treated as a non-sensitive attestation.
+    assertResult(
+      KeySensitivityConfig(sliceKeySensitivity = SliceKeySensitivity.NonSensitive)
+    )(
+      KeySensitivityConfig.fromProto(
+        KeySensitivityConfigP(Some(SliceKeySensitivityP.NON_SENSITIVE))
+      )
+    )
+
+    // An explicit SENSITIVE decodes as a sensitive attestation.
+    assertResult(
+      KeySensitivityConfig(sliceKeySensitivity = SliceKeySensitivity.Sensitive)
+    )(
+      KeySensitivityConfig.fromProto(
+        KeySensitivityConfigP(Some(SliceKeySensitivityP.SENSITIVE))
+      )
+    )
+
+    // UNSPECIFIED and an empty proto both decode to the default (no attestation).
+    assertResult(KeySensitivityConfig.DEFAULT)(
+      KeySensitivityConfig.fromProto(
+        KeySensitivityConfigP(Some(SliceKeySensitivityP.UNSPECIFIED))
+      )
+    )
+    assertResult(KeySensitivityConfig.DEFAULT)(
+      KeySensitivityConfig.fromProto(KeySensitivityConfigP())
+    )
+
+    // The default config serializes as UNSPECIFIED, and the non-default config as NON_SENSITIVE.
+    val nonSensitive =
+      KeySensitivityConfig(sliceKeySensitivity = SliceKeySensitivity.NonSensitive)
+    assertResult(Some(SliceKeySensitivityP.UNSPECIFIED))(
+      KeySensitivityConfig.DEFAULT.toProto.sliceKeySensitivity
+    )
+    assertResult(Some(SliceKeySensitivityP.NON_SENSITIVE))(
+      nonSensitive.toProto.sliceKeySensitivity
+    )
+
+    // Round-trip the default, the explicit sensitive, and the non-sensitive configs through proto.
+    assertResult(KeySensitivityConfig.DEFAULT)(
+      KeySensitivityConfig.fromProto(KeySensitivityConfig.DEFAULT.toProto)
+    )
+    val sensitive =
+      KeySensitivityConfig(sliceKeySensitivity = SliceKeySensitivity.Sensitive)
+    assertResult(sensitive)(KeySensitivityConfig.fromProto(sensitive.toProto))
+    assertResult(nonSensitive)(KeySensitivityConfig.fromProto(nonSensitive.toProto))
   }
 
   test("InternalTargetConfig backward-compatability with proto") {
@@ -614,7 +855,9 @@ class InternalTargetConfigSuite extends DatabricksTest {
         HealthWatcherTargetConfig.DEFAULT,
         KeyOfDeathProtectionConfig.DEFAULT,
         TargetWatchRequestRateLimitConfig.DEFAULT,
-        AuthorizerHelper.DEFAULT_AUTHORIZER
+        AuthorizerHelper.DEFAULT_AUTHORIZER,
+        KeySensitivityConfig.DEFAULT,
+        useAlternativeTarget = false
       )
     )
     // It's hard to access a real stale version of InternalTargetConfig in test and verify this in

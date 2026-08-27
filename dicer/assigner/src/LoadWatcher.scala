@@ -23,7 +23,7 @@ import com.databricks.dicer.assigner.LoadWatcher.{
   StaticConfig
 }
 import com.databricks.dicer.assigner.conf.LoadWatcherConf
-import com.databricks.dicer.common.SliceletData.KeyLoad
+import com.databricks.dicer.common.SliceletData.{KeyLoad, LoadDistribution}
 import com.databricks.dicer.common.{Assignment, LoadMeasurement, SliceAssignment}
 import com.databricks.dicer.external.{ResourceAddress, Slice, SliceKey}
 
@@ -242,14 +242,30 @@ private[assigner] class LoadWatcher(config: LoadWatcherTargetConfig, staticConfi
       resource: ResourceAddress,
       numReplicas: Int,
       load: Double,
-      topKeys: Seq[KeyLoad]): Measurement = {
+      topKeys: Seq[KeyLoad],
+      loadDistributionOpt: Option[LoadDistribution]): Measurement = {
     val overriddenTopKeys: Seq[KeyLoad] =
       if (staticConfig.allowTopKeys && config.useTopKeys) {
         topKeys
       } else {
         Seq.empty
       }
-    new Measurement(time, windowDuration, slice, resource, numReplicas, load, overriddenTopKeys)
+    val overriddenLoadDistributionOpt: Option[LoadDistribution] =
+      if (staticConfig.allowLoadDistribution && config.useLoadDistribution) {
+        loadDistributionOpt
+      } else {
+        None
+      }
+    new Measurement(
+      time,
+      windowDuration,
+      slice,
+      resource,
+      numReplicas,
+      load,
+      overriddenTopKeys,
+      overriddenLoadDistributionOpt
+    )
   }
 
   /**
@@ -322,14 +338,21 @@ private[assigner] object LoadWatcher {
    * @param allowTopKeys whether to allow any target to use top key information from the Slicelet.
    *                     [[LoadWatcherTargetConfig.useTopKeys]] must still be enabled to actually
    *                     use the top keys.
+   * @param allowLoadDistribution whether to allow any target to use the per-key load distribution
+   *                              (CDF) reported by the Slicelet.
+   *                              [[LoadWatcherTargetConfig.useLoadDistribution]] must still be
+   *                              enabled to actually use the load distribution.
    */
-  case class StaticConfig(allowTopKeys: Boolean)
+  case class StaticConfig(allowTopKeys: Boolean, allowLoadDistribution: Boolean)
 
   object StaticConfig {
 
     /** Create a [[StaticConfig]] derived from the DbConfs in [[LoadWatcherConf]]. */
     def fromConf(conf: LoadWatcherConf): StaticConfig = {
-      StaticConfig(allowTopKeys = conf.allowTopKeys)
+      StaticConfig(
+        allowTopKeys = conf.allowTopKeys,
+        allowLoadDistribution = conf.allowLoadDistribution
+      )
     }
   }
 
@@ -339,7 +362,8 @@ private[assigner] object LoadWatcher {
    * and `numReplicas` indicates the number of replicas (known by the Slicelet who reported this
    * Measurement) for `slice` when this load report was generated. `topKeys` contains estimated load
    * measurements for keys within the Slice, and the sum of their estimated load should be <= `load`
-   * (with some small wiggle room for floating point errors).
+   * (with some small wiggle room for floating point errors). `loadDistributionOpt`, when present,
+   * is the approximate distribution (CDF) of `load` across keys within the Slice.
    *
    * Must be created by [[LoadWatcher.createMeasurement]].
    *
@@ -355,7 +379,8 @@ private[assigner] object LoadWatcher {
       val resource: ResourceAddress,
       val numReplicas: Int,
       val load: Double,
-      val topKeys: Seq[KeyLoad]) {
+      val topKeys: Seq[KeyLoad],
+      val loadDistributionOpt: Option[LoadDistribution]) {
     if (windowDuration < Duration.Zero) {
       throw new IllegalArgumentException(s"windowDuration must be non-negative: $windowDuration")
     }
@@ -375,7 +400,8 @@ private[assigner] object LoadWatcher {
       val resource: ResourceAddress,
       val load: Double,
       val topKeys: Seq[KeyLoad],
-      val numReplicas: Int
+      val numReplicas: Int,
+      val loadDistributionOpt: Option[LoadDistribution]
   ) extends IntrusiveMinHeapElement[TickerTime] {
     iassert(numReplicas > 0)
     LoadMeasurement.requireValidLoadMeasurement(load)
@@ -398,7 +424,8 @@ private[assigner] object LoadWatcher {
         measurement.resource,
         measurement.load,
         measurement.topKeys,
-        measurement.numReplicas
+        measurement.numReplicas,
+        measurement.loadDistributionOpt
       )
       measurementElement.setPriority(measurement.time)
       measurementElement

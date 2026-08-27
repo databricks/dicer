@@ -111,6 +111,7 @@ class SliceletLoadAccumulatorSuite extends DatabricksTest with TestName {
           val assignment: Assignment = createAssignment(
             generation = Generation.fromProto(proto.getGeneration),
             consistencyMode = AssignmentConsistencyMode.Affinity,
+            assignerServiceInfoOpt = None,
             entries = proto.newAssignment.map((proto: SimpleSliceAssignmentP) => {
               val sliceWithResources: SliceWithResources = SliceWithResources(
                 slice = SliceHelper.fromProto(proto.getSlice),
@@ -235,8 +236,8 @@ class SliceletLoadAccumulatorSuite extends DatabricksTest with TestName {
     if (proto.expectedLoads.nonEmpty) {
       val expectedAttributedLoads: Seq[SliceletData.SliceLoad] =
         proto.expectedLoads.map { expectedLoad: SliceLoadP =>
-          SliceletData.SliceLoad
-            .fromProto(expectedLoad)
+          SliceletData.SliceLoad.forTest
+            .SliceLoadfromProto(expectedLoad)
             .copy(
               // Adjust the window times to match the start time of the test.
               windowLowInclusive = Instant.ofEpochMilli(
@@ -390,12 +391,13 @@ class SliceletLoadAccumulatorSuite extends DatabricksTest with TestName {
     val randomAssignments: Array[Assignment] = generations.map { generation =>
       ProposedAssignment(
         predecessorOpt = None,
-        createRandomProposal(
+        sliceMap = createRandomProposal(
           numSlices = 10,
           resources = squids,
           numMaxReplicas = 3,
           rng = rng
-        )
+        ),
+        assignerServiceInfoOpt = None
       ).commit(
         isFrozen = false,
         consistencyMode = AssignmentConsistencyMode.Affinity,

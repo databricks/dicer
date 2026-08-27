@@ -32,6 +32,7 @@ class MigrationTestAssignmentSuite extends DatabricksTest {
       assignment == createAssignment(
         generation,
         Affinity,
+        assignerServiceInfoOpt = None,
         // Placeholder slice:
         (("" -- 0) @@ generation -> Seq("pod0")).withPrimaryRateLoad(0.0),
         // Interesting slices:
@@ -100,6 +101,7 @@ class MigrationTestAssignmentSuite extends DatabricksTest {
     val assignment1: Assignment = createAssignment(
       42,
       Affinity,
+      assignerServiceInfoOpt = None,
       (("" -- 0) @@ 42 -> Seq("pod0", "pod1")).withPrimaryRateLoad(20.0),
       ((0 -- 1) @@ 42 -> Seq("pod0")).withPrimaryRateLoad(20.0),
       ((1 -- 2) @@ 42 -> Seq("pod0")).withPrimaryRateLoad(70.0),
@@ -113,6 +115,7 @@ class MigrationTestAssignmentSuite extends DatabricksTest {
     val assignment2: Assignment = createAssignment(
       42,
       Affinity,
+      assignerServiceInfoOpt = None,
       (("" -- 0) @@ 42 -> Seq("pod0", "pod1")).withPrimaryRateLoad(20.0),
       // Miss the slice with load 20.0 assigned to pod0.
       ((0 -- 1) @@ 42 -> Seq("pod0")).withPrimaryRateLoad(90.0),
@@ -128,6 +131,7 @@ class MigrationTestAssignmentSuite extends DatabricksTest {
     val assignment3: Assignment = createAssignment(
       42,
       Affinity,
+      assignerServiceInfoOpt = None,
       (("" -- 0) @@ 42 -> Seq("pod0", "pod1")).withPrimaryRateLoad(20.0),
       ((0 -- 1) @@ 42 -> Seq("pod0")).withPrimaryRateLoad(20.0),
       ((1 -- 2) @@ 42 -> Seq("pod0")).withPrimaryRateLoad(70.0),
@@ -143,6 +147,7 @@ class MigrationTestAssignmentSuite extends DatabricksTest {
     val assignment4: Assignment = createAssignment(
       42,
       Affinity,
+      assignerServiceInfoOpt = None,
       (("" -- 0) @@ 42 -> Seq("pod0", "pod1")).withPrimaryRateLoad(20.0),
       ((0 -- 1) @@ 42 -> Seq("pod0")).withPrimaryRateLoad(20.0) | Map(
         "pod0" -> Seq(SubsliceAnnotation(0 -- 1, UnixTimeVersion(41), stateTransferOpt = None))

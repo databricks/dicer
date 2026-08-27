@@ -1,9 +1,13 @@
 package com.databricks.dicer.common
 
+import scala.concurrent.duration._
+
+import io.prometheus.client.CollectorRegistry
+
 import com.databricks.caching.util.ServerTestUtils
 import com.databricks.dicer.common.EtcdBootstrapper.{BootstrapRequest, ExitCode}
 import com.databricks.caching.util.{EtcdTestEnvironment, EtcdClient, EtcdKeyValueMapper}
-import com.databricks.caching.util.UnixTimeVersion
+import com.databricks.caching.util.{MetricUtils, UnixTimeVersion}
 import com.databricks.rpc.DatabricksServerWrapper
 import com.databricks.testing.DatabricksTest
 
@@ -14,8 +18,36 @@ class EtcdBootstrapperSuite extends DatabricksTest {
   private[this] val NON_LOOSE_INCARNATION: Incarnation = Incarnation(2)
   private[this] val LOOSE_INCARNATION: Incarnation = Incarnation.MIN
 
+  private[this] val KNOWN_WATERMARK_INCARNATION_GAUGE_NAME =
+    "dicer_etcd_bootstrapper_known_watermark_incarnation"
+  private[this] val KNOWN_WATERMARK_NUMBER_GAUGE_NAME =
+    "dicer_etcd_bootstrapper_known_watermark_number"
+
   override def beforeEach(): Unit = {
     dockerizedEtcd.deleteAll()
+  }
+
+  /**
+   * Runs [[EtcdBootstrapper.bootstrapEtcdBlocking]] without the post-finish linger, so tests do not
+   * sleep. The linger is production-only behavior that keeps the short-lived job alive for
+   * scraping.
+   */
+  private def bootstrapEtcdBlockingNoLinger(requests: Seq[BootstrapRequest]): ExitCode =
+    EtcdBootstrapper.bootstrapEtcdBlocking(requests, lingerAfterFinish = Duration.Zero)
+
+  /**
+   * Returns the value of the known-watermark `gaugeName` for the given `outcome` label and
+   * `namespace`, or `None` if no such sample exists.
+   */
+  private def getKnownWatermarkGaugeValueOpt(
+      gaugeName: String,
+      outcome: String,
+      namespace: EtcdClient.KeyNamespace): Option[Double] = {
+    MetricUtils.getMetricValueOpt(
+      CollectorRegistry.defaultRegistry,
+      gaugeName,
+      Map("outcome" -> outcome, "namespace" -> namespace.value)
+    )
   }
 
   override def afterAll(): Unit = {
@@ -36,7 +68,7 @@ class EtcdBootstrapperSuite extends DatabricksTest {
     )
 
     assert(
-      EtcdBootstrapper.bootstrapEtcdBlocking(
+      bootstrapEtcdBlockingNoLinger(
         Seq(
           BootstrapRequest(
             dockerizedEtcd.createEtcdClient(
@@ -57,6 +89,22 @@ class EtcdBootstrapperSuite extends DatabricksTest {
             .toVersionValueString(EtcdClient.Version(incarnation.value, UnixTimeVersion.MIN))
         )
     )
+
+    // Verify: Metrics are correctly reported.
+    assert(
+      getKnownWatermarkGaugeValueOpt(
+        KNOWN_WATERMARK_INCARNATION_GAUGE_NAME,
+        "newly_written",
+        NAMESPACE
+      ).contains(incarnation.value.toDouble)
+    )
+    assert(
+      getKnownWatermarkGaugeValueOpt(
+        KNOWN_WATERMARK_NUMBER_GAUGE_NAME,
+        "newly_written",
+        NAMESPACE
+      ).contains(UnixTimeVersion.MIN.value.toDouble)
+    )
   }
 
   test("when there is high watermark already exist, bootstrap returns with success") {
@@ -67,7 +115,7 @@ class EtcdBootstrapperSuite extends DatabricksTest {
     // returned exit code is `SUCCESS`, and the high watermark in the etcd cluster remains
     // untouched.
     assert(
-      EtcdBootstrapper.bootstrapEtcdBlocking(
+      bootstrapEtcdBlockingNoLinger(
         Seq(
           BootstrapRequest(
             dockerizedEtcd.createEtcdClient(
@@ -92,7 +140,7 @@ class EtcdBootstrapperSuite extends DatabricksTest {
     // Try to re-bootstrap etcd with same store incarnation. Should report success and leave the
     // existing value untouched.
     assert(
-      EtcdBootstrapper.bootstrapEtcdBlocking(
+      bootstrapEtcdBlockingNoLinger(
         Seq(
           BootstrapRequest(
             dockerizedEtcd.createEtcdClient(
@@ -117,7 +165,7 @@ class EtcdBootstrapperSuite extends DatabricksTest {
     // Try to re-bootstrap etcd with a different store incarnation. Like above, it should report
     // success and leave the existing value untouched.
     assert(
-      EtcdBootstrapper.bootstrapEtcdBlocking(
+      bootstrapEtcdBlockingNoLinger(
         Seq(
           BootstrapRequest(
             dockerizedEtcd.createEtcdClient(
@@ -138,6 +186,22 @@ class EtcdBootstrapperSuite extends DatabricksTest {
           )
         )
     )
+
+    // Verify: The metrics are correctly reported.
+    assert(
+      getKnownWatermarkGaugeValueOpt(
+        KNOWN_WATERMARK_INCARNATION_GAUGE_NAME,
+        "existing",
+        NAMESPACE
+      ).contains(NON_LOOSE_INCARNATION.value.toDouble)
+    )
+    assert(
+      getKnownWatermarkGaugeValueOpt(
+        KNOWN_WATERMARK_NUMBER_GAUGE_NAME,
+        "existing",
+        NAMESPACE
+      ).contains(UnixTimeVersion.MIN.value.toDouble)
+    )
   }
 
   test("when etcd data is corrupted, bootstrap returns failure exit code") {
@@ -149,7 +213,7 @@ class EtcdBootstrapperSuite extends DatabricksTest {
       "not-a-version"
     )
     assert(
-      EtcdBootstrapper.bootstrapEtcdBlocking(
+      bootstrapEtcdBlockingNoLinger(
         Seq(
           BootstrapRequest(
             dockerizedEtcd.createEtcdClient(
@@ -178,7 +242,7 @@ class EtcdBootstrapperSuite extends DatabricksTest {
     )
 
     assert(
-      EtcdBootstrapper.bootstrapEtcdBlocking(
+      bootstrapEtcdBlockingNoLinger(
         Seq(
           BootstrapRequest(failingClient, Incarnation(42)),
           BootstrapRequest(workingClient, Incarnation(43))
@@ -200,5 +264,30 @@ class EtcdBootstrapperSuite extends DatabricksTest {
           )
         )
     )
+  }
+
+  test("bootstrapEtcdBlocking lingers for at least the requested duration before returning") {
+    // Test plan: Verify that `bootstrapEtcdBlocking` keeps the process alive for at least
+    // `lingerAfterFinish` after the bootstrap completes, so a short-lived job's result metrics can
+    // be scraped before the process exits. Verify this by bootstrapping a single namespace with a
+    // small positive linger and asserting the call takes at least that long to return.
+    val linger: FiniteDuration = 800.millis
+    val startNanos: Long = System.nanoTime()
+    assert(
+      EtcdBootstrapper.bootstrapEtcdBlocking(
+        Seq(
+          BootstrapRequest(
+            dockerizedEtcd.createEtcdClient(EtcdClient.Config(NAMESPACE)),
+            NON_LOOSE_INCARNATION
+          )
+        ),
+        lingerAfterFinish = linger
+      )
+      == ExitCode.SUCCESS
+    )
+    val elapsed: FiniteDuration = (System.nanoTime() - startNanos).nanos
+    assert(elapsed >= linger)
+    // Also verify that the job can be done within a reasonable time.
+    assert(elapsed <= linger + 1.second)
   }
 }

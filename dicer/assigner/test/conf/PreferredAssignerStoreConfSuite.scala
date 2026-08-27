@@ -1,11 +1,15 @@
 package com.databricks.dicer.assigner.conf
 
+import java.util.UUID
+
 import com.databricks.conf.Configs
 import com.databricks.dicer.assigner.{
   Assigner,
   DisabledPreferredAssignerDriver,
-  MigrationPreferredAssignerDriver,
-  PreferredAssignerTestHelper
+  FakeKubernetesTestSupport,
+  KubernetesMembershipChecker,
+  MigrationMode,
+  MigrationPreferredAssignerDriver
 }
 import com.databricks.dicer.common.Incarnation
 import com.databricks.rpc.DatabricksObjectMapper
@@ -24,10 +28,11 @@ class PreferredAssignerStoreConfSuite extends DatabricksTest {
   private def generateConfigMap(
       preferredAssignerEnabled: Boolean,
       preferredAssignerStoreIncarnation: Incarnation,
-      etcdEndpoints: Seq[String]): Map[String, Any] = {
+      etcdEndpoints: Seq[String],
+      migrationModeOpt: Option[MigrationMode] = None): Map[String, Any] = {
     val endpointsConfigString: String = DatabricksObjectMapper.toJson(etcdEndpoints)
 
-    Map(
+    val baseConfig: Map[String, Any] = Map(
       "databricks.dicer.assigner.preferredAssigner.modeEnabled" ->
       preferredAssignerEnabled,
       "databricks.dicer.assigner.preferredAssigner.storeIncarnation" ->
@@ -35,6 +40,13 @@ class PreferredAssignerStoreConfSuite extends DatabricksTest {
       "databricks.dicer.assigner.preferredAssigner.etcd.endpoints" ->
       endpointsConfigString
     )
+    migrationModeOpt match {
+      case Some(migrationMode: MigrationMode) =>
+        baseConfig +
+        ("databricks.dicer.assigner.preferredAssigner.migrationMode" -> migrationMode.name)
+      case None =>
+        baseConfig
+    }
   }
 
   test("Cannot create a PA store when the PA mode is disabled") {
@@ -92,39 +104,40 @@ class PreferredAssignerStoreConfSuite extends DatabricksTest {
     Assigner.createPreferredAssignerStore(assignerConf)
   }
 
-  test("Create PreferredAssignerDriver based on the config") {
-    // Test plan: verify that when the preferred assigner mode is enabled, a
-    // `MigrationPreferredAssignerDriver` instance is created (wrapping etcd + consistent-hashing
-    // drivers), and when the preferred assigner mode is disabled, a
-    // `DisabledPreferredAssignerDriver` instance is created.
-    val preferredAssignerConfMap: Map[String, Any] = generateConfigMap(
-      preferredAssignerEnabled = true,
-      preferredAssignerStoreIncarnation = NON_LOOSE_INCARNATION,
-      etcdEndpoints = ETCD_ENDPOINTS
+  test("createPreferredAssignerDriver selects the driver by PA mode") {
+    // Test plan: verify createPreferredAssignerDriver returns a MigrationPreferredAssignerDriver
+    // when the preferred assigner mode is enabled, and a DisabledPreferredAssignerDriver when it is
+    // disabled. Supply an inert membership checker (the driver requires one but never polls it).
+    val checker: KubernetesMembershipChecker =
+      FakeKubernetesTestSupport.inertMembershipCheckerFactory.create(UUID.randomUUID())
+
+    val enabledConf = new DicerAssignerConf(
+      Configs.parseMap(
+        generateConfigMap(
+          preferredAssignerEnabled = true,
+          preferredAssignerStoreIncarnation = NON_LOOSE_INCARNATION,
+          etcdEndpoints = ETCD_ENDPOINTS
+        )
+      )
     )
-    val preferredAssignerConf: DicerAssignerConf =
-      new DicerAssignerConf(Configs.parseMap(preferredAssignerConfMap))
-    Assigner.createPreferredAssignerDriver(
-      preferredAssignerConf,
-      PreferredAssignerTestHelper.noOpMembershipCheckerFactory
-    ) match {
-      case _: MigrationPreferredAssignerDriver => assert(true)
-      case driver => fail(s"expected `MigrationPreferredAssignerDriver` but got $driver")
+    Assigner.createPreferredAssignerDriver(enabledConf, checker) match {
+      case _: MigrationPreferredAssignerDriver => // expected
+      case driver => fail(s"expected MigrationPreferredAssignerDriver but got $driver")
     }
 
-    val disabledPreferredAssignerConfMap: Map[String, Any] = generateConfigMap(
-      preferredAssignerEnabled = false,
-      preferredAssignerStoreIncarnation = LOOSE_INCARNATION,
-      etcdEndpoints = ETCD_ENDPOINTS
+    val disabledConf = new DicerAssignerConf(
+      Configs.parseMap(
+        generateConfigMap(
+          preferredAssignerEnabled = false,
+          preferredAssignerStoreIncarnation = LOOSE_INCARNATION,
+          etcdEndpoints = ETCD_ENDPOINTS
+        )
+      )
     )
-    val disabledPreferredAssignerConf: DicerAssignerConf =
-      new DicerAssignerConf(Configs.parseMap(disabledPreferredAssignerConfMap))
-    Assigner.createPreferredAssignerDriver(
-      disabledPreferredAssignerConf,
-      PreferredAssignerTestHelper.noOpMembershipCheckerFactory
-    ) match {
-      case _: DisabledPreferredAssignerDriver => assert(true)
-      case driver => fail(s"expected `DisabledPreferredAssignerDriver` but got $driver")
+    Assigner.createPreferredAssignerDriver(disabledConf, checker) match {
+      case _: DisabledPreferredAssignerDriver => // expected
+      case driver => fail(s"expected DisabledPreferredAssignerDriver but got $driver")
     }
   }
+
 }

@@ -86,8 +86,8 @@ object MetricUtils extends Assertions {
   }
 
   /**
-   * Returns the current value of the [[PrefixLogger]] error count metric for the given combination
-   * of `severity`, `errorCode`, and `prefix`.
+   * Returns the current value of the [[PrefixLogger]] or [[CachingErrorMetrics]] error count metric
+   * for the given combination of `severity`, `errorCode`, and `prefix`.
    */
   def getPrefixLoggerErrorCount(
       severity: Severity,

@@ -380,8 +380,11 @@ final class EtcdClient private (jetcd: JetcdWrapper, val config: Config) {
    * required step during new store bring-up. Writes will fail if a watermark is absent from the
    * store.
    *
+   * @return A future completing with `None` when `watermark` was newly written by the call, or
+   *         `Some(existingWatermark)` when a watermark was already present. In the latter case the
+   *         existing watermark is left untouched.
+   *
    * Throws a status exception on error:
-   *  - `ALREADY_EXISTS` indicates the watermark already exists.
    *  - `DATA_LOSS` indicates a watermark exists but is corrupted.
    *
    * Note: initialization must be performed manually since EtcdClient cannot distinguish
@@ -390,7 +393,7 @@ final class EtcdClient private (jetcd: JetcdWrapper, val config: Config) {
    * guarantee key version monotonicity). A new, larger watermark must be re-written to the store
    * to recover.
    */
-  def initializeVersionHighWatermarkUnsafe(watermark: Version): Future[Unit] = {
+  def initializeVersionHighWatermarkUnsafe(watermark: Version): Future[Option[Version]] = {
     val versionHighWatermarkKey: ByteSequence =
       EtcdKeyValueMapper.getVersionHighWatermarkKeyBytes(config.keyNamespace)
     // Conditioned on its non-existence in the store (if), initialize the version high watermark
@@ -407,6 +410,7 @@ final class EtcdClient private (jetcd: JetcdWrapper, val config: Config) {
           logger.info(
             s"Version high watermark initialized to $watermark at revision=$revision"
           )
+          None
         } else {
           // The comparison failed, so a watermark already exists in etcd.
           val getResponses: Seq[GetResponse] = response.getGetResponses.asScala
@@ -435,11 +439,9 @@ final class EtcdClient private (jetcd: JetcdWrapper, val config: Config) {
                   .withCause(ex)
               )
           }
-          throw new StatusException(
-            Status.ALREADY_EXISTS.withDescription(
-              s"version high watermark already exists with value: $existingWatermark"
-            )
-          )
+          // A watermark already exists; leave it untouched and return it for reporting.
+          logger.info(s"Version high watermark already exists with value: $existingWatermark")
+          Some(existingWatermark)
         }
       }(InlinePipelineExecutor)
       .toFuture // Non-blocking; only side effect is logging.
@@ -1464,7 +1466,11 @@ object EtcdClient {
    * Timeout commands are cheap and total outgoing QPS is low, so we only allocate a single thread.
    */
   private val timeoutEcPool: SequentialExecutionContextPool =
-    SequentialExecutionContextPool.create("etcd-client-timeout", numThreads = 1)
+    SequentialExecutionContextPool.create(
+      poolName = "etcd-client-timeout",
+      numThreads = 1,
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+    )
 
   private[util] object forTest {
 

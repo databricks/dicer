@@ -107,5 +107,85 @@ round_tripping_cases: [
       }
       num_replicas: 1
     }
+  },
+
+  # Case 5: attributed_loads carrying load distributions.
+  {
+    squid: {
+      resource_address: "test-uri-5"
+      creation_time_millis: 1234567890004
+      resource_uuid_high: 123456793
+      resource_uuid_low: 987654325
+    }
+    state: RUNNING
+    kubernetes_namespace: "test-namespace-5"
+    attributed_loads: [
+      # Multi-point load distribution.
+      {
+        primary_rate_load: 100.0
+        window_low_inclusive_seconds: 10
+        window_high_exclusive_seconds: 20
+        slice: {
+          low_inclusive: "aaa"
+          high_exclusive: "zzz"
+        }
+        num_replicas: 1
+        load_distribution: {
+          points: [
+            {
+              key: "aaa"
+              cumulative_load_fraction: 0.0
+            },
+            {
+              key: "mmm"
+              cumulative_load_fraction: 0.4
+            },
+            {
+              key: "zzy"
+              cumulative_load_fraction: 1.0
+            }
+          ]
+          max_error_fraction: 0.1
+        }
+      },
+      # Load distribution with no points (no load observed yet).
+      {
+        primary_rate_load: 0.0
+        window_low_inclusive_seconds: 10
+        window_high_exclusive_seconds: 20
+        slice: {
+          low_inclusive: "aaa"
+          high_exclusive: "zzz"
+        }
+        num_replicas: 1
+        load_distribution: {
+          max_error_fraction: 0.1
+        }
+      },
+      # Lossless load distribution (max_error_fraction at the lower bound, 0.0).
+      {
+        primary_rate_load: 100.0
+        window_low_inclusive_seconds: 10
+        window_high_exclusive_seconds: 20
+        slice: {
+          low_inclusive: "aaa"
+          high_exclusive: "zzz"
+        }
+        num_replicas: 1
+        load_distribution: {
+          points: [
+            {
+              key: "aaa"
+              cumulative_load_fraction: 0.4
+            },
+            {
+              key: "zzy"
+              cumulative_load_fraction: 1.0
+            }
+          ]
+          max_error_fraction: 0.0
+        }
+      }
+    ]
   }
 ]

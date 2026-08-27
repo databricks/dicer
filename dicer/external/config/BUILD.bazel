@@ -6,12 +6,5 @@ package(
 filegroup(
     name = "target_config",
     srcs = glob(["**/*.textproto"]),
-    visibility = ["//dicer:internal"],
-)
-
-filegroup(
-    name = "target_config_for_test",
-    srcs = glob(["**/*"]),
-    testonly = True,
-    visibility = ["//dicer/production/safeconfig:__pkg__"],
+    visibility = ["//visibility:public"],
 )

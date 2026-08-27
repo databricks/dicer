@@ -255,7 +255,7 @@ class AssignmentSuite extends DatabricksTest {
 
       for (call: IsAssignedKeyTestCaseP.CallP <- testCase.calls) {
         val sliceKey: SliceKey = identityKey(call.getSliceKey)
-        val resource: Squid = createTestSquid(call.getResource, call.getResourceSalt)
+        val resource: Squid = createTestSquid(call.getResource, call.getResourceCreationTimeOffset)
         assert(assignment.isAssignedKey(sliceKey, resource) == call.getExpectedResult)
       }
     }
@@ -269,7 +269,7 @@ class AssignmentSuite extends DatabricksTest {
       val assignment: Assignment =
         parseSimpleAssignment(testCase.getAssignment)
       for (call: GetSliceSetForResourceTestCaseP.CallP <- testCase.calls) {
-        val resource: Squid = createTestSquid(call.getResource, call.getResourceSalt)
+        val resource: Squid = createTestSquid(call.getResource, call.getResourceCreationTimeOffset)
         val expectedAssignedSlices: SliceSetImpl = SliceSetImpl(
           call.expectedSlices.map((slice: SliceP) => SliceHelper.fromProto(slice))
         )
@@ -287,6 +287,7 @@ class AssignmentSuite extends DatabricksTest {
       val assignment: Assignment = createAssignment(
         generation = Generation.fromProto(testCase.getAssignment.getGeneration),
         consistencyMode = AssignmentConsistencyMode.Affinity,
+        assignerServiceInfoOpt = None,
         entries = testCase.getAssignment.sliceAssignments.map((proto: SimpleSliceAssignmentP) => {
           val sliceWithResources: SliceWithResources = SliceWithResources(
             slice = SliceHelper.fromProto(proto.getSlice),
@@ -342,6 +343,7 @@ class AssignmentSuite extends DatabricksTest {
     val assignment: Assignment = createAssignment(
       35 ## 64,
       AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
       ("" -- ∞) @@ (35 ## 54) -> Seq("Pod4")
     )
     // Check some keys.
@@ -362,6 +364,7 @@ class AssignmentSuite extends DatabricksTest {
       createAssignment(
         generation = Generation.EMPTY,
         AssignmentConsistencyMode.Affinity,
+        assignerServiceInfoOpt = None,
         ("" -- ∞) @@ 1 -> Seq("pod0")
       )
     }
@@ -373,6 +376,7 @@ class AssignmentSuite extends DatabricksTest {
       createAssignment(
         generation = 10,
         AssignmentConsistencyMode.Strong,
+        assignerServiceInfoOpt = None,
         ("" -- ∞) @@ 10 -> Seq("pod0")
       )
     }

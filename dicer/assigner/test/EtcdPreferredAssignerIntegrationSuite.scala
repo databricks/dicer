@@ -31,7 +31,6 @@ import com.databricks.dicer.common.{
   Redirect,
   TestAssigner
 }
-import com.databricks.backend.common.util.Project
 import com.databricks.dicer.external.Target
 import com.databricks.testing.DatabricksTest
 import com.databricks.rpc.RPCContext

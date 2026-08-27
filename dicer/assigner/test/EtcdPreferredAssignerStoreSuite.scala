@@ -44,7 +44,11 @@ class EtcdPreferredAssignerStoreSuite extends DatabricksTest with TestName {
   private val NAMESPACE = EtcdClient.KeyNamespace("test-namespace")
 
   protected val pool: SequentialExecutionContextPool =
-    SequentialExecutionContextPool.create("test-pool", numThreads = 2)
+    SequentialExecutionContextPool.create(
+      poolName = "test-pool",
+      numThreads = 2,
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+    )
   private val etcd = EtcdTestEnvironment.create()
 
   override def afterAll(): Unit = {

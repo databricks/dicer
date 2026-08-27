@@ -127,6 +127,7 @@ scala_library(
     testonly = True,
     srcs = [
         "test/JettyTestRPCContext.scala",
+        "test/RPCTestUtils.scala",
         "test/TestSslArguments.scala",
         "test/TestTLSOptions.scala",
     ],

@@ -6,9 +6,6 @@ import javax.annotation.concurrent.NotThreadSafe;
 /**
  * Java-friendly interface for {@link TLSOptions} that delegates all functionality to the underlying
  * Scala {@link TLSOptions} object.
- *
- * <p>This is the OSS-minimal subset of the internal JTLSOptions. It exposes only the builder
- * methods needed for file-based TLS configuration.
  */
 public final class JTLSOptions {
 

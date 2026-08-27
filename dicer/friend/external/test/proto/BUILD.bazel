@@ -1,0 +1,17 @@
+load("@rules_proto//proto:defs.bzl", "proto_library")
+load("@rules_scala//scala_proto:scala_proto.bzl", "scala_proto_library")
+
+proto_library(
+    name = "test_data_proto",
+    srcs = ["test_data.proto"],
+    testonly = True,
+    visibility = ["//dicer:internal"],
+    deps = ["//wrappers/rpc:scalapb_proto"],
+)
+
+scala_proto_library(
+    name = "test_data_proto_scala_lib",
+    testonly = True,
+    visibility = ["//dicer:internal"],
+    deps = [":test_data_proto"],
+)

@@ -4,8 +4,8 @@ import java.net.URI
 import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 
 /**
- * Open source version of internal web client. Only supports HTTP GET, which is all that is needed
- * for readiness probe testing.
+ * A web client that only supports HTTP GET, which is all that is needed for readiness probe
+ * testing.
  */
 object SimpleWebClient {
   private lazy val singletonClient: WebClient = new WebClient()

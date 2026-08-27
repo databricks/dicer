@@ -57,7 +57,8 @@ class DisabledPreferredAssignerDriver(storeIncarnation: Incarnation)
     Future.successful(heartbeatResponse)
   }
 
-  // No eligibility factors; the driver is always eligible.
-  override private[assigner] def selectionEligibilityWatchCell: WatchValueCell.Consumer[Boolean] =
-    PreferredAssignerDriver.ALWAYS_ELIGIBLE
+  // The disabled driver does not run a consistent-hashing election, so it has no snapshot.
+  override private[assigner] def consistentHashingStateView
+      : Future[Option[ConsistentHashingState]] =
+    Future.successful(None)
 }

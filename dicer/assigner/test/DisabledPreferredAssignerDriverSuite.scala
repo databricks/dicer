@@ -1,5 +1,6 @@
 package com.databricks.dicer.assigner
 
+import com.databricks.caching.util.AlertOwnerTeam
 import com.databricks.caching.util.{
   Cancellable,
   LoggingStreamCallback,
@@ -23,7 +24,10 @@ class DisabledPreferredAssignerDriverSuite extends DatabricksTest {
   )
 
   /** The sequential executor for the suite. */
-  private val sec = SequentialExecutionContext.createWithDedicatedPool(this.getClass.getName)
+  private val sec = SequentialExecutionContext.createWithDedicatedPool(
+    name = this.getClass.getName,
+    alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+  )
 
   test("Cannot create DisabledPreferredAssignerDriver with non-loose store incarnation") {
     // Test plan: verify that creating a DisabledPreferredAssignerDriver with a non-loose store
@@ -34,6 +38,16 @@ class DisabledPreferredAssignerDriverSuite extends DatabricksTest {
 
     // The driver can be created with a loose store incarnation.
     new DisabledPreferredAssignerDriver(LOOSE_STORE_INCARNATION)
+  }
+
+  test("DisabledPreferredAssignerDriver exposes no consistent-hashing state") {
+    // Test plan: Verify the disabled driver reports no consistent-hashing snapshot, so the Assigner
+    // debug page shows the consistent-hashing section as inactive for the non-CH driver.
+    val driver: PreferredAssignerDriver =
+      new DisabledPreferredAssignerDriver(LOOSE_STORE_INCARNATION)
+    val stateOpt: Option[ConsistentHashingState] =
+      TestUtils.awaitResult(driver.consistentHashingStateView, Duration.Inf)
+    assertResult(None)(stateOpt)
   }
 
   test("DisabledPreferredAssignerDriver should always return ModeDisabled") {

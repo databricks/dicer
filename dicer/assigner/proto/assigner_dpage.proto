@@ -45,6 +45,7 @@ message PreferredAssignerStateViewP {
 
 // View data for the consistent-hashing preferred assigner state in DPage output.
 // Present only when the CH preferred-assigner driver is active.
+// (-- Next ID: 6. --)
 message ConsistentHashingStateViewP {
   // State of the Kubernetes API connection as tracked by the membership checker's
   // hysteresis monitor. Nested and unprefixed per <internal link> since it is used only here.
@@ -59,17 +60,20 @@ message ConsistentHashingStateViewP {
     // The membership checker currently considers the Kubernetes API connection unhealthy.
     UNHEALTHY = 3;
   }
+  // Field 3 previously held eligible_pod_count (int32); replaced by the eligible_pods list below.
+  reserved 3;
+  reserved "eligible_pod_count";
   // This Assigner instance's own identity (UUID + URI), so DPages of different assigners
   // can be compared.
   optional AssignerInfoViewP local_assigner = 1;
   // The consistent-hashing-elected preferred assigner (UUID + URI), or unset when no
   // assigner is currently elected.
   optional AssignerInfoViewP preferred_assigner = 2;
-  // Number of healthy assigner pods currently considered eligible for election.
-  optional int32 eligible_pod_count = 3;
   // Whether the Kubernetes API connection is currently considered healthy by the
   // membership checker's hysteresis monitor.
   optional K8sConnectionHealthP k8s_connection_health = 4;
+  // The healthy assigner pods currently considered eligible for election.
+  repeated AssignerInfoViewP eligible_pods = 5;
 }
 
 // View data for assignment churn statistics in DPage output.
@@ -125,6 +129,10 @@ message AssignerSliceViewP {
     // CH nominates / etcd reads: the consistent-hashing driver writes its pick to
     // etcd; etcd remains authoritative for reads.
     CH_NOMINATED_ETCD_READ = 2;
+    // CH primary / etcd write: the consistent-hashing driver is authoritative for the
+    // actual preferred assigner pick; its pick is still written to etcd for durability, but etcd is
+    // no longer read back.
+    CH_PRIMARY_ETCD_WRITE = 3;
   }
   // Identity of this Assigner instance.
   optional AssignerInfoViewP assigner_info = 1;

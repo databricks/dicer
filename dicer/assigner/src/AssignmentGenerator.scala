@@ -14,6 +14,8 @@ import com.databricks.caching.util.AssertMacros.iassert
 import com.databricks.caching.util.{
   CachingErrorCode,
   PrefixLogger,
+  HyperLogLog,
+  SlidingHyperLogLog,
   StateMachine,
   StateMachineOutput,
   StatusUtils,
@@ -50,6 +52,7 @@ import com.databricks.dicer.assigner.conf.LoadWatcherConf
 import com.databricks.dicer.common.Assignment.DiffUnused
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.common.{
+  AssignerServiceInfo,
   Assignment,
   ClerkData,
   ClientRequest,
@@ -59,7 +62,6 @@ import com.databricks.dicer.common.{
   ProposedAssignment,
   ProposedSliceAssignment,
   SliceletData,
-  SliceletState,
   SyncAssignmentState
 }
 import com.databricks.dicer.external.{AppTarget, KubernetesTarget, Slice, SliceKey, Target}
@@ -73,13 +75,17 @@ import java.net.URI
  *
  * The state machine is exercised only via [[onEvent()]] and [[onAdvance()]]. The driver, when
  * started, calls [[onAdvance()]] with the initial time.
+ *
+ * @param assignerServiceInfoOpt The service info of the Assigner that runs this generator, or
+ * [[None]].
  */
 class AssignmentGenerator(
     config: Config,
     target: Target,
     targetConfig: InternalTargetConfig,
     healthWatcher: HealthWatcher,
-    keyOfDeathDetector: KeyOfDeathDetector
+    keyOfDeathDetector: KeyOfDeathDetector,
+    assignerServiceInfoOpt: Option[AssignerServiceInfo]
 ) extends StateMachine[Event, DriverAction] {
 
   private val logger =
@@ -158,6 +164,12 @@ class AssignmentGenerator(
    * because those operations are expensive.
    */
   private var latestExportAssignmentSnapshotTimeOpt: Option[TickerTime] = None
+
+  /**
+   * Holds the estimated cardinality of recently-seen keys for the target. Slicelets' observations
+   * of keys are folded in during Watch.
+   */
+  private val keyCardinalityEstimate = new SlidingHyperLogLog(60.seconds)
 
   protected override def onEvent(tickerTime: TickerTime, instant: Instant, event: Event): Output = {
 
@@ -238,6 +250,11 @@ class AssignmentGenerator(
     // event returns (or another assignment is learned from other sources). Regardless of
     // ordering, the stats will be computed based on the old (current) assignment.
     maybeExportAssignmentSnapshot(tickerTime, outputBuilder)
+
+    TargetMetrics.setRecentKeyCardinality(
+      target,
+      keyCardinalityEstimate.recent(tickerTime).estimate()
+    )
 
     // In steady state, both the starting point for the assignment and the store predecessor
     // should both just be the most recent assignment.
@@ -548,11 +565,7 @@ class AssignmentGenerator(
       instant: Instant,
       outputBuilder: StateMachineOutput.Builder[DriverAction],
       resourceUuid: UUID): Unit = {
-    val event = HealthWatcher.Event
-      .SliceletStateFromKubernetes(
-        resourceUuid,
-        SliceletState.Terminating
-      )
+    val event = HealthWatcher.Event.PodTerminatingFromKubernetes(resourceUuid)
     handleHealthWatcherOutput(
       tickerTime,
       instant,
@@ -613,7 +626,8 @@ class AssignmentGenerator(
               resource.resourceAddress,
               numReplicas = sliceLoad.numReplicas,
               sliceLoad.primaryRateLoad,
-              sliceLoad.topKeys
+              sliceLoad.topKeys,
+              sliceLoad.loadDistributionOpt
             )
           }
           TargetMetrics.recordAssignmentGeneratorLatencySync(
@@ -621,6 +635,9 @@ class AssignmentGenerator(
             target
           ) {
             loadWatcher.reportLoad(tickerTime, primaryRateMeasurements.result())
+          }
+          for (hll: HyperLogLog <- sliceletData.keyCardinalityEstimateOpt) {
+            keyCardinalityEstimate.merge(tickerTime, hll)
           }
           AssignmentDistributionSource.Slicelet
         case ClerkData =>
@@ -975,7 +992,8 @@ class AssignmentGenerator(
           (
             ProposedAssignment(
               predecessorOpt = None,
-              initialAssignment
+              initialAssignment,
+              assignerServiceInfoOpt
             ),
             None
           )
@@ -1020,7 +1038,8 @@ class AssignmentGenerator(
             predecessorOpt = latestKnownAssignmentOpt.filter { latestKnownAssignment: Assignment =>
               latestKnownAssignment.generation.incarnation == config.storeIncarnation
             },
-            proposedSliceMap
+            proposedSliceMap,
+            assignerServiceInfoOpt
           )
 
           (
@@ -1078,11 +1097,11 @@ object AssignmentGenerator {
    *        distribution can harm the downstream store or slicelets. Historical note: we had seen
    *        that frequent and large number of resources' health change led to frequent assignment
    *        change, and the high write rate to etcd store melted down the etcd cluster (see
-   *        https://docs.google.com/document/d/1pDlurc6o8ugEREnL8fZb8Yv5VuakxjkZhx36zyV7VC0). We'd
+   *        <internal link>). We'd
    *        also seen a bug from assignment generation algorithm led to frequent re-assignment, and
    *        the frequent assignment update made the slicelets send excessive watch requests,
    *        resulting in CPU throttling (see
-   *        https://docs.google.com/document/d/1N5Ru07me9xyVvztXjKD7q5JM9ZcNTRLgYrKLib2z8AQ).
+   *        <internal link>).
    */
   case class Config(
       storeIncarnation: Incarnation,

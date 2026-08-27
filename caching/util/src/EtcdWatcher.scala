@@ -76,9 +76,10 @@ class EtcdWatcher private (
   /** Generic driver implementation that drives the [[EtcdWatcherStateMachine]]. */
   private val baseDriver =
     new StateMachineDriver[Event, DriverAction, EtcdWatcherStateMachine](
-      sec,
-      new EtcdWatcherStateMachine(watchArgs, loggerPrefix = scopedKey.toString),
-      performAction
+      sec = sec,
+      stateMachine = new EtcdWatcherStateMachine(watchArgs, loggerPrefix = scopedKey.toString),
+      performAction = performAction,
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
     )
 
   /**

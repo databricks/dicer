@@ -151,4 +151,17 @@ class TickerTimeSuite extends DatabricksTest {
       assert(x - y == convertToTickerTime(expectedDiff))
     }
   }
+
+  test("toString") {
+    // Test plan: verify toString produces a seconds representation
+
+    assert(TickerTime.ofNanos(1L).toString == "0.000000001")
+    assert(TickerTime.ofNanos(-1L).toString == "-0.000000001")
+
+    assert(TickerTime.ofNanos(12000000589L).toString == "12.000000589")
+    assert(TickerTime.ofNanos(-12000000589L).toString == "-12.000000589")
+
+    assert(TickerTime.ofNanos(12000000000L).toString == "12.000000000")
+    assert(TickerTime.ofNanos(12500000000L).toString == "12.500000000")
+  }
 }

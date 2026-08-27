@@ -277,23 +277,28 @@ object TestSliceUtils extends Assertions {
   }
 
   /**
-   * An arbitrary creation time used for all test SQUIDs. Since test squids have deterministic
-   * UUIDs, the specific creation time doesn't matter: the creation time will not need to be used
-   * to break ties.
+   * Baseline creation time for [[createTestSquid]] SQUIDs. Most tests use this value unchanged
+   * (the default `creationTimeOffset` is 0) but can be changed through `creationTimeOffset`.
    */
   private val TEST_SQUID_CREATION_TIME_MILLIS: Long = 1680279132000L
 
   /**
-   * Creates a Squid for the given URI. Produces a deterministic "UUID" by taking a fingerprint
-   * of the URI plus the given salt.
+   * Creates a Squid for the given URI. Produces a deterministic resource UUID by taking a
+   * fingerprint of the URI plus the creation time offset (negative offsets moves the time earlier).
+   *
+   * The SQUID's creation time is [[TEST_SQUID_CREATION_TIME_MILLIS]] plus `creationTimeOffset`.
+   * Use an offset when a test depends on creation-time ordering (for example, to model a newer
+   * incarnation of a resource).
    */
-  def createTestSquid(uri: String, salt: String = ""): Squid = {
+  def createTestSquid(uri: String, creationTimeOffset: Long = 0): Squid = {
     val resourceAddress = ResourceAddress(URI.create(uri))
     val hash: HashCode =
-      Hashing.murmur3_128().hashBytes((uri + salt).getBytes(StandardCharsets.UTF_8))
+      Hashing
+        .murmur3_128()
+        .hashBytes((s"$uri:$creationTimeOffset").getBytes(StandardCharsets.UTF_8))
     val bytes: Array[Byte] = hash.asBytes()
-    val uuidInScareQuotes = UUID.nameUUIDFromBytes(bytes)
-    Squid(resourceAddress, TEST_SQUID_CREATION_TIME_MILLIS, uuidInScareQuotes)
+    val uuidInScareQuotes: UUID = UUID.nameUUIDFromBytes(bytes)
+    Squid(resourceAddress, TEST_SQUID_CREATION_TIME_MILLIS + creationTimeOffset, uuidInScareQuotes)
   }
 
   /**
@@ -690,9 +695,15 @@ object TestSliceUtils extends Assertions {
   def createAssignment(
       generation: Generation,
       consistencyMode: AssignmentConsistencyMode,
+      assignerServiceInfoOpt: Option[AssignerServiceInfo],
       firstEntry: SliceAssignment,
       remainingEntries: SliceAssignment*): Assignment = {
-    createAssignment(generation, consistencyMode, firstEntry +: remainingEntries)
+    createAssignment(
+      generation,
+      consistencyMode,
+      assignerServiceInfoOpt,
+      firstEntry +: remainingEntries
+    )
   }
 
   /**
@@ -702,12 +713,14 @@ object TestSliceUtils extends Assertions {
   def createAssignment(
       generation: Generation,
       consistencyMode: AssignmentConsistencyMode,
+      assignerServiceInfoOpt: Option[AssignerServiceInfo],
       entries: Iterable[SliceAssignment]): Assignment = {
     Assignment(
       isFrozen = false,
       consistencyMode,
       generation,
-      SliceMapHelper.ofSliceAssignments(entries.toVector)
+      SliceMapHelper.ofSliceAssignments(entries.toVector),
+      assignerServiceInfoOpt
     )
   }
 
@@ -1024,7 +1037,10 @@ object TestSliceUtils extends Assertions {
           DiffAssignmentSliceMap.Full(
             SliceMapHelper.ofSliceAssignments(sliceMapEntries)
           )
-      }
+      },
+      // Invalid assigner service info throws an exception as a warning to developers
+      // that they have constructed an invalid proto.
+      assignerServiceInfoOpt = proto.assignerServiceInfo.map(AssignerServiceInfo.fromProto)
     )
   }
 

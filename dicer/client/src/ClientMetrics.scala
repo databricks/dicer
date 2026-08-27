@@ -77,6 +77,15 @@ private[dicer] object ClientMetrics {
     .labelNames("targetCluster", "targetName", "targetInstanceId", "configMatched")
     .register()
 
+  private val numWatchChannelsCreated: Counter = Counter
+    .build()
+    .name("dicer_client_watch_channels_created_total")
+    .help(
+      "The number of watch channels created by Dicer clients in this process."
+    )
+    .labelNames("clientName")
+    .register()
+
   /**
    * Histogram buckets for assignment propagation latency in milliseconds.
    * Uses a growth factor of 1.4 in the range [1ms, 1s) and a growth factor of 2 beyond that
@@ -249,6 +258,10 @@ private[dicer] object ClientMetrics {
       .inc()
   }
 
+  /** Increments the metric tracking the number of watch channels created in this process. */
+  private[client] def incrementWatchChannelsCreated(clientName: String): Unit =
+    numWatchChannelsCreated.labels(clientName).inc()
+
   /** Decrements the metric tracking the number of active [[SliceLookup]]s in this process. */
   private[client] def decrementNumActiveSliceLookups(
       target: Target,
@@ -333,13 +346,15 @@ private[dicer] object ClientMetrics {
   }
 
   /**
-   * Records a SliceLookup cache lookup result.
+   * Records a SliceLookup cache lookup target hit.
    *
    * @param target the target for which the cache lookup was performed
    * @param configMatched true if an existing SliceLookup was reused (cache hit with matching
    *                      config), false if a new SliceLookup was created due to config mismatch
    */
-  private[client] def recordSliceLookupCacheResult(target: Target, configMatched: Boolean): Unit = {
+  private[client] def recordSliceLookupCacheTargetHit(
+      target: Target,
+      configMatched: Boolean): Unit = {
     numSliceLookupCacheHits
       .labels(
         target.getTargetClusterLabel,

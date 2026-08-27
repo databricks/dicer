@@ -112,6 +112,22 @@ class EtcdPreferredAssignerDriverSuite extends DatabricksTest with TestName {
     (store, driver)
   }
 
+  test("EtcdPreferredAssignerDriver exposes no consistent-hashing state") {
+    // Test plan: Verify the etcd-backed driver reports no consistent-hashing snapshot and no
+    // migration mode, so the Assigner debug page shows those sections as inactive for this driver.
+    val fakeSec: FakeSequentialExecutionContext = FakeSequentialExecutionContext.create(getSafeName)
+    val (_, driver): (InterposingEtcdPreferredAssignerStore, EtcdPreferredAssignerDriver) =
+      createStoreAndDriver(
+        fakeSec,
+        Incarnation(40),
+        AssignerInfo(UUID.randomUUID(), new URI("http://localhost:31299")),
+        EtcdPreferredAssignerDriver.Config()
+      )
+    val stateOpt: Option[ConsistentHashingState] =
+      TestUtils.awaitResult(driver.consistentHashingStateView, Duration.Inf)
+    assertResult(None)(stateOpt)
+  }
+
   test("EtcdPreferredAssignerDriver export correct assigner role to the metric") {
     // Test plan: verify that the assigner role gauge is set correctly when the preferred assigner
     // driver is at different states. Verify the initial state is STARTUP, and test the following

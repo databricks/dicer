@@ -9,7 +9,10 @@ object RequestHeaders {
   def builder(): RequestHeadersBuilder = new RequestHeadersBuilder()
 }
 
-/** Dummy implementation of request headers builder in OSS that is a no-op. */
+/**
+ * No-op implementation of a request headers builder; exists purely for compatibility with
+ * internal APIs.
+ */
 class RequestHeadersBuilder {
   def method(method: HttpMethod): RequestHeadersBuilder = this
   def path(path: String): RequestHeadersBuilder = this

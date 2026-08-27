@@ -7,7 +7,7 @@ import com.databricks.caching.util.SequentialExecutionContextPool.{
 import java.util
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.locks.ReentrantLock
-
+import scala.annotation.tailrec
 import scala.concurrent.duration.{Duration, FiniteDuration, NANOSECONDS}
 import scala.concurrent.{ExecutionContext, Future}
 import scala.language.implicitConversions
@@ -27,9 +27,9 @@ import com.databricks.caching.util.ContextAwareUtil.{
  * contexts are supposed to be used as part of a cooperative task management paradigm where each
  * context guards some coarse-grained piece of state. One can think of these contexts as
  * "coarse-grained" locks with a nice property that one does have to explicitly acquire or release
- * locks. However, it is the responsibility of each work item to not use the execution context for a
- * "long time" or block the execution context (since the remaining items will simply wait for such
- * long/blocking work items to finish).
+ * locks. However, it is the responsibility of each command to not use the execution context for a
+ * "long time" or block the execution context (since the remaining commands will simply wait for
+ * such long/blocking commands to finish).
  *
  * ORDERING
  *
@@ -71,7 +71,7 @@ import com.databricks.caching.util.ContextAwareUtil.{
  *   sec.run { n() }
  * }}}
  *
- * Internally, the `WorkItemQueue` data structure provides this guarantee.
+ * Internally, the `CommandQueue` data structure provides this guarantee.
  *
  * FAIRNESS
  *
@@ -87,7 +87,7 @@ import com.databricks.caching.util.ContextAwareUtil.{
  * this policy is that all commands, whether scheduled or immediate, experience the same delay
  * relative to their desired execution time based on the current backlog in the context.
  *
- * Internally, the `WorkItemQueue` data structure implements this policy.
+ * Internally, the `CommandQueue` data structure implements this policy.
  *
  * CANCELLATION
  *
@@ -240,10 +240,10 @@ trait SequentialExecutionContext {
 
       override def cancel(reason: Status): Unit = withLock(lock) {
         if (!isCancelled) {
-          // Prevent scheduleNext() from scheduling new work items.
+          // Prevent scheduleNext() from scheduling new commands.
           isCancelled = true
 
-          // Best-effort cancel currently scheduled work item.
+          // Best-effort cancel currently scheduled command.
           if (cancellable != null) {
             cancellable.cancel(reason)
             cancellable = null
@@ -369,10 +369,10 @@ object SequentialExecutionContext {
       alertOwnerTeam: String,
       enableContextPropagation: Boolean = true): SequentialExecutionContext = {
     val pool = SequentialExecutionContextPool.create(
-      s"$name-pool",
+      poolName = s"$name-pool",
       numThreads = 1,
-      alertOwnerTeam,
-      enableContextPropagation
+      alertOwnerTeam = alertOwnerTeam,
+      enableContextPropagation = enableContextPropagation
     )
     pool.createExecutionContext(contextName = name)
   }
@@ -384,7 +384,7 @@ object SequentialExecutionContext {
   )
   def createWithDedicatedPool(name: String): SequentialExecutionContext =
     createWithDedicatedPool(
-      name,
+      name = name,
       alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
       enableContextPropagation = true
     )
@@ -398,7 +398,7 @@ object SequentialExecutionContext {
       name: String,
       enableContextPropagation: Boolean): SequentialExecutionContext =
     createWithDedicatedPool(
-      name,
+      name = name,
       alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
       enableContextPropagation = enableContextPropagation
     )
@@ -471,8 +471,8 @@ object SequentialExecutionContext {
      */
     private val tickleRunnable: Runnable = () => withLock(lock) { tickle() }
 
-    /** Contains all pending [[WorkItem]]s. */
-    private val queue = new WorkItemQueue
+    /** Contains all pending [[Command]]s. */
+    private val queue = new CommandQueue
 
     /** State of the context! See [[State]] class docs for background. */
     private var state: State = State.Pending
@@ -513,7 +513,7 @@ object SequentialExecutionContext {
     }
 
     override def getClock: TypedClock = {
-      // Note that while internally in `WorkItemQueue` we use monotonic ticker time values, we
+      // Note that while internally in `CommandQueue` we use monotonic ticker time values, we
       // choose not to expose those monotonic values via `getClock`, or make monotonicity a general
       // feature of `TypedClock`. In general, ticker time (or `System.nanoTime`) is a lightweight
       // and useful feature for measuring durations with good precision. The fact that the
@@ -532,12 +532,12 @@ object SequentialExecutionContext {
         enableContextPropagation = enableContextPropagation
       )
       withLock(lock) {
-        val workItem: WorkItem = queue.push(now, delay, boundRunnable)
+        val command: Command = queue.push(now, delay, boundRunnable)
         val cancellable: Cancellable = (_: Status) =>
           withLock(lock) {
-            workItem.cancel()
+            command.cancel()
             // Call `ensureScheduled` to ensure that the next tickle time is updated if the
-            // cancelled work item was the next one due to run. If there are no pending commands,
+            // cancelled command was the next one due to run. If there are no pending commands,
             // this will cancel the pending tickle task.
             ensureScheduled(clock.tickerTime())
           }
@@ -560,14 +560,14 @@ object SequentialExecutionContext {
      *
      * High-level strategy:
      *
-     *  - The context keeps track of all pending commands in [[WorkItemQueue]], which is responsible
+     *  - The context keeps track of all pending commands in [[CommandQueue]], which is responsible
      *    for ordering guarantees and implementing the fairness policy.
      *  - Commands are executed in the [[tickle]] method, which is in turn executed on the
      *    underlying `pool`. Every time it is tickled, the context checks for pending work, executes
      *    the next command if any, and then makes sure the context will be tickled again when the
      *    next command is due to run by calling [[ensureScheduled]].
      *  - When a command is added to the context (via `schedule`, `execute`, `run`, etc.), it is
-     *    added to the [[WorkItemQueue]]. Then [[ensureScheduled]] is called to make sure that
+     *    added to the [[CommandQueue]]. Then [[ensureScheduled]] is called to make sure that
      *    `tickle` will be called at the appropriate time if the added command is the next one due
      *    to run.
      *  - In general, [[ensureScheduled]] tries to maintain at most a single outstanding `tickle`
@@ -622,14 +622,14 @@ object SequentialExecutionContext {
       cancelTickleTask()
 
       val now: TickerTime = clock.tickerTime()
-      val command: Option[(Runnable, TickerTime)] = queue.pollReadyCommand(now)
-      command match {
+      val commandOpt: Option[(Runnable, TickerTime)] = queue.pollReady(now)
+      commandOpt match {
         case None =>
           // A different kind of spurious wakeup: there are no pending commands. Ensure that this
           // executor will be tickled again when the next command is due.
           spuriousWakeupsCounter(Metrics.SpuriousWakeupReason.NoPendingCommands).inc()
           ensureScheduled(now)
-        case Some(command) =>
+        case Some((runnable, desiredExecutionTime)) =>
           // Enter the running state to ensure that no concurrent work is done (violating the
           // "sequential" part of our contract) while the command is running.
           state = State.Running
@@ -644,10 +644,10 @@ object SequentialExecutionContext {
 
           val startTime: TickerTime = clock.tickerTime()
           val executionDelay: FiniteDuration =
-            (startTime - command._2).max(Duration.Zero)
+            (startTime - desiredExecutionTime).max(Duration.Zero)
           executionDelayHistogram.observe(executionDelay.toNanos)
           try {
-            command._1.run()
+            runnable.run()
           } catch {
             case ex: InterruptedException =>
               // Report the exception for our metrics, and restore the interrupted bit for the
@@ -796,24 +796,16 @@ object SequentialExecutionContext {
    * Internal representation of an outstanding command. All accesses must be protected by the
    * owning [[SequentialExecutionContext]]'s lock.
    *
-   * Extends [[IntrusiveMinHeapElement]] so that work items can be efficiently removed from the
+   * Extends [[IntrusiveMinHeapElement]] so that commands can be efficiently removed from the
    * context's scheduled work heap when they are cancelled.
    *
-   * Not thread-safe. All interactions with [[WorkItem]] must be externally synchronized.
+   * Not thread-safe. All interactions with [[Command]] must be externally synchronized.
    */
-  private class WorkItem private extends IntrusiveMinHeapElement[TickerTime] {
-
-    /**
-     * The command to run. Note that the context's lock should be released before running this
-     * command, as it may be long-running. The command is cleared (to None) when this work item is
-     * either cancelled via [[cancel]] or it is picked up for execution by the context using
-     * [[takeRunnable]], so that any state pinned in the command's closure environment can be GCed.
-     */
-    private var runnableOpt: Option[Runnable] = None
+  private final class Command private (private var runnable: Runnable)
+      extends IntrusiveMinHeapElement[TickerTime] {
 
     def this(runnable: Runnable, desiredExecutionTime: TickerTime) = {
-      this()
-      this.runnableOpt = Some(runnable)
+      this(runnable)
       setPriority(desiredExecutionTime)
     }
 
@@ -821,31 +813,26 @@ object SequentialExecutionContext {
     def desiredExecutionTime: TickerTime = getPriority
 
     /**
-     * Cancels execution of this work item. No-op if the work item has already been cancelled or
-     * run.
+     * Cancels execution of a scheduled command. Does nothing if the command has already been
+     * cancelled.
      */
     def cancel(): Unit = {
-      if (runnableOpt.isDefined) {
-        runnableOpt = None
+      this.runnable = NoopRunnable
 
-        // If the work item is currently attached to the context's heap, which tracks scheduled
-        // work, we remove it to avoid leaking memory for commands that will never run.
-        if (attached) {
-          remove()
-        }
+      // If the command is currently attached to the context's heap, which tracks scheduled work,
+      // we remove it to avoid leaking memory for commands that will never run.
+      if (attached) {
+        remove()
       }
     }
 
-    /** Returns Some Runnable to run, or None if the work item has been cancelled/run before. */
-    def takeRunnable(): Option[(Runnable, TickerTime)] = {
-      val runnableOpt = this.runnableOpt
-      this.runnableOpt = None
-      runnableOpt match {
-        case None =>
-          None
-        case Some(command: Runnable) =>
-          Some((command, desiredExecutionTime))
-      }
+    /**
+     * Returns Some Runnable to run, or NoopRunnable if the command has been cancelled/run before.
+     */
+    def takeRunnable(): Runnable = {
+      val runnable: Runnable = this.runnable
+      this.runnable = NoopRunnable
+      runnable
     }
   }
 
@@ -858,46 +845,46 @@ object SequentialExecutionContext {
    * commands in an [[IntrusiveMinHeap]] (O(log n) push, pop and cancel in the number of scheduled
    * commands).
    *
-   * Not thread-safe. All interactions with [[WorkItemQueue]] must be externally synchronized.
+   * Not thread-safe. All interactions with [[CommandQueue]] must be externally synchronized.
    */
-  private class WorkItemQueue {
+  private final class CommandQueue {
 
     /**
-     * Heap containing all work items added with positive execution delays, by desired execution
-     * time. This data structure has order stability, meaning that work items with the same desired
+     * Heap containing all commands added with positive execution delays, by desired execution
+     * time. This data structure has order stability, meaning that commands with the same desired
      * execution time will be popped in the same order they were pushed onto the heap.
      */
-    private val heap = new IntrusiveMinHeap[TickerTime, WorkItem]
+    private val heap = new IntrusiveMinHeap[TickerTime, Command]
 
     /**
-     * Queue containing all work items pushed with zero (or negative) execution delays. Work items
+     * Queue containing all commands pushed with zero (or negative) execution delays. Commands
      * in this queue are ordered by desired execution time then by insertion order because they are
-     * added the the back of the queue with `desiredExecutionTime = monotonicNow + 0`.
+     * added to the back of the queue with `desiredExecutionTime = monotonicNow + 0`.
      */
-    private val queue = new util.ArrayDeque[WorkItem]
+    private val queue = new util.ArrayDeque[Command]
 
     /**
-     * Latest value returned by [[getMonotonicNow]]. Used to ensure monotonicity of work item
+     * Latest value returned by [[getMonotonicNow]]. Used to ensure monotonicity of command
      * desired execution times, which in turn ensures that the ordering guarantee is honored.
      */
     private var latestNow = TickerTime.MIN
 
     /**
-     * Returns the number of [[WorkItem]]s scheduled to execute (i.e., that are stored in `heap`).
+     * Returns the number of [[Command]]s scheduled to execute (i.e., that are stored in `heap`).
      */
     def getNumPendingScheduled: Int = heap.size
 
     /**
-     * Returns the number of [[WorkItem]]s ready to execute immediately (i.e., that are stored in
+     * Returns the number of [[Command]]s ready to execute immediately (i.e., that are stored in
      * `queue`).
      */
     def getNumPendingImmediate: Int = queue.size()
 
     /**
-     * Adds a task to the queue and returns [[WorkItem]] which may be used as a cancellation
+     * Adds a task to the queue and returns [[Command]] which may be used as a cancellation
      * handle.
      */
-    def push(now: TickerTime, delay: FiniteDuration, runnable: Runnable): WorkItem = {
+    def push(now: TickerTime, delay: FiniteDuration, runnable: Runnable): Command = {
       // Since `System.nanoTime` is not guaranteed to be monotonic, and since the ordering
       // guarantees in the context require that execution order honors insertion order, we adjust
       // `now` to ensure that it is non-decreasing in successive calls to `push`.
@@ -907,53 +894,38 @@ object SequentialExecutionContext {
         // Negative delays are rounded up to zero (our desired execution time is just "now"),
         // because we don't want commands to "jump the line" (which would violate both our ordering
         // guarantee and our fairness policy).
-        val workItem = new WorkItem(runnable, desiredExecutionTime = monotonicNow)
-        queue.addLast(workItem)
-        workItem
+        val command = new Command(runnable, desiredExecutionTime = monotonicNow)
+        queue.addLast(command)
+        command
       } else {
         // Delayed commands are added to the heap.
-        val workItem = new WorkItem(runnable, desiredExecutionTime = monotonicNow + delay)
-        heap.push(workItem)
-        workItem
+        val command = new Command(runnable, desiredExecutionTime = monotonicNow + delay)
+        heap.push(command)
+        command
       }
     }
 
     /**
-     * Pops and returns the next scheduled or immediate command due to run no later than `now`, or
-     * returns None if no commands are ready.
+     * Pops and returns a runnable and desired execution time for the next command that is ready to
+     * run and was not previously cancelled, or None if no such command exists.
      */
-    def pollReadyCommand(now: TickerTime): Option[(Runnable, TickerTime)] = {
-      val monotonicNow: TickerTime = getMonotonicNow(now)
-      if (heap.isEmpty) {
-        if (queue.isEmpty) {
-          // No pending commands.
-          return None
-        }
-        // Only immediate commands are pending; return the next one.
-        return queue.pollFirst().takeRunnable()
+    @tailrec def pollReady(now: TickerTime): Option[(Runnable, TickerTime)] = {
+      val commandOpt: Option[Command] = pollReadyCommand(now)
+      commandOpt match {
+        case None => None
+        case Some(command: Command) =>
+          val runnable: Runnable = command.takeRunnable()
+          if (runnable ne NoopRunnable) {
+            return Some((runnable, command.desiredExecutionTime))
+          }
+          // The command has been cancelled/run before, so we need to poll again.
+          pollReady(now)
       }
-      val nextScheduledTime: TickerTime = heap.peek.get.desiredExecutionTime
-      if (queue.isEmpty) {
-        // Only scheduled work is pending; return it if enough time has elapsed.
-        if (nextScheduledTime <= monotonicNow) {
-          return heap.pop().takeRunnable()
-        }
-        return None
-      }
-      // Both scheduled and immediate work is pending, so choose whichever has the earlier desired
-      // execution time. If they have the same desired execution time, we give precedence to the
-      // scheduled work because it was added first (`monotonicNow` was less than
-      // `desiredExecutionTime` when the scheduled item was added to `heap`). This is a requirement
-      // the fairness policy, which is motivated in the `SequentialExecutionContext` class docs.
-      if (nextScheduledTime <= queue.peekFirst.desiredExecutionTime) {
-        return heap.pop().takeRunnable()
-      }
-      queue.pollFirst().takeRunnable()
     }
 
     /**
-     * Returns `getMonotonicNow(now)` and the desired execution time of the next item that is due to
-     * run. Interpretation of results:
+     * Returns `getMonotonicNow(now)` and the desired execution time of the next command that is due
+     * to run. Interpretation of results:
      *
      *  - `monotonicNow >= desiredExecutionTime` when there are commands to run immediately.
      *  - `desiredExecutionTime == TickerTime.MAX` when there are no commands left in the queue.
@@ -972,6 +944,41 @@ object SequentialExecutionContext {
       (getMonotonicNow(now), desiredExecutionTime)
     }
 
+    /**
+     * Pops and returns the next command that is ready to run, or None if no commands are ready.
+     * In contrast with [[pollReadyCommand]], this method may return a command that has already
+     * been cancelled.
+     */
+    private def pollReadyCommand(now: TickerTime): Option[Command] = {
+      val monotonicNow: TickerTime = getMonotonicNow(now)
+      if (heap.isEmpty) {
+        if (queue.isEmpty) {
+          // No pending commands.
+          return None
+        }
+        // Only immediate commands are pending; return the next one.
+        return Some(queue.pollFirst())
+      }
+      val nextScheduledTime: TickerTime = heap.peek.get.desiredExecutionTime
+      if (queue.isEmpty) {
+        // Only scheduled work is pending; return it if enough time has elapsed.
+        if (nextScheduledTime <= monotonicNow) {
+          return Some(heap.pop())
+        }
+        return None
+      }
+      // Both scheduled and immediate work is pending, so choose whichever has the earlier desired
+      // execution time. If they have the same desired execution time, we give precedence to the
+      // scheduled work because it was added first (`monotonicNow` was less than
+      // `desiredExecutionTime` when the scheduled command was added to `heap`). This is a
+      // requirement of the fairness policy, which is motivated in the `SequentialExecutionContext`
+      // class docs.
+      if (nextScheduledTime <= queue.peekFirst.desiredExecutionTime) {
+        return Some(heap.pop())
+      }
+      Some(queue.pollFirst())
+    }
+
     /** Returns a monotonic `now` value. */
     private def getMonotonicNow(now: TickerTime): TickerTime = {
       // Adjust the `latestNow` value to ensure that this method returns non-decreasing values in
@@ -983,5 +990,14 @@ object SequentialExecutionContext {
         latestNow
       }
     }
+  }
+
+  /**
+   * Singleton no-op runnable that replaces the runnable in a [[Command]] after it has been
+   * cancelled. It is used defensively to prevent execution after cancellation, and to allow the
+   * task's closure environment to be garbage collected when it is no longer needed.
+   */
+  private object NoopRunnable extends Runnable {
+    override def run(): Unit = {}
   }
 }

@@ -19,6 +19,7 @@ import com.databricks.api.proto.dicer.assigner.{
   TargetConfigViewP
 }
 import com.databricks.api.proto.dicer.dpage.{ClerkViewP, SliceletViewP}
+import com.databricks.caching.util.AlertOwnerTeam
 import com.databricks.caching.util.SequentialExecutionContext
 import com.databricks.dicer.assigner.AssignmentGenerator.GeneratorTargetSlicezData
 import com.databricks.dicer.assigner.AssignmentStats.AssignmentChangeStats
@@ -50,7 +51,10 @@ object AssignerSlicez {
   private val ASSIGNER_COMPONENT_PREFIX: String = "Dicer Assigner"
 
   /** Sequential execution context used to handle futures. */
-  private val sec = SequentialExecutionContext.createWithDedicatedPool("AssignerSlicez")
+  private val sec = SequentialExecutionContext.createWithDedicatedPool(
+    name = "AssignerSlicez",
+    alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+  )
 
   /** The Zpage component that allows users to track assignment information for target-key pairs. */
   private val slicezAssignmentKeyTracker = new SlicezAssignmentKeyTracker(sec)
@@ -410,25 +414,81 @@ object AssignerTargetSlicezData {
 }
 
 /**
+ * Snapshot of the consistent-hashing preferred-assigner state for display on the Assigner
+ * debug page (ZPage/DPage only). Populated by the consistent-hashing preferred-assigner driver
+ * when active.
+ *
+ * @param localAssignerInfo This assigner instance's own identity (UUID + URI).
+ * @param preferredAssignerInfoOpt The CH-elected preferred assigner (UUID + URI), or `None`
+ *                                 when no assigner is currently elected.
+ * @param eligiblePods The healthy assigner pods currently considered eligible for election.
+ * @param k8sConnectionHealth Whether the Kubernetes API connection is currently considered
+ *                            healthy by the membership checker's hysteresis monitor.
+ */
+case class ConsistentHashingState(
+    localAssignerInfo: AssignerInfo,
+    preferredAssignerInfoOpt: Option[AssignerInfo],
+    eligiblePods: Seq[AssignerInfo],
+    k8sConnectionHealth: ConsistentHashingState.K8sConnectionHealth)
+
+object ConsistentHashingState {
+
+  import com.databricks.api.proto.dicer.assigner.ConsistentHashingStateViewP.K8sConnectionHealthP
+
+  /** State of the Kubernetes API connection as tracked by the hysteresis monitor. */
+  sealed abstract class K8sConnectionHealth(val toProto: K8sConnectionHealthP) {
+    override def toString: String = this match {
+      case K8sConnectionHealth.Init => "INIT"
+      case K8sConnectionHealth.Healthy => "HEALTHY"
+      case K8sConnectionHealth.Unhealthy => "UNHEALTHY"
+    }
+  }
+
+  object K8sConnectionHealth {
+
+    /** Membership checker has not yet observed a poll result. */
+    case object Init extends K8sConnectionHealth(K8sConnectionHealthP.INIT)
+
+    /** The K8s API connection is currently considered healthy. */
+    case object Healthy extends K8sConnectionHealth(K8sConnectionHealthP.HEALTHY)
+
+    /** The K8s API connection is currently considered unhealthy. */
+    case object Unhealthy extends K8sConnectionHealth(K8sConnectionHealthP.UNHEALTHY)
+  }
+}
+
+/**
+ * All preferred-assigner data surfaced on the Assigner debug page: the elected preferred-assigner
+ * value (common to every driver), the consistent-hashing election snapshot (present only while the
+ * consistent-hashing driver is active), and the migration mode in effect. TODO(<internal bug>): collapse
+ * back to just the elected preferred-assigner value once the migration to consistent-hashing PA is
+ * complete and we no longer need a split view with the etcd preferred-assigner.
+ *
+ * @param preferredAssignerValue the elected preferred-assigner value, shown for every driver.
+ * @param consistentHashingStateOpt the consistent-hashing election snapshot, or `None` when the
+ *                                  consistent-hashing driver is not active (the etcd-backed and
+ *                                  disabled drivers).
+ * @param migrationMode the preferred-assigner migration mode in effect.
+ */
+private[assigner] case class PreferredAssignerSlicezData(
+    preferredAssignerValue: PreferredAssignerValue,
+    consistentHashingStateOpt: Option[ConsistentHashingState],
+    migrationMode: MigrationMode)
+
+/**
  * Class that contains the assigner information and the Slicez data for all targets.
  *
- * @param chState Snapshot of the consistent-hashing preferred-assigner state; populated only
- *                when the CH driver is active. `None` when the driver is the etcd-backed one
- *                or PA mode is disabled. TODO(<internal bug>): remove this field once the migration
- *                to consistent-hashing PA is complete and we no longer need a split view
- *                with the etcd preferred-assigner.
- * @param migrationModeOpt Current migration mode for the preferred-assigner election;
- *                         populated only when the migration driver is active. TODO(<internal bug>):
- *                         remove this field once the migration to consistent-hashing PA is
- *                         complete and we no longer need a split view with the etcd
- *                         preferred-assigner.
+ * @param preferredAssignerSlicezData the elected preferred-assigner value plus the
+ *                                    consistent-hashing snapshot and migration mode for the debug
+ *                                    page. TODO(<internal bug>): collapse back to just the elected
+ *                                    preferred-assigner value once the migration to
+ *                                    consistent-hashing PA is complete and we no longer need a
+ *                                    split view with the etcd preferred-assigner.
  */
 case class AssignerSlicezData(
     assignerInfo: AssignerInfo,
-    preferredAssignerValue: PreferredAssignerValue,
-    targetsSlicezData: Seq[AssignerTargetSlicezData],
-    chState: Option[ConsistentHashingState] = None,
-    migrationModeOpt: Option[MigrationMode] = None)
+    preferredAssignerSlicezData: PreferredAssignerSlicezData,
+    targetsSlicezData: Seq[AssignerTargetSlicezData])
     extends SlicezData {
 
   /** Generates an HTML table based on all [[AssignerTargetSlicezData]]. */
@@ -515,8 +575,9 @@ case class AssignerSlicezData(
       targets = targetsSlicezData.map { td: AssignerTargetSlicezData =>
         td.toViewProto
       },
-      consistentHashing = chState.map(consistentHashingStateToViewProto),
-      migrationMode = migrationModeOpt.map(migrationModeToProto)
+      consistentHashing = preferredAssignerSlicezData.consistentHashingStateOpt
+        .map(consistentHashingStateToViewProto),
+      migrationMode = Some(migrationModeToProto(preferredAssignerSlicezData.migrationMode))
     )
   }
 
@@ -528,7 +589,7 @@ case class AssignerSlicezData(
    * and DPage JSON representations.
    */
   private def preferredAssignerStateDisplay: AssignerSlicezData.PreferredAssignerStateDisplay = {
-    preferredAssignerValue match {
+    preferredAssignerSlicezData.preferredAssignerValue match {
       case SomeAssigner(preferredAssignerInfo: AssignerInfo, generation: Generation) =>
         if (preferredAssignerInfo.uuid == assignerInfo.uuid) {
           AssignerSlicezData.PreferredAssignerStateDisplay(
@@ -565,7 +626,7 @@ case class AssignerSlicezData(
   }
 
   /**
-   * Converts [[preferredAssignerValue]] to a [[PreferredAssignerStateViewP]] view proto,
+   * Converts the elected preferred-assigner value to a [[PreferredAssignerStateViewP]] view proto,
    * reflecting the role and action of this assigner.
    */
   private def preferredAssignerStateToViewProto: PreferredAssignerStateViewP = {
@@ -594,45 +655,48 @@ case class AssignerSlicezData(
     table(cls := "assigner-table")(rows: _*)
   }
 
-  /**
-   * Renders the current migration mode as an HTML table (ZPage only), or a placeholder when
-   * [[migrationModeOpt]] is empty (the migration driver is not active).
-   */
+  /** Renders the current migration mode as an HTML table (ZPage only). */
   private def renderMigrationMode: TypedTag[String] = {
-    migrationModeOpt match {
-      case None =>
-        p("Migration driver: not active")
-      case Some(mode: MigrationMode) =>
-        table(cls := "assigner-table")(
-          tr(th("Mode"), td(AssignerSlicezData.migrationModeDisplayName(mode)))
-        )
-    }
+    val mode: MigrationMode = preferredAssignerSlicezData.migrationMode
+    table(cls := "assigner-table")(
+      tr(th("Mode"), td(AssignerSlicezData.migrationModeDisplayName(mode)))
+    )
   }
 
   /**
    * Renders the consistent-hashing preferred-assigner state as an HTML table (ZPage only),
-   * or a placeholder when [[chState]] is empty (the CH driver is not active). Renders the
-   * local and elected-preferred assigner UUIDs and URIs so DPages of different assigners can
-   * be compared.
+   * or a placeholder when the driver view carries no consistent-hashing snapshot
+   * (the CH driver is not active). Renders the local and elected-preferred assigner UUIDs and URIs
+   * so DPages of different assigners can be compared.
    */
   private def renderConsistentHashingState: TypedTag[String] = {
-    chState match {
-      case None =>
-        p("Consistent hash based preferred assigner: not active")
+    preferredAssignerSlicezData.consistentHashingStateOpt match {
       case Some(state: ConsistentHashingState) =>
         val preferredStr: String = state.preferredAssignerInfoOpt
           .map(AssignerSlicezData.assignerInfoDisplay)
           .getOrElse("N/A")
+        // Render each eligible pod on its own line, prefixed by the count, so DPages of different
+        // assigners can be compared pod-by-pod rather than only on the count.
+        val eligiblePodDisplays: Seq[String] =
+          state.eligiblePods.map(AssignerSlicezData.assignerInfoDisplay)
+        val eligiblePodsCell: TypedTag[String] = td(
+          s"Count: ${eligiblePodDisplays.size}",
+          eligiblePodDisplays.map { display: String =>
+            div(display)
+          }
+        )
         val rows: Seq[TypedTag[String]] = Seq(
           tr(
             th("Local assigner"),
             td(AssignerSlicezData.assignerInfoDisplay(state.localAssignerInfo))
           ),
           tr(th("Preferred assigner"), td(preferredStr)),
-          tr(th("Eligible pod count"), td(state.eligiblePodCount.toString)),
+          tr(th("Eligible pods"), eligiblePodsCell),
           tr(th("K8s connection health"), td(state.k8sConnectionHealth.toString))
         )
         table(cls := "assigner-table")(rows: _*)
+      case None =>
+        p("Consistent hash based preferred assigner: not active")
     }
   }
 
@@ -646,7 +710,7 @@ case class AssignerSlicezData(
       localAssigner = Some(AssignerSlicezData.assignerInfoToViewProto(state.localAssignerInfo)),
       preferredAssigner =
         state.preferredAssignerInfoOpt.map(AssignerSlicezData.assignerInfoToViewProto),
-      eligiblePodCount = Some(state.eligiblePodCount),
+      eligiblePods = state.eligiblePods.map(AssignerSlicezData.assignerInfoToViewProto),
       k8SConnectionHealth = Some(state.k8sConnectionHealth.toProto)
     )
   }
@@ -661,6 +725,8 @@ case class AssignerSlicezData(
         AssignerSliceViewP.PreferredAssignerMigrationModeP.SHADOW
       case MigrationMode.ConsistentHashingNominatedEtcdReadMode =>
         AssignerSliceViewP.PreferredAssignerMigrationModeP.CH_NOMINATED_ETCD_READ
+      case MigrationMode.ConsistentHashingPrimaryEtcdWritesMode =>
+        AssignerSliceViewP.PreferredAssignerMigrationModeP.CH_PRIMARY_ETCD_WRITE
     }
   }
 }
@@ -696,6 +762,8 @@ object AssignerSlicezData {
       case MigrationMode.ShadowMode => "Shadow (etcd authoritative)"
       case MigrationMode.ConsistentHashingNominatedEtcdReadMode =>
         "Consistent-hashing nominates / etcd reads"
+      case MigrationMode.ConsistentHashingPrimaryEtcdWritesMode =>
+        "Consistent-hashing primary / etcd writes"
     }
   }
 
@@ -707,49 +775,5 @@ object AssignerSlicezData {
   /** Human-readable "UUID (URI)" string for an assigner, used in ZPage tables. */
   private[assigner] def assignerInfoDisplay(info: AssignerInfo): String = {
     s"${info.uuid} (${info.uri})"
-  }
-}
-
-/**
- * Snapshot of the consistent-hashing preferred-assigner state for display on the Assigner
- * debug page. Populated by the CH preferred-assigner driver when active.
- *
- * @param localAssignerInfo This assigner instance's own identity (UUID + URI).
- * @param preferredAssignerInfoOpt The CH-elected preferred assigner (UUID + URI), or `None`
- *                                 when no assigner is currently elected.
- * @param eligiblePodCount Number of healthy assigner pods currently considered eligible for
- *                         election.
- * @param k8sConnectionHealth Whether the Kubernetes API connection is currently considered
- *                            healthy by the membership checker's hysteresis monitor.
- */
-case class ConsistentHashingState(
-    localAssignerInfo: AssignerInfo,
-    preferredAssignerInfoOpt: Option[AssignerInfo],
-    eligiblePodCount: Int,
-    k8sConnectionHealth: ConsistentHashingState.K8sConnectionHealth)
-
-object ConsistentHashingState {
-
-  import ConsistentHashingStateViewP.K8sConnectionHealthP
-
-  /** State of the Kubernetes API connection as tracked by the hysteresis monitor. */
-  sealed abstract class K8sConnectionHealth(val toProto: K8sConnectionHealthP) {
-    override def toString: String = this match {
-      case K8sConnectionHealth.Init => "INIT"
-      case K8sConnectionHealth.Healthy => "HEALTHY"
-      case K8sConnectionHealth.Unhealthy => "UNHEALTHY"
-    }
-  }
-
-  object K8sConnectionHealth {
-
-    /** Membership checker has not yet observed a poll result. */
-    case object Init extends K8sConnectionHealth(K8sConnectionHealthP.INIT)
-
-    /** The K8s API connection is currently considered healthy. */
-    case object Healthy extends K8sConnectionHealth(K8sConnectionHealthP.HEALTHY)
-
-    /** The K8s API connection is currently considered unhealthy. */
-    case object Unhealthy extends K8sConnectionHealth(K8sConnectionHealthP.UNHEALTHY)
   }
 }

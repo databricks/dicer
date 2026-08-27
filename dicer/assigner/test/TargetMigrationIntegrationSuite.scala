@@ -9,16 +9,21 @@ import com.databricks.caching.util.{
   MetricUtils,
   TestUtils
 }
+import com.databricks.caching.util.MetricUtils.ChangeTracker
 import com.databricks.caching.util.TestUtils.ParameterizedTestNameDecorator
+import com.databricks.dicer.assigner.TargetMetrics.GeneratorShutdownReason
 import com.databricks.dicer.assigner.PreferredAssignerTestHelper.{
   advanceClockBySync,
   createAssignerConfig,
   TEST_TARGET_FOR_PA_DISCOVERY
 }
 import com.databricks.dicer.assigner.config.{
-  StaticTargetConfigProvider,
   InternalTargetConfigMap,
-  TargetMigrationRole
+  TargetConfigProvider,
+  TargetConfigProviderFactory,
+  TargetMigrationConfig,
+  TargetMigrationRole,
+  TargetMigrationType
 }
 import com.databricks.dicer.assigner.config.TargetConfigProvider.DEFAULT_INITIAL_POLL_TIMEOUT
 import com.databricks.dicer.client.TestClientUtils
@@ -34,7 +39,7 @@ import com.databricks.testing.DatabricksTest
 import io.prometheus.client.CollectorRegistry
 import org.scalatest.Suite
 import scala.collection.immutable.IndexedSeq
-import scala.concurrent.duration.Duration
+import scala.concurrent.duration._
 
 /**
  * Drives the active-target-migration override path end-to-end across two simulated clusters. The
@@ -122,20 +127,31 @@ class ParameterizedTargetMigrationIntegrationSuite(localRole: TargetMigrationRol
     val configMap: InternalTargetConfigMap = new InternalTargetConfigMapWithDefault(
       InternalTargetConfigMap.create(configScopeOpt = None, Map.empty)
     )
-    val configProvider: StaticTargetConfigProvider =
-      StaticTargetConfigProvider.create(
+    val configProvider: TargetConfigProvider =
+      TargetConfigProviderFactory.createBlocking(
         staticTargetConfigMap = configMap,
-        config.assignerConf
+        config.assignerConf,
+        initialPollTimeout = DEFAULT_INITIAL_POLL_TIMEOUT
       )
-    configProvider.startBlocking(DEFAULT_INITIAL_POLL_TIMEOUT)
     TestAssigner.createAndStart(
       secPool = secPool,
       config = config,
       configProvider = configProvider,
-      dockerizedEtcdOpt = None,
-      assignerClusterUri = assignerClusterUri
+      preferredAssignerDriverFactory = TestAssigner.defaultPreferredAssignerDriverFactory(
+        config.assignerConf,
+        config.preferredAssignerDriverConfig,
+        dockerizedEtcdOpt = None
+      ),
+      assignerClusterUri = assignerClusterUri,
+      assignerServiceInfoOpt = None
     )
   }
+
+  /** Returns the [[AssignmentGeneratorDriver]] for `target` on `assigner`, or `None` if absent. */
+  private def getGeneratorOpt(
+      assigner: TestAssigner,
+      target: Target): Option[AssignmentGeneratorDriver] =
+    TestUtils.awaitResult(assigner.forTest.getGeneratorFromMap(target), Duration.Inf)
 
   test("Slicelet successfully receives an assignment with peer cluster version > local version") {
     // Test plan: Verify that even when the local and peer Assigners disagree on which role owns the
@@ -172,7 +188,7 @@ class ParameterizedTargetMigrationIntegrationSuite(localRole: TargetMigrationRol
     }
 
     // The local cluster owns the target and never redirects to its peer, so the blackhole URI is
-    // sufficient for `peerAssignerUri`.
+    // sufficient for `peerAssignerUris`.
     val localConfig: TestAssigner.Config = createAssignerConfig(
       preferredAssignerStoreIncarnation = Incarnation(40),
       targetMigratorOpt = Some(
@@ -180,7 +196,7 @@ class ParameterizedTargetMigrationIntegrationSuite(localRole: TargetMigrationRol
           initialSnapshot = TargetMigrationSnapshot.ActiveMigration(
             targetMigrationConfig = localConfigBuilder.build(),
             targetMigrationRole = localRole,
-            peerAssignerUri = BLACKHOLE_PEER_URI
+            peerAssignerUris = Seq(BLACKHOLE_PEER_URI)
           )
         )
       )
@@ -201,7 +217,7 @@ class ParameterizedTargetMigrationIntegrationSuite(localRole: TargetMigrationRol
       .getOrElse(fail("Expected at least one standby assigner to be present"))
 
     // Setup: Create the peer cluster's migration config. This is at a higher version V+1, with
-    // `MISMATCHING_TARGET` owned by the local cluster. Its `peerAssignerUri` points at the
+    // `MISMATCHING_TARGET` owned by the local cluster. Its `peerAssignerUris` points at the
     // discovered local Standby.
     val peerRole: TargetMigrationRole = localRole match {
       case TargetMigrationRole.Source => TargetMigrationRole.Destination
@@ -227,7 +243,7 @@ class ParameterizedTargetMigrationIntegrationSuite(localRole: TargetMigrationRol
           initialSnapshot = TargetMigrationSnapshot.ActiveMigration(
             targetMigrationConfig = peerConfigBuilder.build(),
             targetMigrationRole = peerRole,
-            peerAssignerUri = standbyAssigner.getAssignerInfoBlocking().uri
+            peerAssignerUris = Seq(standbyAssigner.getAssignerInfoBlocking().uri)
           )
         )
       )
@@ -303,13 +319,13 @@ class ParameterizedTargetMigrationIntegrationSuite(localRole: TargetMigrationRol
         localConfigBuilder.forceToSource(mismatchingTargetName)
     }
 
-    // The local cluster uses a placeholder `peerAssignerUri` until the standalone peer Assigner has
-    // been created.
+    // The local cluster uses a placeholder `peerAssignerUris` until the standalone peer Assigner
+    // has been created.
     val localMigrator: FakeTargetMigrator = new FakeTargetMigrator(
       initialSnapshot = TargetMigrationSnapshot.ActiveMigration(
         targetMigrationConfig = localConfigBuilder.build(),
         targetMigrationRole = localRole,
-        peerAssignerUri = BLACKHOLE_PEER_URI
+        peerAssignerUris = Seq(BLACKHOLE_PEER_URI)
       )
     )
 
@@ -330,7 +346,7 @@ class ParameterizedTargetMigrationIntegrationSuite(localRole: TargetMigrationRol
     )
 
     // Setup: Create the peer cluster's migration config. This is at a lower version V-1, with
-    // `MISMATCHING_TARGET` owned by the local cluster. Its `peerAssignerUri` points at the
+    // `MISMATCHING_TARGET` owned by the local cluster. Its `peerAssignerUris` points at the
     // discovered local Assigner.
     val peerRole: TargetMigrationRole = localRole match {
       case TargetMigrationRole.Source => TargetMigrationRole.Destination
@@ -356,7 +372,7 @@ class ParameterizedTargetMigrationIntegrationSuite(localRole: TargetMigrationRol
           initialSnapshot = TargetMigrationSnapshot.ActiveMigration(
             targetMigrationConfig = peerConfigBuilder.build(),
             targetMigrationRole = peerRole,
-            peerAssignerUri = localAssigner.localUri
+            peerAssignerUris = Seq(localAssigner.localUri)
           )
         )
       )
@@ -373,7 +389,7 @@ class ParameterizedTargetMigrationIntegrationSuite(localRole: TargetMigrationRol
       TargetMigrationSnapshot.ActiveMigration(
         targetMigrationConfig = localConfigBuilder.build(),
         targetMigrationRole = localRole,
-        peerAssignerUri = peerAssigner.localUri
+        peerAssignerUris = Seq(peerAssigner.localUri)
       )
     )
 
@@ -447,12 +463,12 @@ class ParameterizedTargetMigrationIntegrationSuite(localRole: TargetMigrationRol
     }
 
     // The local cluster owns the target and never redirects to its peer, so the blackhole URI is
-    // sufficient for `peerAssignerUri`.
+    // sufficient for `peerAssignerUris`.
     val localMigrator: FakeTargetMigrator = new FakeTargetMigrator(
       initialSnapshot = TargetMigrationSnapshot.ActiveMigration(
         targetMigrationConfig = configBuilder.build(),
         targetMigrationRole = localRole,
-        peerAssignerUri = BLACKHOLE_PEER_URI
+        peerAssignerUris = Seq(BLACKHOLE_PEER_URI)
       )
     )
 
@@ -486,7 +502,7 @@ class ParameterizedTargetMigrationIntegrationSuite(localRole: TargetMigrationRol
           initialSnapshot = TargetMigrationSnapshot.ActiveMigration(
             targetMigrationConfig = configBuilder.build(),
             targetMigrationRole = peerRole,
-            peerAssignerUri = localAssigner.localUri
+            peerAssignerUris = Seq(localAssigner.localUri)
           )
         )
       )
@@ -524,5 +540,435 @@ class ParameterizedTargetMigrationIntegrationSuite(localRole: TargetMigrationRol
       Duration.Inf
     )
     peerEnv.clear()
+  }
+
+  test("A new resolver that reroutes a target shuts down that target's generator") {
+    // Test plan: Verify that when the Assigner adopts a new TargetOwnershipResolver that reroutes a
+    // target it previously handled, the generator for that target is shut down and recorded as a
+    // TARGET_MIGRATION_REROUTE removal, while a target that stays locally owned keeps its
+    // generator.
+    //
+    // Do this by standing up a standalone local Assigner whose initial migration snapshot pins both
+    // a `reroutedTarget` and a `retainedTarget` to the local role. A Slicelet for each target
+    // creates its generator. We then publish a new snapshot that flips only `reroutedTarget` to the
+    // peer role, and verify that `reroutedTarget`'s generator is removed (with a
+    // TARGET_MIGRATION_REROUTE removal recorded) while `retainedTarget`'s generator survives.
+    val reroutedTarget: Target = Target("rerouted-target")
+    val retainedTarget: Target = Target("retained-target")
+    val reroutedTargetName: TargetName = TargetName.forTarget(reroutedTarget)
+    val retainedTargetName: TargetName = TargetName.forTarget(retainedTarget)
+
+    // Setup: The initial migration config pins both targets to the local role, so both are handled
+    // locally and get a generator.
+    val initialConfigBuilder: TargetMigrationConfigBuilder = new TargetMigrationConfigBuilder(
+      version = 1,
+      destinationTargetNameFraction = 0.0
+    )
+    localRole match {
+      case TargetMigrationRole.Source =>
+        initialConfigBuilder.forceToSource(reroutedTargetName)
+        initialConfigBuilder.forceToSource(retainedTargetName)
+      case TargetMigrationRole.Destination =>
+        initialConfigBuilder.forceToDestination(reroutedTargetName)
+        initialConfigBuilder.forceToDestination(retainedTargetName)
+    }
+    val migrator: FakeTargetMigrator = new FakeTargetMigrator(
+      initialSnapshot = TargetMigrationSnapshot.ActiveMigration(
+        targetMigrationConfig = initialConfigBuilder.build(),
+        targetMigrationRole = localRole,
+        peerAssignerUris = Seq(BLACKHOLE_PEER_URI)
+      )
+    )
+
+    val localConfig: TestAssigner.Config = createAssignerConfig(
+      preferredAssignerStoreIncarnation = Incarnation(1),
+      preferredAssignerEnabled = false,
+      targetMigratorOpt = Some(migrator)
+    )
+    val fakeClock: FakeTypedClock = new FakeTypedClock()
+    val secPool: FakeSequentialExecutionContextPool =
+      FakeSequentialExecutionContextPool
+        .create(this.getClass.getName, numThreads = 10, fakeClock)
+    val localAssigner: TestAssigner = createStandaloneAssigner(
+      config = localConfig,
+      secPool = secPool,
+      assignerClusterUri = URI.create("kubernetes-cluster:test-env/cloud1/public/region1/local/01")
+    )
+
+    // Track reroute-driven removals for both targets from before any generator is created, so the
+    // assertions below capture every removal each target accrues over the whole test.
+    val reroutedRemovalTracker: ChangeTracker[Long] =
+      ChangeTracker[Long] { () =>
+        TargetMetricsUtils
+          .getGeneratorsRemovedTotal(
+            reroutedTarget,
+            GeneratorShutdownReason.TARGET_MIGRATION_REROUTE
+          )
+      }
+    val retainedRemovalTracker: ChangeTracker[Long] =
+      ChangeTracker[Long] { () =>
+        TargetMetricsUtils
+          .getGeneratorsRemovedTotal(
+            retainedTarget,
+            GeneratorShutdownReason.TARGET_MIGRATION_REROUTE
+          )
+      }
+
+    // Setup: Connect a Slicelet for each target so both generators are created.
+    val reroutedSlicelet: Slicelet = TestClientUtils.createSlicelet(
+      assignerPort = localAssigner.localUri.getPort,
+      target = reroutedTarget,
+      sliceletHost = s"rerouted-slicelet-host-$localRole",
+      clientTlsFilePathsOpt = None,
+      serverTlsFilePathsOpt = None,
+      watchFromDataPlane = false
+    )
+    reroutedSlicelet.start(selfPort = 1234, listenerOpt = None)
+    val retainedSlicelet: Slicelet = TestClientUtils.createSlicelet(
+      assignerPort = localAssigner.localUri.getPort,
+      target = retainedTarget,
+      sliceletHost = s"retained-slicelet-host-$localRole",
+      clientTlsFilePathsOpt = None,
+      serverTlsFilePathsOpt = None,
+      watchFromDataPlane = false
+    )
+    retainedSlicelet.start(selfPort = 5678, listenerOpt = None)
+
+    AssertionWaiter("Both generators are created").await {
+      assert(
+        getGeneratorOpt(localAssigner, reroutedTarget).isDefined,
+        "Rerouted target's generator should be created"
+      )
+      assert(
+        getGeneratorOpt(localAssigner, retainedTarget).isDefined,
+        "Retained target's generator should be created"
+      )
+      assert(
+        reroutedRemovalTracker.totalChange() == 0L,
+        "Creating the generators should not record a TARGET_MIGRATION_REROUTE removal for the " +
+        "rerouted target"
+      )
+      assert(
+        retainedRemovalTracker.totalChange() == 0L,
+        "Creating the generators should not record a TARGET_MIGRATION_REROUTE removal for the " +
+        "retained target"
+      )
+    }
+
+    // Now the actual test. Publish a new snapshot flipping only `reroutedTarget` to the peer role.
+    val flippedConfigBuilder: TargetMigrationConfigBuilder = new TargetMigrationConfigBuilder(
+      version = 2,
+      destinationTargetNameFraction = 0.0
+    )
+    localRole match {
+      case TargetMigrationRole.Source =>
+        // Flip `reroutedTarget` to the peer (Destination) role, keep `retainedTarget` local.
+        flippedConfigBuilder.forceToDestination(reroutedTargetName)
+        flippedConfigBuilder.forceToSource(retainedTargetName)
+      case TargetMigrationRole.Destination =>
+        flippedConfigBuilder.forceToSource(reroutedTargetName)
+        flippedConfigBuilder.forceToDestination(retainedTargetName)
+    }
+    migrator.setSnapshot(
+      TargetMigrationSnapshot.ActiveMigration(
+        targetMigrationConfig = flippedConfigBuilder.build(),
+        targetMigrationRole = localRole,
+        peerAssignerUris = Seq(BLACKHOLE_PEER_URI)
+      )
+    )
+
+    AssertionWaiter("Rerouted target's generator is shut down, retained target's survives").await {
+      assert(
+        getGeneratorOpt(localAssigner, reroutedTarget).isEmpty,
+        "Rerouted target's generator should be removed after the resolver reroutes it"
+      )
+      assert(
+        getGeneratorOpt(localAssigner, retainedTarget).isDefined,
+        "Retained target's generator should survive the resolver change"
+      )
+      assert(
+        reroutedRemovalTracker.totalChange() == 1L,
+        "Rerouted target should record exactly one TARGET_MIGRATION_REROUTE removal"
+      )
+      assert(
+        retainedRemovalTracker.totalChange() == 0L,
+        "Retained target should record no TARGET_MIGRATION_REROUTE removal"
+      )
+    }
+
+    reroutedSlicelet.forTest.stop()
+    retainedSlicelet.forTest.stop()
+    TestUtils.awaitResult(
+      localAssigner.stop(InterposingEtcdPreferredAssignerDriver.ShutdownOption.ABRUPT),
+      Duration.Inf
+    )
+  }
+
+  test("A transition to NoActiveMigration does not shut down any generator") {
+    // Test plan: Verify that when a migration completes or aborts — the resolver transitions from
+    // an ActiveMigration to a NoActiveMigration snapshot — no generator is removed, since a
+    // NoActiveMigration resolver handles every target locally.
+    //
+    // Do this by pinning `target` to the local role under an ActiveMigration at version 1, creating
+    // its generator, then publishing a NoActiveMigration snapshot at version 2. Verify the
+    // generator survives and no TARGET_MIGRATION_REROUTE removal is recorded.
+    val target: Target = Target("no-migration-transition-target")
+    val targetName: TargetName = TargetName.forTarget(target)
+
+    // Setup: The initial config pins `target` to the local role, so it is handled locally.
+    val initialConfigBuilder: TargetMigrationConfigBuilder = new TargetMigrationConfigBuilder(
+      version = 1,
+      destinationTargetNameFraction = 0.0
+    )
+    localRole match {
+      case TargetMigrationRole.Source => initialConfigBuilder.forceToSource(targetName)
+      case TargetMigrationRole.Destination => initialConfigBuilder.forceToDestination(targetName)
+    }
+    val migrator: FakeTargetMigrator = new FakeTargetMigrator(
+      initialSnapshot = TargetMigrationSnapshot.ActiveMigration(
+        targetMigrationConfig = initialConfigBuilder.build(),
+        targetMigrationRole = localRole,
+        peerAssignerUris = Seq(BLACKHOLE_PEER_URI)
+      )
+    )
+
+    val localConfig: TestAssigner.Config = createAssignerConfig(
+      preferredAssignerStoreIncarnation = Incarnation(1),
+      preferredAssignerEnabled = false,
+      targetMigratorOpt = Some(migrator)
+    )
+    val fakeClock: FakeTypedClock = new FakeTypedClock()
+    val secPool: FakeSequentialExecutionContextPool =
+      FakeSequentialExecutionContextPool
+        .create(this.getClass.getName, numThreads = 10, fakeClock)
+    val localAssigner: TestAssigner = createStandaloneAssigner(
+      config = localConfig,
+      secPool = secPool,
+      assignerClusterUri = URI.create("kubernetes-cluster:test-env/cloud1/public/region1/local/01")
+    )
+
+    // Track reroute-driven removals from before the generator is created, so the assertion below
+    // captures every removal the target accrues over the whole test.
+    val removalTracker: ChangeTracker[Long] =
+      ChangeTracker[Long] { () =>
+        TargetMetricsUtils
+          .getGeneratorsRemovedTotal(target, GeneratorShutdownReason.TARGET_MIGRATION_REROUTE)
+      }
+
+    // Setup: Connect a Slicelet so the generator is created.
+    val slicelet: Slicelet = TestClientUtils.createSlicelet(
+      assignerPort = localAssigner.localUri.getPort,
+      target = target,
+      sliceletHost = s"slicelet-host-$localRole",
+      clientTlsFilePathsOpt = None,
+      serverTlsFilePathsOpt = None,
+      watchFromDataPlane = false
+    )
+    slicelet.start(selfPort = 1234, listenerOpt = None)
+
+    AssertionWaiter("Generator is created").await {
+      assert(
+        getGeneratorOpt(localAssigner, target).isDefined,
+        "Target's generator should be created"
+      )
+    }
+
+    // Publish a NoActiveMigration snapshot at a higher version, ending the migration.
+    val noMigrationConfig: TargetMigrationConfig = TargetMigrationConfig(
+      version = 2,
+      migrationType = TargetMigrationType.NoMigration,
+      forceToSourceTargetNames = Set.empty,
+      forceToDestinationTargetNames = Set.empty,
+      destinationTargetNameFraction = 0.0
+    )
+    migrator.setSnapshot(TargetMigrationSnapshot.NoActiveMigration(noMigrationConfig))
+
+    // Advance the clock so any spurious scheduled work would have a chance to run, then confirm the
+    // generator survives and no reroute removal was recorded.
+    advanceClockBySync(fakeClock, 1.second, Vector(localAssigner))
+    AssertionWaiter("Generator survives the transition to NoActiveMigration").await {
+      assert(
+        getGeneratorOpt(localAssigner, target).isDefined,
+        "Target's generator should survive the transition to NoActiveMigration"
+      )
+      assert(
+        removalTracker.totalChange() == 0L,
+        "A transition to NoActiveMigration must not record a TARGET_MIGRATION_REROUTE removal"
+      )
+    }
+
+    slicelet.forTest.stop()
+    TestUtils.awaitResult(
+      localAssigner.stop(InterposingEtcdPreferredAssignerDriver.ShutdownOption.ABRUPT),
+      Duration.Inf
+    )
+  }
+
+  test("A generator shut down by a reroute is recreated when a newer inbound token forces Handle") {
+    // Test plan: Verify that a target whose generator was shut down by a reroute can spin its
+    // generator back up when a peer redirects it back with a strictly newer config version. This is
+    // the sequence where the local cluster falls behind: at v1 the local cluster owns the target
+    // (generator created); at v2 the local cluster reroutes it to the peer (generator shut down);
+    // then the peer, now at v3, disagrees and redirects the Slicelet back to the local cluster with
+    // a v3 token. Since v3 is newer than the local v2, the local cluster overrides its reroute,
+    // handles the target locally, and must recreate the generator.
+    //
+    // Do this with two standalone Assigners pointing at each other: drive the local cluster through
+    // v1 (handle) then v2 (reroute) and confirm the generator is created then removed, then create
+    // a Slicelet against the peer (at v3, owning the target as the local cluster's) and confirm the
+    // local cluster overrides and recreates the generator.
+    val peerRole: TargetMigrationRole = localRole match {
+      case TargetMigrationRole.Source => TargetMigrationRole.Destination
+      case TargetMigrationRole.Destination => TargetMigrationRole.Source
+    }
+    val targetName: TargetName = TargetName.forTarget(MISMATCHING_TARGET)
+
+    // Setup: The local cluster starts at v1 owning the target, so it is handled locally.
+    val localV1Builder: TargetMigrationConfigBuilder = new TargetMigrationConfigBuilder(
+      version = 1,
+      destinationTargetNameFraction = 0.0
+    )
+    localRole match {
+      case TargetMigrationRole.Source => localV1Builder.forceToSource(targetName)
+      case TargetMigrationRole.Destination => localV1Builder.forceToDestination(targetName)
+    }
+    val localMigrator: FakeTargetMigrator = new FakeTargetMigrator(
+      initialSnapshot = TargetMigrationSnapshot.ActiveMigration(
+        targetMigrationConfig = localV1Builder.build(),
+        targetMigrationRole = localRole,
+        peerAssignerUris = Seq(BLACKHOLE_PEER_URI)
+      )
+    )
+    val localConfig: TestAssigner.Config = createAssignerConfig(
+      preferredAssignerStoreIncarnation = Incarnation(1),
+      preferredAssignerEnabled = false,
+      targetMigratorOpt = Some(localMigrator)
+    )
+    val fakeClock: FakeTypedClock = new FakeTypedClock()
+    val secPool: FakeSequentialExecutionContextPool =
+      FakeSequentialExecutionContextPool
+        .create(this.getClass.getName, numThreads = 10, fakeClock)
+    val localAssigner: TestAssigner = createStandaloneAssigner(
+      config = localConfig,
+      secPool = secPool,
+      assignerClusterUri = URI.create("kubernetes-cluster:test-env/cloud1/public/region1/local/01")
+    )
+
+    val removalTracker: ChangeTracker[Long] =
+      ChangeTracker[Long] { () =>
+        TargetMetricsUtils
+          .getGeneratorsRemovedTotal(
+            MISMATCHING_TARGET,
+            GeneratorShutdownReason.TARGET_MIGRATION_REROUTE
+          )
+      }
+
+    // Setup: Connect a Slicelet directly to the local Assigner so it creates the generator while
+    // the target is handled locally at v1.
+    val slicelet: Slicelet = TestClientUtils.createSlicelet(
+      assignerPort = localAssigner.localUri.getPort,
+      target = MISMATCHING_TARGET,
+      sliceletHost = s"recreate-slicelet-host-$localRole",
+      clientTlsFilePathsOpt = None,
+      serverTlsFilePathsOpt = None,
+      watchFromDataPlane = false
+    )
+    slicelet.start(selfPort = 1234, listenerOpt = None)
+
+    AssertionWaiter("Generator is created while handled locally at v1").await {
+      assert(
+        getGeneratorOpt(localAssigner, MISMATCHING_TARGET).isDefined,
+        "Target's generator should be created while it is handled locally"
+      )
+    }
+
+    // Advance the local cluster to v2, flipping the target to the peer role so it is now rerouted
+    // and its generator is shut down.
+    val localV2Builder: TargetMigrationConfigBuilder = new TargetMigrationConfigBuilder(
+      version = 2,
+      destinationTargetNameFraction = 0.0
+    )
+    localRole match {
+      case TargetMigrationRole.Source => localV2Builder.forceToDestination(targetName)
+      case TargetMigrationRole.Destination => localV2Builder.forceToSource(targetName)
+    }
+    localMigrator.setSnapshot(
+      TargetMigrationSnapshot.ActiveMigration(
+        targetMigrationConfig = localV2Builder.build(),
+        targetMigrationRole = localRole,
+        peerAssignerUris = Seq(BLACKHOLE_PEER_URI)
+      )
+    )
+    AssertionWaiter("Generator is shut down once the target is rerouted at v2").await {
+      assert(
+        getGeneratorOpt(localAssigner, MISMATCHING_TARGET).isEmpty,
+        "Target's generator should be shut down after the reroute"
+      )
+      assert(
+        removalTracker.totalChange() == 1L,
+        "The reroute should record exactly one TARGET_MIGRATION_REROUTE removal"
+      )
+    }
+
+    // Setup: Stand up the peer Assigner at v3, owning the target as the local cluster's, and
+    // pointing its reroutes back at the local Assigner.
+    val peerConfigBuilder: TargetMigrationConfigBuilder = new TargetMigrationConfigBuilder(
+      version = 3,
+      destinationTargetNameFraction = 0.0
+    )
+    peerRole match {
+      case TargetMigrationRole.Source => peerConfigBuilder.forceToDestination(targetName)
+      case TargetMigrationRole.Destination => peerConfigBuilder.forceToSource(targetName)
+    }
+    val peerConfig: TestAssigner.Config = createAssignerConfig(
+      preferredAssignerStoreIncarnation = Incarnation(1),
+      preferredAssignerEnabled = false,
+      targetMigratorOpt = Some(
+        new FakeTargetMigrator(
+          initialSnapshot = TargetMigrationSnapshot.ActiveMigration(
+            targetMigrationConfig = peerConfigBuilder.build(),
+            targetMigrationRole = peerRole,
+            peerAssignerUris = Seq(localAssigner.localUri)
+          )
+        )
+      )
+    )
+    val peerAssigner: TestAssigner = createStandaloneAssigner(
+      config = peerConfig,
+      secPool = secPool,
+      assignerClusterUri = URI.create("kubernetes-cluster:test-env/cloud1/public/region1/peer/01")
+    )
+
+    // Redirect the Slicelet to watch the peer. The peer reroutes it back to the local Assigner with
+    // a v3 token; since v3 is newer than the local v2, the local cluster overrides and handles the
+    // target, recreating its generator.
+    slicelet.forTest.stop()
+    val redirectedSlicelet: Slicelet = TestClientUtils.createSlicelet(
+      assignerPort = peerAssigner.localUri.getPort,
+      target = MISMATCHING_TARGET,
+      sliceletHost = s"redirected-slicelet-host-$localRole",
+      clientTlsFilePathsOpt = None,
+      serverTlsFilePathsOpt = None,
+      watchFromDataPlane = false
+    )
+    redirectedSlicelet.start(selfPort = 5678, listenerOpt = None)
+
+    AssertionWaiter("Generator is recreated once the newer inbound token forces a local Handle")
+      .await {
+        assert(
+          getGeneratorOpt(localAssigner, MISMATCHING_TARGET).isDefined,
+          "Target's generator should be recreated after the override forces a local Handle"
+        )
+      }
+
+    redirectedSlicelet.forTest.stop()
+    TestUtils.awaitResult(
+      peerAssigner.stop(InterposingEtcdPreferredAssignerDriver.ShutdownOption.ABRUPT),
+      Duration.Inf
+    )
+    TestUtils.awaitResult(
+      localAssigner.stop(InterposingEtcdPreferredAssignerDriver.ShutdownOption.ABRUPT),
+      Duration.Inf
+    )
   }
 }

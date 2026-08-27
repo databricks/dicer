@@ -13,7 +13,7 @@ class TargetHelperSuite extends DatabricksTest {
 
   test("isFatalTargetMismatch") {
     // Test plan: Verify that isFatalTargetMismatch returns the expected result for all
-    // test cases defined in FATAL_TARGET_MISMATCH_TEST_DATA.
+    // test cases defined in TEST_DATA.
 
     // Test fatally mismatched cases.
     for (testCase <- TEST_DATA.fatallyMismatchedTestCases) {
@@ -30,12 +30,12 @@ class TargetHelperSuite extends DatabricksTest {
         s"to be true, but got false"
       )
 
-      // Verify reflexivity.
-      val actualFatalReflexive = TargetHelper.isFatalTargetMismatch(target2, target1)
+      // Verify symmetry.
+      val actualFatalSymmetric = TargetHelper.isFatalTargetMismatch(target2, target1)
       assert(
-        actualFatalReflexive,
+        actualFatalSymmetric,
         s"Test case '$description': Expected isFatalTargetMismatch($target2, $target1) " +
-        s"to be true (reflexive), but got false"
+        s"to be true (symmetric), but got false"
       )
     }
 
@@ -54,12 +54,12 @@ class TargetHelperSuite extends DatabricksTest {
         s"to be false, but got true"
       )
 
-      // Verify reflexivity.
-      val actualFatalReflexive = TargetHelper.isFatalTargetMismatch(target2, target1)
+      // Verify symmetry.
+      val actualFatalSymmetric = TargetHelper.isFatalTargetMismatch(target2, target1)
       assert(
-        !actualFatalReflexive,
+        !actualFatalSymmetric,
         s"Test case '$description': Expected isFatalTargetMismatch($target2, $target1) " +
-        s"to be false (reflexive), but got true"
+        s"to be false (symmetric), but got true"
       )
     }
   }

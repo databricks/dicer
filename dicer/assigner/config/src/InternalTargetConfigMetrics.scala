@@ -14,6 +14,18 @@ import com.databricks.dicer.common.TargetName
 /** Contains metrics that record values in [[InternalTargetConfig]] across targets. */
 object InternalTargetConfigMetrics {
 
+  /**
+   * Metric set to 1 for each target name the Assigner has a configuration for. This provides an
+   * explicit signal of which targets are configured, which can be used to count configured targets
+   * or as a join target in dashboards and alerts.
+   */
+  private val targetConfigured = Gauge
+    .build()
+    .name("dicer_assigner_target_configured")
+    .help("Set to 1 for each configured target name.")
+    .labelNames("targetName")
+    .register()
+
   /** Metric indicating whether load balancing is enabled for targets with a given name. */
   private val loadBalancingConfigEnabled = Gauge
     .build()
@@ -80,6 +92,13 @@ object InternalTargetConfigMetrics {
     .labelNames("targetName")
     .register()
 
+  private val advancedTargetConfigLoadWatcherConfigUseLoadDistribution = Gauge
+    .build()
+    .name("dicer_assigner_advanced_target_config_load_watcher_config_use_load_distribution")
+    .help("The use load distribution configured for each target name.")
+    .labelNames("targetName")
+    .register()
+
   /**
    * Metrics containing configured values for fields in [[KeyReplicationConfigP]] for each target.
    * These fields are configured through advanced target config.
@@ -115,6 +134,7 @@ object InternalTargetConfigMetrics {
   def exportAssignerConfigStats(
       targetName: TargetName,
       targetConfig: InternalTargetConfig): Unit = {
+    targetConfigured.labels(targetName.value).set(1)
     setLoadWatcherConfigStats(targetName, targetConfig.loadWatcherConfig)
     loadBalancingConfigEnabled.labels(targetName.value).set(1)
     setLoadBalancingConfigStats(targetName.value, targetConfig.loadBalancingConfig)
@@ -125,18 +145,50 @@ object InternalTargetConfigMetrics {
     setWatchRequestRateLimitConfigStats(targetName, targetConfig.targetRateLimitConfig)
   }
 
-  /** A gauge indicating whether the dynamic values are unavailable during Assigner startup. */
+  /** Set to 1 when polling SAFE dynamic target config fails or times out; cleared on success. */
   private val dynamicConfigUnavailabilityGauge = Gauge
     .build()
     .name("dicer_dynamic_config_unavailable")
-    .help("Whether the dicer dynamic values are unavailable")
+    .help(
+      "Set to 1 when polling SAFE dynamic target config fails or times out; " +
+      "cleared when polling succeeds."
+    )
     .register()
 
-  /** A gauge indicating whether the malformed value is polled form SAFE. */
+  /**
+   * Set to 1 when at least one dynamic target config value polled from SAFE cannot be parsed or
+   * fails validation.
+   */
   private val dynamicConfigMalformedGauge = Gauge
     .build()
     .name("dicer_malformed_dynamic_config")
-    .help("Whether the dicer dynamic values are malformed")
+    .help("Set to 1 when at least one Dicer dynamic target config is malformed.")
+    .register()
+
+  /**
+   * Set to 1 for each static target without a valid dynamic config. This metric is only set when
+   * [[DynamicTargetConfigProvider]] is used.
+   *
+   * Note that when SAFE gradual rollout is enabled, the dynamic config rollout might be slower than
+   * the binary rollout, so it's possible that the target is missing the dynamic config for a longer
+   * period of time.
+   */
+  private val staticTargetMissingDynamicConfigGauge = Gauge
+    .build()
+    .name("dicer_static_target_missing_dynamic_config")
+    .help("Set to 1 when a static target is missing a valid dynamic config.")
+    .labelNames("targetName")
+    .register()
+
+  /**
+   * Set to 1 for each target present in [[DynamicTargetConfigProvider]]'s current serving config
+   * but absent from static config.
+   */
+  private val dynamicOnlyTargetGauge = Gauge
+    .build()
+    .name("dicer_assigner_dynamic_only_target")
+    .help("Whether a target is present in current serving config but absent from static config.")
+    .labelNames("targetName")
     .register()
 
   def setDynamicConfigUnavailableMetrics(unavailable: Boolean): Unit = {
@@ -145,6 +197,21 @@ object InternalTargetConfigMetrics {
 
   def setDynamicConfigMalformedMetrics(malformed: Boolean): Unit = {
     dynamicConfigMalformedGauge.set(if (malformed) 1 else 0)
+  }
+
+  /** Set the static target missing dynamic config metric for a given target. */
+  def setStaticTargetMissingDynamicConfigMetrics(targetName: TargetName, missing: Boolean): Unit = {
+    staticTargetMissingDynamicConfigGauge.labels(targetName.value).set(if (missing) 1 else 0)
+  }
+
+  /** Set the dynamic-only target metric for a given target. */
+  def setDynamicOnlyTargetMetrics(targetName: TargetName): Unit = {
+    dynamicOnlyTargetGauge.labels(targetName.value).set(1)
+  }
+
+  /** Clears the dynamic-only target metric for all targets. */
+  def clearAllDynamicOnlyTargetMetrics(): Unit = {
+    dynamicOnlyTargetGauge.clear()
   }
 
   /** Exports the fields in `loadWatcherConfig` to metrics. */
@@ -160,6 +227,9 @@ object InternalTargetConfigMetrics {
     advancedTargetConfigLoadWatcherConfigUseTopKeys
       .labels(targetName.value)
       .set(if (loadWatcherConfig.useTopKeys) 1 else 0)
+    advancedTargetConfigLoadWatcherConfigUseLoadDistribution
+      .labels(targetName.value)
+      .set(if (loadWatcherConfig.useLoadDistribution) 1 else 0)
   }
 
   /** Exports the fields in `keyReplicationConfig` to metrics. */
@@ -203,6 +273,7 @@ object InternalTargetConfigMetrics {
 
     /** Resets all metrics. */
     def clearMetrics(): Unit = {
+      targetConfigured.clear()
       loadBalancingConfigEnabled.clear()
       stateTransferConfigEnabled.clear()
       targetConfigPrimaryRateMetricConfigMaxLoadHint.clear()
@@ -211,8 +282,11 @@ object InternalTargetConfigMetrics {
       advancedTargetConfigLoadWatcherConfigMinDurationSeconds.clear()
       advancedTargetConfigLoadWatcherConfigMaxAgeSeconds.clear()
       advancedTargetConfigLoadWatcherConfigUseTopKeys.clear()
+      advancedTargetConfigLoadWatcherConfigUseLoadDistribution.clear()
       dynamicConfigUnavailabilityGauge.clear()
       dynamicConfigMalformedGauge.clear()
+      staticTargetMissingDynamicConfigGauge.clear()
+      clearAllDynamicOnlyTargetMetrics()
       advancedTargetConfigWatchRequestRateLimitClientRequestsPerSecond.clear()
     }
   }

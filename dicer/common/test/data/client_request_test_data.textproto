@@ -397,6 +397,66 @@ invalid_cases: [
       clerk_fields: { }
     }
     expected_error_message: "SyncAssignmentStateP state must not be empty"
+  },
+  {
+    case_name: "alternative_target with invalid AppTarget"
+    client_request: {
+      target: {
+        name: "softstore"
+      }
+      sync_assignment_state: {
+        known_generation: { incarnation: 10 number: 42 }
+      }
+      subscriber_debug_name: "subscriber"
+      chosen_rpc_timeout_millis: 600000
+      clerk_fields: { }
+      alternative_target: {
+        name: "Bad-Name"
+        target_type: APP
+        instance_id: "inst-1"
+      }
+    }
+    expected_error_message: "alternativeTarget is ill-formed:"
+  },
+
+  {
+    case_name: "alternative_target with KubernetesTarget"
+    client_request: {
+      target: {
+        name: "softstore"
+      }
+      sync_assignment_state: {
+        known_generation: { incarnation: 10 number: 42 }
+      }
+      subscriber_debug_name: "subscriber"
+      chosen_rpc_timeout_millis: 600000
+      clerk_fields: { }
+      alternative_target: {
+        name: "bad-alt"
+        target_type: KUBERNETES
+      }
+    }
+    expected_error_message: "alternativeTarget must be an AppTarget"
+  },
+
+  {
+    case_name: "alternative_target with TYPE_UNSPECIFIED"
+    client_request: {
+      target: {
+        name: "softstore"
+      }
+      sync_assignment_state: {
+        known_generation: { incarnation: 10 number: 42 }
+      }
+      subscriber_debug_name: "subscriber"
+      chosen_rpc_timeout_millis: 600000
+      clerk_fields: { }
+      alternative_target: {
+        name: "bad-alt"
+        target_type: TYPE_UNSPECIFIED
+      }
+    }
+    expected_error_message: "alternativeTarget must be an AppTarget"
   }
 ]
 
@@ -750,5 +810,86 @@ round_tripping_cases: [
     chosen_rpc_timeout_millis: 600000
     clerk_fields: { }
     redirect_token: "\x01\x02\x03\x04"
+  },
+
+  # ClerkRequest with alternative_target set to an AppTarget.
+  {
+    target: {
+      name: "softstore"
+    }
+    sync_assignment_state: {
+      known_generation: { incarnation: 10 number: 42 }
+    }
+    subscriber_debug_name: "subscriber"
+    chosen_rpc_timeout_millis: 600000
+    clerk_fields: { }
+    alternative_target: {
+      name: "svc-name"
+      target_type: APP
+      instance_id: "inst-1"
+    }
+  },
+
+  # ClerkRequest carrying the sender's cluster_uri and region_uri.
+  {
+    target: {
+      name: "softstore"
+    }
+    sync_assignment_state: {
+      known_generation: { incarnation: 10 number: 42 }
+    }
+    subscriber_debug_name: "subscriber"
+    chosen_rpc_timeout_millis: 600000
+    clerk_fields: { }
+    cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01"
+    region_uri: "region:dev/cloud1/public/region1"
+  }
+]
+
+# Requests that parse successfully but whose cluster_uri / region_uri are dropped to None because
+# they are unrecognized. These fields are advisory sender metadata, so an unrecognized value must
+# not fail the request.
+dropped_uri_cases: [
+  # Both URI fields unset: they decode to None.
+  {
+    target: {
+      name: "softstore"
+    }
+    sync_assignment_state: {
+      known_generation: { incarnation: 10 number: 42 }
+    }
+    subscriber_debug_name: "subscriber"
+    chosen_rpc_timeout_millis: 600000
+    clerk_fields: { }
+  },
+
+  # Malformed cluster_uri and region_uri: they decode to None.
+  {
+    target: {
+      name: "softstore"
+    }
+    sync_assignment_state: {
+      known_generation: { incarnation: 10 number: 42 }
+    }
+    subscriber_debug_name: "subscriber"
+    chosen_rpc_timeout_millis: 600000
+    clerk_fields: { }
+    cluster_uri: "not a uri %"
+    region_uri: "region:dev/cloud1/public/region1/extra"
+  },
+
+  # Well-formed cluster_uri and region_uri that are absent from IDM: they decode to None.
+  {
+    target: {
+      name: "softstore"
+    }
+    sync_assignment_state: {
+      known_generation: { incarnation: 10 number: 42 }
+    }
+    subscriber_debug_name: "subscriber"
+    chosen_rpc_timeout_millis: 600000
+    clerk_fields: { }
+    cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/99"
+    region_uri: "region:dev/cloud1/public/nonexistent"
   }
 ]

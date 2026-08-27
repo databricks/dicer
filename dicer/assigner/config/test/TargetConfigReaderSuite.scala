@@ -733,9 +733,8 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
     // Test plan: Verify a textproto under <root>/<service>/<service>.textproto is returned.
     val configWriter = new ConfigWriter
     val targetName: TargetName = TargetName("snappy-matcher")
-    configWriter.writeConfigInDirectory(
-      targetName.toString,
-      s"$targetName.textproto",
+    configWriter.writeConfig(
+      s"$targetName/$targetName.textproto",
       """default_config {
         |  primary_rate_metric_config {
         |    max_load_hint: 1000
@@ -767,7 +766,7 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
         |}
         |""".stripMargin
     configWriter.writeConfig(s"$flatTarget.textproto", body)
-    configWriter.writeConfigInDirectory(nestedTarget.toString, s"$nestedTarget.textproto", body)
+    configWriter.writeConfig(s"$nestedTarget/$nestedTarget.textproto", body)
     val configMap: Map[TargetName, InternalTargetConfig] =
       TargetConfigReader.readScopeConfigMapFromDirectories(
         configScopeOpt = None,
@@ -782,9 +781,8 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
     // subdirectory (the path OwnerTeamMappingsGenerator relies on for alert routing).
     val configWriter = new ConfigWriter
     val targetName: TargetName = TargetName("nested-owner-service")
-    configWriter.writeConfigInDirectory(
-      targetName.toString,
-      s"$targetName.textproto",
+    configWriter.writeConfig(
+      s"$targetName/$targetName.textproto",
       """owner_team_name: "platform-team"
         |""".stripMargin
     )
@@ -799,15 +797,13 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
     // tripping on OWNERS files that the per-service-subdir layout introduces.
     val configWriter = new ConfigWriter
     val targetName: TargetName = TargetName("owners-coexist")
-    configWriter.writeConfigInDirectory(
-      targetName.toString,
-      "OWNERS",
+    configWriter.writeConfig(
+      s"$targetName/OWNERS",
       "file://eng-teams/platform-team/all.OWNERS\n"
     )
-    configWriter.writeConfigInDirectory(targetName.toString, "README.md", "# notes\n")
-    configWriter.writeConfigInDirectory(
-      targetName.toString,
-      s"$targetName.textproto",
+    configWriter.writeConfig(s"$targetName/README.md", "# notes\n")
+    configWriter.writeConfig(
+      s"$targetName/$targetName.textproto",
       """default_config {
         |  primary_rate_metric_config {
         |    max_load_hint: 1000
@@ -831,9 +827,8 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
     // textproto nested deeper than the layout allows from being silently picked up as a target.
     val configWriter = new ConfigWriter
     val deepTarget: TargetName = TargetName("too-deep")
-    configWriter.writeConfigInDirectory(
-      "a/b",
-      s"$deepTarget.textproto",
+    configWriter.writeConfig(
+      s"a/b/$deepTarget.textproto",
       """default_config {
         |  primary_rate_metric_config {
         |    max_load_hint: 1000
@@ -864,7 +859,7 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
         |}
         |""".stripMargin
     configWriter.writeConfig(s"$targetName.textproto", body)
-    configWriter.writeConfigInDirectory(targetName.toString, s"$targetName.textproto", body)
+    configWriter.writeConfig(s"$targetName/$targetName.textproto", body)
     val ex: IllegalArgumentException = assertThrow[IllegalArgumentException](
       s"Duplicate target configuration for $targetName"
     ) {
@@ -903,8 +898,8 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
         |  }
         |}
         |""".stripMargin
-    configWriter.writeConfigInDirectory("foo", s"$targetName.textproto", body)
-    configWriter.writeConfigInDirectory("bar", s"$targetName.textproto", body)
+    configWriter.writeConfig(s"foo/$targetName.textproto", body)
+    configWriter.writeConfig(s"bar/$targetName.textproto", body)
     val ex: IllegalArgumentException = assertThrow[IllegalArgumentException](
       s"Duplicate target configuration for $targetName"
     ) {

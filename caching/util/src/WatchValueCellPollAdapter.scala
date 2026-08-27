@@ -9,30 +9,34 @@ import scala.concurrent.duration.FiniteDuration
  * An abstraction for implementing a [[WatchValueCell]] on top of a producer that only supports
  * polling for determining when the underlying value has changed.
  *
- * @param initialValueOpt       Optional initial value of the transformed type. If None, the cell
- *                              will not have a value until the first poll completes.
- * @param poller                A code function that polls the watched value.
- * @param transform             The code function that transforms the raw value to the parsed one.
+ * @param initialValueOpt       Optional initial parsed value. If None, the cell will not have a
+ *                              parsed value until the first poll completes.
+ * @param poller                The function that polls the raw value.
+ * @param update                The function that computes the next parsed value from the latest
+ *                              published value, if any, and the newly polled raw value. If update
+ *                              returns a value equal to the latest published value, the cell is
+ *                              not updated, and existing watchers are not notified.
  * @param pollInterval          The finite duration of the interval between each value poll. Must
  *                              be strictly positive.
  * @param sec                   A sequential execution context for scheduling and protecting mutable
  *                              state. Blocking work may be performed on this execution context.
  *
- * @tparam T                The type for the raw value.
- * @tparam R                The type for the parsed value.
+ * @tparam T                    the type of the raw polled value.
+ * @tparam R                    the type of the parsed value published by the cell.
  *
- * Once `start()` is called, the producer polls the raw value every `pollInterval` using `poller`.
- * Once it gets the value, it applies `transform` to get the parsed value. The periodical poll
- * will be canceled if `cancel()` is called.
- * The consumer can register its callback by calling the `watch()` function.
+ * Once [[start()]] is called, the adapter immediately polls using `poller`, then polls every
+ * `pollInterval`. After each poll, `update` computes the next parsed value from the latest
+ * published value and the newly polled raw value. Polling and updating execute serially on `sec`.
  *
- * @throws IllegalArgumentException If `pollInterval` is not strictly positive.
+ * Periodic polling is canceled by [[cancel()]]. Consumers register callbacks through [[watch()]].
+ *
+ * @throws IllegalArgumentException if [[pollInterval]] is not strictly positive.
  */
 @ThreadSafe
 sealed class WatchValueCellPollAdapter[T, R] @throws[IllegalArgumentException]()(
     initialValueOpt: Option[R],
     poller: () => T,
-    transform: T => R,
+    update: (Option[R], T) => R,
     pollInterval: FiniteDuration,
     sec: SequentialExecutionContext)
     extends WatchValueCell.Consumer[R]
@@ -104,7 +108,7 @@ sealed class WatchValueCellPollAdapter[T, R] @throws[IllegalArgumentException]()
     val latestValueOpt: Option[R] = cell.getLatestValueOpt
 
     val newValueRaw: T = poller()
-    val newValue: R = transform(newValueRaw)
+    val newValue: R = update(latestValueOpt, newValueRaw)
 
     // Update the value if: (1) there's no existing value, or (2) the value has changed.
     if (!latestValueOpt.contains(newValue)) {

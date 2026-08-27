@@ -2,12 +2,16 @@ package com.databricks.dicer.common
 
 import scala.util.Random
 import com.databricks.api.proto.dicer.common.DiffAssignmentP
+import com.databricks.api.proto.dicer.common.DiffAssignmentP.AssignerServiceInfoP
 import com.databricks.dicer.common.TestSliceUtils._
 import com.databricks.dicer.external.Slice
+import com.databricks.caching.util.MetricUtils
+import com.databricks.caching.util.MetricUtils.ChangeTracker
 import com.databricks.caching.util.TestUtils.{assertThrow, loadTestData}
 import com.databricks.dicer.friend.{SliceMap, Squid}
 import com.databricks.dicer.friend.SliceMap.GapEntry
 import com.databricks.testing.DatabricksTest
+import io.prometheus.client.CollectorRegistry
 
 import java.time.Instant
 import com.databricks.dicer.common.test.{DiffAssignmentTestDataP, SimpleDiffAssignmentP}
@@ -24,6 +28,27 @@ class DiffAssignmentSuite extends DatabricksTest {
     loadTestData[DiffAssignmentTestDataP](
       "dicer/common/test/data/diff_assignment_test_data.textproto"
     )
+
+  /**
+   * Returns a [[ChangeTracker]] over the `dicer_assignment_service_info_parse_total` counter for
+   * the given label values.
+   */
+  private def createAssignerInfoParseOutcomeTracker(
+      outcome: String,
+      assignerName: String,
+      assignerInstanceId: String): ChangeTracker[Double] = {
+    ChangeTracker[Double] { () =>
+      MetricUtils.getMetricValue(
+        CollectorRegistry.defaultRegistry,
+        "dicer_assignment_service_info_parse_total",
+        Map(
+          "outcome" -> outcome,
+          "assignerName" -> assignerName,
+          "assignerInstanceId" -> assignerInstanceId
+        )
+      )
+    }
+  }
 
   /**
    * Creates a [[DiffAssignmentSliceMap]] that assigns complete slices with random
@@ -182,9 +207,38 @@ class DiffAssignmentSuite extends DatabricksTest {
     }
   }
 
+  test("DiffAssignment.fromProto ignores invalid assigner service info") {
+    // Test plan: Verify that DiffAssignment.fromProto returns None when assigner service info
+    // is invalid, and records the parse outcome metric as "invalid" with the name and instance id
+    // carried by the rejected proto.
+
+    val validDiffAssignment: DiffAssignment =
+      parseSimpleDiffAssignment(TEST_DATA.getValidDiffAssignment)
+    val validProto: DiffAssignmentP = validDiffAssignment.toProto
+
+    for (invalidInfo: AssignerServiceInfoP <- TEST_DATA.invalidAssignerServiceInfos) {
+      val protoWithInvalidInfo: DiffAssignmentP = validProto.withAssignerServiceInfo(invalidInfo)
+      val invalidParses: ChangeTracker[Double] =
+        createAssignerInfoParseOutcomeTracker(
+          "invalid",
+          invalidInfo.getName,
+          invalidInfo.getInstanceId
+        )
+
+      val parsed: DiffAssignment = DiffAssignment.fromProto(protoWithInvalidInfo)
+
+      assert(parsed.assignerServiceInfoOpt.isEmpty)
+      // Assert that the parse outcome metric was recorded as "invalid" with the name and instance
+      // id carried by the rejected proto.
+      assertResult(1.0)(invalidParses.totalChange())
+    }
+  }
+
   test("DiffAssignment round-tripping") {
     // Test plan: Verify that a valid DiffAssignment can be converted to DiffAssignmentP
-    // and back.
+    // and back. For the manual test cases, also verify that the round trip records the
+    // parse outcome metric: "valid" with the service info's name and instance id when it is
+    // present, and "absent" with empty labels when it is not.
 
     // Converts `diffAssignment` to a protobuf message and converts the protobuf message back to
     // a `DiffAssignment` scala class. Asserts that the re-constructed
@@ -200,7 +254,18 @@ class DiffAssignmentSuite extends DatabricksTest {
 
     // Manual test cases.
     for (testCase: SimpleDiffAssignmentP <- TEST_DATA.roundTripTestCases) {
+      // A case that omits the service info parses as "absent" with empty labels.
+      val (outcome, name, instanceId): (String, String, String) =
+        testCase.assignerServiceInfo match {
+          case Some(info: AssignerServiceInfoP) => ("valid", info.getName, info.getInstanceId)
+          case None => ("absent", "", "")
+        }
+      val parses: ChangeTracker[Double] =
+        createAssignerInfoParseOutcomeTracker(outcome, name, instanceId)
+
       testRoundTrip(parseSimpleDiffAssignment(testCase))
+
+      assertResult(1.0)(parses.totalChange())
     }
 
     // Random test cases.
@@ -220,8 +285,20 @@ class DiffAssignmentSuite extends DatabricksTest {
         Generation(Incarnation(incarnationValue), number = Instant.now().toEpochMilli)
       val sliceMap: DiffAssignmentSliceMap =
         createRandomDiffAssignmentSliceMap(useFullDiff, generation)
+      val assignerServiceInfoOpt: Option[AssignerServiceInfo] =
+        if (Random.nextBoolean()) {
+          Some(AssignerServiceInfo(name = "dicer-assigner", instanceId = "test-instance"))
+        } else {
+          None
+        }
       val diffAssignment =
-        DiffAssignment(isFrozen, consistencyMode, generation, sliceMap)
+        DiffAssignment(
+          isFrozen,
+          consistencyMode,
+          generation,
+          sliceMap,
+          assignerServiceInfoOpt
+        )
       testRoundTrip(diffAssignment)
     }
   }

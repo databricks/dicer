@@ -19,6 +19,7 @@ import com.databricks.api.proto.dicer.client.{
   UnattributedLoadEntryViewP
 }
 import com.databricks.api.proto.dicer.dpage.{ClerkViewP, SliceletViewP}
+import com.databricks.caching.util.AlertOwnerTeam
 import com.databricks.caching.util.{AsciiTable, SequentialExecutionContext}
 import com.databricks.caching.util.AsciiTable.Header
 import com.databricks.dicer.client.ClientSlicez.clientSlicez
@@ -44,7 +45,10 @@ private[client] class ClientSlicez {
 
   import ClientSlicez.{TARGET_NAME_BACKGROUND_COLOR}
 
-  private val sec = SequentialExecutionContext.createWithDedicatedPool("ClientSlicez")
+  private val sec = SequentialExecutionContext.createWithDedicatedPool(
+    name = "ClientSlicez",
+    alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+  )
 
   /**
    * The set of clients whose Slicez is being maintained, i.e., all those that were created
@@ -421,7 +425,7 @@ private[client] case class ClientTargetSlicezData(
     watchAddress: URI,
     watchAddressUsedSince: Instant,
     lastSuccessfulHeartbeat: Instant,
-    clientClusterOpt: Option[URI])
+    clientClusterOpt: Option[String])
     extends TargetSlicezData(
       target,
       sliceletsData,
@@ -589,13 +593,14 @@ private[client] case class ClientTargetSlicezData(
         // Only KubernetesTargets with a cluster URI can be compared against the client's cluster.
         for {
           targetCluster: URI <- kubernetesTarget.clusterOpt
-          clientCluster: URI <- clientClusterOpt
+          clientCluster: String <- clientClusterOpt
+          targetClusterUri: String = targetCluster.toString
           // No indicator needed when the target and client are in the same cluster.
-          if targetCluster != clientCluster
+          if targetClusterUri != clientCluster
         } yield {
           // If either region cannot be determined, conservatively indicate cross-cluster only.
           (
-            ClientTargetSlicezData.getRegion(targetCluster),
+            ClientTargetSlicezData.getRegion(targetClusterUri),
             ClientTargetSlicezData.getRegion(clientCluster)
           ) match {
             case (Some(targetRegion: String), Some(clientRegion: String))
@@ -628,9 +633,9 @@ private[client] object ClientTargetSlicezData {
    * Returns the region for the given Kubernetes cluster URI using the embedded IDM.
    * Returns `None` on failure.
    */
-  private def getRegion(clusterUri: URI): Option[String] = {
+  private def getRegion(clusterUri: String): Option[String] = {
     InfraDataModel.fromEmbedded
-      .getKubernetesClusterByUri(clusterUri.toString)
+      .getKubernetesClusterByUri(clusterUri)
       .map(_.getRelation.getRegionUri)
       .filter(_.nonEmpty)
   }

@@ -19,14 +19,22 @@ import com.databricks.api.proto.dicer.common.{
   DiffAssignmentP,
   GenerationP,
   RedirectP,
-  SyncAssignmentStateP
+  SyncAssignmentStateP,
+  TargetP
 }
-import com.databricks.caching.util.{CachingErrorCode, PrefixLogger, Severity}
+import com.databricks.caching.util.{
+  CachingErrorCode,
+  HyperLogLog,
+  KubernetesClusterUri,
+  PrefixLogger,
+  RegionUri,
+  Severity
+}
 import com.google.protobuf.ByteString
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.common.Version.{LATEST_VERSION, UNKNOWN_VERSION}
 import com.databricks.dicer.common.WatchServerHelper.validateWatchRpcTimeout
-import com.databricks.dicer.external.{Slice, SliceKey, Target}
+import com.databricks.dicer.external.{AppTarget, KubernetesTarget, Slice, SliceKey, Target}
 import com.databricks.dicer.friend.Squid
 
 // This file contains abstractions that wrap proto messages from/to Clerks/Slicelets and the
@@ -112,7 +120,8 @@ case class SliceletData(
     state: SliceletState,
     kubernetesNamespace: String,
     attributedLoads: Vector[SliceletData.SliceLoad],
-    unattributedLoadOpt: Option[SliceletData.SliceLoad])
+    unattributedLoadOpt: Option[SliceletData.SliceLoad],
+    keyCardinalityEstimateOpt: Option[HyperLogLog])
     extends SubscriberData {
 
   override def toString: String = {
@@ -141,11 +150,17 @@ case class SliceletData(
       unattributedLoad = unattributedLoadOpt.map { load: SliceletData.SliceLoad =>
         load.toProto
       },
-      kubernetesNamespace = Some(kubernetesNamespace)
+      kubernetesNamespace = Some(kubernetesNamespace),
+      keyCardinalityEstimate = keyCardinalityEstimateOpt.map {
+        keyCardinalityEstimate: HyperLogLog =>
+          keyCardinalityEstimate.toProto
+      }
     )
   }
 }
 object SliceletData {
+
+  private val logger = PrefixLogger.create(classOf[SliceletData], "")
 
   /**
    * Parses and validates the given proto representation of [[SliceletData]].
@@ -159,12 +174,28 @@ object SliceletData {
       proto.attributedLoads.map(SliceletData.SliceLoad.fromProto).toVector
     val unattributedLoadOpt: Option[SliceletData.SliceLoad] =
       proto.unattributedLoad.map(SliceletData.SliceLoad.fromProto)
+    // Since this is for telemetry only we'd rather not report it than fail the watch.
+    val keyCardinalityEstimate: Option[HyperLogLog] = try {
+      proto.keyCardinalityEstimate.map(HyperLogLog.fromProto)
+    } catch {
+      case e: IllegalArgumentException =>
+        logger.alert(
+          Severity.DEGRADED,
+          CachingErrorCode.DICER_CLIENT_REQUEST_MALFORMED_CARDINALITY_ESTIMATE,
+          s"Received malformed key_cardinality_estimate from Slicelet for target " +
+          s"$targetForErrorLogging; dropping: $e",
+          every = 30.seconds
+        )
+        None
+    }
+
     SliceletData(
       squid,
       SliceletState.fromProto(proto.getState, targetForErrorLogging),
       proto.getKubernetesNamespace,
       attributedLoads,
-      unattributedLoadOpt
+      unattributedLoadOpt,
+      keyCardinalityEstimate
     )
   }
 
@@ -186,10 +217,14 @@ object SliceletData {
    * @param topKeys Top keys within this Slice that have the highest estimated load.
    * @param numReplicas The number of replicas of `slice` known by the Slicelet when generating this
    *                    SliceLoad.
+   * @param loadDistributionOpt Optional approximate distribution (CDF) of load across keys within
+   *                            `slice`, present for range-sharded targets that collect it.
    *
    * @throws IllegalArgumentException If `primaryRateLoad` is a negative or infinite value.
    * @throws IllegalArgumentException If any key in `topKeys` is not contained within `slice`.
    * @throws IllegalArgumentException If `numReplicas` <= 0.
+   * @throws IllegalArgumentException If any keys in `loadDistributionOpt` are not contained within
+   *                                 `slice`.
    */
   case class SliceLoad @throws[IllegalArgumentException]()(
       primaryRateLoad: Double,
@@ -197,7 +232,8 @@ object SliceletData {
       windowHighExclusive: Instant,
       slice: Slice,
       topKeys: Seq[KeyLoad],
-      numReplicas: Int) {
+      numReplicas: Int,
+      loadDistributionOpt: Option[LoadDistribution] = None) {
     LoadMeasurement.requireValidLoadMeasurement(primaryRateLoad)
     require(
       windowHighExclusive.compareTo(windowLowInclusive) >= 0,
@@ -211,13 +247,26 @@ object SliceletData {
     if (numReplicas <= 0) {
       throw new IllegalArgumentException(s"numReplicas must be positive: $numReplicas.")
     }
+    for (distribution: LoadDistribution <- loadDistributionOpt) {
+      if (distribution.points.nonEmpty) {
+        // CDF points in the distribution are strictly ascending by key, so it suffices to check
+        // that the first and last keys are within `slice` to ensure all the keys are within it.
+        val firstKey: SliceKey = distribution.points.head.key
+        val lastKey: SliceKey = distribution.points.last.key
+        require(
+          slice.contains(firstKey) && slice.contains(lastKey),
+          s"Load distribution's lowest key $firstKey and highest key $lastKey must be contained " +
+          s"in slice $slice."
+        )
+      }
+    }
 
     /** Returns non-negative duration of the window for this load measurement. */
     def windowDuration: FiniteDuration = {
       (windowHighExclusive.toEpochMilli - windowLowInclusive.toEpochMilli).millis
     }
 
-    def toProto: SliceletDataP.SliceLoadP = {
+    private[common] def toProto: SliceletDataP.SliceLoadP = {
       import SliceHelper.RichSlice
       new SliceletDataP.SliceLoadP(
         primaryRateLoad = Some(primaryRateLoad),
@@ -225,7 +274,8 @@ object SliceletData {
         windowHighExclusiveSeconds = Some(windowHighExclusive.getEpochSecond),
         slice = Some(slice.toProto),
         topKeys = topKeys.map(_.toProto),
-        numReplicas = Some(numReplicas)
+        numReplicas = Some(numReplicas),
+        loadDistribution = loadDistributionOpt.map((_: LoadDistribution).toProto)
       )
     }
   }
@@ -237,7 +287,7 @@ object SliceletData {
      *
      * @throws IllegalArgumentException if the proto is not valid.
      */
-    def fromProto(proto: SliceletDataP.SliceLoadP): SliceLoad = {
+    private[common] def fromProto(proto: SliceletDataP.SliceLoadP): SliceLoad = {
       SliceLoad(
         primaryRateLoad = proto.getPrimaryRateLoad,
         windowLowInclusive = Instant.ofEpochSecond(proto.getWindowLowInclusiveSeconds),
@@ -248,8 +298,17 @@ object SliceletData {
         // (e.g. when the SliceLoadP is reported by some Slicelets in stale versions), we set the
         // value of this field to 1 by default in the returned SliceLoad scala class, rather than
         // failing the fromProto() method.
-        numReplicas = proto.numReplicas.getOrElse(1)
+        numReplicas = proto.numReplicas.getOrElse(1),
+        loadDistributionOpt = proto.loadDistribution.map(LoadDistribution.fromProto)
       )
+    }
+
+    object forTest {
+
+      /** Test-only method to convert the given `proto` to a `SliceLoad` instance. */
+      def SliceLoadfromProto(proto: SliceletDataP.SliceLoadP): SliceLoad = {
+        fromProto(proto)
+      }
     }
   }
 
@@ -266,7 +325,7 @@ object SliceletData {
   case class KeyLoad(key: SliceKey, underestimatedPrimaryRateLoad: Double) {
     LoadMeasurement.requireValidLoadMeasurement(underestimatedPrimaryRateLoad)
 
-    def toProto: SliceletDataP.KeyLoadP = {
+    private[common] def toProto: SliceletDataP.KeyLoadP = {
       new SliceletDataP.KeyLoadP(
         sliceKey = Some(key.bytes),
         underestimatedPrimaryRateLoad = Some(underestimatedPrimaryRateLoad)
@@ -282,12 +341,113 @@ object SliceletData {
      * @throws IllegalArgumentException if the proto is not valid.
      */
     @throws[IllegalArgumentException]
-    def fromProto(proto: SliceletDataP.KeyLoadP): KeyLoad = {
+    private[common] def fromProto(proto: SliceletDataP.KeyLoadP): KeyLoad = {
       require(proto.sliceKey.isDefined, "KeyLoadP must have a slice key")
       KeyLoad(
         key = SliceKey.fromRawBytes(proto.getSliceKey),
         underestimatedPrimaryRateLoad = proto.getUnderestimatedPrimaryRateLoad
       )
+    }
+  }
+
+  /**
+   * Approximate distribution of load across keys within a Slice.
+   *
+   * @param points           Samples of the load CDF, ordered by `key` ascending. Empty when no
+   *                         distribution has been reported for the Slice; consumers may assume that
+   *                         the load is evenly distributed across the Slice.
+   * @param maxErrorFraction The maximum error in any point's `cumulativeLoadFraction`, as a
+   *                         fraction of the Slice's total load.
+   *
+   * @throws IllegalArgumentException If `maxErrorFraction` is not in the half-open interval
+   *                                  [0.0, 1.0).
+   * @throws IllegalArgumentException If `points` are not strictly ascending by `key` (i.e. not
+   *                                  ordered, or with duplicate keys).
+   * @throws IllegalArgumentException If any point's `cumulativeLoadFraction` is less than the
+   *                                  preceding point's (i.e. not non-decreasing).
+   */
+  case class LoadDistribution @throws[IllegalArgumentException]()(
+      points: Seq[LoadDistribution.CdfPoint],
+      maxErrorFraction: Double) {
+    require(
+      maxErrorFraction >= 0.0 && maxErrorFraction < 1.0,
+      s"maxErrorFraction must be in [0, 1): $maxErrorFraction"
+    )
+    for (pair <- points.zip(points.drop(1))) {
+      val (prev, next): (LoadDistribution.CdfPoint, LoadDistribution.CdfPoint) = pair
+      require(
+        prev.key.compare(next.key) < 0,
+        "points must be strictly ascending by key (ordered, with unique keys)"
+      )
+      require(
+        prev.cumulativeLoadFraction <= next.cumulativeLoadFraction,
+        "cumulativeLoadFraction must be non-decreasing across points"
+      )
+    }
+
+    /** Converts to corresponding proto representation. */
+    def toProto: SliceletDataP.LoadDistributionP = {
+      new SliceletDataP.LoadDistributionP(
+        points = points.map((point: LoadDistribution.CdfPoint) => point.toProto),
+        maxErrorFraction = Some(maxErrorFraction)
+      )
+    }
+  }
+
+  object LoadDistribution {
+
+    /** Converts the given `proto` to a [[LoadDistribution]] instance. */
+    @throws[IllegalArgumentException]("if the proto is not valid")
+    def fromProto(proto: SliceletDataP.LoadDistributionP): LoadDistribution = {
+      require(
+        proto.maxErrorFraction.isDefined,
+        "LoadDistributionP must have a max_error_fraction"
+      )
+      LoadDistribution(
+        points = proto.points.map(CdfPoint.fromProto).toSeq,
+        maxErrorFraction = proto.getMaxErrorFraction
+      )
+    }
+
+    /**
+     * A single point on the load CDF: `cumulativeLoadFraction` (the quantile) is the fraction of
+     * the Slice's total load attributed to keys at or below `key`.
+     *
+     * @throws IllegalArgumentException If `cumulativeLoadFraction` is not in the closed interval
+     *                                  [0.0, 1.0].
+     */
+    case class CdfPoint @throws[IllegalArgumentException]()(
+        key: SliceKey,
+        cumulativeLoadFraction: Double) {
+      require(
+        cumulativeLoadFraction >= 0.0 && cumulativeLoadFraction <= 1.0,
+        s"cumulativeLoadFraction must be in [0, 1]: $cumulativeLoadFraction"
+      )
+
+      /** Converts to corresponding proto representation. */
+      def toProto: SliceletDataP.LoadDistributionP.CdfPointP = {
+        new SliceletDataP.LoadDistributionP.CdfPointP(
+          key = Some(key.bytes),
+          cumulativeLoadFraction = Some(cumulativeLoadFraction)
+        )
+      }
+    }
+
+    object CdfPoint {
+
+      /** Converts the given `proto` to a [[CdfPoint]] instance. */
+      @throws[IllegalArgumentException]("if the proto is not valid")
+      def fromProto(proto: SliceletDataP.LoadDistributionP.CdfPointP): CdfPoint = {
+        require(proto.key.isDefined, "CdfPointP must have a key")
+        require(
+          proto.cumulativeLoadFraction.isDefined,
+          "CdfPointP must have a cumulative_load_fraction"
+        )
+        CdfPoint(
+          key = SliceKey.fromRawBytes(proto.getKey),
+          cumulativeLoadFraction = proto.getCumulativeLoadFraction
+        )
+      }
     }
   }
 }
@@ -442,8 +602,15 @@ object Redirect {
  *                         [[Redirect.redirectTokenOpt]] the client received. `None` when the client
  *                         is not currently acting on a redirect. The client does not inspect the
  *                         bytes — the server on the redirected address is responsible for decoding.
+ * @param alternativeTargetOpt See [[ClientRequestP.alternativeTarget]].
+ * @param clusterUriOpt Sender pod's Kubernetes cluster IDM URI, if available from WhereAmI;
+ *                      region consistency with `regionUriOpt` is not enforced.
+ * @param regionUriOpt Sender pod's region IDM URI, if available from WhereAmI.
+ *
+ * @throws IllegalArgumentException If `timeout` is not positive.
+ * @throws IllegalArgumentException If `subscriberDebugName` is empty.
  */
-case class ClientRequest(
+case class ClientRequest @throws[IllegalArgumentException]("if an argument is invalid")(
     target: Target,
     syncAssignmentState: SyncAssignmentState,
     subscriberDebugName: String,
@@ -451,7 +618,13 @@ case class ClientRequest(
     subscriberData: SubscriberData,
     supportsSerializedAssignment: Boolean,
     redirectTokenOpt: Option[ByteString],
-    version: Long = LATEST_VERSION) {
+    version: Long = LATEST_VERSION,
+    alternativeTargetOpt: Option[AppTarget],
+    // TODO(<internal bug>): Remove once DBNS replaces the Kubernetes API server termination-signal watch
+    // and once clusterUriOpt is no longer used to determine the cluster type of the sender for the
+    // process of rejecting new Serverless Platform customers that use KubernetesTarget.
+    clusterUriOpt: Option[KubernetesClusterUri],
+    regionUriOpt: Option[RegionUri]) {
   require(timeout.toMillis > 0, s"Positive timeout value needed: $timeout.")
   require(subscriberDebugName.nonEmpty, "Subscriber debug name must not be empty.")
 
@@ -473,7 +646,10 @@ case class ClientRequest(
       clientFeatureSupport = Some(
         ClientFeatureSupportP(supportsSerializedAssignment = Some(supportsSerializedAssignment))
       ),
-      redirectToken = redirectTokenOpt
+      redirectToken = redirectTokenOpt,
+      alternativeTarget = alternativeTargetOpt.map((_: AppTarget).toProto),
+      clusterUri = clusterUriOpt.map((_: KubernetesClusterUri).uri),
+      regionUri = regionUriOpt.map((_: RegionUri).uri)
     )
   }
 
@@ -491,10 +667,13 @@ case class ClientRequest(
 
 object ClientRequest {
 
+  private val logger: PrefixLogger = PrefixLogger.create(classOf[ClientRequest], "")
+
   /**
    * Create [[ClientRequest]] from `proto` if it is valid.
    *
-   * @throws IllegalArgumentException if `proto` is invalid.
+   * @throws IllegalArgumentException if `proto` is invalid, including if `alternativeTarget` is set
+   *                                  but is not a valid `AppTarget`.
    */
   def fromProto(targetUnmarshaller: TargetUnmarshaller, proto: ClientRequestP): ClientRequest = {
     // Parse Target first so it can be included in any error alerts emitted during SliceletData
@@ -526,6 +705,53 @@ object ClientRequest {
 
     val clientFeatureSupport: ClientFeatureSupportP = proto.getClientFeatureSupport
     val supportsSerializedAssignment: Boolean = clientFeatureSupport.getSupportsSerializedAssignment
+
+    val alternativeTargetOpt: Option[AppTarget] = proto.alternativeTarget.map {
+      alternativeTargetP: TargetP =>
+        val alternativeTarget: Target = try {
+          targetUnmarshaller.fromProto(alternativeTargetP)
+        } catch {
+          case e: IllegalArgumentException =>
+            throw new IllegalArgumentException(
+              s"alternativeTarget is ill-formed: ${e.getMessage}",
+              e
+            )
+        }
+        alternativeTarget match {
+          case appTarget: AppTarget => appTarget
+          case _: KubernetesTarget =>
+            throw new IllegalArgumentException(
+              s"alternativeTarget must be an AppTarget; got a KubernetesTarget: $alternativeTarget"
+            )
+        }
+    }
+
+    // A URI that is malformed or names a resource absent from IDM is dropped to None rather than
+    // rejecting the request: these fields are advisory sender metadata, so an unrecognized value
+    // should not fail an otherwise-valid watch.
+    val clusterUriOpt: Option[KubernetesClusterUri] =
+      proto.clusterUri.flatMap { uri: String =>
+        val parsedUriOpt: Option[KubernetesClusterUri] = KubernetesClusterUri.fromUri(uri)
+        if (parsedUriOpt.isEmpty) {
+          logger.warn(
+            s"Unrecognized clusterUri $uri in request for $target from subscriber " +
+            s"${proto.getSubscriberDebugName}."
+          )
+        }
+        parsedUriOpt
+      }
+    val regionUriOpt: Option[RegionUri] =
+      proto.regionUri.flatMap { uri: String =>
+        val parsedUriOpt: Option[RegionUri] = RegionUri.fromUri(uri)
+        if (parsedUriOpt.isEmpty) {
+          logger.warn(
+            s"Unrecognized regionUri $uri in request for $target from subscriber " +
+            s"${proto.getSubscriberDebugName}."
+          )
+        }
+        parsedUriOpt
+      }
+
     new ClientRequest(
       target,
       SyncAssignmentState.fromProto(proto.getSyncAssignmentState),
@@ -534,7 +760,10 @@ object ClientRequest {
       subscriberData,
       supportsSerializedAssignment,
       proto.redirectToken,
-      proto.version.getOrElse(UNKNOWN_VERSION)
+      version = proto.version.getOrElse(UNKNOWN_VERSION),
+      alternativeTargetOpt = alternativeTargetOpt,
+      clusterUriOpt = clusterUriOpt,
+      regionUriOpt = regionUriOpt
     )
   }
 }

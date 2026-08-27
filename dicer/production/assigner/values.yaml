@@ -23,6 +23,16 @@ service:
 container:
   infoPort: 7777
 
+# Kubernetes identity used by the membership checker.
+serviceAccount:
+  create: true
+  # Defaults to service.name when empty. If create is false, that ServiceAccount must already exist.
+  name: ""
+
+rbac:
+  # Allow the membership checker to list Assigner pods in its namespace.
+  create: true
+
 # Target configuration paths.
 config:
   targetConfigDirectory: /app/config/target_config

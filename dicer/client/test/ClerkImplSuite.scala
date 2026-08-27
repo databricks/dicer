@@ -3,10 +3,9 @@ package com.databricks.dicer.client
 import java.net.URI
 import java.util.{Random, UUID}
 
-import com.databricks.backend.common.util.Project
 import com.databricks.conf.Config
 import com.databricks.conf.Configs
-import com.databricks.conf.trusted.ProjectConf
+import com.databricks.conf.trusted.ProjectConfByName
 import com.databricks.conf.trusted.RPCPortConf
 import com.databricks.rpc.tls.TLSOptions
 
@@ -323,7 +322,7 @@ class ClerkImplSuite extends DatabricksTest with TestName {
         baseEntries
     }
     val config: Config = Configs.parseMap(entries: _*)
-    new ProjectConf(Project.TestProject, config) with ClerkConf with RPCPortConf {
+    new ProjectConfByName("test", config) with ClerkConf with RPCPortConf {
       override protected def dicerTlsOptions: Option[TLSOptions] = None
       override def envVars: Map[String, String] = Map.empty
     }

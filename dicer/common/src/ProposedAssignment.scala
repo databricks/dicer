@@ -78,10 +78,15 @@ object ProposedSliceAssignment {
  *                       proposal is committed. None indicates that the proposal is for the initial
  *                       assignment, which has no predecessor.
  * @param sliceMap proposed mapping from Slices to resources.
+ * @param assignerServiceInfoOpt The service info of the Assigner that generated this proposed
+ *                               assignment. It should be populated by the assignment generator,
+ *                               but may be absent if the Assigner cannot determine the service
+ *                               info or if an outdated Assigner binary is deployed.
  */
 case class ProposedAssignment(
     predecessorOpt: Option[Assignment],
-    sliceMap: SliceMap[ProposedSliceAssignment]) {
+    sliceMap: SliceMap[ProposedSliceAssignment],
+    assignerServiceInfoOpt: Option[AssignerServiceInfo]) {
 
   def sliceAssignments: immutable.Vector[ProposedSliceAssignment] = sliceMap.entries
 
@@ -187,7 +192,8 @@ case class ProposedAssignment(
           isFrozen,
           consistencyMode,
           generation,
-          primaryRateLoadThreshold
+          primaryRateLoadThreshold,
+          assignerServiceInfoOpt
         )
       case _ =>
         // Either there's no predecessor or it's from an earlier incarnation.
@@ -195,12 +201,20 @@ case class ProposedAssignment(
           sliceMap,
           isFrozen,
           consistencyMode,
-          generation
+          generation,
+          assignerServiceInfoOpt
         )
     }
   }
 
-  override def toString: String = sliceAssignments.mkString("\n")
+  override def toString: String = {
+    val assignerServiceInfoDescription: String = assignerServiceInfoOpt match {
+      case Some(assignerServiceInfo: AssignerServiceInfo) =>
+        s"Generating Assigner: ${assignerServiceInfo.name}/${assignerServiceInfo.instanceId}"
+      case None => "Generating Assigner: unknown"
+    }
+    s"$assignerServiceInfoDescription\n${sliceAssignments.mkString("\n")}"
+  }
 }
 
 object ProposedAssignment {
@@ -221,7 +235,8 @@ object ProposedAssignment {
       isFrozen: Boolean,
       consistencyMode: AssignmentConsistencyMode,
       generation: Generation,
-      primaryRateLoadThreshold: Double
+      primaryRateLoadThreshold: Double,
+      assignerServiceInfoOpt: Option[AssignerServiceInfo]
   ): Assignment = {
     require(
       generation > predecessor.generation,
@@ -390,7 +405,13 @@ object ProposedAssignment {
     }
     val committedSliceMap: SliceMap[SliceAssignment] =
       SliceMapHelper.ofSliceAssignments(committedSliceAssignments.toVector)
-    Assignment(isFrozen, consistencyMode, generation, committedSliceMap)
+    Assignment(
+      isFrozen,
+      consistencyMode,
+      generation,
+      committedSliceMap,
+      assignerServiceInfoOpt
+    )
   }
 
   /**
@@ -401,7 +422,8 @@ object ProposedAssignment {
       sliceMap: SliceMap[ProposedSliceAssignment],
       isFrozen: Boolean,
       consistencyMode: AssignmentConsistencyMode,
-      generation: Generation): Assignment = {
+      generation: Generation,
+      assignerServiceInfoOpt: Option[AssignerServiceInfo]): Assignment = {
     val committedSliceAssignments = Vector.newBuilder[SliceAssignment]
     // Since there is no predecessor, all Slices in the emitted assignment have the same
     // generation as the overall assignment.
@@ -415,7 +437,13 @@ object ProposedAssignment {
     }
     val committedSliceMap: SliceMap[SliceAssignment] =
       SliceMapHelper.ofSliceAssignments(committedSliceAssignments.result())
-    Assignment(isFrozen, consistencyMode, generation, committedSliceMap)
+    Assignment(
+      isFrozen,
+      consistencyMode,
+      generation,
+      committedSliceMap,
+      assignerServiceInfoOpt
+    )
   }
 
   /**

@@ -25,7 +25,11 @@ import com.databricks.dicer.assigner.MultipleAssignerInstancesSuite.{
   verifyAssignerFunctionality
 }
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
-import com.databricks.dicer.assigner.config.{StaticTargetConfigProvider, InternalTargetConfigMap}
+import com.databricks.dicer.assigner.config.{
+  InternalTargetConfigMap,
+  TargetConfigProvider,
+  TargetConfigProviderFactory
+}
 import com.databricks.dicer.assigner.config.TargetConfigProvider.DEFAULT_INITIAL_POLL_TIMEOUT
 import com.databricks.dicer.client.TestClientUtils
 import com.databricks.dicer.common.InternalDicerTestEnvironment.InternalTargetConfigMapWithDefault
@@ -212,7 +216,7 @@ private object MultipleAssignerInstancesSuite {
       val testAssigners: IndexedSeq[TestAssigner],
       val fakeClock: FakeTypedClock,
       val fakeSecPool: FakeSequentialExecutionContextPool,
-      val dynamicConfigProvider: StaticTargetConfigProvider
+      val dynamicConfigProvider: TargetConfigProvider
   ) {
 
     /** Map from target to slicelets connected to this instance's assigners. */
@@ -339,19 +343,24 @@ private object MultipleAssignerInstancesSuite {
     )
     val assignerConf = createAssignerConf(storeNamespacePrefix)
     val testAssignerConfig = TestAssigner.Config.create(assignerConf)
-    val dynamicConfigProvider = StaticTargetConfigProvider.create(
+    val dynamicConfigProvider = TargetConfigProviderFactory.createBlocking(
       staticTargetConfigMap = CONFIG_MAP,
-      assignerConf
+      assignerConf,
+      initialPollTimeout = DEFAULT_INITIAL_POLL_TIMEOUT
     )
-    dynamicConfigProvider.startBlocking(DEFAULT_INITIAL_POLL_TIMEOUT)
 
     val testAssigners = (0 until numAssigners).map { _ =>
       TestAssigner.createAndStart(
         fakeSecPool,
         testAssignerConfig,
         dynamicConfigProvider,
-        Some(dockerizedEtcd),
-        ASSIGNER_CLUSTER_URI
+        TestAssigner.defaultPreferredAssignerDriverFactory(
+          testAssignerConfig.assignerConf,
+          testAssignerConfig.preferredAssignerDriverConfig,
+          Some(dockerizedEtcd)
+        ),
+        ASSIGNER_CLUSTER_URI,
+        assignerServiceInfoOpt = None
       )
     }
 

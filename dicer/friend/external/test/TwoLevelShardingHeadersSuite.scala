@@ -1,63 +1,91 @@
 package com.databricks.dicer.friend.external
 
-import java.util.Base64
-
+import com.databricks.caching.util.TestUtils
 import com.google.protobuf.ByteString
-
+import com.databricks.dicer.friend.external.test.TwoLevelShardingHeadersTestDataP
+import com.databricks.dicer.friend.external.test.TwoLevelShardingHeadersTestDataP.{
+  DecodeCaseP,
+  EncodeCaseP,
+  RoundTripCaseP
+}
+import com.databricks.dicer.friend.external.test.TwoLevelShardingHeadersTestDataP.DecodeCaseP.{
+  ExpectedOutcome,
+  HeaderEntryP
+}
 import com.databricks.dicer.external.SliceKey
 import com.databricks.testing.DatabricksTest
 
 class TwoLevelShardingHeadersSuite extends DatabricksTest {
 
-  /** Helper for creating a SliceKey, hashing the given key. */
-  private def newSliceKey(key: String): SliceKey =
-    SliceKey.newFingerprintBuilder().putString(key).build()
-
-  test("createSecondarySliceKeyHeader + getSecondarySliceKeyFromHeader round-trip") {
-    // Test plan: Verify that the header entry produced by createSecondarySliceKeyHeader is able to
-    // be decoded back to the same SliceKey by getSecondarySliceKeyFromHeader.
-    val secondarySliceKey: SliceKey = newSliceKey("secondary-key")
-    val headers: Map[String, String] =
-      TwoLevelShardingHeaders.createSecondarySliceKeyHeader(secondarySliceKey) ++
-      // Add in another fake entry to the headers map.
-      Map("x-databricks-internal-dicer-slice-key" -> "AAAA")
-    assertResult(Some(secondarySliceKey))(
-      TwoLevelShardingHeaders.getSecondarySliceKeyFromHeader(headers)
+  /**
+   * Test data shared with the Rust `two_level_sharding_headers_test` so that both languages
+   * serialize and parse the secondary-slice-key header identically.
+   */
+  private lazy val TEST_DATA: TwoLevelShardingHeadersTestDataP =
+    TestUtils.loadTestData[TwoLevelShardingHeadersTestDataP](
+      "dicer/friend/external/test/data/two_level_sharding_headers_test_data.textproto"
     )
-  }
 
-  test("getSecondarySliceKeyFromHeader extracts the SliceKey from a manually constructed Map") {
-    // Test plan: Manually constructing the header map with the literal header string and a
-    // base64-encoded value, then verify that getSecondarySliceKeyFromHeader returns the expected
-    // SliceKey.
-    val sliceKeyBytes: Array[Byte] = Array[Byte](1, 2, 3, 4, 5, 6, 7, 8)
-    val expectedSliceKey: SliceKey =
-      SliceKey.fromTrustedFingerprint(ByteString.copyFrom(sliceKeyBytes))
-    val headers: Map[String, String] = Map(
-      "x-databricks-internal-dicer-secondary-slice-key" -> Base64.getEncoder.encodeToString(
-        sliceKeyBytes
+  test("createSecondarySliceKeyHeader serializes to the expected header name and value") {
+    // Test plan: For each encode case, verify that createSecondarySliceKeyHeader produces exactly
+    // a single-entry map with the expected header name and base64 value.
+    for (encodeCase: EncodeCaseP <- TEST_DATA.encodeCases) {
+      val secondarySliceKey: SliceKey =
+        SliceKeyAccessor.fromRawBytes(encodeCase.getSecondarySliceKey)
+
+      val headers: Map[String, String] =
+        TwoLevelShardingHeaders.createSecondarySliceKeyHeader(secondarySliceKey)
+
+      assertResult(Map(encodeCase.getExpectedHeaderName -> encodeCase.getExpectedHeaderValue))(
+        headers
       )
-    )
-    assertResult(Some(expectedSliceKey))(
-      TwoLevelShardingHeaders.getSecondarySliceKeyFromHeader(headers)
-    )
+    }
   }
 
-  test("getSecondarySliceKeyFromHeader returns None when the secondary header is absent") {
-    // Test plan: Verify that getSecondarySliceKeyFromHeader signals "no secondary key" via None
-    // when the secondary header is not present.
-    val headers: Map[String, String] = Map("x-databricks-internal-dicer-slice-key" -> "AAAA")
-    assertResult(None)(TwoLevelShardingHeaders.getSecondarySliceKeyFromHeader(headers))
+  test("getSecondarySliceKeyFromHeader extracts, absents, or rejects per the decode cases") {
+    // Test plan: For each decode case, build the header map and verify that
+    // getSecondarySliceKeyFromHeader returns the expected SliceKey, signals absence via None, or
+    // throws IllegalArgumentException with the expected message on malformed base64, as the case
+    // dictates.
+    for (decodeCase: DecodeCaseP <- TEST_DATA.decodeCases) {
+      val headers: Map[String, String] =
+        decodeCase.headers.map { entry: HeaderEntryP =>
+          entry.getName -> entry.getValue
+        }.toMap
+
+      decodeCase.expectedOutcome match {
+        case ExpectedOutcome.ExpectedSliceKey(sliceKeyBytes: ByteString) =>
+          val expectedSliceKey: SliceKey = SliceKeyAccessor.fromRawBytes(sliceKeyBytes)
+          assertResult(Some(expectedSliceKey))(
+            TwoLevelShardingHeaders.getSecondarySliceKeyFromHeader(headers)
+          )
+        case ExpectedOutcome.ExpectedAbsent(_: Boolean) =>
+          assertResult(None)(
+            TwoLevelShardingHeaders.getSecondarySliceKeyFromHeader(headers)
+          )
+        case ExpectedOutcome.ExpectedErrorMessage(expectedErrorMessage: String) =>
+          TestUtils.assertThrow[IllegalArgumentException](expectedErrorMessage) {
+            TwoLevelShardingHeaders.getSecondarySliceKeyFromHeader(headers)
+          }
+        case ExpectedOutcome.Empty =>
+          fail("Decode case must set an expected outcome")
+      }
+    }
   }
 
-  test("getSecondarySliceKeyFromHeader throws IllegalArgumentException on malformed base64") {
-    // Test plan: Verify that a malformed header value results in an IllegalArgumentException being
-    // thrown when it is attempted to be decoded.
-    val malformedHeaders: Map[String, String] = Map(
-      "x-databricks-internal-dicer-secondary-slice-key" -> "not valid base64!!!"
-    )
-    assertThrows[IllegalArgumentException] {
-      TwoLevelShardingHeaders.getSecondarySliceKeyFromHeader(malformedHeaders)
+  test("createSecondarySliceKeyHeader then getSecondarySliceKeyFromHeader round-trips the key") {
+    // Test plan: For each round-trip case, verify that serializing a slice key into a header
+    // and then parsing it back returns the original key.
+    for (roundTripCase: RoundTripCaseP <- TEST_DATA.roundTripCases) {
+      val secondarySliceKey: SliceKey =
+        SliceKeyAccessor.fromRawBytes(roundTripCase.getSecondarySliceKey)
+
+      val headers: Map[String, String] =
+        TwoLevelShardingHeaders.createSecondarySliceKeyHeader(secondarySliceKey)
+
+      assertResult(Some(secondarySliceKey))(
+        TwoLevelShardingHeaders.getSecondarySliceKeyFromHeader(headers)
+      )
     }
   }
 }

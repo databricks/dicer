@@ -35,7 +35,7 @@ The figure below shows the three services that are running in their respective n
 ## Quick Start
 
 ### Prerequisites installation
-We require the following for running the Dicer OSS demo:
+We require the following for running the Dicer demo:
 1. **KIND (Kubernetes IN Docker)**
 2. **Helm (Kubernetes Package Manager)**
 3. **Bazelisk**: user-friendly bazel version management.

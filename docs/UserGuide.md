@@ -79,7 +79,7 @@ Recommended practices:
 
 * Increase `terminationGracePeriodSeconds` to cover Dicer reassignment \+ any application-specific shutdown work.
 
-* During shutdown, keep the pod reachable long enough for Dicer reassignment to take effect (the OSS demo keeps accepting requests during an initial delay window for reassignment \+ propagation). Only once you’re ready to exit should the server stop accepting new requests and drain in-flight RPCs before the grace period ends.
+* During shutdown, keep the pod reachable long enough for Dicer reassignment to take effect (the demo keeps accepting requests during an initial delay window for reassignment \+ propagation). Only once you’re ready to exit should the server stop accepting new requests and drain in-flight RPCs before the grace period ends.
 
 * Use a readinessProbe for health checking, but be careful about failing readiness immediately on shutdown: since Dicer is responsible for shifting traffic, you want the pod to remain routable until Dicer has reassigned away from it.
 

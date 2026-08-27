@@ -1,6 +1,6 @@
 package com.databricks.conf
 
-/** Databricks conf constants. This is the open source minimal version for things used in Dicer. */
+/** Databricks conf constants. */
 object Constants {
 
   /** Port on which to run [[com.databricks.common.web.InfoService]]. */

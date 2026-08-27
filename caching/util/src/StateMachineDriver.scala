@@ -81,7 +81,7 @@ sealed class StateMachineDriver[
       sequentialDomain(sec),
       stateMachine,
       performAction,
-      AlertOwnerTeam.createFromString(alertOwnerTeam)
+      alertOwnerTeam = AlertOwnerTeam.createFromString(alertOwnerTeam)
     )
   }
 
@@ -94,7 +94,12 @@ sealed class StateMachineDriver[
       sec: SequentialExecutionContext,
       stateMachine: MachineT,
       performAction: ActionT => Unit) = {
-    this(sec, stateMachine, performAction, AlertOwnerTeam.CACHING_TEAM_NAME)
+    this(
+      sec,
+      stateMachine,
+      performAction,
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+    )
   }
 
   private val logger = PrefixLogger.create(getClass, "")
@@ -292,7 +297,7 @@ object StateMachineDriver {
       hybridDomain(hybrid),
       stateMachine,
       performAction,
-      AlertOwnerTeam.createFromString(alertOwnerTeam)
+      alertOwnerTeam = AlertOwnerTeam.createFromString(alertOwnerTeam)
     )
   }
 

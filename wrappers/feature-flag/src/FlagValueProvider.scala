@@ -3,8 +3,8 @@ package com.databricks.featureflag.client.utils
 import com.google.common.base.Supplier
 
 /**
- * A minimal trait representing a flag-like object that can provide a value. OSS wrapper that
- * mirrors the internal API surface so callers compile unchanged.
+ * A minimal trait representing a flag-like object that can provide a value. Mirrors the internal
+ * API surface so callers compile unchanged.
  */
 trait FlagValueProvider[T] extends NamedFlag {
 

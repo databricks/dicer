@@ -4,34 +4,23 @@ import com.databricks.testing.DatabricksTest
 import com.databricks.caching.util.TestUtils.TestName
 import io.grpc.Status
 import com.databricks.caching.util.Lock.withLock
-import java.util.concurrent.{ConcurrentHashMap, Executors}
+import java.util.concurrent.Executors
 import java.util.concurrent.locks.ReentrantLock
 
 import scala.concurrent.duration._
 import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.collection.mutable
-import scala.collection.JavaConverters._
 import scala.util.{Failure, Success, Try}
 
 class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
 
   /**
-   * A major use case of the WatchValueCellPollAdapter class is dynamic configuration via SAFE.
-   * A SAFE batch flag produces a value typed Map[String, String], which can be polled by calling
-   * `batchFlag.getSubFlagValues()`. An example value is:
+   * The tests model a producer that exposes a raw map through polling. An example value is:
    * {{{
-   *   "databricks.softstore.config.namespaces.foo" => "$foo_config_value_in_proto_string."
-   *   "databricks.softstore.config.namespaces.bar" => "$bar_config_value_in_proto_string."
+   *   "raw-key-1" => "raw-value-1"
+   *   "raw-key-2" => "raw-value-2"
    * }}}
-   * The value is of raw type and the desired parsed type is Map[String, NamespaceConfig] where the
-   * keys are namespace names (e.g. "foo", "bar"), and the values are NamespaceConfig case class
-   * instances which include memory limit, rate limit, and other configured values.
-   *
-   * In this suite, we define two classes below to simulate the process of watching the SAFE batch
-   * flag value. The raw value type is Map[String, String] with key in the format of "raw-*" and
-   * value in the format of "raw-value-*".
-   * The parsed value type is Map[String, ParsedValue] with key in the format of "parsed-*" and the
-   * value in the format of "parsed-value-*"
+   * The parsed value has type `Map[String, ParsedValue]`, with keys prefixed by `parsed-`.
    */
   /** Type alias for better readability. */
   private type RawValueType = Map[String, String]
@@ -42,21 +31,24 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
     require(value.startsWith("raw-"))
   }
 
-  /** A class that mock the SAFE batch flag. */
-  private class MockSafeBatchFlag(initialValue: RawValueType) {
-    private val flagValue = new ConcurrentHashMap[String, String]()
-    for ((key, value) <- initialValue) {
-      flagValue.put(key, value)
+  /** An in-memory source whose raw value can be polled and updated by tests. */
+  private class FakeRawSource(initialValue: RawValueType) {
+    private val lock = new ReentrantLock()
+    private var rawValue: RawValueType = initialValue
+
+    /** Returns the source's current raw value. */
+    def current: RawValueType = withLock(lock) {
+      rawValue
     }
 
-    /** Get the most recent value of the map. */
-    def getCurrentValue: RawValueType = {
-      flagValue.asScala.toMap
+    /** Updates an entry in the source's raw value. */
+    def update(key: String, value: String): Unit = withLock(lock) {
+      rawValue += key -> value
     }
 
-    /** Update the value for the map. */
-    def updateValue(key: String, value: String): Unit = {
-      flagValue.put(key, value)
+    /** Replaces the source's raw value. */
+    def set(value: RawValueType): Unit = withLock(lock) {
+      rawValue = value
     }
   }
 
@@ -66,7 +58,10 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
     private var latestKeyValueMap: StatusOr[ParsedValueMap] = StatusOr.success(Map.empty)
 
     private val subscriberSec =
-      SequentialExecutionContext.createWithDedicatedPool(s"subscriber-sec-$index")
+      SequentialExecutionContext.createWithDedicatedPool(
+        name = s"subscriber-sec-$index",
+        alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+      )
 
     val valueStreamCallback: ValueStreamCallback[ParsedValueMap] =
       new ValueStreamCallback[ParsedValueMap](subscriberSec) {
@@ -104,10 +99,10 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
   }
 
   /**
-   * Transform `rawValue` to a parsed value. If the rawValue is malformed, returns the
-   * `lastParsedValue`. This is to prevent from SAFE creating a bad value.
+   * Transform `rawValue` to a parsed value. If the rawValue is malformed, returns
+   * [[INITIAL_MAP_VALUE_PARSED]].
    */
-  private def transformation(rawValue: RawValueType): ParsedValueMap = {
+  private def parseRawValue(rawValue: RawValueType): ParsedValueMap = {
     val resultMap = mutable.Map[String, ParsedValue]()
     for ((rawKey, rawValue) <- rawValue) {
       if (!rawKey.startsWith("raw-") || !rawValue.startsWith("raw-")) {
@@ -139,22 +134,24 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
 
   test("Test WatchValueCellPollAdapterSuite with a single subscriber") {
     // Test plan:
-    // 1. Create a WatchValueCellPollAdapter where the pollerThunk is pollCurrentValue.
-    //    The periodical poll will start implicitly after startup.
-    // 2. Add a subscriber to watch the batch flag.
-    // 3. Update the value for the batch flag with a valid value.
+    // 1. Create a WatchValueCellPollAdapter that polls a raw source.
+    // 2. Add a subscriber.
+    // 3. Update the source with a valid value.
     // 4. Wait for a sufficient amount of time to ensure the callback has been executed, and
     //    verify that the subscriber has received the latest value.
-    // 5. Update the value for the batch flag with an invalid value.
+    // 5. Update the source with an invalid value.
     // 6. Wait for a sufficient amount of time to ensure the callback has been executed, and
     //    verify that the subscriber's value hasn't been changed.
-    val mockSafeBatchFlag = new MockSafeBatchFlag(INITIAL_MAP_VALUE_RAW)
+    val rawSource = new FakeRawSource(INITIAL_MAP_VALUE_RAW)
 
-    val sec = SequentialExecutionContext.createWithDedicatedPool(s"ec-$getSafeName")
+    val sec = SequentialExecutionContext.createWithDedicatedPool(
+      name = s"ec-$getSafeName",
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+    )
     val watchValueCellAdapter = new WatchValueCellPollAdapter[RawValueType, ParsedValueMap](
       Some(INITIAL_MAP_VALUE_PARSED),
-      () => mockSafeBatchFlag.getCurrentValue,
-      transformation,
+      () => rawSource.current,
+      (_, rawValue) => parseRawValue(rawValue),
       TEST_POLL_INTERVAL,
       sec
     )
@@ -169,8 +166,8 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
       assert(subscriber.getLatestKeyValueMap == INITIAL_MAP_VALUE_PARSED)
     }
 
-    // Update the flag value with a valid value.
-    mockSafeBatchFlag.updateValue("raw-key-2", "raw-value-2-1")
+    // Update the source with a valid value.
+    rawSource.update("raw-key-2", "raw-value-2-1")
 
     // Wait for consumer to catch the value update and verify the parsed value is fresh.
     val expectedParsedValue: ParsedValueMap = Map[String, ParsedValue](
@@ -183,8 +180,8 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
       assert(subscriber.getLatestKeyValueMap == expectedParsedValue)
     }
 
-    // Update the flag value with an INVALID value.
-    mockSafeBatchFlag.updateValue("raw-key-2", "invalid-value-2-1")
+    // Update the source with an invalid value.
+    rawSource.update("raw-key-2", "invalid-value-2-1")
 
     // Wait for consumer to catch the value update and verify the parsed value is restored to the
     // static fallback.
@@ -199,13 +196,16 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
   test("Test WatchValueCellPollAdapterSuite with multiple subscribers") {
     // Test plan: similar to the single subscriber unit test, just add more subscribers to verify
     // things still work well when there are multiple subscribers.
-    val mockSafeBatchFlag = new MockSafeBatchFlag(INITIAL_MAP_VALUE_RAW)
+    val rawSource = new FakeRawSource(INITIAL_MAP_VALUE_RAW)
 
-    val sec = SequentialExecutionContext.createWithDedicatedPool(s"ec-$getSafeName")
+    val sec = SequentialExecutionContext.createWithDedicatedPool(
+      name = s"ec-$getSafeName",
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+    )
     val watchValueCellAdapter = new WatchValueCellPollAdapter[RawValueType, ParsedValueMap](
       Some(INITIAL_MAP_VALUE_PARSED),
-      () => mockSafeBatchFlag.getCurrentValue,
-      transformation,
+      () => rawSource.current,
+      (_, rawValue) => parseRawValue(rawValue),
       TEST_POLL_INTERVAL,
       sec
     )
@@ -231,8 +231,8 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
       )
     }
 
-    // Update the flag value with a valid value.
-    mockSafeBatchFlag.updateValue("raw-key-2", "raw-value-2-1")
+    // Update the source with a valid value.
+    rawSource.update("raw-key-2", "raw-value-2-1")
 
     // Wait for consumer to catch the value update and verify the parsed value is fresh.
     val expectedParsedValue: ParsedValueMap = Map[String, ParsedValue](
@@ -250,9 +250,9 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
 
     // Register another subscriber.
     watchValueCellAdapter.watch(subscriber2.valueStreamCallback)
-    // Do some further updates for the batch flag.
-    mockSafeBatchFlag.updateValue("raw-key-3", "raw-value-3-1")
-    mockSafeBatchFlag.updateValue("raw-key-1", "raw-value-1-1")
+    // Do some further source updates.
+    rawSource.update("raw-key-3", "raw-value-3-1")
+    rawSource.update("raw-key-1", "raw-value-1-1")
 
     // Wait for consumer to catch the value update and verify the parsed value is fresh.
     val expectedParsedValue2: ParsedValueMap = Map[String, ParsedValue](
@@ -269,8 +269,8 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
       )
     }
 
-    // Update the flag value with an INVALID value.
-    mockSafeBatchFlag.updateValue("raw-key-2", "invalid-value-2-1")
+    // Update the source with an invalid value.
+    rawSource.update("raw-key-2", "invalid-value-2-1")
 
     // Wait for consumer to catch the value update and verify the parsed value is restored to the
     // static fallback.
@@ -288,13 +288,16 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
   test("Test watch as StreamCallback") {
     // Test plan: verify that a subscriber receives the latest value when the adapter is watched
     // by the subscriber's callback as a StreamCallback.
-    val mockSafeBatchFlag = new MockSafeBatchFlag(INITIAL_MAP_VALUE_RAW)
+    val rawSource = new FakeRawSource(INITIAL_MAP_VALUE_RAW)
 
-    val sec = SequentialExecutionContext.createWithDedicatedPool(s"ec-$getSafeName")
+    val sec = SequentialExecutionContext.createWithDedicatedPool(
+      name = s"ec-$getSafeName",
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+    )
     val watchValueCellAdapter = new WatchValueCellPollAdapter[RawValueType, ParsedValueMap](
       Some(INITIAL_MAP_VALUE_PARSED),
-      () => mockSafeBatchFlag.getCurrentValue,
-      transformation,
+      () => rawSource.current,
+      (_, rawValue) => parseRawValue(rawValue),
       TEST_POLL_INTERVAL,
       sec
     )
@@ -310,8 +313,8 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
       assert(subscriber.getLatestKeyValueMap == INITIAL_MAP_VALUE_PARSED)
     }
 
-    // Update the flag value with a valid value.
-    mockSafeBatchFlag.updateValue("raw-key-2", "raw-value-2-1")
+    // Update the source with a valid value.
+    rawSource.update("raw-key-2", "raw-value-2-1")
 
     // Wait for consumer to catch the value update and verify the parsed value is fresh.
     val expectedParsedValue: ParsedValueMap = Map[String, ParsedValue](
@@ -329,13 +332,16 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
     // Test plan: Verify that calling cancel() before start() is harmless. Create an adapter, call
     // cancel(), then call start(), and verify that the adapter still works correctly by observing
     // that a subscriber receives value updates.
-    val mockSafeBatchFlag = new MockSafeBatchFlag(INITIAL_MAP_VALUE_RAW)
+    val rawSource = new FakeRawSource(INITIAL_MAP_VALUE_RAW)
 
-    val sec = SequentialExecutionContext.createWithDedicatedPool(s"ec-$getSafeName")
+    val sec = SequentialExecutionContext.createWithDedicatedPool(
+      name = s"ec-$getSafeName",
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+    )
     val watchValueCellAdapter = new WatchValueCellPollAdapter[RawValueType, ParsedValueMap](
       Some(INITIAL_MAP_VALUE_PARSED),
-      () => mockSafeBatchFlag.getCurrentValue,
-      transformation,
+      () => rawSource.current,
+      (_, rawValue) => parseRawValue(rawValue),
       TEST_POLL_INTERVAL,
       sec
     )
@@ -352,7 +358,7 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
       assert(subscriber.getLatestKeyValueMap == INITIAL_MAP_VALUE_PARSED)
     }
 
-    mockSafeBatchFlag.updateValue("raw-key-2", "raw-value-2-1")
+    rawSource.update("raw-key-2", "raw-value-2-1")
 
     // Verify: The subscriber receives the updated value, confirming that the adapter is polling,
     // despite being canceled before start.
@@ -374,13 +380,16 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
     // multiple times, then issue a single cancel(), and verify that no more updates are received.
     // If multiple start() calls created multiple pollers, a single cancel() would not stop them
     // all.
-    val mockSafeBatchFlag = new MockSafeBatchFlag(INITIAL_MAP_VALUE_RAW)
+    val rawSource = new FakeRawSource(INITIAL_MAP_VALUE_RAW)
 
-    val sec = SequentialExecutionContext.createWithDedicatedPool(s"ec-$getSafeName")
+    val sec = SequentialExecutionContext.createWithDedicatedPool(
+      name = s"ec-$getSafeName",
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+    )
     val watchValueCellAdapter = new WatchValueCellPollAdapter[RawValueType, ParsedValueMap](
       Some(INITIAL_MAP_VALUE_PARSED),
-      () => mockSafeBatchFlag.getCurrentValue,
-      transformation,
+      () => rawSource.current,
+      (_, rawValue) => parseRawValue(rawValue),
       TEST_POLL_INTERVAL,
       sec
     )
@@ -401,7 +410,7 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
     // Drain the sec to ensure cancel() has taken effect and any in-flight polls completed.
     TestUtils.awaitResult(sec.call { () }, Duration.Inf)
 
-    mockSafeBatchFlag.updateValue("raw-key-2", "raw-value-2-1")
+    rawSource.update("raw-key-2", "raw-value-2-1")
 
     // Verify: After waiting, the subscriber should NOT have received the new value, confirming
     // that a single cancel() stopped all polling (i.e., there was only one poller).
@@ -416,31 +425,34 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
     // on the first call but succeeds on subsequent calls, call start(), and verify that
     // subscribers eventually receive updates from the subsequent successful polls.
 
-    // Setup: Create a mock batch flag with a special marker key to track whether the first poll
+    // Setup: Create a raw source with a special marker key to track whether the first poll
     // has occurred.
-    val mockSafeBatchFlag = new MockSafeBatchFlag(INITIAL_MAP_VALUE_RAW)
+    val rawSource = new FakeRawSource(INITIAL_MAP_VALUE_RAW)
     val FIRST_POLL_MARKER_KEY = "first-poll-completed"
 
     // Create the SEC on a throwaway thread so uncaught exceptions don't interrupt the test thread
     // (uncaught exceptions will result in an interruption of the thread on which the executor is
     // created).
     val secFuture: Future[SequentialExecutionContext] = Future {
-      SequentialExecutionContext.createWithDedicatedPool(s"ec-$getSafeName")
+      SequentialExecutionContext.createWithDedicatedPool(
+        name = s"ec-$getSafeName",
+        alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+      )
     }(ExecutionContext.fromExecutor(Executors.newSingleThreadExecutor()))
     val sec: SequentialExecutionContext = Await.result(secFuture, Duration.Inf)
     val watchValueCellAdapter = new WatchValueCellPollAdapter[RawValueType, ParsedValueMap](
       Some(INITIAL_MAP_VALUE_PARSED),
       () => {
-        val currentValue: RawValueType = mockSafeBatchFlag.getCurrentValue
+        val currentValue: RawValueType = rawSource.current
         if (!currentValue.contains(FIRST_POLL_MARKER_KEY)) {
           // Mark that the first poll has been attempted, then throw.
-          mockSafeBatchFlag.updateValue(FIRST_POLL_MARKER_KEY, "true")
+          rawSource.update(FIRST_POLL_MARKER_KEY, "true")
           throw new RuntimeException("First poll intentionally fails")
         }
-        // Remove the marker key so it doesn't interfere with transformation.
+        // Remove the marker key so it doesn't interfere with parsing.
         currentValue - FIRST_POLL_MARKER_KEY
       },
-      transformation,
+      (_, rawValue) => parseRawValue(rawValue),
       TEST_POLL_INTERVAL,
       sec
     )
@@ -458,8 +470,8 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
       assert(subscriber.getLatestKeyValueMap == INITIAL_MAP_VALUE_PARSED)
     }
 
-    // Setup: Update the mock flag value.
-    mockSafeBatchFlag.updateValue("raw-key-2", "raw-value-2-1")
+    // Setup: Update the raw source.
+    rawSource.update("raw-key-2", "raw-value-2-1")
 
     // Verify: The subscriber receives the updated value from a subsequent poll, confirming that
     // periodic polling was scheduled despite the exception in the first poll.
@@ -492,7 +504,8 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
     val poolFuture: Future[SequentialExecutionContextPool] = Future {
       SequentialExecutionContextPool.create(
         poolName = poolName,
-        numThreads = 1
+        numThreads = 1,
+        alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
       )
     }(ExecutionContext.fromExecutor(Executors.newSingleThreadExecutor()))
     val pool: SequentialExecutionContextPool = Await.result(poolFuture, Duration.Inf)
@@ -522,7 +535,7 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
     val watchValueCellAdapter = new WatchValueCellPollAdapter[RawValueType, ParsedValueMap](
       initialValueOpt = Some(INITIAL_MAP_VALUE_PARSED),
       poller = () => withLock(pollerOutcomeLock) { pollerOutcome }.get,
-      transform = transformation,
+      update = (_, rawValue) => parseRawValue(rawValue),
       pollInterval = TEST_POLL_INTERVAL,
       sec = fakeSec
     )
@@ -578,23 +591,27 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
     watchValueCellAdapter.cancel()
   }
 
-  test("Test periodic polling continues when `transform` throws during a scheduled poll") {
-    // Test plan: Verify that when the `transform` function throws during a scheduled poll,
+  test("Test periodic polling continues when `update` throws during a scheduled poll") {
+    // Test plan: Verify that when the `update` function throws during a scheduled poll,
     // the cell retains its value from the previous successful poll, an alert fires, and
-    // periodic polling continues. Do this by toggling the transform's outcome from "return a
+    // periodic polling continues. Do this by toggling the update's outcome from "return a
     // valid parsed value" to "throw" once the initial poll has completed, simulating a
     // scheduled poll, and asserting the served value still matches our expectation and the
-    // alert counter incremented. Then toggle the transform's outcome back to "return an
+    // alert counter incremented. Then toggle the update's outcome back to "return an
     // updated parsed value", simulate another scheduled poll, and assert the cell observes
     // the new value.
 
     // Setup: create the underlying SEC pool on a throwaway thread so uncaught exceptions
-    // (from a transform that throws) interrupt that throwaway thread instead of the test
+    // (from an update that throws) interrupt that throwaway thread instead of the test
     // thread. The pool's exception handler interrupts the pool's creator thread when a
     // worker throws.
     val poolName: String = s"pool-$getSafeName"
     val poolFuture: Future[SequentialExecutionContextPool] = Future {
-      SequentialExecutionContextPool.create(poolName = poolName, numThreads = 1)
+      SequentialExecutionContextPool.create(
+        poolName = poolName,
+        numThreads = 1,
+        alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+      )
     }(ExecutionContext.fromExecutor(Executors.newSingleThreadExecutor()))
     val pool: SequentialExecutionContextPool = Await.result(poolFuture, Duration.Inf)
     val fakeSec: FakeSequentialExecutionContext =
@@ -611,15 +628,15 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
         )
     }
 
-    // Setup: Drives each transform's outcome. The test will toggle it between `Success`
+    // Setup: Drives each update's outcome. The test will toggle it between `Success`
     // (i.e. returning a valid parsed value) and `Failure` (i.e. throwing an exception).
-    val transformOutcomeLock: ReentrantLock = new ReentrantLock()
-    var transformOutcome: Try[ParsedValueMap] = Success(INITIAL_MAP_VALUE_PARSED)
+    val updateOutcomeLock: ReentrantLock = new ReentrantLock()
+    var updateOutcome: Try[ParsedValueMap] = Success(INITIAL_MAP_VALUE_PARSED)
 
     val watchValueCellAdapter = new WatchValueCellPollAdapter[RawValueType, ParsedValueMap](
       initialValueOpt = Some(INITIAL_MAP_VALUE_PARSED),
       poller = () => INITIAL_MAP_VALUE_RAW,
-      transform = _ => withLock(transformOutcomeLock) { transformOutcome }.get,
+      update = (_, _) => withLock(updateOutcomeLock) { updateOutcome }.get,
       pollInterval = TEST_POLL_INTERVAL,
       sec = fakeSec
     )
@@ -637,9 +654,9 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
     assertResult(Some(INITIAL_MAP_VALUE_PARSED))(watchValueCellAdapter.getLatestValueOpt)
     assertResult(INITIAL_MAP_VALUE_PARSED)(subscriber.getLatestKeyValueMap)
 
-    // Arm the `transform` function to throw on its next invocation.
-    withLock(transformOutcomeLock) {
-      transformOutcome = Failure(new RuntimeException("Transform intentionally fails"))
+    // Arm the `update` function to throw on its next invocation.
+    withLock(updateOutcomeLock) {
+      updateOutcome = Failure(new RuntimeException("Update intentionally fails"))
     }
 
     // Simulate a scheduled poll.
@@ -659,8 +676,8 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
     // periodic polling was never canceled by the earlier throw.
     val expectedAfterUpdate: ParsedValueMap =
       INITIAL_MAP_VALUE_PARSED + ("parsed-key-2" -> ParsedValue("raw-value-2-1"))
-    withLock(transformOutcomeLock) {
-      transformOutcome = Success(expectedAfterUpdate)
+    withLock(updateOutcomeLock) {
+      updateOutcome = Success(expectedAfterUpdate)
     }
 
     // Simulate another scheduled poll.
@@ -674,16 +691,78 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
     watchValueCellAdapter.cancel()
   }
 
+  test("Test update uses the latest published value across polls") {
+    // Test plan: Verify that each update receives the value published by the previous poll. Start
+    // without an initial value, poll three disjoint raw maps, and verify that the parsed value
+    // accumulates all three entries.
+    val rawSource = new FakeRawSource(Map("raw-key-1" -> "raw-value-1"))
+
+    // Preserve previously published entries and overlay the newly parsed raw entries.
+    def update(
+        previousValueOpt: Option[ParsedValueMap],
+        newRawValue: RawValueType): ParsedValueMap =
+      previousValueOpt.getOrElse(Map.empty) ++ parseRawValue(newRawValue)
+
+    val poolName = s"update-uses-latest-value-$getSafeName"
+    val poolFuture: Future[SequentialExecutionContextPool] = Future {
+      SequentialExecutionContextPool.create(
+        poolName = poolName,
+        numThreads = 1,
+        alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+      )
+    }(ExecutionContext.fromExecutor(Executors.newSingleThreadExecutor()))
+    val pool: SequentialExecutionContextPool = Await.result(poolFuture, Duration.Inf)
+    val fakeSec: FakeSequentialExecutionContext =
+      FakeSequentialExecutionContext.create(name = s"fakeSec-$getSafeName", pool = pool)
+
+    val watchValueCellAdapter = new WatchValueCellPollAdapter[RawValueType, ParsedValueMap](
+      initialValueOpt = None,
+      poller = () => rawSource.current,
+      update = update,
+      pollInterval = TEST_POLL_INTERVAL,
+      sec = fakeSec
+    )
+    watchValueCellAdapter.start()
+
+    // The first update receives None and publishes the first parsed entry.
+    Await.result(fakeSec.call { () }, Duration.Inf)
+    val expectedAfterFirstPoll: ParsedValueMap =
+      Map("parsed-key-1" -> ParsedValue("raw-value-1"))
+    assertResult(Some(expectedAfterFirstPoll))(watchValueCellAdapter.getLatestValueOpt)
+
+    // The second update receives the first published value and adds the second entry.
+    rawSource.set(Map("raw-key-2" -> "raw-value-2"))
+    fakeSec.advanceBySync(TEST_POLL_INTERVAL)
+    Await.result(fakeSec.call { () }, Duration.Inf)
+    val expectedAfterSecondPoll: ParsedValueMap =
+      Map(
+        "parsed-key-1" -> ParsedValue("raw-value-1"),
+        "parsed-key-2" -> ParsedValue("raw-value-2")
+      )
+    assertResult(Some(expectedAfterSecondPoll))(watchValueCellAdapter.getLatestValueOpt)
+
+    // The third update receives the second published value and adds the third entry.
+    rawSource.set(Map("raw-key-3" -> "raw-value-3"))
+    fakeSec.advanceBySync(TEST_POLL_INTERVAL)
+    Await.result(fakeSec.call { () }, Duration.Inf)
+    assertResult(Some(INITIAL_MAP_VALUE_PARSED))(watchValueCellAdapter.getLatestValueOpt)
+
+    watchValueCellAdapter.cancel()
+  }
+
   test("Test require fails for non-positive pollInterval") {
     // Test plan: Verify that constructing the adapter with a zero pollInterval throws an
     // IllegalArgumentException. A zero pollInterval would result in a busy-loop with no time
     // between successive polls.
-    val sec = SequentialExecutionContext.createWithDedicatedPool(s"ec-$getSafeName")
+    val sec = SequentialExecutionContext.createWithDedicatedPool(
+      name = s"ec-$getSafeName",
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+    )
     intercept[IllegalArgumentException] {
       new WatchValueCellPollAdapter[RawValueType, ParsedValueMap](
         Some(INITIAL_MAP_VALUE_PARSED),
         () => INITIAL_MAP_VALUE_RAW,
-        transformation,
+        (_, rawValue) => parseRawValue(rawValue),
         Duration.Zero,
         sec
       )
@@ -692,18 +771,21 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
 
   test("Test that initial value is set from first poll when initialValueOpt is None") {
     // Test plan: Verify that when initialValueOpt is None, the cell has no value until the first
-    // poll completes, and then the subscriber receives the polled value. Create a mock flag,
+    // poll completes, and then the subscriber receives the polled value. Create a raw source,
     // create an adapter with None as the initial value, add a subscriber, start the adapter, and
     // verify the subscriber receives the value from the first poll.
 
-    // Setup: Create a mock flag with initial data.
-    val mockSafeBatchFlag = new MockSafeBatchFlag(INITIAL_MAP_VALUE_RAW)
+    // Setup: Create a raw source with initial data.
+    val rawSource = new FakeRawSource(INITIAL_MAP_VALUE_RAW)
 
-    val sec = SequentialExecutionContext.createWithDedicatedPool(s"ec-$getSafeName")
+    val sec = SequentialExecutionContext.createWithDedicatedPool(
+      name = s"ec-$getSafeName",
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+    )
     val watchValueCellAdapter = new WatchValueCellPollAdapter[RawValueType, ParsedValueMap](
       initialValueOpt = None,
-      poller = () => mockSafeBatchFlag.getCurrentValue,
-      transformation,
+      poller = () => rawSource.current,
+      update = (_, rawValue) => parseRawValue(rawValue),
       TEST_POLL_INTERVAL,
       sec
     )
@@ -724,8 +806,8 @@ class WatchValueCellPollAdapterSuite extends DatabricksTest with TestName {
       assert(subscriber.getLatestKeyValueMap == INITIAL_MAP_VALUE_PARSED)
     }
 
-    // Setup: Update the mock flag value.
-    mockSafeBatchFlag.updateValue("raw-key-2", "raw-value-2-1")
+    // Setup: Update the raw source.
+    rawSource.update("raw-key-2", "raw-value-2-1")
 
     // Verify: The subscriber receives the updated value from subsequent polls.
     val expectedParsedValue: ParsedValueMap = Map[String, ParsedValue](

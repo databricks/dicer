@@ -20,17 +20,15 @@ import com.databricks.rpc.tls.TLSOptions
 /**
  * Manages the creation of watch stubs for watching assignments.
  *
- * @note `clientName`, `subscriberDebugName`, `target`, and `clientIdOpt` are unused but match the
- * internal implementation signature for compatibility.
+ * @note `subscriberDebugName` and `watchFromDataPlane` are unused but match the internal
+ * implementation signature for compatibility.
  */
 class WatchStubManager private[dicer] (
     clientName: String,
     subscriberDebugName: String,
     defaultWatchAddress: URI,
     tlsOptionsOpt: Option[TLSOptions],
-    watchFromDataPlane: Boolean,
-    target: Target,
-    clientIdOpt: Option[UUID]) {
+    watchFromDataPlane: Boolean) {
 
   /**
    * The default channel to use for watching assignments.
@@ -46,8 +44,15 @@ class WatchStubManager private[dicer] (
    *
    * @param redirectAddressOpt The address of the redirect target to create a watch stub for.
    *                           If not provided, returns a stub bound to [[defaultWatchAddress]].
+   * @param target             Unused; present only for signature parity with the internal
+   *                           implementation.
+   * @param clientIdOpt        Unused; present only for signature parity with the internal
+   *                           implementation.
    */
-  private[dicer] def createWatchStub(redirectAddressOpt: Option[URI]): AssignmentServiceStub = {
+  private[dicer] def createWatchStub(
+      redirectAddressOpt: Option[URI],
+      target: Target,
+      clientIdOpt: Option[UUID]): AssignmentServiceStub = {
     val channel: ManagedChannel = redirectAddressOpt match {
       case None => defaultGrpcChannel
       case Some(redirectAddress: URI) =>
@@ -70,6 +75,7 @@ class WatchStubManager private[dicer] (
 
   /** Creates a gRPC channel that's bound to the provided `address`. */
   private def createGrpcChannel(address: URI): ManagedChannel = {
+    ClientMetrics.incrementWatchChannelsCreated(clientName)
     val correctedUri: URI = normalizeAddress(address)
 
     // Use gRPC's transport-independent TLS API.

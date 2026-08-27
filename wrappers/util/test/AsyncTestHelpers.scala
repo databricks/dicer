@@ -7,10 +7,7 @@ import org.scalatest.time.{Nanoseconds, Span}
 
 import scala.concurrent.duration._
 
-/**
- * Minimal open source version of AsyncTestHelpers that provides just the eventually method
- * needed by AssertionWaiter.
- */
+/** Provides methods for testing asynchronous or multi-threaded code. */
 trait AsyncTestHelpers extends Assertions {
 
   /**

@@ -12,7 +12,10 @@ import com.databricks.testing.DatabricksTest
 
 class EtcdClientLatencyHistogramSuite extends DatabricksTest {
   private val sec =
-    SequentialExecutionContext.createWithDedicatedPool("EtcdClientLatencyHistogramSuite")
+    SequentialExecutionContext.createWithDedicatedPool(
+      name = "EtcdClientLatencyHistogramSuite",
+      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+    )
   private val clock = new FakeTypedClock()
 
   // Name for the histogram metric.

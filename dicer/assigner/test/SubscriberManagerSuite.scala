@@ -23,8 +23,7 @@ import com.databricks.dicer.common.{
 import com.databricks.dicer.common.Assignment.AssignmentValueCell
 import com.databricks.dicer.common.TestSliceUtils
 import com.databricks.dicer.external.Target
-import com.databricks.rpc.RPCContext
-import com.databricks.rpc.testing.JettyTestRPCContext
+import com.databricks.rpc.{RPCContext, RPCTestUtils}
 import com.databricks.testing.DatabricksTest
 
 class SubscriberManagerSuite extends DatabricksTest {
@@ -40,7 +39,9 @@ class SubscriberManagerSuite extends DatabricksTest {
     val manager: SubscriberManager = new SubscriberManager(
       secPool,
       getSuggestedClerkRpcTimeoutFn = () => 1.second,
-      suggestedSliceletRpcTimeout = 1.second
+      suggestedSliceletRpcTimeout = 1.second,
+      // Same as value set in `dicer/production/assigner/deploy/conf/service-conf.jsonnet`.
+      maxSubscribersPromptedForAssignmentRecovery = 5
     )
     (manager, fakeClock)
   }
@@ -53,13 +54,14 @@ class SubscriberManagerSuite extends DatabricksTest {
       manager: SubscriberManager,
       target: Target,
       currentTime: TickerTime): Unit = {
-    val rpcContext: RPCContext = JettyTestRPCContext.builder().method("POST").uri("/").build()
+    val rpcContext: RPCContext = RPCTestUtils.testRPCContext()
     val sliceletData: SliceletData = SliceletData(
       squid = TestSliceUtils.createTestSquid("pod0"),
       state = SliceletState.Running,
       kubernetesNamespace = "test-namespace",
       attributedLoads = Vector.empty,
-      unattributedLoadOpt = None
+      unattributedLoadOpt = None,
+      keyCardinalityEstimateOpt = None
     )
     val request: ClientRequest = ClientRequest(
       target = target,
@@ -68,7 +70,10 @@ class SubscriberManagerSuite extends DatabricksTest {
       timeout = 1.second,
       subscriberData = sliceletData,
       supportsSerializedAssignment = true,
-      redirectTokenOpt = None
+      redirectTokenOpt = None,
+      alternativeTargetOpt = None,
+      clusterUriOpt = None,
+      regionUriOpt = None
     )
     val cell: AssignmentValueCell = new AssignmentValueCell
     // The Future will not complete because no assignment is published to the cell. Failures

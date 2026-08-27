@@ -1,5 +1,6 @@
 package com.databricks.dicer.common
 
+import com.databricks.caching.util.AlertOwnerTeam
 import com.databricks.caching.util.AssertMacros.ifail
 import com.databricks.caching.util.TestUtils
 import com.databricks.caching.util.{
@@ -20,9 +21,10 @@ import scala.concurrent.Future
 import com.databricks.rpc.RequestHeaders
 
 import com.databricks.dicer.assigner.config.{
-  StaticTargetConfigProvider,
   InternalTargetConfig,
-  InternalTargetConfigMap
+  InternalTargetConfigMap,
+  TargetConfigProvider,
+  TargetConfigProviderFactory
 }
 import com.databricks.dicer.assigner.config.TargetConfigProvider.DEFAULT_INITIAL_POLL_TIMEOUT
 import com.databricks.dicer.assigner.{
@@ -31,6 +33,7 @@ import com.databricks.dicer.assigner.{
   TestableDicerAssignerConf
 }
 import com.databricks.dicer.client.{TestClientUtils, TlsFilePaths}
+import com.databricks.dicer.client.featurerollouts.DicerClientFeatureRolloutFlag
 import com.databricks.dicer.common.SliceletData.SliceLoad
 import com.databricks.dicer.external.{
   Clerk,
@@ -62,9 +65,10 @@ class InternalDicerTestEnvironment private (
     val dockerizedEtcdOpt: Option[EtcdTestEnvironment],
     val tlsFilePathsOpt: Option[TlsFilePaths],
     val sliceletHostNameOpt: Option[String],
-    dynamicConfigProvider: StaticTargetConfigProvider,
+    dynamicConfigProvider: TargetConfigProvider,
     secPool: SequentialExecutionContextPool,
     assignerClusterUri: URI,
+    assignerServiceInfoOpt: Option[AssignerServiceInfo],
     dPageNamespaceOpt: Option[String]) {
 
   /** The lock used to protect all state in the test environment. */
@@ -79,10 +83,19 @@ class InternalDicerTestEnvironment private (
   @GuardedBy("lock")
   private val sliceletMap = new mutable.HashMap[Target, mutable.ArrayBuffer[Slicelet]]
 
+  /**
+   * Pairs a running test Assigner with the [[TestAssigner.Config]] it was created with. The conf is
+   * only used if we need to restart the assigner with the same config.
+   */
+  private case class AssignerWithConf(assigner: TestAssigner, config: TestAssigner.Config)
+
+  /**
+   * The Assigners created as part of the test environment, along with the config used to build
+   * them.
+   */
   @GuardedBy("lock")
-  /** The Assigners that have been created as part of the test environment. */
-  private val assigners: mutable.ArrayBuffer[TestAssigner] =
-    new mutable.ArrayBuffer[TestAssigner]
+  private val assignerWithConfs: mutable.ArrayBuffer[AssignerWithConf] =
+    new mutable.ArrayBuffer[AssignerWithConf]
 
   /**
    * REQUIRES: `slicelet` has been started.
@@ -91,12 +104,23 @@ class InternalDicerTestEnvironment private (
    *
    * This is *not* equivalent to `Clerk.createFollowingSlicelet(slicelet)`, which is used to share
    * in-memory state with a collocated Slicelet.
+   *
+   * @param featureRolloutFlagOpt When defined, the Clerk's [[ClerkConf]] uses this flag to resolve
+   *                              [[DicerClientConf.isFeatureRolloutFlagEnabled]] instead of the
+   *                              process-wide singleton.
    */
-  def createClerk(slicelet: Slicelet): Clerk[ResourceAddress] = withLock(lock) {
+  def createClerk(
+      slicelet: Slicelet,
+      featureRolloutFlagOpt: Option[DicerClientFeatureRolloutFlag] = None
+  ): Clerk[ResourceAddress] = withLock(lock) {
     val target: Target = slicelet.impl.target
     val clerkConf: ClerkConf =
       TestClientUtils
-        .createTestClerkConf(slicelet.impl.forTest.sliceletPort, tlsFilePathsOpt)
+        .createTestClerkConf(
+          slicelet.impl.forTest.sliceletPort,
+          tlsFilePathsOpt,
+          featureRolloutFlagOpt
+        )
     val clerk: Clerk[ResourceAddress] = TestClientUtils.createClerk(target, clerkConf)
     val clerks = clerkMap.getOrElseUpdate(target, new ArrayBuffer[Clerk[ResourceAddress]])
     clerks.append(clerk)
@@ -119,15 +143,25 @@ class InternalDicerTestEnvironment private (
    *
    * @param initialAssignerIndex The index of the Assigner to issue the initial watch request.
    * @param branchOpt The optional branch name to use for the Clerk.
+   * @param featureRolloutFlagOpt When defined, the Clerk's [[ClerkConf]] uses this flag to resolve
+   *                              [[DicerClientConf.isFeatureRolloutFlagEnabled]] instead of the
+   *                              process-wide singleton.
    */
   def createDirectClerk(
       target: Target,
       initialAssignerIndex: Int,
-      branchOpt: Option[String] = None): Clerk[ResourceAddress] =
+      branchOpt: Option[String] = None,
+      featureRolloutFlagOpt: Option[DicerClientFeatureRolloutFlag] = None
+  ): Clerk[ResourceAddress] =
     withLock(lock) {
       val assignerPort = testAssigners(initialAssignerIndex).localUri.getPort
       val directClerkConf: ClerkConf =
-        TestClientUtils.createTestDirectClerkConf(assignerPort, tlsFilePathsOpt, branchOpt)
+        TestClientUtils.createTestDirectClerkConf(
+          assignerPort,
+          tlsFilePathsOpt,
+          branchOpt,
+          featureRolloutFlagOpt
+        )
       val clerk: Clerk[ResourceAddress] =
         TestClientUtils.createClerk(target, directClerkConf)
       clerkMap.getOrElseUpdate(target, new ArrayBuffer[Clerk[ResourceAddress]]).append(clerk)
@@ -153,31 +187,37 @@ class InternalDicerTestEnvironment private (
    *                           the created Slicelet. When set to true, callers are responsible for
    *                           setting the "LOCATION" environment variable appropriately based on
    *                           their desired testing behaviors.
+   * @param featureRolloutFlagOpt When defined, the Slicelet's [[SliceletConf]] uses this flag to
+   *                              resolve [[DicerClientConf.isFeatureRolloutFlagEnabled]] instead
+   *                              of the process-wide singleton.
    */
   def createSlicelet(
       target: Target,
       initialAssignerIndex: Int,
-      watchFromDataPlane: Boolean): Slicelet = withLock(lock) {
-    val initialAssignerPort: Int = testAssigners(initialAssignerIndex).localUri.getPort
-    val slicelets = sliceletMap.getOrElseUpdate(target, new ArrayBuffer[Slicelet])
-    val podOrdinal = slicelets.size
+      watchFromDataPlane: Boolean,
+      featureRolloutFlagOpt: Option[DicerClientFeatureRolloutFlag] = None): Slicelet =
+    withLock(lock) {
+      val initialAssignerPort: Int = testAssigners(initialAssignerIndex).localUri.getPort
+      val slicelets = sliceletMap.getOrElseUpdate(target, new ArrayBuffer[Slicelet])
+      val podOrdinal = slicelets.size
 
-    val sliceletHostName: String = sliceletHostNameOpt.getOrElse {
-      // Replace ':' with '-' in the slicelet host name since URI cannot parse names with ':' in
-      // them.
-      s"$target-$podOrdinal".replace(':', '-')
+      val sliceletHostName: String = sliceletHostNameOpt.getOrElse {
+        // Replace ':' with '-' in the slicelet host name since URI cannot parse names with ':' in
+        // them.
+        s"$target-$podOrdinal".replace(':', '-')
+      }
+      val slicelet: Slicelet = TestClientUtils.createSlicelet(
+        initialAssignerPort,
+        target,
+        sliceletHostName,
+        clientTlsFilePathsOpt = tlsFilePathsOpt,
+        serverTlsFilePathsOpt = tlsFilePathsOpt,
+        watchFromDataPlane,
+        featureRolloutFlagOpt
+      )
+      slicelets.append(slicelet)
+      slicelet
     }
-    val slicelet: Slicelet = TestClientUtils.createSlicelet(
-      initialAssignerPort,
-      target,
-      sliceletHostName,
-      clientTlsFilePathsOpt = tlsFilePathsOpt,
-      serverTlsFilePathsOpt = tlsFilePathsOpt,
-      watchFromDataPlane
-    )
-    slicelets.append(slicelet)
-    slicelet
-  }
 
   /**
    * Stops and clears all the test Assigners, Slicelets, and Clerks within this test environment;
@@ -194,10 +234,10 @@ class InternalDicerTestEnvironment private (
     }
     sliceletMap.clear()
 
-    for (testAssigner <- assigners) {
-      testAssigner.stop(InterposingEtcdPreferredAssignerDriver.ShutdownOption.ABRUPT)
+    for (assignerWithConf: AssignerWithConf <- assignerWithConfs) {
+      assignerWithConf.assigner.stop(InterposingEtcdPreferredAssignerDriver.ShutdownOption.ABRUPT)
     }
-    assigners.clear()
+    assignerWithConfs.clear()
 
     for (dockerizedEtcd: EtcdTestEnvironment <- dockerizedEtcdOpt) {
       dockerizedEtcd.deleteAll()
@@ -218,7 +258,7 @@ class InternalDicerTestEnvironment private (
 
   /** Returns a snapshot of current test Assigners in the test environment. */
   def testAssigners: IndexedSeq[TestAssigner] = withLock(lock) {
-    assigners.toIndexedSeq
+    assignerWithConfs.map(_.assigner).toIndexedSeq
   }
 
   // Convenience methods for test environments that contain only a single assigner. Because the
@@ -296,11 +336,25 @@ class InternalDicerTestEnvironment private (
   }
 
   /**
-   * Like `createSlicelet(target, initialAssignerIndex, watchFromDataPlane)`, but uses the first
-   * Assigner instance and sets `watchFromDataPlane` to be false.
+   * Like `createSlicelet(target, initialAssignerIndex, watchFromDataPlane, featureRolloutFlagOpt)`,
+   * but uses the first Assigner instance, sets `watchFromDataPlane` to be false, and uses the
+   * process-wide feature-rollout-flag singleton. To inject a test
+   * [[DicerClientFeatureRolloutFlag]], call the four-arg overload directly.
    */
   def createSlicelet(target: Target): Slicelet = {
     createSlicelet(target, initialAssignerIndex = 0, watchFromDataPlane = false)
+  }
+
+  /**
+   * Like `createDirectClerk(target, initialAssignerIndex, branchOpt, featureRolloutFlagOpt)`, but
+   * uses the process-wide feature-rollout-flag singleton. To inject a test
+   * [[DicerClientFeatureRolloutFlag]], call the four-arg overload directly.
+   */
+  def createDirectClerk(
+      target: Target,
+      initialAssignerIndex: Int,
+      branchOpt: Option[String]): Clerk[ResourceAddress] = {
+    createDirectClerk(target, initialAssignerIndex, branchOpt, featureRolloutFlagOpt = None)
   }
 
   /** Updates the dynamic configuration targets to include the given parsed `config`. */
@@ -326,6 +380,7 @@ class InternalDicerTestEnvironment private (
   /**
    * Dynamically adds a new [[TestAssigner]] to the test environment with designated `config`.
    *
+   * @param config The configuration used to create the Assigner.
    * @return The tuple containing the newly added Assigner and the index of it in the test
    *         environment.
    */
@@ -335,13 +390,14 @@ class InternalDicerTestEnvironment private (
         secPool,
         config,
         dynamicConfigProvider,
-        dockerizedEtcdOpt,
+        preferredAssignerDriverFactoryFor(config),
         assignerClusterUri,
+        assignerServiceInfoOpt,
         dPageNamespaceOpt = dPageNamespaceOpt
       )
     withLock(lock) {
-      assigners.append(newTestAssigner)
-      (newTestAssigner, assigners.length - 1)
+      assignerWithConfs.append(AssignerWithConf(newTestAssigner, config))
+      (newTestAssigner, assignerWithConfs.length - 1)
     }
   }
 
@@ -356,8 +412,9 @@ class InternalDicerTestEnvironment private (
    */
   def stopAssigner(index: Int): Unit = {
     withLock(lock) {
-      require(0 <= index && index < assigners.length)
-      assigners(index).stop(InterposingEtcdPreferredAssignerDriver.ShutdownOption.ABRUPT)
+      require(0 <= index && index < assignerWithConfs.length)
+      assignerWithConfs(index).assigner
+        .stop(InterposingEtcdPreferredAssignerDriver.ShutdownOption.ABRUPT)
     }
   }
 
@@ -373,17 +430,24 @@ class InternalDicerTestEnvironment private (
   }
 
   /**
-   * Restarts the `index`th Assigner with exactly the same configuration as the currently running
-   * one, including the Assigner port. This can be used when we want the previously created
-   * Slicelets to talk to the newly started Assigner.
+   * Restarts the `index`th Assigner with the same configuration as the currently running one,
+   * including the Assigner port. This can be used when we want the previously created Slicelets to
+   * talk to the newly started Assigner.
    */
   def restartAssignerWithSameConfig(index: Int): Unit = {
     withLock(lock) {
-      val previousPort: Int = assigners(index).localUri.getPort
+      val entry: AssignerWithConf = assignerWithConfs(index)
+      val previousPort: Int = entry.assigner.localUri.getPort
+      val oldConfig: TestAssigner.Config = entry.config
+      // Reuse the original config, preserving the port so existing Slicelets can still talk to the
+      // restarted Assigner.
       val newConfig = TestAssigner.Config.create(
-        assigners(index).conf,
+        assignerConf = oldConfig.assignerConf,
         designatedDicerAssignerRpcPort = Some(previousPort),
-        targetMigratorOpt = Some(assigners(index).targetMigrator)
+        preferredAssignerDriverConfig = oldConfig.preferredAssignerDriverConfig,
+        targetMigratorOpt = oldConfig.targetMigratorOpt,
+        membershipCheckerFactoryOpt = oldConfig.membershipCheckerFactoryOpt,
+        preferredAssignerDriverFactoryOverride = oldConfig.preferredAssignerDriverFactoryOverride
       )
       restartAssignerInternal(index, newConfig)
     }
@@ -452,33 +516,48 @@ class InternalDicerTestEnvironment private (
    */
   private def testAssignerInternal: TestAssigner = withLock(lock) {
     assert(
-      assigners.length == 1,
+      assignerWithConfs.length == 1,
       "testAssigner can only be used if there is exactly one assigner."
     )
-    assigners.head
+    assignerWithConfs.head.assigner
   }
+
+  // Resolves the driver factory for `config`: a test-injected override, else the conf-derived
+  // default bound to this environment's dockerized etcd (which only the environment owns).
+  private def preferredAssignerDriverFactoryFor(
+      config: TestAssigner.Config): TestAssigner.PreferredAssignerDriverFactory =
+    config.preferredAssignerDriverFactoryOverride.getOrElse(
+      TestAssigner.defaultPreferredAssignerDriverFactory(
+        config.assignerConf,
+        config.preferredAssignerDriverConfig,
+        dockerizedEtcdOpt
+      )
+    )
 
   /** See [[InternalDicerTestEnvironment.restartAssigner]]. */
   private def restartAssignerInternal(index: Int, newConfig: TestAssigner.Config): Unit = {
-    require(0 <= index && index < assigners.length)
+    require(0 <= index && index < assignerWithConfs.length)
 
     // We await the asynchronous shutdown to complete, ensuring the new Assigner starts only after
     // the port is released. This is necessary because the stop and start are on different `sec`s,
     // and the start might execute before the stop. If that happens and the restart is configured
     // to be on the same URI, the RPC server will fail to bind to the port.
+    val oldAssigner: TestAssigner = assignerWithConfs(index).assigner
     TestUtils.awaitReady(
-      assigners(index).stop(InterposingEtcdPreferredAssignerDriver.ShutdownOption.ABRUPT),
+      oldAssigner.stop(InterposingEtcdPreferredAssignerDriver.ShutdownOption.ABRUPT),
       Duration.Inf
     )
 
-    assigners(index) = TestAssigner.createAndStart(
+    val newAssigner: TestAssigner = TestAssigner.createAndStart(
       secPool,
       newConfig,
       dynamicConfigProvider,
-      dockerizedEtcdOpt,
+      preferredAssignerDriverFactoryFor(newConfig),
       assignerClusterUri,
+      assignerServiceInfoOpt,
       dPageNamespaceOpt = dPageNamespaceOpt
     )
+    assignerWithConfs(index) = AssignerWithConf(newAssigner, newConfig)
   }
 }
 
@@ -553,6 +632,8 @@ object InternalDicerTestEnvironment {
    * @param assignerClusterUri The URI of the kubernetes cluster that the assigners created in the
    *                           test environment will run in (see <internal link>).
    *                           Defaults to "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01"
+   * @param assignerServiceInfoOpt The service info that assigners created in the test environment
+   *                               will use. Defaults to [[None]].
    * @param dPageNamespaceOpt When specified, this namespace is used for DPage registration.
    *                          Each assigner instance uses this to register under a unique DAction
    *                          name. When None, each assigner's UUID is used as the namespace.
@@ -567,9 +648,13 @@ object InternalDicerTestEnvironment {
       numAssigners: Int = 1,
       allowEtcdMode: Boolean = false,
       withDefaultTargetConfig: Boolean = true,
-      secPool: SequentialExecutionContextPool =
-        SequentialExecutionContextPool.create("testEnvPool", numThreads = 10),
+      secPool: SequentialExecutionContextPool = SequentialExecutionContextPool.create(
+        poolName = "testEnvPool",
+        numThreads = 10,
+        alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+      ),
       assignerClusterUri: URI = new URI("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01"),
+      assignerServiceInfoOpt: Option[AssignerServiceInfo] = None,
       dPageNamespaceOpt: Option[String] = None
   ): InternalDicerTestEnvironment = {
     require(numAssigners >= 0)
@@ -585,12 +670,12 @@ object InternalDicerTestEnvironment {
 
     // Initialize and start the dynamic target config provider.
     // TODO(<internal bug>): Make each assigner has individual dynamic config provider.
-    val dynamicConfigProvider: StaticTargetConfigProvider =
-      StaticTargetConfigProvider.create(
+    val dynamicConfigProvider: TargetConfigProvider =
+      TargetConfigProviderFactory.createBlocking(
         staticTargetConfigMap = configMap,
-        assignerConf
+        assignerConf,
+        DEFAULT_INITIAL_POLL_TIMEOUT
       )
-    dynamicConfigProvider.startBlocking(DEFAULT_INITIAL_POLL_TIMEOUT)
 
     val dockerizedEtcdOpt: Option[EtcdTestEnvironment] =
       if (allowEtcdMode) {
@@ -609,6 +694,7 @@ object InternalDicerTestEnvironment {
       dynamicConfigProvider,
       secPool,
       assignerClusterUri,
+      assignerServiceInfoOpt,
       dPageNamespaceOpt
     )
 

@@ -62,6 +62,47 @@ final class ConsistentHashRing[T, K] private (
     node
   }
 
+  /**
+   * Returns an iterator over the ring's nodes in ring order, starting from the node responsible
+   * for `key`. Each subsequent element is the next node encountered while walking the ring
+   * clockwise and wrapping around back to the node responsible for `key`.
+   * Note: For cases where `vnodesPerNode` > 1, the iterator will visit each node `vnodesPerNode`
+   * times.
+   */
+  def lookupIterator(key: K): Iterator[T] = {
+    val hashedValue: Long = hashBytes(typeMapper.mapKey(key).asReadOnlyByteBuffer())
+    // Start from the first entry >= `hashedValue`, or wrap to the first entry on the ring if no
+    // such entry exists. A `def` (not a `val`) is used so that each reference below creates a fresh
+    // iterator instance.
+    def keyOwnerIterator: Iterator[(Long, T)] = {
+      val ceilingIterator: Iterator[(Long, T)] = ring.iteratorFrom(hashedValue)
+      if (ceilingIterator.hasNext) ceilingIterator else ring.iterator
+    }
+    // Safe to call next() since `nodes` must be non-empty.
+    val keyOwnerHash: Long = keyOwnerIterator.next() match {
+      case (hash, _) => hash
+    }
+    // An iterator that collects entries from the start of the ring until the node responsible for
+    // `key`. In the case where `keyOwnerHash` corresponds to the first node on the ring, this
+    // iterator will be empty.
+    val wrapAroundIterator: Iterator[(Long, T)] = ring.iterator.takeWhile(
+      entry => {
+        val (hash, _): (Long, T) = entry
+        keyOwnerHash != hash
+      }
+    )
+    // Concatenate the two iterators to get the full set of nodes in ring order starting from
+    // `keyOwnerHash` and wrapping around.
+    val orderedNodes: Iterator[T] = (keyOwnerIterator ++ wrapAroundIterator).map(
+      entry => {
+        // Extract the node from the ring entry.
+        val (_, node): (_, T) = entry
+        node
+      }
+    )
+    orderedNodes
+  }
+
   /** Hashes the bytes in `buffer` (position to limit) to a 64-bit value using FarmHash. */
   private def hashBytes(buffer: ByteBuffer): Long = {
     Hashing

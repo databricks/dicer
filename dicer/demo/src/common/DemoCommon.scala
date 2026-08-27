@@ -2,7 +2,7 @@ package com.databricks.dicer.demo.common
 
 import com.databricks.dicer.external.SliceKey
 
-/** Shared constants for the OSS Dicer demo client and server. */
+/** Shared constants for the Dicer demo client and server. */
 object DemoCommon {
 
   /** The target name used by the demo service. */
