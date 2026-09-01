@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dicer — dynamic auto-sharding for stateful serving</title>
+  <meta name="description" content="Dicer is an open-source dynamic auto-sharder. Serve state from memory instead of round-tripping to a database, without the hotspots and outages of static sharding.">
+  <link rel="canonical" href="https://databricks.github.io/dicer/">
+  <meta property="og:title" content="Dicer — dynamic auto-sharding for stateful serving">
+  <meta property="og:description" content="Serve state from memory instead of round-tripping to a database, without the hotspots and outages of static sharding.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://databricks.github.io/dicer/">
+  <meta property="og:image" content="https://databricks.github.io/dicer/images/dicer-demo.png">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,700;0,9..40,800;1,9..40,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="top">
+    <div class="top-inner">
+      <a class="brand" href="./">
+        <svg class="mark" viewBox="0 0 34 34" aria-hidden="true">
+          <rect width="34" height="34" rx="6" fill="#1B3139"/>
+          <path d="M8 17.5 17 8l9 9.5L17 27z" fill="#FF3621"/>
+          <circle cx="17" cy="17.5" r="3.2" fill="#F9F7F4"/>
+        </svg>
+        Dicer
+      </a>
+      <nav class="nav" aria-label="Primary">
+        <a href="#why">Why Dicer</a>
+        <a href="#use-cases">Use cases</a>
+        <a href="#start">Get started</a>
+        <a href="#community">Docs</a>
+        <a class="cta" href="https://github.com/databricks/dicer">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <section class="hero">
+    <div class="hero-inner">
+      <div class="kicker">Open source · Apache 2.0</div>
+      <h1>Dynamic <span class="accent-word">auto-sharding</span> for stateful serving</h1>
+      <p class="lede">
+        Dicer dynamically shards keys across application pods based on
+        real-time health and load, enabling high-performance in-process
+        caching, leader selection, batching and ingestion, and session
+        sharding.
+      </p>
+      <div class="actions">
+        <a class="btn btn-primary" href="https://github.com/databricks/dicer">View on GitHub</a>
+        <a class="btn btn-ghost" href="https://github.com/databricks/dicer#readme">Read the README</a>
+        <a class="btn btn-ghost" href="https://www.databricks.com/blog/open-sourcing-dicer-databricks-auto-sharder">Read the blog post</a>
+      </div>
+    </div>
+  </section>
+
+  <main id="main">
+    <section id="why" class="section">
+      <div class="wrap">
+        <h2>Why Dicer</h2>
+        <p class="section-lede">
+          A control plane that watches load and health, then continuously
+          reassigns keys to pods so your service stays balanced and available.
+        </p>
+        <div class="grid-3">
+          <div class="card">
+            <strong>Zero downtime</strong>
+            Dicer provides zero downtime for rolling updates, autoscaling, and node upgrades by listening to shutdown signals and reassigning slices.
+          </div>
+          <div class="card">
+            <strong>Crash detection</strong>
+            Dicer reassigns slices from unresponsive pods, so traffic reroutes to healthy ones.
+          </div>
+          <div class="card">
+            <strong>Load balancing</strong>
+            Dicer reassigns, splits, and merges slices to keep every pod inside a tolerable load band.
+          </div>
+          <div class="card">
+            <strong>Hot-key isolation</strong>
+            Dicer isolates an overloaded key into its own slice, on a dedicated pod if needed.
+          </div>
+          <div class="card">
+            <strong>Asymmetric replication</strong>
+            Dicer replicates the hottest slices across several pods at once to spread the load.
+          </div>
+          <div class="card">
+            <strong>Low churn</strong>
+            Dicer meets its load-balancing goals while moving as few keys as possible.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="use-cases" class="section alt">
+      <div class="wrap">
+        <h2>Use cases</h2>
+        <p class="section-lede">Any workload that requires assigning keys to pods.</p>
+        <div class="grid-3">
+          <div class="card">
+            <strong>In-memory caching</strong>
+            Serve database state from local memory with low latency.
+          </div>
+          <div class="card">
+            <strong>Quota &amp; rate limiting</strong>
+            Track counters per key without a shared store.
+          </div>
+          <div class="card">
+            <strong>Session sharding</strong>
+            Pin user or LLM sessions — including KV cache reuse — to a pod.
+          </div>
+          <div class="card">
+            <strong>Pub/sub rendezvous</strong>
+            Match publishers and subscribers on the same pod.
+          </div>
+          <div class="card">
+            <strong>Batching &amp; ingestion</strong>
+            Group high-throughput writes before they hit storage.
+          </div>
+          <div class="card">
+            <strong>Leader election</strong>
+            Run a highly available controller with soft leader selection.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="start" class="section">
+      <div class="wrap">
+        <h2>Getting started</h2>
+        <div class="steps">
+          <div class="step">
+            <div class="step-num">1</div>
+            <div>
+              <strong>Build it</strong>
+              <p>Clone the repo and build with Bazel.</p>
+              <pre><code>git clone https://github.com/databricks/dicer.git
+cd dicer &amp;&amp; bazel build //...</code></pre>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-num">2</div>
+            <div>
+              <strong>Run the demo</strong>
+              <p>Deploy a sample key-value cache service and client locally.</p>
+              <a href="https://github.com/databricks/dicer/blob/master/dicer/demo/README.md">Demo walkthrough →</a>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-num">3</div>
+            <div>
+              <strong>Go to production</strong>
+              <p>Deploy the Assigner service with the provided Helm charts.</p>
+              <a href="https://github.com/databricks/dicer/blob/master/dicer/production/assigner/README.md">Deployment guide →</a>
+            </div>
+          </div>
+        </div>
+        <figure class="demo-figure">
+          <img
+            src="images/dicer-demo.png"
+            alt="Dicer demo dashboard showing a client sending lookup, insert, and delete requests through the Dicer Assigner to eight sharded cache server pods, each reporting its slice count and load"
+            loading="lazy"
+            width="1024"
+            height="754"
+          >
+          <figcaption>
+            A running Dicer demo: the Assigner tracks load and health across
+            pods and keeps slices balanced as pods come and go.
+          </figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section id="community" class="section alt">
+      <div class="wrap">
+        <h2>Docs &amp; community</h2>
+        <div class="grid-3">
+          <a class="card card-link" href="https://github.com/databricks/dicer#readme">
+            <strong>README</strong>
+            Architecture, concepts, and the full API surface.
+          </a>
+          <a class="card card-link" href="https://github.com/databricks/dicer/tree/master/docs">
+            <strong>User guide &amp; FAQ</strong>
+            Multi-target setup, config options, and common questions.
+          </a>
+          <a class="card card-link" href="https://www.databricks.com/blog/open-sourcing-dicer-databricks-auto-sharder">
+            <strong>Blog post</strong>
+            Why we built Dicer, and why we open-sourced it.
+          </a>
+          <a class="card card-link" href="https://github.com/databricks/dicer/blob/master/CONTRIBUTING.md">
+            <strong>Contributing</strong>
+            Start with an issue; a CLA is required.
+          </a>
+          <a class="card card-link" href="https://groups.google.com/a/databricks.com/g/dicer-discuss">
+            <strong>Discussion group</strong>
+            Questions and feedback at dicer-discuss.
+          </a>
+          <a class="card card-link" href="https://github.com/databricks/dicer/blob/master/LICENSE.txt">
+            <strong>License</strong>
+            Apache License 2.0.
+          </a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="foot-inner">
+      <div>Open-sourced by Databricks under the <a href="https://github.com/databricks/dicer/blob/master/LICENSE.txt">Apache License 2.0</a>.</div>
+      <div><a href="https://github.com/databricks/dicer">github.com/databricks/dicer</a></div>
+    </div>
+  </footer>
+</body>
+</html>
