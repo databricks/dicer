@@ -464,7 +464,7 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     // Send a request containing an assignment for a different target name. Despite not having any
     // assignment, the state machine should not request that the driver incorporate the
     // assignment.
-    val fatallyMismatchedTarget = Target(getSuffixedSafeName("other"))
+    val notServedTarget = Target(getSuffixedSafeName("other"))
     val assignment1: Assignment = ProposedAssignment(
       predecessorOpt = None,
       sliceMap = TestSliceUtils.createProposal(
@@ -484,7 +484,7 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
           instant,
           Event.WatchRequest(
             ClientRequest(
-              fatallyMismatchedTarget,
+              notServedTarget,
               SyncAssignmentState.KnownAssignment(assignment1),
               "another-client",
               5.seconds,
@@ -525,8 +525,8 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
         .actions == Seq(DriverAction.UseAssignment(assignment1))
     )
 
-    // Sending a newer assignment for a target with the same name but different cluster a (non-fatal
-    // mismatch) should also be incorporated.
+    // Sending a newer assignment for a target with the same name but different cluster (which is
+    // still served) should also be incorporated.
     val assignment2: Assignment = ProposedAssignment(
       predecessorOpt = None,
       sliceMap = TestSliceUtils.createProposal(
@@ -540,7 +540,7 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     )
 
     val uri2: URI = URI.create("kubernetes-cluster:test-env/cloud1/public/region1/clustertype1/kjfna2")
-    val nonFatalMismatchedTarget = Target.createKubernetesTarget(uri2, getSafeName)
+    val servedTarget = Target.createKubernetesTarget(uri2, getSafeName)
     assert(
       testDriver
         .onEvent(
@@ -548,7 +548,7 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
           instant,
           Event.WatchRequest(
             ClientRequest(
-              nonFatalMismatchedTarget,
+              servedTarget,
               SyncAssignmentState.KnownAssignment(assignment2),
               "another-client",
               5.seconds,

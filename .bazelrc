@@ -6,6 +6,3 @@ common --java_language_version=17
 common --action_env=LANG=C.UTF-8
 # Needed to use precompiled protoc, see MODULE.bazel for more details.
 build --incompatible_enable_proto_toolchain_resolution
-
-common --downloader_config=.bazel_downloader_config
-startup --host_jvm_args=-Djavax.net.ssl.trustStore=/etc/ssl/certs/java/cacerts

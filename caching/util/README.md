@@ -214,9 +214,16 @@ import Foo.{DriverAction, Event}
 
 class FooDriver {
 
+ // Use the owning service's alert-routing team identifier so alerts route to the correct team.
+ val alertOwnerTeam: String = ???
  val sec: SequentialExecutionContext = ???
  val baseDriver =
-     new StateMachineDriver[Event, DriverAction, Foo](sec, new Foo(), performAction)
+     new StateMachineDriver[Event, DriverAction, Foo](
+       sec = sec,
+       stateMachine = new Foo(),
+       performAction = performAction,
+       alertOwnerTeam = alertOwnerTeam
+     )
 
  // Kicks off the state machine.
  sec.run { baseDriver.start() }

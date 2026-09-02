@@ -46,6 +46,7 @@ import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.common.TestSliceUtils._
 import com.databricks.dicer.common.{
   AppIdentifierTestUtils,
+  AssignerServiceInfo,
   Assignment,
   AssignmentMetricsSource,
   ClientRequest,
@@ -61,6 +62,7 @@ import com.databricks.dicer.common.{
 }
 import com.databricks.caching.util.Lock.withLock
 import com.databricks.common.status.{ProbeStatus, ProbeStatusSource, ProbeStatuses}
+import com.databricks.dicer.assigner.TargetMetricsUtils
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
 import com.databricks.dicer.assigner.config.InternalTargetConfig.HealthWatcherTargetConfig
 import com.databricks.dicer.assigner.config.{InternalTargetConfig, InternalTargetConfigMap}
@@ -118,7 +120,8 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
   protected val testEnv: InternalDicerTestEnvironment =
     InternalDicerTestEnvironment.create(
       config = sharedSliceletTestAssignerConfig,
-      assignerClusterUri = ASSIGNER_CLUSTER_URI
+      assignerClusterUri = ASSIGNER_CLUSTER_URI,
+      assignerServiceInfoOpt = Some(SliceletSuite.TEST_ASSIGNER_SERVICE_INFO)
     )
 
   /** The number of Slicelets that have been created in the current test case. */
@@ -364,13 +367,6 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
         "clientType" -> clientType.toString
       )
     )
-  }
-
-  /**
-   * Returns the value of the key cardinality estimate gauge.
-   */
-  protected def getKeyCardinalityEstimate: Double = {
-    readPrometheusMetric("dicer_assigner_recent_key_cardinality", targetMetricLabels)
   }
 
   /** Waits for an assignment to be delivered to `slicelet` in which it is assigned `key`. */
@@ -684,9 +680,15 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
   }
 
   test("Slicelet tracks generation and incarnation") {
-    // Test plan: Verify that the slicelet tracks latest generation and incarnation correctly.
-    // Verify this by creating an initial assignment, verifying the initial values, updating the
-    // assignment, and verifying the metrics are updated correctly.
+    // Test plan: Verify that the slicelet tracks latest generation and incarnation correctly, and
+    // that the assigner service info is correctly propagated to the metrics. Verify this by
+    // creating an initial assignment, verifying the initial values, updating the assignment, and
+    // verifying the metrics are updated correctly.
+    val assignmentMetricLabels: Vector[(String, String)] =
+      targetAndSourceMetricLabels ++ Vector(
+        "assignerName" -> SliceletSuite.TEST_ASSIGNER_SERVICE_INFO.name,
+        "assignerInstanceId" -> SliceletSuite.TEST_ASSIGNER_SERVICE_INFO.instanceId
+      )
 
     // Create an initial proposal to freeze the assignment before starting the Slicelet (otherwise
     // starting the Slicelet first would trigger initial assignment generation, which would then
@@ -703,7 +705,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
         Incarnation(
           readPrometheusMetric(
             "dicer_assignment_latest_store_incarnation",
-            targetAndSourceMetricLabels
+            assignmentMetricLabels
           ).toLong
         ) ==
         initialAssignment.generation.incarnation
@@ -712,7 +714,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
         UnixTimeVersion(
           readPrometheusMetric(
             "dicer_assignment_latest_generation_number",
-            targetAndSourceMetricLabels
+            assignmentMetricLabels
           ).toLong
         ) ==
         initialAssignment.generation.number
@@ -720,7 +722,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
       assert(
         readPrometheusMetric(
           "dicer_assignment_number_new_generations_total",
-          targetAndSourceMetricLabels
+          assignmentMetricLabels
         ) == 1
       )
     }
@@ -744,7 +746,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
         UnixTimeVersion(
           readPrometheusMetric(
             "dicer_assignment_latest_generation_number",
-            targetAndSourceMetricLabels
+            assignmentMetricLabels
           ).toLong
         ) ==
         waitForAssignment.generation.number
@@ -752,7 +754,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
       assert(
         readPrometheusMetric(
           "dicer_assignment_number_new_generations_total",
-          targetAndSourceMetricLabels
+          assignmentMetricLabels
         ) == 2
       )
     }
@@ -2114,6 +2116,43 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
       localTestEnv.stop()
     }
   }
+
+  test("key cardinality estimation") {
+    // Test plan: verify that a slicelet's observed key end up in the key cardinality estimate
+    // metric.
+    val slicelet: SliceletHarness = createSlicelet(testEnv)()
+    slicelet.start(selfPort = 1234, listenerOpt = None)
+
+    val assignment1: Assignment = TestUtils.awaitResult(
+      setAndFreezeAssignment(
+        testEnv,
+        createProposal(("" -- ∞) -> Seq(slicelet.squid))
+      ),
+      Duration.Inf
+    )
+    AssertionWaiter("Wait for assignment1").await {
+      assert(slicelet.latestAssignmentOpt.contains(assignment1))
+    }
+
+    val oracle = new HyperLogLog()
+    for (i <- 0 until 1000) {
+      val key = ByteString.copyFrom(BigInt(i.toLong).toByteArray)
+      val sliceKey = SliceKey.fromRawBytes(key)
+
+      oracle.add(key)
+
+      Using.resource(slicelet.createHandle(sliceKey)) { handle =>
+        handle.incrementLoadBy(1)
+      }
+    }
+
+    AssertionWaiter("wait for key cardinality estimate metric report").await {
+      val reported = TargetMetricsUtils
+        .getKeyCardinalityEstimate(expectedAssignerCanonicalizedTargetIdentifier)
+        .get
+      assert(reported == oracle.estimate().toDouble)
+    }
+  }
 }
 
 /**
@@ -2836,40 +2875,6 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
       readPrometheusMetric("dicer_client_watch_channels_created_total", clientNameLabels)
     assert(watchChannelsCreated >= 1.0 && watchChannelsCreated <= 2.0)
   }
-
-  test("key cardinality estimation") {
-    // Test plan: verify that a slicelet's observed key end up in the key cardinality estimate
-    // metric.
-    val slicelet: SliceletHarness = createSlicelet(testEnv)()
-    slicelet.start(selfPort = 1234, listenerOpt = None)
-
-    val assignment1: Assignment = TestUtils.awaitResult(
-      setAndFreezeAssignment(
-        testEnv,
-        createProposal(("" -- ∞) -> Seq(slicelet.squid))
-      ),
-      Duration.Inf
-    )
-    AssertionWaiter("Wait for assignment1").await {
-      assert(slicelet.latestAssignmentOpt.contains(assignment1))
-    }
-
-    val oracle = new HyperLogLog()
-    for (i <- 0 until 1000) {
-      val key = ByteString.copyFrom(BigInt(i.toLong).toByteArray)
-      val sliceKey = SliceKey.fromRawBytes(key)
-
-      oracle.add(key)
-
-      Using.resource(slicelet.createHandle(sliceKey)) { handle =>
-        handle.incrementLoadBy(1)
-      }
-    }
-
-    AssertionWaiter("wait for key cardinality estimate metric report").await {
-      assert(getKeyCardinalityEstimate == oracle.estimate().toDouble)
-    }
-  }
 }
 
 object SliceletSuite {
@@ -2883,6 +2888,12 @@ object SliceletSuite {
    */
   val DATA_PLANE_SLICELET_CLUSTER_URI: URI =
     URI.create("kubernetes-cluster:test-env/cloud1/public/region1/clustertype1/kjfna2")
+
+  /** The Assigner's service info used in the Slicelet suite. */
+  val TEST_ASSIGNER_SERVICE_INFO: AssignerServiceInfo = AssignerServiceInfo(
+    name = "test-assigner",
+    instanceId = "test-instance-id"
+  )
 }
 
 /** A Slicelet listener that logs all its calls for analysis later. */

@@ -31,7 +31,6 @@ import io.prometheus.client.CollectorRegistry
 import com.databricks.dicer.assigner.AssignerMainSuite.BASE_CONFIG
 import com.databricks.dicer.assigner.PreferredAssignerValue.SomeAssigner
 import com.databricks.rpc.DatabricksObjectMapper
-
 class AssignerMainSuite extends DatabricksTest with TestName {
   val etcd: EtcdTestEnvironment = EtcdTestEnvironment.create()
 

@@ -27,6 +27,7 @@ scala_library(
     srcs = ["src/ClientMetrics.scala"],
     deps = [
         "//caching/util:unix_time_version",
+        "//dicer/common:assigner_service_info",
         "//dicer/common:client_type",
         "//dicer/common:generation",
         "//dicer/common:target_helper",
@@ -296,6 +297,7 @@ scala_library(
         "//caching/util:sequential_execution_context",
         "//caching/util:watch_cell",
         "//caching/util:where_am_i_helper",
+        "//dicer/common:assigner_service_info",
         "//dicer/common:assignment_core",
         "//dicer/common:client_request",
         "//dicer/common:client_type",
@@ -349,6 +351,7 @@ scala_library(
         "//caching/util:where_am_i_helper",
         "//dicer/common/proto:common_proto_scala_lib",
         "//dicer/common:app_identifier",
+        "//dicer/common:assigner_service_info",
         "//dicer/common:assignment_core",
         "//dicer/common:client_request",
         "//dicer/common:client_type",

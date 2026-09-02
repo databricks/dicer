@@ -334,7 +334,10 @@ object PrefixLogger {
       line: Line,
       message: => Any,
       every: FiniteDuration): String = {
-    val filename = file.value.split("/").last
+    // `split` would allocate an array on every log call just to take its last element. The path
+    // comes from a compile-time macro and always ends in a file name, so scanning back to the last
+    // separator is equivalent.
+    val filename: String = file.value.substring(file.value.lastIndexOf('/') + 1)
     val everyStr: String =
       if (every == Duration.Zero) "" else s" [every=${durationToCompactString(every)}]"
     s"[$filename:${line.value}]$everyStr $message"

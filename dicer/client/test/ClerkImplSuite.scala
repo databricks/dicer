@@ -1,6 +1,7 @@
 package com.databricks.dicer.client
 
 import java.net.URI
+import java.time.Instant
 import java.util.{Random, UUID}
 
 import com.databricks.conf.Config
@@ -28,10 +29,12 @@ import com.databricks.caching.util.MetricUtils.ChangeTracker
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.common.TestSliceUtils._
 import com.databricks.dicer.common.{
+  AssignerServiceInfo,
   Assignment,
   AssignmentMetricsSource,
   ClientRequest,
   ClientType,
+  Generation,
   InternalDicerTestEnvironment,
   ProposedSliceAssignment
 }
@@ -85,6 +88,72 @@ class ClerkImplSuite extends DatabricksTest with TestName {
     )
   }
 
+  /**
+   * Returns the labels that a Clerk records on its assignment metrics for `target`, taking the
+   * assigner labels from `assignerServiceInfoOpt` and falling back to the unknown-assigner
+   * sentinels when the assignment did not carry any service info.
+   */
+  private def assignmentMetricLabels(
+      target: Target,
+      assignerServiceInfoOpt: Option[AssignerServiceInfo]): Map[String, String] = {
+    Map(
+      "targetCluster" -> target.getTargetClusterLabel,
+      "targetName" -> target.getTargetNameLabel,
+      "source" -> AssignmentMetricsSource.Clerk.toString,
+      "assignerName" -> assignerServiceInfoOpt
+        .map(_.name)
+        .getOrElse(ClientMetrics.UNKNOWN_ASSIGNER_NAME),
+      "assignerInstanceId" -> assignerServiceInfoOpt
+        .map(_.instanceId)
+        .getOrElse(ClientMetrics.UNKNOWN_ASSIGNER_INSTANCE_ID)
+    )
+  }
+
+  /**
+   * Returns the latest generation number sample recorded for the `target` by the Assigner
+   * identified by `assignerServiceInfoOpt`, or `None` if there is no such sample (i.e. the labels
+   * were never set or have been removed).
+   */
+  private def getLatestGenerationNumberOpt(
+      target: Target,
+      assignerServiceInfoOpt: Option[AssignerServiceInfo]): Option[Double] = {
+    MetricUtils.getMetricValueOpt(
+      CollectorRegistry.defaultRegistry,
+      "dicer_assignment_latest_generation_number",
+      assignmentMetricLabels(target, assignerServiceInfoOpt)
+    )
+  }
+
+  /**
+   * Returns the latest store incarnation sample recorded for the `target` by the Assigner
+   * identified by `assignerServiceInfoOpt`, or `None` if there is no such sample (i.e. the labels
+   * were never set or have been removed).
+   */
+  private def getLatestStoreIncarnationOpt(
+      target: Target,
+      assignerServiceInfoOpt: Option[AssignerServiceInfo]): Option[Double] = {
+    MetricUtils.getMetricValueOpt(
+      CollectorRegistry.defaultRegistry,
+      "dicer_assignment_latest_store_incarnation",
+      assignmentMetricLabels(target, assignerServiceInfoOpt)
+    )
+  }
+
+  /** Returns the number of active `SliceLookup`s for the `target` with `ClientType.Clerk`. */
+  private def getNumActiveSliceLookups(target: Target): Long = {
+    MetricUtils
+      .getMetricValue(
+        CollectorRegistry.defaultRegistry,
+        metric = "dicer_client_num_active_slice_lookups",
+        Map(
+          "targetCluster" -> target.getTargetClusterLabel,
+          "targetName" -> target.getTargetNameLabel,
+          "clientType" -> ClientType.Clerk.toString
+        )
+      )
+      .toLong
+  }
+
   test("Methods called after stop don't throw") {
     // Test plan: Verify that all methods called after `ClerkImpl.stop` don't throw for both a
     // regular Clerk and a direct Clerk.
@@ -116,55 +185,12 @@ class ClerkImplSuite extends DatabricksTest with TestName {
     // stopped.
     val target = Target(getSafeName)
 
-    // Returns the latest generation number sample for the `target`, or `None` if there is no
-    // sample (i.e. the label was never set or has been removed).
-    def getLatestGenerationNumberOpt: Option[Double] = {
-      MetricUtils.getMetricValueOpt(
-        CollectorRegistry.defaultRegistry,
-        "dicer_assignment_latest_generation_number",
-        Map(
-          "targetCluster" -> target.getTargetClusterLabel,
-          "targetName" -> target.getTargetNameLabel,
-          "source" -> AssignmentMetricsSource.Clerk.toString
-        )
-      )
-    }
-
-    // Returns the latest store incarnation sample for the `target`, or `None` if there is no
-    // sample (i.e. the label was never set or has been removed).
-    def getLatestStoreIncarnationOpt: Option[Double] = {
-      MetricUtils.getMetricValueOpt(
-        CollectorRegistry.defaultRegistry,
-        "dicer_assignment_latest_store_incarnation",
-        Map(
-          "targetCluster" -> target.getTargetClusterLabel,
-          "targetName" -> target.getTargetNameLabel,
-          "source" -> AssignmentMetricsSource.Clerk.toString
-        )
-      )
-    }
-
-    // Returns the number of active `SliceLookup`s for the `target` with `ClientType.Clerk`.
-    def getNumActiveSliceLookups: Long = {
-      MetricUtils
-        .getMetricValue(
-          CollectorRegistry.defaultRegistry,
-          metric = "dicer_client_num_active_slice_lookups",
-          Map(
-            "targetCluster" -> target.getTargetClusterLabel,
-            "targetName" -> target.getTargetNameLabel,
-            "clientType" -> ClientType.Clerk.toString
-          )
-        )
-        .toLong
-    }
-
     // Setup: Set and freeze an initial assignment to the assigner.
     val proposal: SliceMap[ProposedSliceAssignment] = sampleProposal()
     val initialAssignment: Assignment =
       TestUtils.awaitResult(testEnv.setAndFreezeAssignment(target, proposal), Duration.Inf)
 
-    val initialNumActiveSliceLookup: Long = getNumActiveSliceLookups
+    val initialNumActiveSliceLookup: Long = getNumActiveSliceLookups(target)
     // Setup: Create a Clerk that connects directly to the assigner to send watch requests, because
     // the type of watch server backing a particular address is unlikely to affect the clerk's
     // stopping behavior, and the assigner is easier to control and verify than a Slicelet. (Note:
@@ -173,7 +199,7 @@ class ClerkImplSuite extends DatabricksTest with TestName {
     val clerk: Clerk[ResourceAddress] = createDirectClerk(target)
     // Setup: Wait for the clerk to start and receive the first response.
     AssertionWaiter("Wait for the clerk to start and receive the first response").await {
-      assert(getNumActiveSliceLookups == (initialNumActiveSliceLookup + 1))
+      assert(getNumActiveSliceLookups(target) == (initialNumActiveSliceLookup + 1))
       assert(clerk.impl.forTest.getLatestAssignmentOpt.contains(initialAssignment))
     }
     val numClientSlicezDataForTargetBeforeStop: Int =
@@ -184,13 +210,15 @@ class ClerkImplSuite extends DatabricksTest with TestName {
 
     // Verify: While the clerk is running, the generation-number and store-incarnation gauges are
     // populated for it.
-    assert(getLatestGenerationNumberOpt.exists((_: Double) > 0.0))
-    assert(getLatestStoreIncarnationOpt.isDefined)
+    assert(
+      getLatestGenerationNumberOpt(target, assignerServiceInfoOpt = None).exists((_: Double) > 0.0)
+    )
+    assert(getLatestStoreIncarnationOpt(target, assignerServiceInfoOpt = None).isDefined)
 
     // Setup: Stop the clerk. Also wait for the SliceLookup to be cancelled.
     clerk.impl.stop()
     AssertionWaiter("Wait for the lookup metric to be decremented").await {
-      assert(getNumActiveSliceLookups == initialNumActiveSliceLookup)
+      assert(getNumActiveSliceLookups(target) == initialNumActiveSliceLookup)
     }
 
     // Verify: ClientSlicez should unregister the clerk after stopping the clerk.
@@ -207,8 +235,8 @@ class ClerkImplSuite extends DatabricksTest with TestName {
     // leave a stale sample in the scrape (which would cause `DicerClientNotReceivingAssignments`
     // alerts to fire indefinitely against a clerk that is no longer running).
     AssertionWaiter("Wait for the gauge labels to be removed").await {
-      assert(getLatestGenerationNumberOpt.isEmpty)
-      assert(getLatestStoreIncarnationOpt.isEmpty)
+      assert(getLatestGenerationNumberOpt(target, assignerServiceInfoOpt = None).isEmpty)
+      assert(getLatestStoreIncarnationOpt(target, assignerServiceInfoOpt = None).isEmpty)
     }
 
     // Setup: Record the clerk's current assignment.
@@ -232,8 +260,8 @@ class ClerkImplSuite extends DatabricksTest with TestName {
     // unchanged and the gauge labels should remain removed (i.e. a stopped clerk does not
     // resurrect its metric labels in response to assigner-side activity).
     assert(clerk.impl.forTest.getLatestAssignmentOpt == initialAssignmentOpt)
-    assert(getLatestGenerationNumberOpt.isEmpty)
-    assert(getLatestStoreIncarnationOpt.isEmpty)
+    assert(getLatestGenerationNumberOpt(target, assignerServiceInfoOpt = None).isEmpty)
+    assert(getLatestStoreIncarnationOpt(target, assignerServiceInfoOpt = None).isEmpty)
   }
 
   test("Multi-thread ClerkImpl.stop") {
@@ -293,6 +321,60 @@ class ClerkImplSuite extends DatabricksTest with TestName {
       verifyEventuallyNoWatchRequestsReceivedAfterStop(target)
       assert(!clerk.impl.forTest.getLatestAssignmentOpt.contains(newAssignment))
     }
+  }
+
+  test("Clerk removes gauges for a target after assigner service info change") {
+    // Test plan: Verify that the Clerk removes gauges for a target after the assigner service info
+    // changes. Verify this by recording metrics for one target under an initial assigner service
+    // info, injecting a newer assignment stamped with a different assigner service info, and
+    // checking that the stale metrics are removed.
+    val target = Target(getSafeName)
+    val initialServiceInfo =
+      AssignerServiceInfo(name = "test-assigner-1", instanceId = "instance-1")
+    val changedServiceInfo =
+      AssignerServiceInfo(name = "test-assigner-2", instanceId = "instance-2")
+
+    // Setup: Create a test environment with the initial assigner service info. Then create a
+    // Clerk that receives its first assignment from the test environment.
+    val env: InternalDicerTestEnvironment =
+      InternalDicerTestEnvironment.create(assignerServiceInfoOpt = Some(initialServiceInfo))
+    val initialAssignment: Assignment =
+      TestUtils.awaitResult(env.setAndFreezeAssignment(target, sampleProposal()), Duration.Inf)
+    val clerk: Clerk[ResourceAddress] =
+      env.createDirectClerk(target, initialAssignerIndex = 0)
+
+    // Verify: After the clerk receives its first assignment, it records assignment metrics with the
+    // initial assigner service info.
+    AssertionWaiter("Wait for metrics to be recorded").await {
+      assert(getLatestGenerationNumberOpt(target, Some(initialServiceInfo)).isDefined)
+      assert(getLatestStoreIncarnationOpt(target, Some(initialServiceInfo)).isDefined)
+    }
+
+    // Setup: Simulate a restarted assigner with a different service info by injecting a newer
+    // assignment with a different service info.
+    val assignmentWithChangedServiceInfo: Assignment = initialAssignment.copy(
+      generation = Generation.createForCurrentTime(
+        incarnation = initialAssignment.generation.incarnation,
+        now = Instant.now(),
+        lowerBoundExclusive = initialAssignment.generation
+      ),
+      assignerServiceInfoOpt = Some(changedServiceInfo)
+    )
+    clerk.impl.forTest.injectAssignment(assignmentWithChangedServiceInfo)
+
+    // Verify: After the clerk receives the updated assignment, it records assignment metrics and
+    // clears the stale metrics. The difference in assigner service infos should trigger the Clerk
+    // to clear the gauge with the initial assigner service info.
+    AssertionWaiter("Wait for new metrics to be recorded and stale metrics to be removed").await {
+      assert(getLatestGenerationNumberOpt(target, Some(changedServiceInfo)).isDefined)
+      assert(getLatestStoreIncarnationOpt(target, Some(changedServiceInfo)).isDefined)
+      assert(getLatestGenerationNumberOpt(target, Some(initialServiceInfo)).isEmpty)
+      assert(getLatestStoreIncarnationOpt(target, Some(initialServiceInfo)).isEmpty)
+    }
+
+    // Cleanup: Stop the Clerk and the test environment created by this test.
+    clerk.impl.stop()
+    env.stop()
   }
 
   import ClientMetrics.ClientUuidStatus

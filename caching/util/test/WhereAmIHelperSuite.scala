@@ -1,5 +1,9 @@
 package com.databricks.caching.util
 
+import io.prometheus.client.CollectorRegistry
+
+import com.databricks.caching.util.MetricUtils.ChangeTracker
+import com.databricks.caching.util.WhereAmIHelper.ClusterUriParity
 import com.databricks.caching.util.WhereAmITestUtils.withLocationConfSingleton
 import com.databricks.conf.trusted.LocationConf
 import com.databricks.conf.trusted.LocationConfTestUtils
@@ -8,6 +12,21 @@ import com.databricks.testing.DatabricksTest
 import java.net.URI
 
 class WhereAmIHelperSuite extends DatabricksTest {
+
+  /**
+   * Returns the current cluster URI parity counter for the given label values or 0.0 if the
+   * metric has not yet been recorded.
+   */
+  private def parityCount(parity: ClusterUriParity, clusterUri: String): Double =
+    MetricUtils.getMetricValue(
+      CollectorRegistry.defaultRegistry,
+      "caching_util_where_am_i_cluster_uri_parity_total",
+      Map(
+        "status" -> parity.label,
+        "clusterUri" -> clusterUri
+      )
+    )
+
   test("getClusterUri without LocationConf singleton is None") {
     // Test plan: verify that the URI is empty when the LocationConf singleton isn't set and that
     // getClusterUri does not throw an exception. Verify this by calling getClusterUri and checking
@@ -109,22 +128,31 @@ class WhereAmIHelperSuite extends DatabricksTest {
   }
 
   test("validateCluster with a valid URI does not throw an exception") {
-    // Test plan: verify that validateCluster does not throw an exception when given a valid URI.
-    // Verify this by calling validateCluster with a valid URI and checking that it does not throw
-    // an exception.
+    // Test plan: verify that validateCluster does not throw an exception when given a valid URI
+    // and records a parity match. Verify this by calling validateCluster with a valid URI that is
+    // defined by KubernetesClusterUri.fromUri.
     val validUri = new URI("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01")
+    val matchTracker =
+      ChangeTracker(() => parityCount(ClusterUriParity.Match, validUri.toASCIIString))
+
     WhereAmIHelper.validateCluster(validUri)
+    assertResult(1.0)(matchTracker.totalChange())
   }
 
   test("validateCluster with an empty URI throws an exception") {
-    // Test plan: verify that validateCluster throws an exception when given an empty URI. Verify
-    // this by calling validateCluster with an empty URI and checking that it throws an exception.
+    // Test plan: verify that validateCluster throws an exception when given an empty URI and
+    // records a parity match, because fromUri rejects it too. Verify this by calling
+    // validateCluster with an empty URI and checking that it throws an exception.
 
     // The URI is empty.
     val emptyUri = new URI("")
+    val matchTracker =
+      ChangeTracker(() => parityCount(ClusterUriParity.Match, emptyUri.toASCIIString))
+
     intercept[IllegalArgumentException] {
       WhereAmIHelper.validateCluster(emptyUri)
     }
+    assertResult(1.0)(matchTracker.totalChange())
   }
 
   test("validateCluster with an invalid URI throws an exception") {
@@ -164,6 +192,21 @@ class WhereAmIHelperSuite extends DatabricksTest {
     intercept[IllegalArgumentException] {
       WhereAmIHelper.validateCluster(invalidUri5)
     }
+  }
+
+  test("validateCluster records a validateOnly result when fromUri returns None") {
+    // Test plan: verify that a valid URI that is not defined by `KubernetesClusterUri.fromUri`
+    // passes `validateCluster`, recording a `validateOnly` parity result. Verify this by calling
+    // `validateCluster` with a valid URI whose cloud provider is unknown.
+
+    // The cluster URI is valid but resolves to None by KubernetesClusterUri.fromUri due to the
+    // cloud provider being "random-cloud".
+    val unknownClusterUri: String = "kubernetes-cluster:prod/random-cloud/public/region1/clustertype2/00"
+    val validateOnlyTracker =
+      ChangeTracker(() => parityCount(ClusterUriParity.ValidateOnly, unknownClusterUri))
+
+    WhereAmIHelper.validateCluster(new URI(unknownClusterUri))
+    assertResult(1.0)(validateOnlyTracker.totalChange())
   }
 
   test("getRegionUri without LocationConf singleton is None") {

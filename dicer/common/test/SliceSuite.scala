@@ -17,6 +17,7 @@ import com.google.common.hash.Hashing
 import com.databricks.dicer.common.test.SliceKeyTestDataP
 import java.net.URI
 import java.nio.charset.StandardCharsets
+import java.util.Objects
 import scala.util.Random
 import com.databricks.dicer.common.TestSliceUtils._
 import com.databricks.dicer.external.{
@@ -138,6 +139,28 @@ class SliceSuite extends DatabricksTest {
         Seq(Slice.atLeast(fp("Kili")), Slice(fp("Kili"), InfinitySliceKey))
       )
     )
+  }
+
+  test("Slice hashCode is equivalent to Objects.hash") {
+    // Test plan: verify that the allocation-free hashCode is equivalent to the `Objects.hash` call
+    // it replaced, in the sense that both map the same pairs of Slices to equal hash codes. Verify
+    // this by checking that the two differ by a fixed offset for every Slice, which makes one a
+    // bijection of the other and so preserves exactly which Slices collide.
+
+    def offsetFromObjectsHash(slice: Slice): Int = {
+      slice.hashCode() - Objects.hash(slice.lowInclusive, slice.highExclusive)
+    }
+
+    // Setup: take the offset of the first Slice as the reference the others must match.
+    val expectedOffset: Int = offsetFromObjectsHash(orderedSlices.head)
+
+    // Verify: every Slice has that same offset.
+    for (slice: Slice <- orderedSlices) {
+      assert(
+        offsetFromObjectsHash(slice) == expectedOffset,
+        s"hashCode diverges from Objects.hash for $slice"
+      )
+    }
   }
 
   test("Slice compare/equals with zero-padded prefix comparison") {

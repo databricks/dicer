@@ -69,32 +69,50 @@ private[dicer] object TargetHelper {
   }
 
   /**
-   * Returns whether `target1` and `target2` are considered "fatally" mismatched.
+   * Returns whether the component handling `localTarget` should serve an incoming request from
+   * `requestTarget`.
    *
-   * How does this differ from !Target.equals()? Target.equals() will compare the Targets in
-   * the fully-qualified space, while this function would consider some of those fully-qualified
-   * mismatches to be "non-fatal". In particular, for two [[KubernetesTarget]]s, if their names
-   * match but their cluster identifiers differ, !Target.equals() returns true, while this function
-   * returns false. This is used for our handling of SMK migration, where a target being migrated
-   * may straddle multiple clusters. If the system were to only reason about equality in the
-   * fully-qualified space, then the service under-migration may be considered two distinct Targets.
+   * For two [[KubernetesTarget]]s whose names match but whose cluster identifiers differ, the
+   * assignment is still served. This is used for our handling of SMK migration, where a target
+   * being migrated may straddle multiple clusters.
    *
-   * Other types of mismatches other than this special case are considered fatal (e.g., two
-   * [[AppTarget]]s with the same name but different instance IDs are considered fatally
-   * mismatched).
+   * An [[AppTarget]] `localTarget` should serve an assignment to a same-name [[KubernetesTarget]]
+   * `requestTarget`. This allows KubernetesTarget Clerks to successfully watch for assignments
+   * from AppTarget Slicelets, which de-couples the migration of Clerks from Slicelets. This
+   * relationship is asymmetric: a [[KubernetesTarget]] `localTarget` should not serve an
+   * assignment to a request with an [[AppTarget]] `requestTarget`. We will migrate Slicelets to
+   * [[AppTarget]] completely before Clerks begin migrating, so the reverse direction is never a
+   * valid migration state.
+   *
+   * While this special case is allowed, the correct distribution of assignments from Slicelets to
+   * Clerks depends on the network configuration of the Clerk (i.e., the `sliceletHostname` of the
+   * Clerk). This dependency already exists for KubernetesTarget Clerks talking to KubernetesTarget
+   * Slicelets due to the SMK migration special case described above.
+   *
+   * Other types of mismatches other than these special cases are not served (e.g., two
+   * [[AppTarget]]s with the same name but different instance IDs).
+   *
+   * TODO(<internal bug>): Tighten this check up after SMK migration finishes.
+   *
+   * @param localTarget the target configured on the local component handling the watch request
+   * @param requestTarget the target supplied by the incoming watch request
    */
-  // TODO(<internal bug>): Tighten this check up after SMK migration finishes.
-  def isFatalTargetMismatch(target1: Target, target2: Target): Boolean = {
-    (target1, target2) match {
-      case (target1: KubernetesTarget, target2: KubernetesTarget) =>
-        target1.name != target2.name
+  def shouldServeRequestTarget(localTarget: Target, requestTarget: Target): Boolean = {
+    (localTarget, requestTarget) match {
+      // Both App: serve only when identical.
+      case (localAppTarget: AppTarget, requestAppTarget: AppTarget) =>
+        localAppTarget == requestAppTarget
 
-      case (target: AppTarget, requestTarget: AppTarget) =>
-        target != requestTarget
+      // Both Kubernetes: serve when names match, tolerating a cluster mismatch during SMK
+      // migration.
+      // App local and Kubernetes request: serve when names match, tolerating the type mismatch
+      // during target migration.
+      case (_: KubernetesTarget, _: KubernetesTarget) | (_: AppTarget, _: KubernetesTarget) =>
+        localTarget.name == requestTarget.name
 
-      case _ =>
-        // Reject: the targets are of different types.
-        true
+      // Kubernetes local and App request: never serve.
+      case (_: KubernetesTarget, _: AppTarget) =>
+        false
     }
   }
 

@@ -92,7 +92,6 @@ class SliceLookup private (
    */
   private val watchStubManager = new WatchStubManager(
     clientName = sliceLookupConfig.clientName,
-    subscriberDebugName = subscriberDebugName,
     defaultWatchAddress = sliceLookupConfig.watchAddress,
     tlsOptionsOpt = sliceLookupConfig.tlsOptionsOpt,
     watchFromDataPlane = sliceLookupConfig.watchFromDataPlane

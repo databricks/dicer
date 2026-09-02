@@ -1,16 +1,16 @@
 # proto-file: dicer/common/test/proto/test_data.proto
-# proto-message: FatalTargetMismatchTestDataP
+# proto-message: ShouldServeRequestTargetTestDataP
 
-# Test cases where the targets are considered fatally mismatched.
-fatally_mismatched_test_cases: [
+# Cases where an assignment for local_target should NOT be served to a request for request_target.
+should_not_serve_test_cases: [
   {
     description: "Both Kubernetes targets, name mismatch"
-    target1: {
+    local_target: {
       name: "name1"
       kubernetes_cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01"
       target_type: KUBERNETES
     }
-    target2: {
+    request_target: {
       name: "name2"
       kubernetes_cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01"
       target_type: KUBERNETES
@@ -18,12 +18,12 @@ fatally_mismatched_test_cases: [
   },
   {
     description: "Both Kubernetes targets, both name and cluster mismatch"
-    target1: {
+    local_target: {
       name: "name1"
       kubernetes_cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01"
       target_type: KUBERNETES
     }
-    target2: {
+    request_target: {
       name: "name2"
       kubernetes_cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region1/clustertype1/kjfna2"
       target_type: KUBERNETES
@@ -31,12 +31,12 @@ fatally_mismatched_test_cases: [
   },
   {
     description: "Both App targets, name mismatch"
-    target1: {
+    local_target: {
       name: "name1"
       target_type: APP
       instance_id: "instance-id1"
     }
-    target2: {
+    request_target: {
       name: "name2"
       target_type: APP
       instance_id: "instance-id1"
@@ -44,12 +44,12 @@ fatally_mismatched_test_cases: [
   },
   {
     description: "Both App targets, instance ID mismatch"
-    target1: {
+    local_target: {
       name: "name1"
       target_type: APP
       instance_id: "instance-id1"
     }
-    target2: {
+    request_target: {
       name: "name1"
       target_type: APP
       instance_id: "instance-id2"
@@ -57,42 +57,68 @@ fatally_mismatched_test_cases: [
   },
   {
     description: "Both App targets, both name and instance ID mismatch"
-    target1: {
+    local_target: {
       name: "name1"
       target_type: APP
       instance_id: "instance-id1"
     }
-    target2: {
+    request_target: {
       name: "name2"
       target_type: APP
       instance_id: "instance-id2"
     }
   },
   {
-    description: "Type mismatch: Kubernetes vs App"
-    target1: {
+    description: "Type mismatch: Kubernetes vs App and name mismatch"
+    local_target: {
       name: "name1"
       kubernetes_cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01"
       target_type: KUBERNETES
     }
-    target2: {
+    request_target: {
+      name: "name2"
+      target_type: APP
+      instance_id: "instance-id1"
+    }
+  },
+  {
+    description: "Kubernetes local target and App request target with matching names"
+    local_target: {
+      name: "name1"
+      kubernetes_cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01"
+      target_type: KUBERNETES
+    }
+    request_target: {
       name: "name1"
       target_type: APP
       instance_id: "instance-id1"
     }
+  },
+  {
+    description: "App local target and Kubernetes request target with mismatched names"
+    local_target: {
+      name: "name1"
+      target_type: APP
+      instance_id: "instance-id1"
+    }
+    request_target: {
+      name: "name2"
+      kubernetes_cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01"
+      target_type: KUBERNETES
+    }
   }
 ]
 
-# Test cases where the targets are matched or considered non-fatal mismatched.
-matched_or_non_fatal_mismatched_test_cases: [
+# Cases where an assignment for local_target should be served to a request for request_target.
+should_serve_test_cases: [
   {
-    description: "Both Kubernetes targets, only cluster mismatch (non-fatal for SMK migration)"
-    target1: {
+    description: "Both Kubernetes targets, only cluster mismatch (still served for SMK migration)"
+    local_target: {
       name: "name1"
       kubernetes_cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01"
       target_type: KUBERNETES
     }
-    target2: {
+    request_target: {
       name: "name1"
       kubernetes_cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region1/clustertype1/kjfna2"
       target_type: KUBERNETES
@@ -100,12 +126,12 @@ matched_or_non_fatal_mismatched_test_cases: [
   },
   {
     description: "Both Kubernetes targets, exact match"
-    target1: {
+    local_target: {
       name: "name1"
       kubernetes_cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01"
       target_type: KUBERNETES
     }
-    target2: {
+    request_target: {
       name: "name1"
       kubernetes_cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01"
       target_type: KUBERNETES
@@ -113,15 +139,28 @@ matched_or_non_fatal_mismatched_test_cases: [
   },
   {
     description: "Both App targets, exact match"
-    target1: {
+    local_target: {
       name: "name1"
       target_type: APP
       instance_id: "instance-id1"
     }
-    target2: {
+    request_target: {
       name: "name1"
       target_type: APP
       instance_id: "instance-id1"
+    }
+  },
+  {
+    description: "App local target and Kubernetes request target with matching names"
+    local_target: {
+      name: "name1"
+      target_type: APP
+      instance_id: "instance-id1"
+    }
+    request_target: {
+      name: "name1"
+      kubernetes_cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01"
+      target_type: KUBERNETES
     }
   }
 ]

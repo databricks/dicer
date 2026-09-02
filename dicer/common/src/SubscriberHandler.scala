@@ -195,7 +195,7 @@ class SubscriberHandler(
 
         updateWatchMetrics(request, serviceIdentityOpt)
 
-        if (TargetHelper.isFatalTargetMismatch(target, request.target)) {
+        if (!TargetHelper.shouldServeRequestTarget(target, request.target)) {
           // Implementation note: because of the way `SubscriberHandler` is used in the Assigner (a
           // `SubscriberHandler` is chosen to respond to a request based on a matching target), we
           // do not expect these errors to surface in the Assigner.

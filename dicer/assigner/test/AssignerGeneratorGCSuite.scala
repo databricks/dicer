@@ -88,7 +88,6 @@ class AssignerGeneratorGCSuite extends DatabricksTest with TestName {
   /** Manages the creation of watch stubs for this test suite. */
   private val watchStubManager = new WatchStubManager(
     clientName = "dicer-assigner",
-    subscriberDebugName = "assigner-generator-clustertype2-test",
     defaultWatchAddress = URI.create(s"http://localhost:${testEnv.getAssignerPort}"),
     tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
     watchFromDataPlane = false

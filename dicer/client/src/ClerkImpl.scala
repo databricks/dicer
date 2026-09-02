@@ -24,6 +24,7 @@ import com.databricks.caching.util.{
 import com.google.protobuf.ByteString
 import com.databricks.dicer.client.ClerkMetrics.ClerkFactoryContext
 import com.databricks.dicer.common.{
+  AssignerServiceInfo,
   Assignment,
   AssignmentMetricsSource,
   ClerkData,
@@ -108,12 +109,13 @@ private[dicer] class ClerkImpl[Stub <: AnyRef] private (
   private object ClerkWatchCallback extends ValueStreamCallback[Assignment](sec) {
 
     protected override def onSuccess(assignment: Assignment): Unit = {
+      val previousAssignmentOpt: Option[Assignment] = clerkAssignmentCell.getLatestValueOpt.map(
+        (clerkAssignment: ClerkAssignment) => clerkAssignment.assignment
+      )
       // Suppress known spurious wakeups where the recorded ClerkAssignment is at least as new as
       // the new `assignment`.
-      val latestKnownGeneration: Generation = clerkAssignmentCell.getLatestValueOpt
-        .map(
-          (clerkAssignment: ClerkAssignment) => clerkAssignment.assignment.generation
-        )
+      val latestKnownGeneration: Generation = previousAssignmentOpt
+        .map((previousAssignment: Assignment) => previousAssignment.generation)
         .getOrElse(Generation.EMPTY)
       if (assignment.generation <= latestKnownGeneration) {
         logger.debug(
@@ -139,7 +141,9 @@ private[dicer] class ClerkImpl[Stub <: AnyRef] private (
           ClientMetrics.updateOnNewAssignment(
             assignment.generation,
             target,
-            AssignmentMetricsSource.Clerk
+            AssignmentMetricsSource.Clerk,
+            previousAssignmentOpt.flatMap(_.assignerServiceInfoOpt),
+            assignment.assignerServiceInfoOpt
           )
         }
       }
@@ -195,7 +199,15 @@ private[dicer] class ClerkImpl[Stub <: AnyRef] private (
     // Set isStopped to true to prevent the metrics being resurrected by any pending callbacks
     // scheduled on `sec`.
     isStopped = true
-    ClientMetrics.removeGaugesForTarget(target, AssignmentMetricsSource.Clerk)
+    val latestAssignerServiceInfoOpt: Option[AssignerServiceInfo] =
+      clerkAssignmentCell.getLatestValueOpt.flatMap(
+        (clerkAssignment: ClerkAssignment) => clerkAssignment.assignment.assignerServiceInfoOpt
+      )
+    ClientMetrics.removeGaugesForTarget(
+      target,
+      AssignmentMetricsSource.Clerk,
+      latestAssignerServiceInfoOpt
+    )
     logger.info("Stopped Clerk")
   }
 

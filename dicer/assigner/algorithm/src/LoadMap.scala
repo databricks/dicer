@@ -435,13 +435,17 @@ object LoadMap {
      * returns a new entry with the intersecting slice range, and with load apportioned to the
      * intersection. See remarks on [[LoadMap]] for details of the apportioning strategy.
      */
-    private[LoadMap] def intersection(other: Slice): Option[Entry] =
+    private[LoadMap] def intersection(other: Slice): Option[Entry] = {
+      // Short-circuit before calling `slice.intersection` in the case that `other` is a
+      // (non-strict) superset of `slice`. This avoids wasted allocation from `slice.intersection`
+      // in the common case where the load map has been built from an assignment's slices and is
+      // then queried per slice in the same assignment.
+      if (other.contains(slice)) {
+        return Some(this)
+      }
       slice.intersection(other) match {
         case None => None // no intersection between `this` and `other`
         case Some(intersection) =>
-          if (intersection == slice) { // `other` is a (non-strict) superset of `slice`
-            return Some(this)
-          }
           // Associate all slice bounds with numbers so that we can determine their relative sizes.
           // Numeric values are scaled so that the most significant bytes of all bounds have the
           // same magnitude.
@@ -465,6 +469,7 @@ object LoadMap {
             }
           Some(Entry(intersection, intersectionRatio * load))
       }
+    }
 
     /**
      * Determines how (and whether) to split this entry to get `desiredLoad` in its prefix

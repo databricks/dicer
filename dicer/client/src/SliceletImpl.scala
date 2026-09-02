@@ -783,14 +783,17 @@ private[client] final class SliceletSliceLookup(
     sec.run {
       cellHandle = baseLookup.cellConsumer.watch(new ValueStreamCallback[Assignment](sec) {
         override protected def onSuccess(assignment: Assignment): Unit = {
+          val previousSliceletAssignment: SliceletAssignment = latestSliceletAssignment
           // Set the latest Slicelet assignment if the given assignment is new.
-          if (assignment.generation > latestSliceletAssignment.generationOrEmpty) {
+          if (assignment.generation > previousSliceletAssignment.generationOrEmpty) {
             loadAccumulator.onAssignmentChanged(squid, assignment)
             ClientMetrics
               .updateOnNewAssignment(
                 assignment.generation,
                 sliceLookupConfig.target,
-                AssignmentMetricsSource.Slicelet
+                AssignmentMetricsSource.Slicelet,
+                previousSliceletAssignment.assignmentOpt.flatMap(_.assignerServiceInfoOpt),
+                assignment.assignerServiceInfoOpt
               )
             cell.setValue(SliceletAssignment(Some(squid), Some(assignment)))
           }

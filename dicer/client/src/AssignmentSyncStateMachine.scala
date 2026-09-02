@@ -254,7 +254,7 @@ class AssignmentSyncStateMachine(config: InternalClientConfig, random: Random)
   private def onWatchRequest(
       request: ClientRequest,
       outputBuilder: StateMachineOutput.Builder[DriverAction]): Unit = {
-    if (TargetHelper.isFatalTargetMismatch(sliceLookupConfig.target, request.target)) {
+    if (!TargetHelper.shouldServeRequestTarget(sliceLookupConfig.target, request.target)) {
       logger.warn(
         s"Assignment sync node for target ${sliceLookupConfig.target} received request for " +
         s"target ${request.target}. Ignoring."

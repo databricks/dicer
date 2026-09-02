@@ -1,5 +1,6 @@
 package com.databricks.dicer.assigner
 
+import scala.annotation.tailrec
 import scala.collection.immutable.SortedMap
 import scala.collection.mutable
 import scala.concurrent.duration._
@@ -277,17 +278,22 @@ private[assigner] class LoadWatcher(config: LoadWatcherTargetConfig, staticConfi
     // Run SliceLoadWatcher.cleanUp() for all SliceLoadWatchers that are empty or contain expired
     // Measurements, and remove empty SliceLoadWatchers from the map and the heap.
     val expiryTime: TickerTime = now - config.maxAge
-    while (sliceLoadWatchersByAge.peek.exists(
-        (_: SliceLoadWatcher).earliestMeasurementTimeOrMin < expiryTime
-      )) {
-      val sliceLoadWatcher: SliceLoadWatcher = sliceLoadWatchersByAge.peek.get
-      // No-op if the SliceLoadWatcher is already empty.
-      sliceLoadWatcher.cleanUp(now)
-      if (sliceLoadWatcher.isEmpty) {
-        sliceLoadWatchersByAge.pop()
-        sliceLoadWatchersBySlice.remove(sliceLoadWatcher.slice)
-      }
+
+    @tailrec
+    def cleanUpExpiredSliceLoadWatchers(): Unit = sliceLoadWatchersByAge.peek match {
+      case Some(sliceLoadWatcher: SliceLoadWatcher)
+          if sliceLoadWatcher.earliestMeasurementTimeOrMin < expiryTime =>
+        // No-op if the SliceLoadWatcher is already empty.
+        sliceLoadWatcher.cleanUp(now)
+        if (sliceLoadWatcher.isEmpty) {
+          sliceLoadWatchersByAge.pop()
+          sliceLoadWatchersBySlice.remove(sliceLoadWatcher.slice)
+        }
+        cleanUpExpiredSliceLoadWatchers()
+      case _ => ()
     }
+
+    cleanUpExpiredSliceLoadWatchers()
   }
 
   object forTest {
@@ -650,10 +656,10 @@ private[assigner] object LoadWatcher {
      */
     def cleanUp(now: TickerTime): Unit = {
       val expiryTime: TickerTime = now - measurementMaxAge
+      var oldestMeasurementOpt: Option[MeasurementElement] = measurementsByAge.peek
       while ({
-        val hasExpired: Boolean = measurementsByAge.peek.exists {
-          (_: MeasurementElement).time < expiryTime
-        }
+        val hasExpired: Boolean =
+          oldestMeasurementOpt.exists((_: MeasurementElement).time < expiryTime)
         // Condition to maintain the size requirement of SliceLoadWatcher: The number of tracked
         // Measurements should be no more than the of max number of replicas reported by the
         // currently tracked (i.e. non-expired) Measurements themselves. This is a heuristic
@@ -665,14 +671,16 @@ private[assigner] object LoadWatcher {
         }
         hasExpired || oversizing
       }) {
-        removeExistingMeasurement(measurementsByAge.peek.get)
+        // `oversizing` can only be true when at least two Measurements are tracked, so the head is
+        // always present here.
+        removeExistingMeasurement(oldestMeasurementOpt.get)
+        oldestMeasurementOpt = measurementsByAge.peek
       }
 
       // After removing all Measurements needed, reset the priority of SliceLoadWatcher and adjust
       // its position in the heap (if it's attached to any).
       setPriority(
-        priority =
-          measurementsByAge.peek.map((_: MeasurementElement).time).getOrElse(TickerTime.MIN)
+        priority = oldestMeasurementOpt.map((_: MeasurementElement).time).getOrElse(TickerTime.MIN)
       )
     }
 
