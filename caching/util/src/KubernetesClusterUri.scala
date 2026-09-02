@@ -24,8 +24,6 @@ final class KubernetesClusterUri private (val uri: String) {
 
 object KubernetesClusterUri {
 
-  private val logger: PrefixLogger = PrefixLogger.create(getClass, "")
-
   /**
    * Parses `uri` as a Kubernetes cluster IDM URI, resolving it against the embedded
    * [[InfraDataModel]]. Returns `None` when `uri` is not a `kubernetes-cluster:` URI, or the
@@ -45,9 +43,6 @@ object KubernetesClusterUri {
       IdmUriParseMetrics.UriType.KubernetesCluster,
       succeeded = resultOpt.isDefined
     )
-    if (resultOpt.isEmpty) {
-      logger.warn(s"Failed to parse Kubernetes cluster IDM URI: $uri")
-    }
     resultOpt
   }
 }

@@ -20,12 +20,11 @@ import com.databricks.rpc.tls.TLSOptions
 /**
  * Manages the creation of watch stubs for watching assignments.
  *
- * @note `subscriberDebugName` and `watchFromDataPlane` are unused but match the internal
- * implementation signature for compatibility.
+ * @note `watchFromDataPlane` is unused but matches the internal implementation signature for
+ * compatibility.
  */
 class WatchStubManager private[dicer] (
     clientName: String,
-    subscriberDebugName: String,
     defaultWatchAddress: URI,
     tlsOptionsOpt: Option[TLSOptions],
     watchFromDataPlane: Boolean) {

@@ -1,7 +1,5 @@
 package com.databricks.dicer.external
 
-import java.util.Objects
-
 /**
  * REQUIRES: `lowInclusive` is less than `highExclusive`
  *
@@ -50,7 +48,12 @@ final class Slice(val lowInclusive: SliceKey, val highExclusive: HighSliceKey)
     case _ => false
   }
 
-  override def hashCode(): Int = Objects.hash(lowInclusive, highExclusive)
+  // Combine the two field hashes inline rather than via Objects.hash, which takes varargs and so
+  // allocates an Object[] for the arguments (plus a box per primitive) on every call. Slices are
+  // used extensively as map keys in Dicer code, so that per-call allocation balloons into large GC
+  // overheads. This is equivalent to Objects.hash up to a constant offset, so collisions are
+  // unchanged.
+  override def hashCode(): Int = 31 * lowInclusive.hashCode() + highExclusive.hashCode()
 
   override def toString: String = s"[$lowInclusive .. $highExclusive)"
 }

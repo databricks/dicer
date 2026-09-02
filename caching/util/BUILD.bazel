@@ -1451,9 +1451,11 @@ scala_library(
     name = "where_am_i_helper",
     srcs = ["src/WhereAmIHelper.scala"],
     deps = [
+        ":kubernetes_cluster_uri",
         "//wrappers/conf:dbconf",
         "//wrappers/conf:environment",
         "//wrappers/conf:location",
+        "@maven//:io_prometheus_simpleclient",
     ],
 )
 
@@ -1462,6 +1464,7 @@ scala_test(
     srcs = ["test/WhereAmIHelperSuite.scala"],
     timeout = "short",
     deps = [
+        ":metric_utils",
         ":where_am_i_helper",
         ":where_am_i_test_utils",
         "//wrappers/conf:dbconf",
@@ -1470,6 +1473,7 @@ scala_test(
         "//wrappers/util:async_test_helpers",
         "//wrappers/util:databricks-test",
         "@maven//:com_typesafe_config",
+        "@maven//:io_prometheus_simpleclient",
     ],
 )
 
@@ -1494,7 +1498,6 @@ scala_library(
     srcs = ["src/KubernetesClusterUri.scala"],
     deps = [
         ":idm_uri_parse_metrics",
-        ":prefix_logger",
         "//wrappers/deployment:infra_data_model_lib",
         "//wrappers/deployment:kubernetes_cluster",
     ],

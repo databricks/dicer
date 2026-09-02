@@ -3,7 +3,12 @@ package com.databricks.dicer.client
 import java.time.Instant
 import java.util.concurrent.TimeUnit
 import io.prometheus.client.{Counter, Gauge, Histogram}
-import com.databricks.dicer.common.{AssignmentMetricsSource, ClientType, Generation}
+import com.databricks.dicer.common.{
+  AssignerServiceInfo,
+  AssignmentMetricsSource,
+  ClientType,
+  Generation
+}
 import com.databricks.dicer.external.Target
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import io.grpc.Status.Code
@@ -12,18 +17,45 @@ import scala.concurrent.duration._
 /** Contains Prometheus metrics for the Dicer client library. */
 private[dicer] object ClientMetrics {
 
+  /**
+   * The `assignerName` label value recorded when assigner service info is missing from the
+   * assignment. This could be missing when the Assigner was unable to determine its service
+   * info or is running an outdated binary.
+   */
+  private[client] val UNKNOWN_ASSIGNER_NAME = ""
+
+  /**
+   * The `assignerInstanceId` label value recorded when assigner service info is missing from the
+   * assignment. Missing for the same reasons as [[UNKNOWN_ASSIGNER_NAME]].
+   */
+  private[client] val UNKNOWN_ASSIGNER_INSTANCE_ID = ""
+
   private val latestGenerationNumber: Gauge = Gauge
     .build()
     .name("dicer_assignment_latest_generation_number")
     .help("The latest generation number for a target")
-    .labelNames("targetCluster", "targetName", "targetInstanceId", "source")
+    .labelNames(
+      "targetCluster",
+      "targetName",
+      "targetInstanceId",
+      "source",
+      "assignerName",
+      "assignerInstanceId"
+    )
     .register()
 
   private val latestStoreIncarnation: Gauge = Gauge
     .build()
     .name("dicer_assignment_latest_store_incarnation")
     .help("The latest store incarnation for a target")
-    .labelNames("targetCluster", "targetName", "targetInstanceId", "source")
+    .labelNames(
+      "targetCluster",
+      "targetName",
+      "targetInstanceId",
+      "source",
+      "assignerName",
+      "assignerInstanceId"
+    )
     .register()
 
   @SuppressWarnings(
@@ -36,7 +68,14 @@ private[dicer] object ClientMetrics {
     .build()
     .name("dicer_assignment_number_new_generations_total")
     .help("The number of new generations for a target")
-    .labelNames("targetCluster", "targetName", "targetInstanceId", "source")
+    .labelNames(
+      "targetCluster",
+      "targetName",
+      "targetInstanceId",
+      "source",
+      "assignerName",
+      "assignerInstanceId"
+    )
     .register()
 
   @SuppressWarnings(
@@ -168,45 +207,84 @@ private[dicer] object ClientMetrics {
     .register()
 
   /**
-   * Removes the per-(target, source) labels from the gauge metrics so that a stopped client does
-   * not leave stale samples in the Prometheus scrape.
+   * Removes the per-(target, source, assigner service info) labels from the gauge metrics so that
+   * a stopped client or changed assigner service info does not leave stale samples in the
+   * Prometheus scrape.
    *
    * Only Gauges are removed; Counters (e.g. `numberNewGenerations`) are intentionally left in
    * place because we typically observe counters by `rate()` queries and leaving them in place
    * doesn't affect the dashboards or alerts.
    *
    * @param target the target whose labels should be removed
-   * @param source the source label associated with the stopped client
+   * @param source the source label associated with the calling client
+   * @param assignerServiceInfoOpt the service info of the Assigner whose samples should be
+   *                               removed, or [[None]] if the assignment did not carry it.
    */
   private[client] def removeGaugesForTarget(
       target: Target,
-      source: AssignmentMetricsSource): Unit = {
-    val targetCluster: String = target.getTargetClusterLabel
-    val targetName: String = target.getTargetNameLabel
-    val targetInstanceId: String = target.getTargetInstanceIdLabel
-    val sourceLabel: String = source.toString
-    latestGenerationNumber.remove(targetCluster, targetName, targetInstanceId, sourceLabel)
-    latestStoreIncarnation.remove(targetCluster, targetName, targetInstanceId, sourceLabel)
+      source: AssignmentMetricsSource,
+      assignerServiceInfoOpt: Option[AssignerServiceInfo]): Unit = {
+    val assignerName: String = assignerServiceInfoOpt.map(_.name).getOrElse(UNKNOWN_ASSIGNER_NAME)
+    val assignerInstanceId: String =
+      assignerServiceInfoOpt.map(_.instanceId).getOrElse(UNKNOWN_ASSIGNER_INSTANCE_ID)
+    val labelValues: Seq[String] = Seq(
+      target.getTargetClusterLabel,
+      target.getTargetNameLabel,
+      target.getTargetInstanceIdLabel,
+      source.toString,
+      assignerName,
+      assignerInstanceId
+    )
+
+    latestGenerationNumber.remove(labelValues: _*)
+    latestStoreIncarnation.remove(labelValues: _*)
   }
 
   /**
-   * Updates the Prometheus metrics for the latestGenerationNumber, latestTargetIncarnation,
-   * latestStoreIncarnation, and numberNewGenerations.
+   * Updates the Prometheus metrics for the latestGenerationNumber, latestStoreIncarnation, and
+   * numberNewGenerations. Cleans up stale metrics when the assigner service info changes so at
+   * most one series per (target, source) is exported.
    *
-   * @param generation the generation of the new assignment
-   * @param target the target
-   * @param source the source of the metric
+   * This function can be called concurrently by multiple clerks for the same target but should
+   * never throw an exception. Concurrent writes to gauges will cause the last-written value to
+   * win. In the scenario one clerk removes gauges for a target and simultaneously another clerk
+   * attempts to write to the gauge, this will result in either the deleted series being recreated
+   * or the write being dropped. This is acceptable because once both clerks are updated with the
+   * newest assignment, the metrics will converge to the same state with no stale series.
+   *
+   * @param generation the generation of the new assignment.
+   * @param target the target.
+   * @param source the source of the metric.
+   * @param previousAssignerServiceInfoOpt the service info previously recorded for this
+   *                                       (target, source), or [[None]] if it was unknown.
+   * @param assignerServiceInfoOpt the service info of the Assigner that generated the assignment,
+   *                               or [[None]] if the assignment did not carry it.
    */
   private[client] def updateOnNewAssignment(
       generation: Generation,
       target: Target,
-      source: AssignmentMetricsSource): Unit = {
+      source: AssignmentMetricsSource,
+      previousAssignerServiceInfoOpt: Option[AssignerServiceInfo],
+      assignerServiceInfoOpt: Option[AssignerServiceInfo]): Unit = {
+    // Remove gauge if the assigner service info has changed. The service info can change if the
+    // Assigner rolls back to a version with a different service info or possibly (but unlikely)
+    // if the client received an assignment from a different Assigner service instance.
+    if (previousAssignerServiceInfoOpt != assignerServiceInfoOpt) {
+      removeGaugesForTarget(target, source, previousAssignerServiceInfoOpt)
+    }
+
+    val assignerName: String = assignerServiceInfoOpt.map(_.name).getOrElse(UNKNOWN_ASSIGNER_NAME)
+    val assignerInstanceId: String =
+      assignerServiceInfoOpt.map(_.instanceId).getOrElse(UNKNOWN_ASSIGNER_INSTANCE_ID)
+
     latestGenerationNumber
       .labels(
         target.getTargetClusterLabel,
         target.getTargetNameLabel,
         target.getTargetInstanceIdLabel,
-        source.toString
+        source.toString,
+        assignerName,
+        assignerInstanceId
       )
       .set(generation.number.value)
     latestStoreIncarnation
@@ -214,7 +292,9 @@ private[dicer] object ClientMetrics {
         target.getTargetClusterLabel,
         target.getTargetNameLabel,
         target.getTargetInstanceIdLabel,
-        source.toString
+        source.toString,
+        assignerName,
+        assignerInstanceId
       )
       .set(generation.incarnation.value)
     numberNewGenerations
@@ -222,7 +302,9 @@ private[dicer] object ClientMetrics {
         target.getTargetClusterLabel,
         target.getTargetNameLabel,
         target.getTargetInstanceIdLabel,
-        source.toString
+        source.toString,
+        assignerName,
+        assignerInstanceId
       )
       .inc()
   }

@@ -186,7 +186,6 @@ class AssignerSuite extends DatabricksTest with TestName {
   /** Manages the creation of watch stubs for this test suite. */
   private val watchStubManager = new WatchStubManager(
     clientName = "dicer-assigner",
-    subscriberDebugName = "assigner-suite-test",
     defaultWatchAddress = URI.create(s"http://localhost:${testEnv.getAssignerPort}"),
     tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
     watchFromDataPlane = false
@@ -1170,7 +1169,6 @@ class AssignerSuite extends DatabricksTest with TestName {
 
       val localStubManager = new WatchStubManager(
         clientName = "dicer-assigner",
-        subscriberDebugName = "alternative-target-canonicalize-test",
         defaultWatchAddress = URI.create(s"http://localhost:${localTestEnv.getAssignerPort}"),
         tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
         watchFromDataPlane = false
@@ -1314,7 +1312,6 @@ class AssignerSuite extends DatabricksTest with TestName {
     try {
       val standbyStubManager = new WatchStubManager(
         clientName = "dicer-assigner",
-        subscriberDebugName = "standby-alternative-target-alert-test",
         defaultWatchAddress = URI.create(s"http://localhost:${standbyTestEnv.getAssignerPort}"),
         tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
         watchFromDataPlane = false

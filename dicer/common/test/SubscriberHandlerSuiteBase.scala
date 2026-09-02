@@ -572,32 +572,37 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
     assert(response.redirect.addressOpt.isEmpty)
   }
 
-  // Verify that metrics are recorded for both fatal and non-fatal mismatches by parameterizing the
-  // test over targets with both types of mismatches.
-  private case class TargetMismatchCase(target1: Target, target2: Target)
+  // Verify that metrics are recorded for both served and not-served requests by parameterizing the
+  // test over targets with both outcomes.
+  private case class TargetMismatchCase(localTarget: Target, requestTarget: Target)
   private val targetMismatchCases: Seq[TargetMismatchCase] = {
     val uri1: URI = URI.create("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01")
     val uri2: URI = URI.create("kubernetes-cluster:test-env/cloud1/public/region1/clustertype1/kjfna2")
     Seq(
-      // Fatal: same cluster, different names.
+      // Not served: same cluster, different names.
       TargetMismatchCase(
-        Target.createKubernetesTarget(uri1, "a"),
-        Target.createKubernetesTarget(uri1, "b")
+        localTarget = Target.createKubernetesTarget(uri1, "a"),
+        requestTarget = Target.createKubernetesTarget(uri1, "b")
       ),
-      // Non-fatal: different clusters, same name.
+      // Served: different clusters, same name.
       TargetMismatchCase(
-        Target.createKubernetesTarget(uri1, "a"),
-        Target.createKubernetesTarget(uri2, "a")
+        localTarget = Target.createKubernetesTarget(uri1, "a"),
+        requestTarget = Target.createKubernetesTarget(uri2, "a")
       ),
-      // Fatal: same app name, different instance IDs.
+      // Not served: same app name, different instance IDs.
       TargetMismatchCase(
-        Target.createAppTarget("app-target", "instance-1"),
-        Target.createAppTarget("app-target", "instance-2")
+        localTarget = Target.createAppTarget("app-target", "instance-1"),
+        requestTarget = Target.createAppTarget("app-target", "instance-2")
       ),
-      // Fatal: KubernetesTarget handler vs AppTarget request (different target types).
+      // Served: AppTarget handler vs same-name KubernetesTarget request.
       TargetMismatchCase(
-        Target.createKubernetesTarget(uri1, "a"),
-        Target.createAppTarget("app-target", "instance-1")
+        localTarget = Target.createAppTarget("a", "instance-1"),
+        requestTarget = Target.createKubernetesTarget(uri1, "a")
+      ),
+      // Not served: KubernetesTarget handler vs same-name AppTarget request.
+      TargetMismatchCase(
+        localTarget = Target.createKubernetesTarget(uri1, "a"),
+        requestTarget = Target.createAppTarget("a", "instance-1")
       )
     )
   }
@@ -605,7 +610,7 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
   gridTest("Target mismatch metrics")(targetMismatchCases) { testCase: TargetMismatchCase =>
     // Test plan: Verify that requests for a target which does not match that of the handler are
     // recorded in the metrics.
-    val driver = createDriver(Location.Slicelet, testCase.target1)
+    val driver = createDriver(Location.Slicelet, testCase.localTarget)
 
     val handlerLocation: Location = Location.Slicelet
     val assignment1 = createRandomAssignment(9, Vector("pod0", "pod1"))
@@ -615,8 +620,8 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
     val numRequestsTrackerForMatchedTarget = MetricUtils.ChangeTracker(
       () =>
         getNumWatchRequests(
-          handlerTarget = testCase.target1,
-          requestTarget = testCase.target1,
+          handlerTarget = testCase.localTarget,
+          requestTarget = testCase.localTarget,
           metricsKey = MetricsKey(isClerk = true, LATEST_VERSION),
           handlerLocation = handlerLocation,
           alternativeTargetOpt = None
@@ -627,8 +632,8 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
     val numRequestsTrackerForMismatchedTarget = MetricUtils.ChangeTracker(
       () =>
         getNumWatchRequests(
-          handlerTarget = testCase.target1,
-          requestTarget = testCase.target2,
+          handlerTarget = testCase.localTarget,
+          requestTarget = testCase.requestTarget,
           metricsKey = MetricsKey(isClerk = true, LATEST_VERSION),
           handlerLocation = handlerLocation,
           alternativeTargetOpt = None
@@ -638,11 +643,11 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
     // Setup: create a metric change tracker for the number of Clerk subscribers for both the
     // handler and mismatched requester targets.
     val numClerksForHandlerTarget = MetricUtils.ChangeTracker(
-      () => getNumClerks(testCase.target1, handlerLocation, LATEST_VERSION)
+      () => getNumClerks(testCase.localTarget, handlerLocation, LATEST_VERSION)
     )
 
     val numClerksForRequesterTarget = MetricUtils.ChangeTracker(
-      () => getNumClerks(testCase.target2, handlerLocation, LATEST_VERSION)
+      () => getNumClerks(testCase.requestTarget, handlerLocation, LATEST_VERSION)
     )
 
     // Verify: The number of mismatched target requests should be 0.
@@ -651,22 +656,23 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
 
     // Setup: Create a client request with a different target.
     val request = createClientRequest(Generation.EMPTY, ClerkData, "subscriber1")
-      .copy(target = testCase.target2)
+      .copy(target = testCase.requestTarget)
 
     // Send the request to the handler.
     val response: Future[ClientResponseP] =
       driver.handleWatch(request, redirectOpt = None)
     Await.ready(response, Duration.Inf)
 
-    val fatalMismatch: Boolean =
-      TargetHelper.isFatalTargetMismatch(testCase.target1, testCase.target2)
-    assert(response.value.get.isFailure == fatalMismatch)
+    val shouldServe: Boolean =
+      TargetHelper.shouldServeRequestTarget(testCase.localTarget, testCase.requestTarget)
+    assert(response.value.get.isSuccess == shouldServe)
     AssertionWaiter("Mismatches incremented", pollInterval = METRICS_ASSERTION_POLL_INTERVAL)
       .await {
         assert(numRequestsTrackerForMismatchedTarget.totalChange() == 1)
       }
 
-    // Verify: The number of clerks should be updated for `target2` and not for `target1`.
+    // Verify: The number of clerks should be updated for the request target and not the local
+    // target.
     AssertionWaiter("Subscriber tracked", pollInterval = METRICS_ASSERTION_POLL_INTERVAL).await {
       assert(numClerksForHandlerTarget.totalChange() == 0)
       assert(numClerksForRequesterTarget.totalChange() == 1)
@@ -674,7 +680,7 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
 
     // Send a client request with the correct target.
     val request2 = createClientRequest(Generation.EMPTY, ClerkData, "subscriber2")
-      .copy(target = testCase.target1)
+      .copy(target = testCase.localTarget)
 
     val response2: Future[ClientResponseP] =
       driver.handleWatch(request2, redirectOpt = None)
@@ -759,8 +765,8 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
     }
   }
 
-  test("Fatal target mismatch gets error") {
-    // Test plan: verify that a fatal target mismatch between the request and handler targets
+  test("Request that should not be served gets error") {
+    // Test plan: verify that a request whose target should not be served by the handler's target
     // results in an error.
     val driver = createDriver(Location.Slicelet, target)
     val otherTarget = Target("other-name")

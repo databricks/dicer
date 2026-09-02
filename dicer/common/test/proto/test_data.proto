@@ -782,20 +782,22 @@ message SliceKeyTestDataP {
   }
 }
 
-// Test data for verifying the expected non-fatal target mismatch behavior.
-message FatalTargetMismatchTestDataP {
+// Test data for verifying `TargetHelper.shouldServeRequestTarget` behavior.
+message ShouldServeRequestTargetTestDataP {
 
   message TestCaseP {
     optional string description = 1;
-    optional TargetP target1 = 2;
-    optional TargetP target2 = 3;
+    optional TargetP local_target = 2;
+    optional TargetP request_target = 3;
   }
 
-  // Test cases where the targets are considered fatally mismatched.
-  repeated TestCaseP fatally_mismatched_test_cases = 1;
+  // Cases where an assignment for `local_target` should NOT be served to a request for
+  // `request_target`.
+  repeated TestCaseP should_not_serve_test_cases = 1;
 
-  // Test cases where the targets are matched or considered non-fatal mismatched.
-  repeated TestCaseP matched_or_non_fatal_mismatched_test_cases = 2;
+  // Cases where an assignment for `local_target` should be served to a request for
+  // `request_target`.
+  repeated TestCaseP should_serve_test_cases = 2;
 }
 
 /** Test data for ResourceAddress tests. */

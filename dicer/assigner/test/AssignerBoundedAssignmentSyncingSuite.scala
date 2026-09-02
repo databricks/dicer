@@ -78,7 +78,6 @@ class AssignerBoundedAssignmentSyncingSuite extends DatabricksTest with TestName
   private def createStub(assigner: TestAssigner, target: Target): AssignmentServiceStub = {
     new WatchStubManager(
       clientName = Project.DicerAssigner.name,
-      subscriberDebugName = "assigner-bounded-assignment-syncing-suite-test",
       defaultWatchAddress = URI.create(s"http://localhost:${assigner.localUri.getPort}"),
       tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
       watchFromDataPlane = false

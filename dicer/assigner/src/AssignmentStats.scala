@@ -1,7 +1,5 @@
 package com.databricks.dicer.assigner
 
-import scala.collection.mutable
-
 import com.databricks.caching.util.AssertMacros.iassert
 import com.databricks.dicer.assigner.algorithm.{Algorithm, LoadMap}
 import com.databricks.dicer.assigner.config.InternalTargetConfig.LoadBalancingConfig
@@ -223,30 +221,52 @@ object AssignmentStats {
         assignment: Assignment,
         loadMap: LoadMap
     ): AssignmentLoadStats = {
-      val loadByResource = mutable.Map[Squid, Double]().withDefaultValue(0.0)
-      val loadBySlice = mutable.Map[Slice, Double]().withDefaultValue(0.0)
-      val numOfAssignedSlicesByResource = mutable.Map[Squid, Int]().withDefaultValue(0)
+      // Accumulate the per-resource totals efficiently with arrays instead of maps keyed by
+      // `Squid`. The inner loop runs once per slice replica and dominates the cost here, and every
+      // write into a `mutable.Map[Squid, Double]` stores a boxed value, which for a Double always
+      // allocates. An `Array[Double]` stores primitives, so that loop no longer allocates; the
+      // immutable Maps built below still box, but only once per resource.
+      val resources: Vector[Squid] = assignment.assignedResources.toVector
+      val resourceIndices: Map[Squid, Int] = resources.zipWithIndex.toMap
+      val loadPerResource = new Array[Double](resources.size)
+      val sliceCountPerResource = new Array[Int](resources.size)
 
-      for (sliceAssignment: SliceAssignment <- assignment.sliceAssignments) {
+      val sliceAssignments: Vector[SliceAssignment] = assignment.sliceAssignments
+      val loadBySliceBuilder = Map.newBuilder[Slice, Double]
+      loadBySliceBuilder.sizeHint(sliceAssignments.size)
+
+      for (sliceAssignment: SliceAssignment <- sliceAssignments) {
         val slice: Slice = sliceAssignment.slice
 
         // Even though the assignment corresponding to the `loadMap` may not exactly match the
         // `assignment` passed in, we can still get the load on each slice accurately since
         // `loadMap` will handle load apportioning internally.
         val sliceLoad: Double = loadMap.getLoad(slice)
-        loadBySlice(slice) += sliceLoad
+        loadBySliceBuilder += slice -> sliceLoad
 
         val sliceResources: Set[Squid] = sliceAssignment.resources
+        val loadPerReplica: Double = sliceLoad / sliceResources.size
         for (resource: Squid <- sliceResources) {
-          loadByResource(resource) += sliceLoad / sliceResources.size
-          numOfAssignedSlicesByResource(resource) += 1
+          val resourceIndex: Int = resourceIndices(resource)
+          loadPerResource(resourceIndex) += loadPerReplica
+          sliceCountPerResource(resourceIndex) += 1
         }
       }
 
+      val loadByResourceBuilder = Map.newBuilder[Squid, Double]
+      loadByResourceBuilder.sizeHint(resources.size)
+      val sliceCountByResourceBuilder = Map.newBuilder[Squid, Int]
+      sliceCountByResourceBuilder.sizeHint(resources.size)
+      for (resourceWithIndex <- resourceIndices) {
+        val (resource, resourceIndex): (Squid, Int) = resourceWithIndex
+        loadByResourceBuilder += resource -> loadPerResource(resourceIndex)
+        sliceCountByResourceBuilder += resource -> sliceCountPerResource(resourceIndex)
+      }
+
       AssignmentLoadStats(
-        loadByResource = loadByResource.toMap,
-        loadBySlice = loadBySlice.toMap,
-        numOfAssignedSlicesByResource = numOfAssignedSlicesByResource.toMap
+        loadByResource = loadByResourceBuilder.result(),
+        loadBySlice = loadBySliceBuilder.result(),
+        numOfAssignedSlicesByResource = sliceCountByResourceBuilder.result()
       )
     }
 

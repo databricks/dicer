@@ -14,6 +14,7 @@ import com.databricks.conf.trusted.{LocationConf, LocationConfTestUtils}
 import com.databricks.rpc.DatabricksObjectMapper
 import com.databricks.dicer.common.TestSliceUtils._
 import com.databricks.dicer.common.{
+  AssignerServiceInfo,
   Assignment,
   AssignmentMetricsSource,
   ClientType,
@@ -87,7 +88,10 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
 
   /** The test environment used for all the tests. */
   protected final val testEnv: InternalDicerTestEnvironment =
-    InternalDicerTestEnvironment.create(assignerClusterUri = URI_DEV_AWS_US_WEST_2)
+    InternalDicerTestEnvironment.create(
+      assignerClusterUri = URI_DEV_AWS_US_WEST_2,
+      assignerServiceInfoOpt = Some(ClerkSuite.TEST_ASSIGNER_SERVICE_INFO)
+    )
 
   /** The Assigner used for all the tests. */
   protected final val testAssigner: TestAssigner = testEnv.testAssigner
@@ -504,7 +508,9 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
           "targetCluster" -> target.getTargetClusterLabel,
           "targetName" -> target.getTargetNameLabel,
           "targetInstanceId" -> target.getTargetInstanceIdLabel,
-          "source" -> source.toString
+          "source" -> source.toString,
+          "assignerName" -> ClerkSuite.TEST_ASSIGNER_SERVICE_INFO.name,
+          "assignerInstanceId" -> ClerkSuite.TEST_ASSIGNER_SERVICE_INFO.instanceId
         )
       )
     }
@@ -516,7 +522,9 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
           "targetCluster" -> target.getTargetClusterLabel,
           "targetName" -> target.getTargetNameLabel,
           "targetInstanceId" -> target.getTargetInstanceIdLabel,
-          "source" -> source.toString
+          "source" -> source.toString,
+          "assignerName" -> ClerkSuite.TEST_ASSIGNER_SERVICE_INFO.name,
+          "assignerInstanceId" -> ClerkSuite.TEST_ASSIGNER_SERVICE_INFO.instanceId
         )
       )
     }
@@ -528,7 +536,9 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
           "targetCluster" -> target.getTargetClusterLabel,
           "targetName" -> target.getTargetNameLabel,
           "targetInstanceId" -> target.getTargetInstanceIdLabel,
-          "source" -> source.toString
+          "source" -> source.toString,
+          "assignerName" -> ClerkSuite.TEST_ASSIGNER_SERVICE_INFO.name,
+          "assignerInstanceId" -> ClerkSuite.TEST_ASSIGNER_SERVICE_INFO.instanceId
         )
       )
     }
@@ -939,6 +949,15 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
     }
     clerk.stop()
   }
+}
+
+object ClerkSuite {
+
+  /** The Assigner's service info used in the Clerk suite. */
+  val TEST_ASSIGNER_SERVICE_INFO: AssignerServiceInfo = AssignerServiceInfo(
+    name = "test-assigner",
+    instanceId = "test-instance-id"
+  )
 }
 
 /**

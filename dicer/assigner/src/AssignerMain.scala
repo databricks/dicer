@@ -6,8 +6,9 @@ import java.util.UUID
 
 import scala.util.{Failure, Success}
 import scala.concurrent.duration._
+import scala.util.control.NonFatal
 
-import io.prometheus.client.Gauge
+import io.prometheus.client.{Counter, Gauge}
 
 import com.databricks.DatabricksMain
 import com.databricks.backend.common.util.Project
@@ -28,7 +29,12 @@ import com.databricks.dicer.assigner.config.{
   TargetConfigProviderFactory
 }
 import com.databricks.dicer.assigner.config.TargetConfigProvider.DEFAULT_INITIAL_POLL_TIMEOUT
-import com.databricks.dicer.common.{EtcdBootstrapper, Incarnation}
+import com.databricks.dicer.common.{
+  AppIdentifier,
+  AssignerServiceInfo,
+  EtcdBootstrapper,
+  Incarnation
+}
 
 /**
  * The Assigner's main logic as a class so tests can drive the real [[DatabricksMain]] bootstrap via
@@ -79,6 +85,22 @@ private[assigner] class AssignerMainBase(
     .name("dicer_assigner_location_info")
     .help("Records the location info for the Assigner provided through WhereAmI, if available.")
     .labelNames("whereAmIClusterUri")
+    .register()
+
+  /**
+   * Temporary metric to allow us to check the status of the assigner service info. This will be
+   * used to validate that assigner service info is available for all Assigners before we make it
+   * required. Incremented exactly once per Assigner startup, with the status this Assigner
+   * resolved.
+   */
+  private val assignerServiceInfoStatusCounter = Counter
+    .build()
+    .name("dicer_assigner_service_info_status_total")
+    .help(
+      "Counts Assigner startups by whether the assigner service info is available, labeled by " +
+      "status, name, and instance id."
+    )
+    .labelNames("status", "name", "instanceId")
     .register()
 
   /**
@@ -243,6 +265,37 @@ private[assigner] class AssignerMainBase(
     // target metrics (see TargetHelper.getTargetClusterLabel).
     locationInfoGauge.labels(assignerClusterUri.toASCIIString()).set(1)
 
+    // Convert this process' app identity into Dicer's assigner service info at the process
+    // boundary. If the app identity is absent or invalid, return `None`. Record availability
+    // of assigner service info in the metric.
+    // TODO(<internal bug>): Make required once validated all Assigners have valid service info.
+    val assignerServiceInfoOpt: Option[AssignerServiceInfo] = try {
+      AppIdentifier.getFromEnv match {
+        case Some(appIdentifier: AppIdentifier) =>
+          val serviceInfo = AssignerServiceInfo(
+            appIdentifier.name,
+            appIdentifier.instanceId
+          )
+          assignerServiceInfoStatusCounter
+            .labels(ServiceInfoStatus.Valid.toString, serviceInfo.name, serviceInfo.instanceId)
+            .inc()
+          Some(serviceInfo)
+        case None =>
+          // No app identifier is set, so the Assigner starts with no service info and generated
+          // assignments carry no service info.
+          assignerServiceInfoStatusCounter.labels(ServiceInfoStatus.Absent.toString, "", "").inc()
+          None
+      }
+    } catch {
+      case NonFatal(ex) =>
+        // This can happen if the app metadata is present but invalid or other non fatal
+        // exceptions. We log a warning and fail open with None as assigner service info is
+        // non blocking to Assigner initialization.
+        prefixLogger.warn(s"Tried to get app identifier, but failed: $ex")
+        assignerServiceInfoStatusCounter.labels(ServiceInfoStatus.Invalid.toString, "", "").inc()
+        None
+    }
+
     // Try to create a KubernetesTargetWatcher factory. If it fails, log an alert and fall back to a
     // factory which returns no-op target watchers. It is OK to proceed starting up the Assigner in
     // this case because Kubernetes signals are not strictly necessary, as we will still hear about
@@ -273,8 +326,7 @@ private[assigner] class AssignerMainBase(
       kubernetesTargetWatcherFactory,
       localClusterMembershipCheckerFactory,
       remoteClusterMembershipCheckerFactoryOpt,
-      // TODO(<internal bug>): Plumb assigner service info through to the assigner.
-      assignerServiceInfoOpt = None
+      assignerServiceInfoOpt
     )
   }
 
@@ -341,3 +393,29 @@ object AssignerMain
       confFactory = config => new DicerAssignerConf(config),
       kubernetesMembershipCheckerFactoryOverrideOpt = None
     )
+
+/**
+ * The availability of the Assigner's service info at startup.
+ */
+private sealed trait ServiceInfoStatus
+
+private object ServiceInfoStatus {
+
+  /** The process app identifier was present and resolved into a valid [[AssignerServiceInfo]]. */
+  case object Valid extends ServiceInfoStatus {
+    override def toString: String = "valid"
+  }
+
+  /** No process app identifier was set, so the Assigner has no service info. */
+  case object Absent extends ServiceInfoStatus {
+    override def toString: String = "absent"
+  }
+
+  /**
+   * The process app identifier was present but could not be resolved into a valid
+   * [[AssignerServiceInfo]].
+   */
+  case object Invalid extends ServiceInfoStatus {
+    override def toString: String = "invalid"
+  }
+}

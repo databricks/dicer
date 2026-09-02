@@ -400,6 +400,7 @@ scala_library(
         "//dicer/assigner/config:internal_target_config_map",
         "//dicer/assigner:assigner_conf",
         "//dicer/assigner:assigner_slicez",
+        "//dicer/assigner:target_metrics_utils",
         "//dicer/client:clerk_impl",
         "//dicer/client:slicelet_impl",
         "//dicer/client:test_client",

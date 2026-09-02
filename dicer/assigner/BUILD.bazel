@@ -29,6 +29,7 @@ scala_library(
         "//caching/util:where_am_i_helper",
         "//dicer/assigner/config:config_provider",
         "//dicer/assigner/config:internal_target_config_map",
+        "//dicer/common:app_identifier",
         "//dicer/common:assigner_service_info",
         "//dicer/common:etcd_bootstrapper",
         "//dicer/common:generation",
