@@ -188,7 +188,8 @@ class AssignerSuite extends DatabricksTest with TestName {
     clientName = "dicer-assigner",
     defaultWatchAddress = URI.create(s"http://localhost:${testEnv.getAssignerPort}"),
     tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
-    watchFromDataPlane = false
+    watchFromDataPlane = false,
+    sourceIpOpt = None
   )
   override def beforeAll(): Unit = {
     super.beforeAll()
@@ -756,7 +757,8 @@ class AssignerSuite extends DatabricksTest with TestName {
             callerService = "unknown",
             metricsKey = MetricsKey(isClerk = true, LATEST_VERSION),
             handlerLocation = handlerLocations(i),
-            alternativeTargetOpt = None
+            alternativeTargetOpt = None,
+            senderClusterUriOpt = None
           )
       )
 
@@ -1171,7 +1173,8 @@ class AssignerSuite extends DatabricksTest with TestName {
         clientName = "dicer-assigner",
         defaultWatchAddress = URI.create(s"http://localhost:${localTestEnv.getAssignerPort}"),
         tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
-        watchFromDataPlane = false
+        watchFromDataPlane = false,
+        sourceIpOpt = None
       )
       val enabledStub: AssignmentServiceStub = localStubManager.createWatchStub(
         redirectAddressOpt = None,
@@ -1314,7 +1317,8 @@ class AssignerSuite extends DatabricksTest with TestName {
         clientName = "dicer-assigner",
         defaultWatchAddress = URI.create(s"http://localhost:${standbyTestEnv.getAssignerPort}"),
         tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
-        watchFromDataPlane = false
+        watchFromDataPlane = false,
+        sourceIpOpt = None
       )
       val standbyStub: AssignmentServiceStub = standbyStubManager.createWatchStub(
         redirectAddressOpt = None,

@@ -1547,7 +1547,8 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
       expectedSliceletTargetIdentifier,
       watchUri, { resourceAddress: ResourceAddress =>
         resourceAddress
-      }
+      },
+      sourceIpOpt = None
     )
 
     AssertionWaiter("Wait for assignment").await {

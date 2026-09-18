@@ -1,6 +1,7 @@
 package com.databricks.dicer.external
 
 import com.databricks.caching.util.TestUtils
+import com.databricks.caching.util.ExecutorUtil
 import com.databricks.dicer.common.{
   Assignment,
   ClerkCheckInvariantsRequestP,
@@ -16,6 +17,8 @@ import com.databricks.dicer.common.{
   CreateClerkResponseP,
   CreateCrossClusterClerkRequestP,
   CreateCrossClusterClerkResponseP,
+  CreateMultiNicClerkRequestP,
+  CreateMultiNicClerkResponseP,
   Generation,
   GetClerkDebugNameRequestP,
   GetClerkDebugNameResponseP,
@@ -26,10 +29,9 @@ import com.databricks.dicer.common.{
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.friend.external.TwoLevelShardingClerkAccessor
 import scala.concurrent.duration.Duration
-import scala.concurrent.Future
+import scala.concurrent.{ExecutionContext, Future}
 import scala.collection.mutable
 
-import com.databricks.threading.NamedExecutor
 import java.net.URI
 
 import com.databricks.dicer.common.ClerkSampleStubForKeyResponseP.ResultEntry

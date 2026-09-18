@@ -7,7 +7,14 @@ import com.databricks.caching.util.EwmaCounter.EwmaAccumulator
 import com.databricks.caching.util.TestUtils.assertThrow
 import com.databricks.caching.util.test.EwmaAccumulatorTestDataP
 import com.databricks.caching.util.test.EwmaAccumulatorTestDataP.TestActionP.Action
-import com.databricks.caching.util.test.EwmaAccumulatorTestDataP._
+import com.databricks.caching.util.test.EwmaAccumulatorTestDataP.{
+  AssertValueEqualsP,
+  EwmaAccumulatorP,
+  RepeatedAppendWithCheckP,
+  TestActionP,
+  TestCaseP,
+  messageCompanion
+}
 
 class EwmaAccumulatorSuite extends DatabricksTest {
 

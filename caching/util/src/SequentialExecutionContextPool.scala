@@ -1,12 +1,12 @@
 package com.databricks.caching.util
 
 import java.lang.Thread.UncaughtExceptionHandler
+import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.ThreadFactory
 
 import io.prometheus.client.Gauge
 
 import com.databricks.caching.util.CachingErrorCode.UNCAUGHT_SEC_POOL_ERROR
-import com.databricks.caching.util.ContextAwareUtil.ContextAwareScheduledExecutorService
 import com.databricks.caching.util.SequentialExecutionContextPool.{ExceptionHandler, Metrics}
 
 // This file contains abstractions relevant to the SequentialExecutionContext. These classes are
@@ -23,7 +23,7 @@ trait SequentialExecutionContextPool {
 
   private[util] val name: String
 
-  private[util] val executorService: ContextAwareScheduledExecutorService
+  private[util] val executorService: ScheduledThreadPoolExecutor
 
   private[util] val exceptionHandler: ExceptionHandler
 
@@ -69,35 +69,6 @@ object SequentialExecutionContextPool {
     createInternal(poolName, numThreads, exceptionHandler, enableContextPropagation)
   }
 
-  /** Use [[create]] with an explicit `alertOwnerTeam` instead. */
-  @deprecated(
-    "Provide alertOwnerTeam explicitly; the CachingTeam default is only correct for " +
-    "Caching-owned pools (<internal bug>)."
-  )
-  def create(poolName: String, numThreads: Int): SequentialExecutionContextPool =
-    create(
-      poolName,
-      numThreads,
-      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
-      enableContextPropagation = true
-    )
-
-  /** Use [[create]] with an explicit `alertOwnerTeam` instead. */
-  @deprecated(
-    "Provide alertOwnerTeam explicitly; the CachingTeam default is only correct for " +
-    "Caching-owned pools (<internal bug>)."
-  )
-  def create(
-      poolName: String,
-      numThreads: Int,
-      enableContextPropagation: Boolean): SequentialExecutionContextPool =
-    create(
-      poolName,
-      numThreads,
-      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
-      enableContextPropagation = enableContextPropagation
-    )
-
   private def createInternal(
       poolName: String,
       numThreads: Int,
@@ -106,18 +77,12 @@ object SequentialExecutionContextPool {
   ): SequentialExecutionContextPool = {
     val factory = new SequentialExecutionContextPoolThreadFactory(poolName, exceptionHandler)
 
-    // Although the SequentialExecutionContext executors running on the pool are already
-    // instrumented and perform their own context propagation, we use an instrumented thread pool
-    // executor here anyway to support the use of SECs in existing services that rely on the common
-    // monitoring and alerting support that is in place for instrumented thread pools (i.e. Generic
-    // Service Dashboard panels, Service Inspector alerts, ...). We disable context propagation in
-    // the underlying executor service since context propagation is already handled by the SECs.
-    val executor: ContextAwareScheduledExecutorService =
-      ContextAwareUtil.createScheduledExecutorService(
-        poolName,
-        maxThreads = numThreads,
-        factory = factory
-      )
+    val executor = new ScheduledThreadPoolExecutor(numThreads, factory)
+    // Each SEC keeps at most one outstanding tickle scheduled in the pool at a time, so it cancels
+    // and reschedules that tickle constantly -- a cancellation-heavy workload. Evict cancelled
+    // tasks from the delay queue immediately so those superseded tickles don't pile up there until
+    // their original due time.
+    executor.setRemoveOnCancelPolicy(true)
     new SequentialExecutionContextPoolImpl(
       poolName,
       executor,
@@ -233,7 +198,7 @@ object SequentialExecutionContextPool {
  */
 private class SequentialExecutionContextPoolImpl private[util] (
     val name: String,
-    val executorService: ContextAwareScheduledExecutorService,
+    val executorService: ScheduledThreadPoolExecutor,
     val exceptionHandler: ExceptionHandler,
     val enableContextPropagation: Boolean)
     extends SequentialExecutionContextPool {
@@ -244,8 +209,8 @@ private class SequentialExecutionContextPoolImpl private[util] (
 }
 
 /**
- * Thread factory for [[SequentialExecutionContextPool]] that registers itself as the uncaught
- * exception handler on each thread.
+ * Thread factory for [[SequentialExecutionContextPool]] that establishes a background context and
+ * registers the pool's uncaught exception handler on each thread.
  */
 private class SequentialExecutionContextPoolThreadFactory(
     poolName: String,
@@ -260,7 +225,12 @@ private class SequentialExecutionContextPoolThreadFactory(
     val threadId: Long = nextThreadId.getAndIncrement()
     val threadName = s"$poolName-$threadId"
     logger.debug(s"Creating thread $threadName")
-    val thread = new Thread(r, threadName): @SuppressWarnings(
+    // The raw executor does not establish a context for internal SEC tickles. Set the worker's
+    // baseline context so tickles run as background work and command-specific wrappers restore this
+    // clean boundary after each command.
+    val backgroundRunnable: Runnable =
+      ExecutorUtil.Internal.wrapRunnable(r, enableContextPropagation = false)
+    val thread = new Thread(backgroundRunnable, threadName): @SuppressWarnings(
       Array("BadMethodCall-NewThread", "reason:grandfathered-2685b5e321e85aac")
     )
     Metrics.incrementNumThreadsGauge(poolName)

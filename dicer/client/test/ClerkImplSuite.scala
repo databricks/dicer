@@ -21,6 +21,7 @@ import com.databricks.caching.util.TestUtils
 import com.databricks.caching.util.TestUtils.{TestName, shamefullyAwait200msForNonEventInAsyncTest}
 import com.databricks.caching.util.{
   AssertionWaiter,
+  ExecutorUtil,
   FakeSequentialExecutionContextPool,
   FakeTypedClock,
   MetricUtils
@@ -41,7 +42,6 @@ import com.databricks.dicer.common.{
 import com.databricks.dicer.external.{Clerk, ClerkConf, ResourceAddress, SliceKey, Slicelet, Target}
 import com.databricks.dicer.friend.SliceMap
 import com.databricks.testing.DatabricksTest
-import com.databricks.threading.NamedExecutor
 
 class ClerkImplSuite extends DatabricksTest with TestName {
 
@@ -284,7 +284,7 @@ class ClerkImplSuite extends DatabricksTest with TestName {
     val clerk: Clerk[ResourceAddress] = createDirectClerk(target)
 
     val numOps: Int = 20
-    val ec: ExecutionContext = NamedExecutor.create(getSafeName, 4)
+    val ec: ExecutionContext = ExecutorUtil.createContextPropagatingExecutionContext(getSafeName, 4)
     val random = new Random()
     // Setup: Randomly select one operation that will serve as the stop operation.
     val stopOpIndex: Int = random.nextInt(numOps)
@@ -415,7 +415,8 @@ class ClerkImplSuite extends DatabricksTest with TestName {
       target: Target,
       status: ClientUuidStatus): ClerkImpl[ResourceAddress] = {
     val clerkConf: ClerkConf = createClientUuidTestClerkConf(status)
-    ClerkImpl.create(clerkConf, target, DUMMY_WATCH_ADDRESS, identity[ResourceAddress])
+    ClerkImpl
+      .create(clerkConf, target, DUMMY_WATCH_ADDRESS, identity[ResourceAddress], sourceIpOpt = None)
   }
 
   /** Creates a Clerk via [[ClerkImpl.createForDataPlaneDirectClerk]] (direct-to-assigner path). */

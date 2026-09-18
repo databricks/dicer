@@ -256,7 +256,8 @@ class ClientSlicezSuite extends DatabricksTest with TestName {
           watchStubCacheTime = 20.seconds,
           watchFromDataPlane = false,
           alternativeTargetOpt = None,
-          enableRateLimiting = false
+          enableRateLimiting = false,
+          sourceIpOpt = None
         ),
         subscriberDebugName = subscriberDebugName
       )

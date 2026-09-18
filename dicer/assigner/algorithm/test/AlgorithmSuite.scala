@@ -14,7 +14,7 @@ import com.databricks.api.proto.dicer.external.LoadBalancingMetricConfigP.{
 }
 import com.databricks.caching.util.TestUtils.ParameterizedTestNameDecorator
 import com.databricks.dicer.assigner.AssignmentStats.{AssignmentChangeStats, AssignmentLoadStats}
-import com.databricks.dicer.assigner.config.{ChurnConfig, InternalTargetConfig}
+import com.databricks.dicer.assigner.config.{ChurnConfig, ConfigTestUtil, InternalTargetConfig}
 import com.databricks.dicer.assigner.config.InternalTargetConfig.{
   KeyReplicationConfig,
   LoadBalancingConfig
@@ -957,7 +957,7 @@ class ParameterizedAlgorithmSuite(keyReplicationConfig: KeyReplicationConfig)
       val targetConfig: InternalTargetConfig = createConfigForLoadBalancing(
         // Disable churn penalty so that the algorithm can be more aggressive in load balancing to
         // new resources.
-        ChurnConfig.ZERO_PENALTY,
+        ConfigTestUtil.ZERO_PENALTY_CHURN_CONFIG,
         maxLoadHint,
         uniformLoadReservationHint = testCase.reservationHint
       )

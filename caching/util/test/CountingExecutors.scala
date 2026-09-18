@@ -5,7 +5,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import scala.concurrent.ExecutionContext
 import scala.concurrent.duration.FiniteDuration
 
-import com.databricks.caching.util.ContextAwareUtil.ContextAwareExecutionContext
+import com.databricks.caching.util.ExecutorUtil.ContextAwareExecutionContext
 
 object CountingExecutors {
 
@@ -23,7 +23,7 @@ object CountingExecutors {
     def getNumExecutionsViaPreparedExecutor: Int = counter.get
 
     override val contextAwareExecutionContext: ContextAwareExecutionContext = {
-      ContextAwareUtil.wrapExecutionContext(
+      ExecutorUtil.Internal.wrapExecutionContext(
         delegate.getName,
         new CountingExecutionContext(delegate.contextAwareExecutionContext, counter),
         enableContextPropagation = false // `delegate` handles context propagation if so configured

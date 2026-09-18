@@ -15,6 +15,7 @@ import com.databricks.caching.util.CachingErrorCode.SUBSCRIBER_HANDLER_ASSIGNMEN
 import com.databricks.caching.util.CachingErrorCode.SUBSCRIBER_HANDLER_WATCH_RESPONSE_NEAR_OR_EXCEEDING_LIMIT
 import com.databricks.caching.util.{
   Cancellable,
+  KubernetesClusterUri,
   PrefixLogger,
   SequentialExecutionContext,
   Severity,
@@ -303,6 +304,7 @@ class SubscriberHandler(
       target,
       request.target,
       request.alternativeTargetOpt,
+      request.clusterUriOpt,
       serviceIdentityOpt,
       metricsKey
     )
@@ -901,6 +903,13 @@ object SubscriberHandler {
 object SubscriberHandlerMetrics {
 
   /**
+   * The `senderClusterUri` label value used when a watch request did not carry a sender cluster
+   * URI. Non-empty so that queries can tell it apart from a handler running a binary that predates
+   * the label, whose series carry no `senderClusterUri` at all.
+   */
+  private val UNKNOWN_SENDER_CLUSTER_URI: String = "unknown"
+
+  /**
    * Histogram buckets for serialized assignment size in bytes. Uses fine granularity (128 KiB
    * steps) up to the gRPC limit (currently 4 MiB, see
    * [[WatchServerHelper.MAX_WATCH_MESSAGE_CONTENT_LENGTH]]) and coarser granularity (1 MiB steps)
@@ -1020,7 +1029,8 @@ object SubscriberHandlerMetrics {
       "matchedCluster",
       "matchedInstanceId",
       "alternativeTargetName",
-      "alternativeTargetInstanceId"
+      "alternativeTargetInstanceId",
+      "senderClusterUri"
     )
     .register(CollectorRegistry.defaultRegistry)
 
@@ -1078,6 +1088,7 @@ object SubscriberHandlerMetrics {
       handlerTarget: Target,
       requestTarget: Target,
       alternativeTargetOpt: Option[AppTarget],
+      senderClusterUriOpt: Option[KubernetesClusterUri],
       serviceIdentityOpt: Option[ServiceIdentity],
       metricsKey: MetricsKey): Unit = {
     val callerService: String = serviceIdentityOpt
@@ -1108,7 +1119,8 @@ object SubscriberHandlerMetrics {
         matchedLabels.matchedCluster,
         matchedLabels.matchedInstanceId,
         alternativeTargetName,
-        alternativeTargetInstanceId
+        alternativeTargetInstanceId,
+        getSenderClusterUriLabel(senderClusterUriOpt)
       )
       .inc()
   }
@@ -1124,6 +1136,15 @@ object SubscriberHandlerMetrics {
         (alternativeTarget.name, alternativeTarget.instanceId)
       }
       .getOrElse(("", ""))
+  }
+
+  /**
+   * Returns the `senderClusterUri` label value for the given optional sender cluster URI, or
+   * [[UNKNOWN_SENDER_CLUSTER_URI]] when it is absent.
+   */
+  private[common] def getSenderClusterUriLabel(
+      senderClusterUriOpt: Option[KubernetesClusterUri]): String = {
+    senderClusterUriOpt.map((_: KubernetesClusterUri).uri).getOrElse(UNKNOWN_SENDER_CLUSTER_URI)
   }
 
   /**

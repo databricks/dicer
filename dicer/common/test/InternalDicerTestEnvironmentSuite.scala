@@ -571,4 +571,5 @@ class InternalDicerTestEnvironmentSuite extends DatabricksTest with TestName {
     assert(!sliceletConfNoFakeFlag.isFeatureRolloutFlagEnabled("feature-on", target))
     assert(errorCount.totalChange() == 1)
   }
+
 }

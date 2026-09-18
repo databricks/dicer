@@ -6,8 +6,7 @@ import scala.collection.mutable
 import scala.concurrent.duration.Duration
 import scala.concurrent.Future
 
-import com.databricks.caching.util.PrefixLogger
-import com.databricks.caching.util.TestUtils
+import com.databricks.caching.util.{Pipeline, PrefixLogger, TestUtils}
 import com.databricks.conf.Config
 import com.databricks.dicer.assigner.InterposingEtcdPreferredAssignerDriver
 import com.databricks.dicer.assigner.config.InternalTargetConfigMap
@@ -25,7 +24,6 @@ import com.databricks.dicer.external.DicerTestEnvironment.{
   TestAssignmentBuilder
 }
 import com.databricks.dicer.friend.{SliceAccessor, SliceMap, Squid}
-import com.databricks.threading.NamedExecutor
 import com.databricks.rpc.tls.TLSOptions
 
 /**
@@ -238,10 +236,13 @@ class DicerTestEnvironment private[dicer] (
    */
   def unfreezeAssignment(target: Target): Future[Unit] = {
     logger.info(s"Received unfreezeAssignment for $target")
-    internalTestEnv
-      .unfreezeAssignment(target)
+    // Converting the result to Unit is stateless and trivial, so it is safe to run inline.
+    Pipeline
+      .fromFuture(internalTestEnv.unfreezeAssignment(target))
       .map[Unit] { _: Option[Assignment] =>
-      }(NamedExecutor.globalImplicit)
+        ()
+      }(Pipeline.InlinePipelineExecutor)
+      .toFuture
   }
 
   /** Stops the environment. No function on this environment must be called after this call. */

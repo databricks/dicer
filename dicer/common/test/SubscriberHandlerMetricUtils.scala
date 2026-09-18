@@ -1,7 +1,7 @@
 package com.databricks.dicer.common
 import io.prometheus.client.CollectorRegistry
 
-import com.databricks.caching.util.MetricUtils
+import com.databricks.caching.util.{KubernetesClusterUri, MetricUtils}
 import com.databricks.dicer.common.SubscriberHandler.{Location, MetricsKey}
 import com.databricks.dicer.common.SubscriberHandlerMetrics.TargetMatchedLabels
 import com.databricks.dicer.common.TargetHelper.TargetOps
@@ -75,6 +75,7 @@ object SubscriberHandlerMetricUtils {
       handlerTarget: Target,
       requestTarget: Target,
       alternativeTargetOpt: Option[AppTarget],
+      senderClusterUriOpt: Option[KubernetesClusterUri],
       callerService: String,
       metricsKey: MetricsKey,
       handlerLocation: Location): Long = {
@@ -101,7 +102,9 @@ object SubscriberHandlerMetricUtils {
           "matchedCluster" -> matchedLabels.matchedCluster,
           "matchedInstanceId" -> matchedLabels.matchedInstanceId,
           "alternativeTargetName" -> alternativeTargetName,
-          "alternativeTargetInstanceId" -> alternativeTargetInstanceId
+          "alternativeTargetInstanceId" -> alternativeTargetInstanceId,
+          "senderClusterUri" ->
+          SubscriberHandlerMetrics.getSenderClusterUriLabel(senderClusterUriOpt)
         )
       )
       .toLong

@@ -564,6 +564,19 @@ class InternalDicerTestEnvironment private (
 /** Companion object to provide a factory method for creating a test Dicer Assigner. */
 object InternalDicerTestEnvironment {
 
+  // Configure a default app identifier for the test process so that internal Slicelet behavior
+  // that depends on the existence of an app identifier works correctly in customer tests, even
+  // when the tests do not explicitly configure an app identifier. For example, the Assigner
+  // rejects watch requests from Slicelets for a target that has `use_alternative_target` enabled
+  // when the watch requests have no alternative target populated (which is internally populated
+  // from the process app identifier). Thus, flipping `use_alternative_target` to enabled would
+  // break existing customer tests unless the test suites configure an app identifier for the test
+  // process.
+  // TODO(<internal bug>): We can remove this once the migration to AppTarget is complete and we remove
+  //   the code that internally populates an alternative target for a Slicelet based on its app
+  //   identifier.
+  AppIdentifierTestUtils.configureForTest(name = "test-app", instanceId = "test-instance")
+
   /**
    * Test-only wrapper that makes get() return a default config for any target not in the
    * underlying map. Only get() has this behavior; size, targetNames, and iterator reflect only

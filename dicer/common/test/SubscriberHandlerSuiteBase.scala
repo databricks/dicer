@@ -9,7 +9,13 @@ import com.databricks.api.proto.dicer.common.{
   SyncAssignmentStateP
 }
 import com.google.protobuf.ByteString
-import com.databricks.caching.util.{AssertionWaiter, MetricUtils, StatusUtils, TestUtils}
+import com.databricks.caching.util.{
+  AssertionWaiter,
+  KubernetesClusterUri,
+  MetricUtils,
+  StatusUtils,
+  TestUtils
+}
 import com.databricks.caching.util.TestUtils.TestName
 import com.databricks.dicer.common.SubscriberHandler.{Location, MetricsKey}
 import com.databricks.dicer.common.TargetHelper.TargetOps
@@ -88,7 +94,8 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
       debugName: String,
       requestTarget: Target = target,
       version: Long = Version.LATEST_VERSION,
-      alternativeTargetOpt: Option[AppTarget] = None): ClientRequest = {
+      alternativeTargetOpt: Option[AppTarget] = None,
+      clusterUriOpt: Option[KubernetesClusterUri] = None): ClientRequest = {
     ClientRequest(
       requestTarget,
       SyncAssignmentState.KnownGeneration(knownGeneration),
@@ -99,7 +106,7 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
       redirectTokenOpt = None,
       version = version,
       alternativeTargetOpt = alternativeTargetOpt,
-      clusterUriOpt = None,
+      clusterUriOpt = clusterUriOpt,
       regionUriOpt = None
     )
   }
@@ -202,16 +209,18 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
   }
 
   /**
-   * Gets the number of watch requests matching the given `handlerTarget`, `requestTarget`, and
-   * `alternativeTargetOpt` parameters (an unpopulated request matches `alternativeTargetOpt` =
-   * `None`).
+   * Gets the number of watch requests matching the given `handlerTarget`, `requestTarget`,
+   * `alternativeTargetOpt`, and `senderClusterUri` parameters (a request that did not populate its
+   * alternativeTarget matches `alternativeTargetOpt` = `None`, and one that did not populate its
+   * sender cluster URI matches `senderClusterUri` = "unknown").
    */
   private def getNumWatchRequests(
       handlerTarget: Target,
       requestTarget: Target,
       metricsKey: MetricsKey,
       handlerLocation: Location,
-      alternativeTargetOpt: Option[AppTarget]): Double = {
+      alternativeTargetOpt: Option[AppTarget],
+      senderClusterUri: String): Double = {
     val (alternativeTargetName, alternativeTargetInstanceId): (String, String) =
       SubscriberHandlerMetrics.getAlternativeTargetLabels(alternativeTargetOpt)
     readPrometheusMetric(
@@ -227,7 +236,8 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
         "version" -> metricsKey.versionLabel,
         "handlerLocation" -> handlerLocation.toString,
         "alternativeTargetName" -> alternativeTargetName,
-        "alternativeTargetInstanceId" -> alternativeTargetInstanceId
+        "alternativeTargetInstanceId" -> alternativeTargetInstanceId,
+        "senderClusterUri" -> senderClusterUri
       )
     )
   }
@@ -624,7 +634,8 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
           requestTarget = testCase.localTarget,
           metricsKey = MetricsKey(isClerk = true, LATEST_VERSION),
           handlerLocation = handlerLocation,
-          alternativeTargetOpt = None
+          alternativeTargetOpt = None,
+          senderClusterUri = "unknown"
         )
     )
 
@@ -636,7 +647,8 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
           requestTarget = testCase.requestTarget,
           metricsKey = MetricsKey(isClerk = true, LATEST_VERSION),
           handlerLocation = handlerLocation,
-          alternativeTargetOpt = None
+          alternativeTargetOpt = None,
+          senderClusterUri = "unknown"
         )
     )
 
@@ -696,13 +708,14 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
     }
   }
 
-  test("alternativeTarget is recorded on the watch request metric") {
-    // Test plan: Verify that a request's alternativeTarget is recorded on the watch request metric,
-    // and that a request without one is recorded under the empty labels. Verify this by sending one
-    // watch request of each kind and confirming each label set's counter increments exactly once.
+  test("alternativeTarget and sender cluster URI are recorded on the watch request metric") {
+    // Test plan: Verify that a request's alternativeTarget and sender cluster URI are recorded on
+    // the watch request metric, and that a request carrying neither is recorded under the
+    // unpopulated label values. Verify this by sending one watch request of each kind and
+    // confirming each label set's counter increments exactly once.
 
-    // Setup: a handler with an assignment, and change trackers for the populated and empty label
-    // sets of the watch request counter.
+    // Setup: a handler with an assignment, and change trackers for the populated and unpopulated
+    // label sets of the watch request counter.
     val handlerLocation: Location = Location.Slicelet
     val driver: SubscriberHandlerHarness = createDriver(handlerLocation, target)
     driver.setAssignment(createRandomAssignment(9, Vector("pod0")))
@@ -711,57 +724,61 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
       case appTarget: AppTarget => appTarget
       case other: Target => fail(s"Expected an AppTarget, got: $other")
     }
+    val senderClusterUri: KubernetesClusterUri =
+      KubernetesClusterUri
+        .fromUri("kubernetes-cluster:prod/cloud1/public/region1/clustertype2/01")
+        .getOrElse(fail("Invalid test sender cluster URI"))
     val metricsKey = MetricsKey(isClerk = true, LATEST_VERSION)
 
-    val numRequestsWithAlternativeTarget = MetricUtils.ChangeTracker(
+    val numRequestsWithPopulatedLabels = MetricUtils.ChangeTracker(
       () =>
         getNumWatchRequests(
           handlerTarget = target,
           requestTarget = target,
           metricsKey = metricsKey,
           handlerLocation = handlerLocation,
-          alternativeTargetOpt = Some(alternativeTarget)
+          alternativeTargetOpt = Some(alternativeTarget),
+          senderClusterUri = senderClusterUri.uri
         )
     )
-    val numRequestsWithoutAlternativeTarget = MetricUtils.ChangeTracker(
+    val numRequestsWithUnpopulatedLabels = MetricUtils.ChangeTracker(
       () =>
         getNumWatchRequests(
           handlerTarget = target,
           requestTarget = target,
           metricsKey = metricsKey,
           handlerLocation = handlerLocation,
-          alternativeTargetOpt = None
+          alternativeTargetOpt = None,
+          senderClusterUri = "unknown"
         )
     )
 
     // Verify: sending a request of each kind moves only its own label set's counter, by one.
-    val requestWithAlternativeTarget: ClientRequest = createClientRequest(
+    val requestWithBothFields: ClientRequest = createClientRequest(
       Generation.EMPTY,
       ClerkData,
-      "subscriber-with-alt",
-      alternativeTargetOpt = Some(alternativeTarget)
+      "subscriber-with-both-fields",
+      alternativeTargetOpt = Some(alternativeTarget),
+      clusterUriOpt = Some(senderClusterUri)
     )
-    Await.ready(driver.handleWatch(requestWithAlternativeTarget, redirectOpt = None), Duration.Inf)
+    Await.ready(driver.handleWatch(requestWithBothFields, redirectOpt = None), Duration.Inf)
     AssertionWaiter(
-      "alternativeTarget metric recorded",
+      "populated alternativeTarget and senderClusterUri labels recorded",
       pollInterval = METRICS_ASSERTION_POLL_INTERVAL
     ).await {
-      assert(numRequestsWithAlternativeTarget.totalChange() == 1)
-      assert(numRequestsWithoutAlternativeTarget.totalChange() == 0)
+      assert(numRequestsWithPopulatedLabels.totalChange() == 1)
+      assert(numRequestsWithUnpopulatedLabels.totalChange() == 0)
     }
 
-    val requestWithoutAlternativeTarget: ClientRequest =
-      createClientRequest(Generation.EMPTY, ClerkData, "subscriber-without-alt")
-    Await.ready(
-      driver.handleWatch(requestWithoutAlternativeTarget, redirectOpt = None),
-      Duration.Inf
-    )
+    val requestWithNeitherField: ClientRequest =
+      createClientRequest(Generation.EMPTY, ClerkData, "subscriber-with-neither-field")
+    Await.ready(driver.handleWatch(requestWithNeitherField, redirectOpt = None), Duration.Inf)
     AssertionWaiter(
-      "empty alternativeTarget metric recorded",
+      "unpopulated alternativeTarget and senderClusterUri labels recorded",
       pollInterval = METRICS_ASSERTION_POLL_INTERVAL
     ).await {
-      assert(numRequestsWithoutAlternativeTarget.totalChange() == 1)
-      assert(numRequestsWithAlternativeTarget.totalChange() == 1)
+      assert(numRequestsWithUnpopulatedLabels.totalChange() == 1)
+      assert(numRequestsWithPopulatedLabels.totalChange() == 1)
     }
   }
 

@@ -18,7 +18,7 @@ import com.databricks.dicer.assigner.conf.DicerAssignerConf
 
 import com.databricks.dicer.assigner.InterposingEtcdPreferredAssignerDriver
 import com.databricks.dicer.assigner.config.{
-  ChurnConfig,
+  ConfigTestUtil,
   InternalTargetConfig,
   InternalTargetConfigMap
 }
@@ -82,7 +82,7 @@ class TopKeysSuite extends DatabricksTest {
       )
     val loadBalancingConfig = LoadBalancingConfig(
       loadBalancingInterval = 1.second, // Use a shorter interval to speed up the test.
-      ChurnConfig.ZERO_PENALTY,
+      ConfigTestUtil.ZERO_PENALTY_CHURN_CONFIG,
       LoadBalancingMetricConfig(maxLoadHint = 1)
     )
     val config = InternalTargetConfig.forTest.DEFAULT.copy(

@@ -112,6 +112,10 @@ private[dicer] class KubernetesMembershipChecker(
       KubernetesMembershipChecker.DEFAULT_RECOVERY_THRESHOLD
     )
 
+  /** Eagerly created with an initial zero value. */
+  private val connectionUnhealthyCounterChild: Counter.Child =
+    KubernetesMembershipChecker.connectionUnhealthyCounter.labels(namespace, appName)
+
   /** Latest resource set, published to [[watch]] subscribers. */
   private val resourceCell: WatchValueCell[VersionedResourceSet] =
     new WatchValueCell[VersionedResourceSet]
@@ -248,9 +252,9 @@ private[dicer] class KubernetesMembershipChecker(
   /**
    * Publishes the current Kubernetes-connection health value to both [[healthCell]] (for
    * cross-component watchers) and the per-pod
-   * [[KubernetesMembershipChecker.connectionHealthGauge]] (for monitoring). Called from the
-   * polling path on the first poll (the cell is unpublished until then) and whenever the
-   * hysteresis monitor flips.
+   * [[KubernetesMembershipChecker.connectionHealthGauge]] (for monitoring), and increments the
+   * unhealthy-transition counter when appropriate. Called from the polling path on the first poll
+   * (the cell is unpublished until then) and whenever the hysteresis monitor flips.
    */
   private def publishConnectionHealth(healthy: Boolean): Unit = {
     healthCell.setValue(healthy)
@@ -258,9 +262,7 @@ private[dicer] class KubernetesMembershipChecker(
       .labels(namespace, appName)
       .set(if (healthy) 1.0 else 0.0)
     if (!healthy) {
-      KubernetesMembershipChecker.connectionUnhealthyCounter
-        .labels(namespace, appName)
-        .inc()
+      connectionUnhealthyCounterChild.inc()
     }
   }
 

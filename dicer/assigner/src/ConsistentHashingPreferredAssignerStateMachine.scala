@@ -130,7 +130,9 @@ private[assigner] class ConsistentHashingPreferredAssignerStateMachine(
         } else {
           latestHashRingOpt = Some(
             ConsistentHashRing.create(
-              nodes = resources.keySet.toVector,
+              // Sort the UUIDs so every callsite builds an identical ring across pods/processes,
+              // even if there are hash collisions.
+              nodes = resources.keySet.toVector.sorted,
               vnodesPerNode = ConsistentHashingPreferredAssignerStateMachine.VNODES_PER_ASSIGNER,
               typeMapper = ConsistentHashingPreferredAssignerStateMachine.TYPE_MAPPER
             )

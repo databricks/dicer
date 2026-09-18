@@ -2,12 +2,12 @@ package com.databricks.caching.util
 
 import java.util.concurrent.locks.ReentrantLock
 import javax.annotation.concurrent.{GuardedBy, ThreadSafe}
-
 import scala.collection.mutable
-
 import io.grpc.Status
-
 import com.databricks.caching.util.Lock.withLock
+
+import scala.concurrent.{Future, Promise}
+import scala.util.Failure
 
 /**
  * This abstraction provides the notion of a "cell", a single value of type T that can be watched
@@ -38,6 +38,17 @@ sealed class WatchCell[T] extends WatchCell.Consumer[T] with WatchCell.Producer[
   @GuardedBy("lock")
   private val watchCallbacks = new mutable.HashSet[StreamCallback[T]]
 
+  /**
+   * The set of promises that the Futures returned by [[notifyInitial()]] are watching, and will be
+   * completed when the initial value is supplied or the error status is set.
+   *
+   * Rather than using a single Promise to back all the [[notifyInitial()]] calls, we use a new
+   * Promise for each [[notifyInitial()]] call and store them here, so when the call is cancelled,
+   * its corresponding backing Promise can be garbage collected.
+   */
+  @GuardedBy("lock")
+  private val notifyInitialPromises = new mutable.HashSet[Promise[Unit]]
+
   // Consumer calls.
 
   override def watch(callback: StreamCallback[T]): Cancellable = withLock(lock) {
@@ -61,6 +72,27 @@ sealed class WatchCell[T] extends WatchCell.Consumer[T] with WatchCell.Producer[
     status
   }
 
+  override def notifyInitial(): (Future[Unit], Cancellable) = withLock(lock) {
+    if (!status.isOk || value.isDefined) {
+      (Future.successful(()), new Cancellable {
+        override def cancel(reason: Status): Unit = { /* Successful Future, nothing to cancel. */ }
+      })
+    } else {
+      val promise = Promise[Unit]()
+      notifyInitialPromises.add(promise)
+
+      val cancellable = new Cancellable {
+        override def cancel(reason: Status): Unit = withLock(lock) {
+          // When the observation is cancelled, complete the Future and clean up the backing
+          // promise.
+          promise.tryComplete(Failure(reason.asRuntimeException()))
+          notifyInitialPromises.remove(promise)
+        }
+      }
+      (promise.future, cancellable)
+    }
+  }
+
   // Producer calls.
 
   override def setValue(newValue: T): Unit = withLock(lock) {
@@ -70,6 +102,11 @@ sealed class WatchCell[T] extends WatchCell.Consumer[T] with WatchCell.Producer[
     for (callback <- watchCallbacks) {
       informSuccess(callback)
     }
+    for (promise: Promise[Unit] <- notifyInitialPromises) {
+      promise.trySuccess(())
+    }
+    // Clean up all the backing promises.
+    notifyInitialPromises.clear()
   }
 
   override def setErrorStatus(newStatus: Status): Unit = withLock(lock) {
@@ -77,6 +114,11 @@ sealed class WatchCell[T] extends WatchCell.Consumer[T] with WatchCell.Producer[
     assert(status.isOk, s"Setting status when an error already exists ($status): $newStatus")
     status = newStatus
     informError()
+    for (promise: Promise[Unit] <- notifyInitialPromises) {
+      promise.trySuccess(())
+    }
+    // Clean up all the backing promises.
+    notifyInitialPromises.clear()
   }
 
   // Private functions.
@@ -133,6 +175,13 @@ object WatchCell {
      * made, returns [[Status.OK]].
      */
     def getStatus: Status
+
+    /**
+     * Returns a Future that will be completed when the initial value of the WatchCell is
+     * supplied, or the error status is set, whichever comes first. Also returns a Cancellable to
+     * cancel this observation and fail the returned Future.
+     */
+    def notifyInitial(): (Future[Unit], Cancellable)
   }
 
   /**
@@ -188,6 +237,8 @@ sealed class WatchValueCell[T] extends WatchValueCell.Consumer[T] with WatchValu
   }
 
   override def getStatus: Status = Status.OK
+
+  override def notifyInitial(): (Future[Unit], Cancellable) = cell.notifyInitial()
 
   // Producer calls.
 

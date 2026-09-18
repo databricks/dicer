@@ -8,8 +8,12 @@ import com.databricks.common.alias.RichScalaPB.RichMessage
 /**
  * Represents a cluster for which a configuration is overridden, corresponding to the proto message
  * [[ConfigScopeP]].
+ *
+ * @throws IllegalArgumentException if `clusterUri` does not start with "kubernetes-cluster:".
  */
-case class ConfigScope(clusterUri: String) {
+case class ConfigScope @throws[IllegalArgumentException](
+  "if clusterUri does not start with \"kubernetes-cluster:\""
+)(clusterUri: String) {
   require(
     clusterUri.startsWith("kubernetes-cluster:"),
     s"Cluster URI must start with 'kubernetes-cluster:': $clusterUri"
@@ -21,13 +25,28 @@ case class ConfigScope(clusterUri: String) {
 object ConfigScope {
 
   /**
-   * REQUIRES: `configScopeP.clusterUri` must be non-empty.
+   * Factory method that creates a `ConfigScope` from a [[ConfigScopeP]] proto message.
    *
-   * Factory method that creates a `ConfigScope` instance from a [[ConfigScopeP]] proto message.
+   * @throws IllegalArgumentException if the scope is unset or contains a string in the cluster_uri
+   *                                  fieldthat does not begin with "kubernetes-cluster:", or is an
+   *                                  instance-id scope. Instance ID scoped overrides are not yet
+   *                                  supported.
    */
+  @throws[IllegalArgumentException](
+    "if the scope is unset or contains a string in the cluster_uri field that does not begin " +
+    "with \"kubernetes-cluster:\", or is an instance-id scope. Instance ID scoped overrides are " +
+    "not yet supported."
+  )
   def fromProto(configScopeP: ConfigScopeP): ConfigScope = {
-    require(configScopeP.clusterUri.nonEmpty, "Cluster URI must be specified.")
-    new ConfigScope(clusterUri = configScopeP.getClusterUri)
+    configScopeP.scope match {
+      case ConfigScopeP.Scope.ClusterUri(clusterUri: String) => ConfigScope(clusterUri)
+      case ConfigScopeP.Scope.InstanceId(instanceId: String) =>
+        throw new IllegalArgumentException(
+          s"Instance-scoped config overrides are not yet supported: $instanceId"
+        )
+      case ConfigScopeP.Scope.Empty =>
+        throw new IllegalArgumentException("Config scope must be specified.")
+    }
   }
 
   /** Extracts the current Databricks cluster URI from the given [[LocationConf]]. */

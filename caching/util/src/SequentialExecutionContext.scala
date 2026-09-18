@@ -5,7 +5,7 @@ import com.databricks.caching.util.SequentialExecutionContextPool.{
   UncaughtExceptionSource
 }
 import java.util
-import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.{ScheduledFuture, ScheduledThreadPoolExecutor}
 import java.util.concurrent.locks.ReentrantLock
 import scala.annotation.tailrec
 import scala.concurrent.duration.{Duration, FiniteDuration, NANOSECONDS}
@@ -16,10 +16,7 @@ import io.grpc.Status
 import io.prometheus.client.{Counter, Gauge, Histogram}
 
 import com.databricks.caching.util.Lock.withLock
-import com.databricks.caching.util.ContextAwareUtil.{
-  ContextAwareExecutionContext,
-  ContextAwareScheduledExecutorService
-}
+import com.databricks.caching.util.ExecutorUtil.ContextAwareExecutionContext
 
 /**
  * This type provides an abstraction of a thread of execution such that each piece of work run or
@@ -207,7 +204,7 @@ trait SequentialExecutionContext {
 
     /** Thread-safe state associated with the repeating command. */
     class State extends Cancellable {
-      val lock = new ReentrantLock()
+      val scheduleRepeatingStateLock = new ReentrantLock()
 
       /**
        * A handle that can be used to cancel any currently scheduled run (populated in
@@ -219,7 +216,7 @@ trait SequentialExecutionContext {
       private var isCancelled = false
 
       /** Schedules the next run, and repeats after it executes. */
-      def scheduleNext(): Unit = withLock(lock) {
+      def scheduleNext(): Unit = withLock(scheduleRepeatingStateLock) {
         // Only schedule if the overall repeating op has not been cancelled.
         if (!isCancelled) {
           cancellable = schedule(
@@ -238,7 +235,7 @@ trait SequentialExecutionContext {
         }
       }
 
-      override def cancel(reason: Status): Unit = withLock(lock) {
+      override def cancel(reason: Status): Unit = withLock(scheduleRepeatingStateLock) {
         if (!isCancelled) {
           // Prevent scheduleNext() from scheduling new commands.
           isCancelled = true
@@ -260,15 +257,12 @@ trait SequentialExecutionContext {
 
   override final def toString: String = getName
 
-  /** See [[ContextAwareUtil]]. */
+  /** See [[ExecutorUtil]]. */
   private[util] val contextAwareExecutionContext: ContextAwareExecutionContext
 }
 
 /** Factory methods and static state for the context. */
 object SequentialExecutionContext {
-
-  /** The execution context being run on the local thread, if any. */
-  private val currentContext = new ThreadLocal[Impl]
 
   private object Metrics {
     private val LABEL_NAMES: Array[String] = Array("pool_name", "context_name")
@@ -377,32 +371,6 @@ object SequentialExecutionContext {
     pool.createExecutionContext(contextName = name)
   }
 
-  /** Use [[createWithDedicatedPool]] with an explicit `alertOwnerTeam` instead. */
-  @deprecated(
-    "Provide alertOwnerTeam explicitly; the CachingTeam default is only correct for " +
-    "Caching-owned pools (<internal bug>)."
-  )
-  def createWithDedicatedPool(name: String): SequentialExecutionContext =
-    createWithDedicatedPool(
-      name = name,
-      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
-      enableContextPropagation = true
-    )
-
-  /** Use [[createWithDedicatedPool]] with an explicit `alertOwnerTeam` instead. */
-  @deprecated(
-    "Provide alertOwnerTeam explicitly; the CachingTeam default is only correct for " +
-    "Caching-owned pools (<internal bug>)."
-  )
-  def createWithDedicatedPool(
-      name: String,
-      enableContextPropagation: Boolean): SequentialExecutionContext =
-    createWithDedicatedPool(
-      name = name,
-      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
-      enableContextPropagation = enableContextPropagation
-    )
-
   /**
    * The production implementation of [[SequentialExecutionContext]]. Separate from the
    * [[SequentialExecutionContext]] trait to allow modified behavior in tests.
@@ -419,14 +387,22 @@ object SequentialExecutionContext {
   private[util] final class Impl(
       poolName: String,
       name: String,
-      executorService: ContextAwareScheduledExecutorService,
+      executorService: ScheduledThreadPoolExecutor,
       exceptionHandler: ExceptionHandler,
       clock: TypedClock,
       enableContextPropagation: Boolean)
       extends SequentialExecutionContext {
 
-    /** Lock protecting all context state. */
-    private val lock = new ReentrantLock()
+    /** Lock protecting all internal context state. */
+    private val stateLock = new ReentrantLock()
+
+    /**
+     * Lock held while running a command. Ensures that application state guarded by the executor is
+     * not concurrently accessed, and satisfies [[assertCurrentContext]] checks while the command is
+     * running. Note that we do _not_ use [[ReentrantLock.isLocked]] to determine if a command is
+     * running, instead using the [[state]] field which is guarded by [[stateLock]].
+     */
+    private val runLock = new ReentrantLock()
 
     // Use `poolName` instead of `name` for the NamedExecutor created in `wrapExecutionContext`
     // so that all SECs within the same thread pool share one NamedExecutor name. Note that
@@ -439,17 +415,17 @@ object SequentialExecutionContext {
     // This is safe because the NamedExecutor here is only a thin context-propagation wrapper,
     // and its name is only used for monitoring purposes.
     private[util] override val contextAwareExecutionContext: ContextAwareExecutionContext =
-      ContextAwareUtil.wrapExecutionContext(
+      ExecutorUtil.Internal.wrapExecutionContext(
         poolName,
         new ExecutionContext {
           override def execute(runnable: Runnable): Unit = {
             // When a runnable is enqueued in this path, it has already been made context-aware
-            // by the `ContextAwareUtil.wrapExecutionContext` wrapper. We enqueue the runnable
+            // by the `ExecutorUtil.Internal.wrapExecutionContext` wrapper. We enqueue the runnable
             // with zero delay relative to "now", and then call `ensureScheduled` to make sure the
             // current execution context is scheduled to run on one of the underlying thread pool
             // threads.
             val now: TickerTime = clock.tickerTime()
-            withLock(lock) {
+            withLock(stateLock) {
               queue.push(now, Duration.Zero, runnable)
               ensureScheduled(now)
             }
@@ -469,7 +445,7 @@ object SequentialExecutionContext {
      * Notice that per locking discipline, this callback is invoked while holding the state lock for
      * the execution context.
      */
-    private val tickleRunnable: Runnable = () => withLock(lock) { tickle() }
+    private val tickleRunnable: Runnable = () => withLock(stateLock) { tickle() }
 
     /** Contains all pending [[Command]]s. */
     private val queue = new CommandQueue
@@ -505,8 +481,8 @@ object SequentialExecutionContext {
     override def run[U](func: => U): Unit = {
       val now: TickerTime = clock.tickerTime()
       val boundRunnable: Runnable =
-        ContextAwareUtil.wrapRunnable(() => func, enableContextPropagation)
-      withLock(lock) {
+        ExecutorUtil.Internal.wrapRunnable(() => func, enableContextPropagation)
+      withLock(stateLock) {
         queue.push(now, Duration.Zero, boundRunnable)
         ensureScheduled(now)
       }
@@ -523,18 +499,18 @@ object SequentialExecutionContext {
     }
 
     /** See [[SequentialExecutionContext.assertCurrentContext()]]. */
-    override def assertCurrentContext(): Unit = assert(currentContext.get() == this)
+    override def assertCurrentContext(): Unit = assert(runLock.isHeldByCurrentThread)
 
     override def schedule(name: String, delay: FiniteDuration, runnable: Runnable): Cancellable = {
       val now: TickerTime = clock.tickerTime()
-      val boundRunnable: Runnable = ContextAwareUtil.wrapRunnable(
+      val boundRunnable: Runnable = ExecutorUtil.Internal.wrapRunnable(
         runnable,
         enableContextPropagation = enableContextPropagation
       )
-      withLock(lock) {
+      withLock(stateLock) {
         val command: Command = queue.push(now, delay, boundRunnable)
         val cancellable: Cancellable = (_: Status) =>
-          withLock(lock) {
+          withLock(stateLock) {
             command.cancel()
             // Call `ensureScheduled` to ensure that the next tickle time is updated if the
             // cancelled command was the next one due to run. If there are no pending commands,
@@ -553,10 +529,12 @@ object SequentialExecutionContext {
      *
      * Locking discipline, see <internal link> for details:
      *
-     *  - Private methods must only be called while holding `lock` (a single [[ReentrantLock]]
+     *  - Private methods must only be called while holding `stateLock` (a single [[ReentrantLock]]
      *    protects all internal state for the context).
-     *  - Corollary: all public methods and callbacks should immediately acquire the `lock`.
-     *  - The lock must not be held while executing commands supplied to the context.
+     *  - Corollary: all public methods and callbacks should immediately acquire `stateLock`.
+     *  - The `stateLock` must not be held while executing commands supplied to the context.
+     *    `runLock` is used for this purpose, and is used to synchronize access to application state
+     *    guarded by the executor and to test whether the current thread is running a command.
      *
      * High-level strategy:
      *
@@ -574,9 +552,9 @@ object SequentialExecutionContext {
      *    call on the underlying `pool` at a time, by (for example) cancelling any pending scheduled
      *    pool task before scheduling a new one. But cancellation is best-effort, so we need to
      *    account for spurious tickle calls (where no new work is discovered).
-     *  - We can't use just `lock` to ensure sequential execution, as the lock must be released when
-     *    calling a user-supplied command (see "locking discipline"). As a result, the executor
-     *    keeps track of whether it's in the `PENDING` or `RUNNING` state. If [[tickle]] or
+     *  - We can't use just `stateLock` to ensure sequential execution, as that lock must be
+     *    released when calling a user-supplied command (see "locking discipline"). As a result, the
+     *    executor keeps track of whether it's in the `PENDING` or `RUNNING` state. If [[tickle]] or
      *    [[ensureScheduled]] is called while the context is in the `RUNNING` state, they do
      *    nothing, relying on the `RUNNING` thread to advance the context as needed when the current
      *    command runs.
@@ -585,9 +563,9 @@ object SequentialExecutionContext {
      *
      *  - The implementation assumes that the `pool` will not execute commands synchronously on the
      *    calling thread. We would need to revisit our locking discipline were that to change.
-     *  - Beyond releasing `lock` while running commands, locks are "maximally" acquired for the
-     *    duration of all public methods and callbacks. Optimize with care! See notes on programming
-     *    with locks in <internal link>.
+     *  - Beyond releasing `stateLock` while running commands, locks are "maximally" acquired for
+     *    the duration of all public methods and callbacks. Optimize with care! See notes on
+     *    programming with locks in <internal link>.
      */
     /** A reference to the spurious wakeups counter for this context with labels set. */
     private def spuriousWakeupsCounter(reason: Metrics.SpuriousWakeupReason): Counter.Child =
@@ -608,7 +586,7 @@ object SequentialExecutionContext {
       )
     )
     private def tickle(): Unit = {
-      assert(lock.isHeldByCurrentThread)
+      assert(stateLock.isHeldByCurrentThread)
 
       if (state == State.Running) {
         // Spurious wakeup. This context is already running, so we can't run any commands
@@ -634,19 +612,19 @@ object SequentialExecutionContext {
           // "sequential" part of our contract) while the command is running.
           state = State.Running
 
-          // Set the current context so that `assertCurrentContext` is satisfied while the
-          // command is running.
-          currentContext.set(Impl.this)
-
           // Release the lock while the command is running, so that commands can be added to the
           // executor from other threads without blocking while the current command is running.
-          lock.unlock()
+          stateLock.unlock()
 
           val startTime: TickerTime = clock.tickerTime()
           val executionDelay: FiniteDuration =
             (startTime - desiredExecutionTime).max(Duration.Zero)
           executionDelayHistogram.observe(executionDelay.toNanos)
           try {
+            // Hold the run lock for the duration of the command execution. Ensures that state
+            // guarded by the executor is not concurrently accessed, and satisfies
+            // assertCurrentContext checks while the command is running.
+            runLock.lock()
             runnable.run()
           } catch {
             case ex: InterruptedException =>
@@ -664,19 +642,17 @@ object SequentialExecutionContext {
               // exceptions just fine, but would not surface them in any way.
               handleCommandException(ex)
           } finally {
+            // Do cleanup work in the finally block, to ensure that invariants are restored even
+            // when a fatal exception is encountered.
+            runLock.unlock()
+
+            // Update metrics.
             val endTime: TickerTime = clock.tickerTime()
             val executionTime: FiniteDuration = (endTime - startTime).max(Duration.Zero)
             executionTimeHistogram.observe(executionTime.toNanos)
 
-            // Reacquire the lock.
-            lock.lock()
-
-            // Do cleanup work in the finally block, to ensure that invariants are restored even
-            // when a fatal exception is encountered.
-
-            // We no longer want `assertCurrentContext` to be satisfied on this thread now that
-            // the command has run.
-            currentContext.remove()
+            // Reacquire the statelock.
+            stateLock.lock()
 
             // We're responsible for ensuring that future work is scheduled after running a
             // command. Exit the RUNNING state, since `ensureScheduled` will/should do nothing
@@ -692,7 +668,7 @@ object SequentialExecutionContext {
      * tickle is currently pending.
      */
     private def cancelTickleTask(): Unit = {
-      assert(lock.isHeldByCurrentThread)
+      assert(stateLock.isHeldByCurrentThread)
       this.tickleHandle match {
         case Some(tickleHandle) =>
           tickleHandle.cancel( /*mayInterruptIfRunning=*/ false)
@@ -708,7 +684,7 @@ object SequentialExecutionContext {
 
     /** Ensures that any pending work will be scheduled. */
     private def ensureScheduled(now: TickerTime): Unit = {
-      assert(lock.isHeldByCurrentThread)
+      assert(stateLock.isHeldByCurrentThread)
 
       // Take this opportunity to update gauge metrics, since ensureScheduled is called when
       // adding commands to the executor, after running commands, and when cancelling scheduled
@@ -759,11 +735,11 @@ object SequentialExecutionContext {
        * to run it. Should only be used in tests where we'd like to ensure that a particular
        * invocation of [[forTest.tickle()]] finds this runnable.
        */
-      def enqueue(runnable: Runnable): Unit = withLock(lock) {
+      def enqueue(runnable: Runnable): Unit = withLock(stateLock) {
         queue.push(
           clock.tickerTime(),
           Duration.Zero,
-          ContextAwareUtil
+          ExecutorUtil.Internal
             .wrapRunnable(runnable, enableContextPropagation = enableContextPropagation)
         )
       }
@@ -773,8 +749,8 @@ object SequentialExecutionContext {
        * advances faster than "real" time.
        *
        * IMPLEMENTATION NOTE: Synchronization is unnecessary because `pool` is thread-safe and
-       * `tickleRunnable` is final/val. We therefore do not acquire the lock because it could mask a
-       * real issues in concurrency tests and because there is no need to do so.
+       * `tickleRunnable` is final/val. We therefore do not acquire the state lock because it could
+       * mask a real issues in concurrency tests and because there is no need to do so.
        */
       def tickle(): Unit = executorService.execute(tickleRunnable)
     }
@@ -794,7 +770,7 @@ object SequentialExecutionContext {
 
   /**
    * Internal representation of an outstanding command. All accesses must be protected by the
-   * owning [[SequentialExecutionContext]]'s lock.
+   * owning [[SequentialExecutionContext]]'s state lock.
    *
    * Extends [[IntrusiveMinHeapElement]] so that commands can be efficiently removed from the
    * context's scheduled work heap when they are cancelled.

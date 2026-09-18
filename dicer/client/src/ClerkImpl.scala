@@ -92,7 +92,8 @@ private[dicer] class ClerkImpl[Stub <: AnyRef] private (
       clerkAssignmentCell,
       logPrefix = s"Router-$target",
       stubFactory,
-      stubCacheLifetime = 1.hour
+      stubCacheLifetime = 1.hour,
+      clerkMetrics
     )
 
   /** A promise that is set when the initial assignment is received. */
@@ -182,7 +183,6 @@ private[dicer] class ClerkImpl[Stub <: AnyRef] private (
   def getNextStubForKey(
       key: SliceKey,
       retryTokenOpt: Option[RetryTokenImpl]): Option[(Stub, RetryTokenImpl)] = {
-    // TODO(<internal bug>): Add a getNextStubForKey metric and increment it here.
     resourceRouter.getNextStubForKey(key, retryTokenOpt)
   }
 
@@ -266,12 +266,24 @@ private[dicer] object ClerkImpl {
    */
   private val lookupCache: SliceLookupCache = new SliceLookupCache()
 
-  /** See specs for the external [[Clerk.create()]] for details. */
+  /**
+   * Creates the internal implementation of a [[Clerk]]. See [[Clerk.create()]] for details on the
+   * external-facing parameters.
+   *
+   * `sourceIpOpt` is part of the [[SliceLookupConfig]] cache key, so a Clerk that binds a source
+   * address never shares a [[SliceLookup]] (and therefore a connection) with one that does not, or
+   * with one bound to a different address.
+   *
+   * @param sourceIpOpt Local (source) address to bind this Clerk's watch connection to, so it
+   *                    egresses through the interface owning that address. `None` leaves the source
+   *                    address to the kernel.
+   */
   def create[Stub <: AnyRef](
       clerkConf: ClerkConf,
       target: Target,
       watchAddress: URI,
-      stubFactory: ResourceAddress => Stub): ClerkImpl[Stub] = {
+      stubFactory: ResourceAddress => Stub,
+      sourceIpOpt: Option[InetAddress]): ClerkImpl[Stub] = {
     val targetBestEffortFullyQualified: Target = target match {
       case kubernetesTarget: KubernetesTarget =>
         tryInsertInferredTargetCluster(kubernetesTarget)
@@ -312,7 +324,8 @@ private[dicer] object ClerkImpl {
         // TODO(<internal bug>): Populate alternativeTargetOpt once DBNS can supply it for the target.
         alternativeTargetOpt = None,
         // TODO(<internal bug>): Use client side feature flag to gradually rollout rate limiting.
-        enableRateLimiting = false
+        enableRateLimiting = false,
+        sourceIpOpt = sourceIpOpt
       ),
       subscriberDebugName = clerkDebugName
     )
@@ -431,7 +444,8 @@ private[dicer] object ClerkImpl {
         // TODO(<internal bug>): Populate alternativeTargetOpt once DBNS can supply it for the target.
         alternativeTargetOpt = None,
         // TODO(<internal bug>): Use client side feature flag to gradually rollout rate limiting.
-        enableRateLimiting = false
+        enableRateLimiting = false,
+        sourceIpOpt = None
       ),
       subscriberDebugName = clerkDebugName
     )
@@ -652,7 +666,8 @@ private[dicer] object ClerkImpl {
         // TODO(<internal bug>): Populate alternativeTargetOpt for Direct Clerks
         alternativeTargetOpt = None,
         // TODO(<internal bug>): Use client side feature flag to gradually rollout rate limiting.
-        enableRateLimiting = false
+        enableRateLimiting = false,
+        sourceIpOpt = None
       ),
       subscriberDebugName = clerkDebugName
     )
@@ -829,7 +844,9 @@ private object ClerkAssignment {
             if (sliceAssignment.indexedResources.size > 1) {
               Some(
                 ConsistentHashRing.create[Squid, SliceKey](
-                  nodes = sliceAssignment.indexedResources,
+                  // Sort by the Squid ordering so every callsite builds an identical ring across
+                  // pods/processes, even if there are hash collisions.
+                  nodes = sliceAssignment.indexedResources.sorted,
                   vnodesPerNode = VNODES_PER_RESOURCE,
                   typeMapper = RingTypeMapper
                 )
@@ -878,7 +895,9 @@ private object ClerkAssignment {
 
     val fallbackRing: ConsistentHashRing[Squid, SliceKey] =
       ConsistentHashRing.create[Squid, SliceKey](
-        nodes = assignmentResources,
+        // Sort by the Squid ordering so every callsite builds an identical ring across
+        // pods/processes, even if there are hash collisions.
+        nodes = assignmentResources.sorted,
         // `vnodesPerNode` is irrelevant since the ring is not used for balancing keys across the
         // ring. It is only used to construct a deterministic mapping from a slice to a resource.
         vnodesPerNode = 1,

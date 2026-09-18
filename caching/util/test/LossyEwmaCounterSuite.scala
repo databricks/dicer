@@ -11,12 +11,24 @@ import org.apache.commons.math3.random.{RandomGenerator, Well19937c}
 import com.databricks.caching.util.MetricUtils.ChangeTracker
 import com.databricks.caching.util.TestUtils.assertThrow
 import com.databricks.caching.util.test.LossyEwmaCounterTestDataP
-import com.databricks.caching.util.test.LossyEwmaCounterTestDataP.ErrorP._
-import com.databricks.caching.util.test.LossyEwmaCounterTestDataP.HalfLifeSecondP._
+import com.databricks.caching.util.test.LossyEwmaCounterTestDataP.ErrorP.Error
+import com.databricks.caching.util.test.LossyEwmaCounterTestDataP.HalfLifeSecondP.HalfLifeSeconds
 import com.databricks.caching.util.test.LossyEwmaCounterTestDataP.IncrementValueP.IncrementValue
-import com.databricks.caching.util.test.LossyEwmaCounterTestDataP.StartTimeP._
-import com.databricks.caching.util.test.LossyEwmaCounterTestDataP.SupportP._
-import com.databricks.caching.util.test.LossyEwmaCounterTestDataP._
+import com.databricks.caching.util.test.LossyEwmaCounterTestDataP.StartTimeP.Time
+import com.databricks.caching.util.test.LossyEwmaCounterTestDataP.SupportP.Support
+import com.databricks.caching.util.test.LossyEwmaCounterTestDataP.{
+  AdvanceClockP,
+  AssertHotKeysEqualsP,
+  IncrementByP,
+  KeyP,
+  LossyEwmaCounterP,
+  OneTimeActionP,
+  RandomizedReferenceTestCaseP,
+  RepeatedActionP,
+  TestActionP,
+  TestCaseP,
+  messageCompanion
+}
 
 class LossyEwmaCounterSuite extends DatabricksTest {
 

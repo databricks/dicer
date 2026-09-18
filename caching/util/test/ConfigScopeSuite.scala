@@ -10,7 +10,8 @@ import com.databricks.testing.DatabricksTest
 class ConfigScopeSuite extends DatabricksTest {
   test("Creating `ConfigScope` instances from `ConfigScopeP` messages") {
     // Test plan: Construct `ConfigScope` with various `ConfigScopeP` messages, verify that
-    // exceptions are thrown for an invalid `cluster_uri`.
+    // exceptions are thrown for an invalid `cluster_uri`, an unset scope, and an instance-id scope
+    // (instance-scoped overrides are not yet supported).
 
     // Illegal cluster URI.
     assertThrow[IllegalArgumentException]("Cluster URI must start with 'kubernetes-cluster:'") {
@@ -20,9 +21,16 @@ class ConfigScopeSuite extends DatabricksTest {
       ConfigScope.fromProto(ConfigScopeP().withClusterUri(""))
     }
 
-    // Unspecified cluster URI.
-    assertThrow[IllegalArgumentException]("Cluster URI must be specified.") {
+    // Unspecified scope.
+    assertThrow[IllegalArgumentException]("Config scope must be specified.") {
       ConfigScope.fromProto(ConfigScopeP())
+    }
+
+    // Instance-scoped overrides are not yet supported.
+    assertThrow[IllegalArgumentException](
+      "Instance-scoped config overrides are not yet supported"
+    ) {
+      ConfigScope.fromProto(ConfigScopeP().withInstanceId("pgpusc1-c1-prod-mt-cloud3-region7"))
     }
 
     // Good message.

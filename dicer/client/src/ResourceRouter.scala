@@ -8,6 +8,7 @@ import com.github.blemale.scaffeine.{Cache, Scaffeine}
 import com.databricks.caching.util.{ConsistentHashRing, PrefixLogger, WatchValueCell}
 import com.databricks.common.instrumentation.SCaffeineCacheInfoExporter
 
+import com.databricks.dicer.client.ClerkMetrics.ResourceType
 import com.databricks.dicer.common.{SliceAssignment, Generation}
 import com.databricks.dicer.external.{ResourceAddress, SliceKey}
 import com.databricks.dicer.friend.Squid
@@ -23,12 +24,14 @@ import com.databricks.dicer.friend.Squid
  * @param logPrefix Prefix to use with the PrefixLogger.
  * @param stubFactory An application-supplied function to create a stub given an address.
  * @param stubCacheLifetime How long stubs are cached before being recreated.
+ * @param metrics A reference to [[ClerkMetrics]] for metric reporting.
  */
 class ResourceRouter[Stub <: AnyRef] private[dicer] (
     clerkAssignmentConsumer: WatchValueCell.Consumer[ClerkAssignment],
     logPrefix: String,
     stubFactory: ResourceAddress => Stub,
-    stubCacheLifetime: FiniteDuration) {
+    stubCacheLifetime: FiniteDuration,
+    metrics: ClerkMetrics) {
 
   private val logger = PrefixLogger.create(getClass, logPrefix)
 
@@ -83,14 +86,15 @@ class ResourceRouter[Stub <: AnyRef] private[dicer] (
   }
 
   /**
-   * Returns a [[Stub]] from either the slice's assigned resources or its fallback squid, given the
-   * state of picked squids recorded in `retryTokenOpt`. On each call it picks a random unpicked
-   * assigned resource and records it in the returned token. Once all assigned resources have been
-   * picked, it returns the fallback squid (if any). Once the assigned resources and the fallback
-   * squid have been picked it returns a random assigned resource.
+   * Returns a [[Stub]] from either the slice's assigned resources or its fallback resource, given
+   * the state of picked resources recorded in `retryTokenOpt`. On each call it picks a random
+   * unpicked assigned resource and records it in the returned token. Once all assigned resources
+   * have been picked, it returns the fallback resource (if any). Once the assigned resources and
+   * the fallback resource have been picked it returns a random assigned resource.
    *
-   * A slice's fallback squid is a resource that is unassigned to the slice from the Assigner's
-   * perspective, chosen deterministically per slice so that all clerks fall back to the same squid.
+   * A slice's fallback resource is a resource that is unassigned to the slice from the Assigner's
+   * perspective, chosen deterministically per slice so that all clerks fall back to the same
+   * resource.
    *
    * Returns `None` when the clerk has no assignment.
    *
@@ -99,23 +103,25 @@ class ResourceRouter[Stub <: AnyRef] private[dicer] (
    * the returned [[RetryTokenImpl]] from the previous call to the next `getNextStubForKey` call.
    *
    * The following example shows how `getNextStubForKey` behaves across successive calls:
-   * Assume the requested key is assigned to [Pod1, Pod2, Pod3] and the slice's fallback squid is
+   * Assume the requested key is assigned to [Pod1, Pod2, Pod3] and the slice's fallback resource is
    * Pod4.
    *
    * 1. The first call to `getNextStubForKey` will return a random pick from [Pod1, Pod2, Pod3].
    * 2. The second call to `getNextStubForKey` will return a random pick from [Pod1, Pod2].
    * 3. The third call to `getNextStubForKey` will return Pod3 - the last unpicked assigned
    *    resource.
-   * 4. The fourth call to `getNextStubForKey` will return Pod4 - the fallback squid.
+   * 4. The fourth call to `getNextStubForKey` will return Pod4 - the fallback resource.
    * 5. The rest of the calls (>=5) to `getNextStubForKey` will always return a random pick from
    *    [Pod1, Pod2, Pod3].
    */
   def getNextStubForKey(
       key: SliceKey,
       retryTokenOpt: Option[RetryTokenImpl]): Option[(Stub, RetryTokenImpl)] = {
-    retryAwarePicker.getSquidForKey(key, retryTokenOpt) match {
-      case Some((resource: Squid, newToken: RetryTokenImpl)) =>
-        Some((getOrCreateStub(resource), newToken))
+    retryAwarePicker.getSquidForKey(key, retryTokenOpt, metrics) match {
+      case Some((squid: Squid, token: RetryTokenImpl)) =>
+        // Observes the number of assigned resources picked so far.
+        metrics.observeGetNextStubForKeyPickedResourceCount(token.pickedResourceIndices.size)
+        Some((getOrCreateStub(squid), token))
       case None => None
     }
   }
@@ -150,23 +156,24 @@ private object ResourceRouter {
      *
      * @param key The requested SliceKey.
      * @param retryTokenOpt The request's retry token.
+     * @param metrics A reference to [[ClerkMetrics]] for metric reporting.
      * @return The next squid pick and the token for the next call (if any).
      */
     def getSquidForKey(
         key: SliceKey,
-        retryTokenOpt: Option[RetryTokenImpl]): Option[(Squid, RetryTokenImpl)] = {
+        retryTokenOpt: Option[RetryTokenImpl],
+        metrics: ClerkMetrics): Option[(Squid, RetryTokenImpl)] = {
       clerkAssignmentConsumer.getLatestValueOpt match {
         case Some(clerkAssignment: ClerkAssignment) =>
           val sliceInfo: SliceInfo = clerkAssignment.sliceInfoMap.lookUp(key)
           val sliceAssignment: SliceAssignment = clerkAssignment.assignment.sliceMap.lookUp(key)
-          // Picks a deterministic order of the assigned resources to ensure the indices of the
-          // picked resources are consistent across calls.
-          val sliceAssignedResources: Vector[Squid] = sliceAssignment.resources.toVector
-            .sortBy((s: Squid) => (s.resourceUuid, s.creationTimeMillis))
+          // Sorts the assigned resources to ensure the indices of the picked resources are
+          // consistent across calls.
+          val sliceAssignedResources: Vector[Squid] = sliceAssignment.resources.toVector.sorted
           val sliceFallbackSquidOpt: Option[Squid] = sliceInfo.fallbackSquidOpt
           val assignmentGeneration: Generation = clerkAssignment.assignment.generation
 
-          val token: RetryTokenImpl = retryTokenOpt match {
+          val (token, wasTokenReset): (RetryTokenImpl, Boolean) = retryTokenOpt match {
             case Some(token: RetryTokenImpl)
                 if clerkAssignment.assignment.generation != token.assignmentGeneration =>
               // Resets the token's state on a different assignment generation since the slice's
@@ -175,10 +182,10 @@ private object ResourceRouter {
               // pickedResourceIndices list & fallbackPicked flag reset on every assignment
               // generation change. This can be optimized in the future by taking a checksum of
               // the slice assignment (using the squid UUIDs) instead of relying on the generation.
-              RetryTokenImpl.create(assignmentGeneration)
-            case Some(token: RetryTokenImpl) => token
+              (RetryTokenImpl.create(assignmentGeneration), true)
+            case Some(token: RetryTokenImpl) => (token, false)
             // Creates a fresh token if the caller did not pass one in.
-            case None => RetryTokenImpl.create(assignmentGeneration)
+            case None => (RetryTokenImpl.create(assignmentGeneration), false)
           }
 
           // The number of assigned resources this token picks before falling back.
@@ -192,15 +199,24 @@ private object ResourceRouter {
               sliceAssignedResources.indices.toSet.diff(pickedResourceIndexSet)
             val newResourceIndex: Int =
               unpickedResourceIndexSet.toVector(Random.nextInt(unpickedResourceIndexSet.size))
+            if (wasTokenReset) {
+              metrics.incrementGetNextStubForKeyCallCount(
+                ResourceType.AssignedResourceAfterTokenReset
+              )
+            } else {
+              metrics.incrementGetNextStubForKeyCallCount(ResourceType.AssignedResource)
+            }
             Some(
               (sliceAssignedResources(newResourceIndex), token.withPickedIndex(newResourceIndex))
             )
           } else if (!token.fallbackPicked && sliceFallbackSquidOpt.isDefined) {
+            metrics.incrementGetNextStubForKeyCallCount(ResourceType.FallbackResource)
             Some((sliceFallbackSquidOpt.get, token.copy(fallbackPicked = true)))
           } else {
             // Returns a random assigned resource after exhausting assigned resources and the
             // fallback squid. As of writing this (Aug 18th, 2026), picking a random assigned
             // resource is the same behaviour as getStubForKey.
+            metrics.incrementGetNextStubForKeyCallCount(ResourceType.RandomAssignedResource)
             Some((sliceAssignedResources(Random.nextInt(sliceAssignedResources.size)), token))
           }
 
@@ -214,7 +230,7 @@ private object ResourceRouter {
 /**
  * Tracks the context for a chain of getNextStubForKey calls. It stores the assignment generation
  * to detect assignment updates (i.e. a new resource assigned to a slice), the indices of the
- * assigned resources it has already picked, and whether the fallback squid has been picked.
+ * assigned resources it has already picked, and whether the fallback resource has been picked.
  *
  * [[RetryTokenImpl]] can be handled by any Clerk instance for a target, which is necessary when an
  * end-client drives retries across process boundaries (e.g. through a proxy).
@@ -222,7 +238,7 @@ private object ResourceRouter {
  * @param assignmentGeneration      The assignment generation on token creation.
  * @param pickedResourceIndices     Indices into `SliceAssignment.orderedResources` of the slice's
  *                                  assigned resources already picked.
- * @param fallbackPicked            Whether the slice's fallback squid has already been picked.
+ * @param fallbackPicked            Whether the slice's fallback resource has already been picked.
  */
 private[client] final case class RetryTokenImpl private (
     assignmentGeneration: Generation,
@@ -238,6 +254,7 @@ private[client] final case class RetryTokenImpl private (
   }
 }
 
+/** Companion object for [[RetryTokenImpl]]. */
 private object RetryTokenImpl {
 
   /**
@@ -252,7 +269,7 @@ private object RetryTokenImpl {
    */
   val MAX_PICKED_ASSIGNED_RESOURCES: Int = 32
 
-  /** Creates a [[RetryTokenImpl]] at `assignmentGeneration` without any picked squids. */
+  /** Creates a [[RetryTokenImpl]] at `assignmentGeneration` without any picked resources. */
   def create(assignmentGeneration: Generation): RetryTokenImpl =
     RetryTokenImpl(assignmentGeneration, Vector.empty, fallbackPicked = false)
 }

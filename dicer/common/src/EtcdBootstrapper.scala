@@ -1,9 +1,8 @@
 package com.databricks.dicer.common
 
-import com.databricks.caching.util.PrefixLogger
+import com.databricks.caching.util.{Pipeline, PrefixLogger}
 import com.databricks.caching.util.EtcdClient
 import com.databricks.caching.util.UnixTimeVersion
-import com.databricks.threading.NamedExecutor
 import io.prometheus.client.Gauge
 
 import scala.concurrent.duration._
@@ -106,13 +105,12 @@ object EtcdBootstrapper {
       requests: Seq[BootstrapRequest],
       lingerAfterFinish: FiniteDuration): ExitCode = {
     // Kick off all bootstrap requests.
-    val exitCodeFutures: Seq[Future[ExitCode]] = requests.map(bootstrapEtcdAsync)
+    val exitCodePipelines: Vector[Pipeline[ExitCode]] =
+      requests.map(bootstrapEtcdAsync).toVector
 
-    // Wait for them all to complete and collect the results. We use the globalImplicit executor for
-    // convenience, as `Future.sequence` is documented to be non-blocking.
-    val exitCodesFuture: Future[Seq[ExitCode]] =
-      Future.sequence(exitCodeFutures)(implicitly, NamedExecutor.globalImplicit)
-    val exitCodes: Seq[ExitCode] = Await.result(exitCodesFuture, Duration.Inf)
+    // Wait for them all to complete and collect the results.
+    val exitCodes: Vector[ExitCode] =
+      Await.result(Pipeline.sequence(exitCodePipelines).toFuture, Duration.Inf)
 
     // If any request failed, take the first failed code; otherwise success.
     val exitCode: ExitCode = exitCodes
@@ -135,10 +133,10 @@ object EtcdBootstrapper {
   /**
    * Asynchronously writes required etcd metadata using `client` for the given `incarnation`.
    *
-   * @return A future that will complete with an [[ExitCode]] with which the application should
+   * @return A pipeline that will complete with an [[ExitCode]] with which the application should
    *         exit.
    */
-  private def bootstrapEtcdAsync(request: BootstrapRequest): Future[ExitCode] = {
+  private def bootstrapEtcdAsync(request: BootstrapRequest): Pipeline[ExitCode] = {
     val versionHighWatermark =
       EtcdClient.Version(highBits = request.incarnation.value, lowBits = UnixTimeVersion.MIN)
     val namespace: EtcdClient.KeyNamespace = request.client.config.keyNamespace
@@ -146,8 +144,11 @@ object EtcdBootstrapper {
       s"Bootstrapping etcd namespace $namespace with version high watermark $versionHighWatermark"
     )
 
-    request.client
-      .initializeVersionHighWatermarkUnsafe(versionHighWatermark)
+    val resultFuture: Future[Option[EtcdClient.Version]] =
+      request.client.initializeVersionHighWatermarkUnsafe(versionHighWatermark)
+    // This callback only logs and records thread-safe metrics, so it is safe to run inline.
+    Pipeline
+      .fromFuture(resultFuture)
       .transform {
         case Success(None) =>
           // We wrote the watermark, so the watermark now in etcd is the one we requested.
@@ -166,7 +167,7 @@ object EtcdBootstrapper {
         case Failure(ex: Throwable) =>
           logger.info(s"Bootstrapping failed with error: ${ex.toString} for namespace $namespace")
           Success(ExitCode.RETRYABLE_FAILURE)
-      }(NamedExecutor.globalImplicit) // Only side effect is thread-safe metric recording.
+      }(Pipeline.InlinePipelineExecutor)
   }
 
   /** Sets the known watermark gauges. */

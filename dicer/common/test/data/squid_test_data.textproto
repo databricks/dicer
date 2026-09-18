@@ -73,6 +73,57 @@ ordered_squids: [
     resource_uuid_high: 4783377478446566759
     resource_uuid_low: -6259518088101395143
   },
+  # UUID tie-breaking uses Java's signed ordering of the high and then low halves. Equal addresses
+  # and creation times force comparison to reach the UUIDs. The earlier creation time has the
+  # greatest UUID to also verify that creation time takes precedence over UUID ordering.
+  {
+    resource_address: "d"
+    creation_time_millis: 46
+    resource_uuid_high: 9223372036854775807  # Long.MaxValue
+    resource_uuid_low: 9223372036854775807
+  },
+  {
+    resource_address: "d"
+    creation_time_millis: 47
+    resource_uuid_high: -9223372036854775808  # Long.MinValue
+    resource_uuid_low: 9223372036854775807
+  },
+  {
+    resource_address: "d"
+    creation_time_millis: 47
+    resource_uuid_high: -1
+    resource_uuid_low: 0
+  },
+  {
+    resource_address: "d"
+    creation_time_millis: 47
+    resource_uuid_high: 0
+    resource_uuid_low: -9223372036854775808
+  },
+  {
+    resource_address: "d"
+    creation_time_millis: 47
+    resource_uuid_high: 0
+    resource_uuid_low: -1
+  },
+  {
+    resource_address: "d"
+    creation_time_millis: 47
+    resource_uuid_high: 0
+    resource_uuid_low: 0
+  },
+  {
+    resource_address: "d"
+    creation_time_millis: 47
+    resource_uuid_high: 0
+    resource_uuid_low: 9223372036854775807
+  },
+  {
+    resource_address: "d"
+    creation_time_millis: 47
+    resource_uuid_high: 9223372036854775807
+    resource_uuid_low: -9223372036854775808
+  },
   {
     resource_address: "http://foo.bar"
     creation_time_millis: 1680279132000

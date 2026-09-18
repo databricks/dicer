@@ -78,17 +78,40 @@ private[dicer] object ClientMetrics {
     )
     .register()
 
-  @SuppressWarnings(
-    Array(
-      "BadMethodCall-PrometheusCounterNamingConvention",
-      "reason: Renaming existing prod metric would break dashboards and alerts"
-    )
-  )
-  private val numEmptyWatchResponses: Counter = Counter
+  private val watchRequestOutcomes: Counter = Counter
     .build()
-    .name("dicer_empty_watch_responses_total")
-    .labelNames("targetCluster", "targetName", "targetInstanceId")
-    .help("The number of responses received by the watcher where the assignment is empty")
+    .name("dicer_client_watch_request_outcomes_total")
+    .help(
+      "Count of watch request outcomes for a Dicer client, labeled by the assignment state the " +
+      "client attached to the request (requestState), how that request resolved " +
+      "(responseOutcome), and whether the response carried an assignment " +
+      "(responseHasAssignment, noResponse when no response arrived). Every request resolves " +
+      "into exactly one outcome. dicer_client_watch_requests_total covers the same requests at " +
+      "the more general gRPC level, while this metric provides the more detailed, internal " +
+      "assignment-sync view."
+    )
+    .labelNames(
+      "targetCluster",
+      "targetName",
+      "targetInstanceId",
+      "clientType",
+      "requestState",
+      "responseOutcome",
+      "responseHasAssignment"
+    )
+    .register()
+
+  private val lateWatchResponses: Counter = Counter
+    .build()
+    .name("dicer_client_late_watch_responses_total")
+    .help(
+      "Count of watch responses that were not for the latest watch request, because a retry " +
+      "superseded the request they answer after its internal deadline passed. That request was " +
+      "already counted as timedOut in dicer_client_watch_request_outcomes_total, so these " +
+      "responses are counted here instead of there to keep that metric summing to requests " +
+      "sent. The response could still be incorporated."
+    )
+    .labelNames("targetCluster", "targetName", "targetInstanceId", "clientType")
     .register()
 
   private val numSliceLookups: Counter = Counter
@@ -309,13 +332,152 @@ private[dicer] object ClientMetrics {
       .inc()
   }
 
-  /** Increments the metric tracking the number of empty watch responses received. */
-  private[client] def incrementEmptyWatchResponses(target: Target): Unit = {
-    numEmptyWatchResponses
+  /** The assignment state a client attached to an outgoing watch request. */
+  sealed trait WatchRequestState
+
+  object WatchRequestState {
+
+    /** The client holds no assignment, so it is asking for one from scratch. */
+    case object NoAssignment extends WatchRequestState {
+      override def toString: String = "noAssignment"
+    }
+
+    /** The client holds an assignment but sent only its generation. */
+    case object GenerationOnly extends WatchRequestState {
+      override def toString: String = "generationOnly"
+    }
+
+    /** The client holds an assignment and sent a diff of it to catch the server up. */
+    case object KnownAssignment extends WatchRequestState {
+      override def toString: String = "knownAssignment"
+    }
+  }
+
+  /** How a watch request resolved. */
+  sealed trait ResponseOutcome
+
+  object ResponseOutcome {
+
+    /** The server reported the generation the client holds, so the two are in sync. */
+    case object InSync extends ResponseOutcome {
+      override def toString: String = "inSync"
+    }
+
+    /** The server reported an older generation than the client holds. */
+    case object ServerBehind extends ResponseOutcome {
+      override def toString: String = "serverBehind"
+    }
+
+    /** The server reported a newer generation than the client holds. */
+    case object ServerAhead extends ResponseOutcome {
+      override def toString: String = "serverAhead"
+    }
+
+    /** The request hit its internal deadline before any response arrived. */
+    case object TimedOut extends ResponseOutcome {
+      override def toString: String = "timedOut"
+    }
+
+    /**
+     * The watch RPC returned an error instead of a response. For the specific failed status, see
+     * `dicer_client_watch_requests_total`.
+     */
+    case object RpcError extends ResponseOutcome {
+      override def toString: String = "rpcError"
+    }
+
+    /**
+     * Classifies a successful watch response by comparing the generation the server reported
+     * against the one the client held when the response arrived. Applies whether the response
+     * carried an assignment or only a generation.
+     */
+    def fromGenerations(
+        clientGenerationAtResponse: Generation,
+        responseGeneration: Generation): ResponseOutcome = {
+      if (responseGeneration == clientGenerationAtResponse) {
+        InSync
+      } else if (responseGeneration < clientGenerationAtResponse) {
+        ServerBehind
+      } else {
+        ServerAhead
+      }
+    }
+  }
+
+  /**
+   * Whether a watch response carried an assignment, alongside the case where no response arrived
+   * at all. [[ResponseOutcome]] compares generations, so on its own it cannot tell a server that
+   * reports a newer generation and sends the assignment from one that reports it and withholds
+   * the assignment, nor show a response that reported an older or equal generation yet still
+   * carried an assignment the client did not need.
+   */
+  sealed trait ResponseHasAssignment
+
+  object ResponseHasAssignment {
+
+    /** The response carried an assignment. */
+    case object True extends ResponseHasAssignment {
+      override def toString: String = "true"
+    }
+
+    /** The response carried only a generation, with no assignment. */
+    case object False extends ResponseHasAssignment {
+      override def toString: String = "false"
+    }
+
+    /** No response arrived: the request hit its internal deadline or its RPC returned an error. */
+    case object NoResponse extends ResponseHasAssignment {
+      override def toString: String = "noResponse"
+    }
+  }
+
+  /**
+   * Records how a watch request resolved, attributed to the assignment state the client attached to
+   * it. This is the internal, assignment-sync view of a request; [[recordWatchRequest]] records the
+   * same request at the more general gRPC level.
+   *
+   * @param target the target being watched
+   * @param clientType the type of client that sent the request (Clerk or Slicelet)
+   * @param requestState the assignment state the client attached to the request
+   * @param outcome how the request resolved, see [[ResponseOutcome.fromGenerations]] for successful
+   *                responses
+   * @param hasAssignment whether the response carried an assignment, or
+   *                      [[ResponseHasAssignment.NoResponse]] when none arrived
+   */
+  private[client] def recordWatchRequestOutcome(
+      target: Target,
+      clientType: ClientType,
+      requestState: WatchRequestState,
+      outcome: ResponseOutcome,
+      hasAssignment: ResponseHasAssignment): Unit = {
+    watchRequestOutcomes
       .labels(
         target.getTargetClusterLabel,
         target.getTargetNameLabel,
-        target.getTargetInstanceIdLabel
+        target.getTargetInstanceIdLabel,
+        clientType.getMetricLabel,
+        requestState.toString,
+        outcome.toString,
+        hasAssignment.toString
+      )
+      .inc()
+  }
+
+  /**
+   * Records a watch response that was not for the latest watch request. The request it answers
+   * was already counted as [[ResponseOutcome.TimedOut]] by [[recordWatchRequestOutcome]], so it is
+   * counted here rather than there.
+   *
+   * @param target the target being watched
+   * @param clientType the type of client that sent the request (Clerk or Slicelet)
+   */
+  private[client] def recordLateWatchResponse(target: Target, clientType: ClientType): Unit = {
+    lateWatchResponses
+      .labels(
+        target.getTargetClusterLabel,
+        target.getTargetNameLabel,
+        target.getTargetInstanceIdLabel,
+        clientType.getMetricLabel
       )
       .inc()
   }

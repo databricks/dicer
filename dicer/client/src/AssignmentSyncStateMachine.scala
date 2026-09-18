@@ -170,8 +170,11 @@ class AssignmentSyncStateMachine(config: InternalClientConfig, random: Random)
       opId: Long,
       response: ClientResponse,
       outputBuilder: StateMachineOutput.Builder[DriverAction]): Unit = {
-    if (response.syncState.isInstanceOf[SyncAssignmentState.KnownGeneration]) {
-      ClientMetrics.incrementEmptyWatchResponses(sliceLookupConfig.target)
+    // Read the client's generation before `incorporateSyncState` below, so the comparison recorded
+    // for the metric reflects what the client held when the response arrived.
+    val clientGenerationAtResponse: Generation = this.assignmentOpt match {
+      case Some(assignment: Assignment) => assignment.generation
+      case None => Generation.EMPTY
     }
     val syncSourceDebugName: String = responseAddressOpt
       .map { responseAddress: URI =>
@@ -189,7 +192,10 @@ class AssignmentSyncStateMachine(config: InternalClientConfig, random: Random)
     val isLatest = isLatestOpId(opId, "read success")
     if (!isLatest) {
       // See the `AssignmentSyncStateMachine` class comment - we want to incorporate new state, but
-      // not send a new request immediately.
+      // not send a new request immediately. `incorporateSyncState` above already applied the
+      // response, so count it: the request it answers was counted as `ResponseOutcome.TimedOut`
+      // when its deadline passed, and counting it there again would double count the request.
+      ClientMetrics.recordLateWatchResponse(sliceLookupConfig.target, sliceLookupConfig.clientType)
       if (isNewAssignment) {
         // If the server is persistently slow, we still want to try to incorporate additional state.
         // Our heuristic is that if we received a new assignment, we should update
@@ -199,6 +205,26 @@ class AssignmentSyncStateMachine(config: InternalClientConfig, random: Random)
         watchRpcTimeout = response.suggestedRpcTimeout
       }
     } else {
+      // Only record a response outcome when `isLatest` is true: a non-latest request was already
+      // counted as `ResponseOutcome.TimedOut` when its deadline passed and a retry was set up.
+      // `latestReadStateOpt` should be non-empty there.
+      for (latestReadState: ReadState <- latestReadStateOpt) {
+        val outcome: ClientMetrics.ResponseOutcome = ClientMetrics.ResponseOutcome
+          .fromGenerations(clientGenerationAtResponse, responseGeneration)
+        val hasAssignment: ClientMetrics.ResponseHasAssignment = response.syncState match {
+          case knownAssignment: SyncAssignmentState.KnownAssignment =>
+            ClientMetrics.ResponseHasAssignment.True
+          case knownGeneration: SyncAssignmentState.KnownGeneration =>
+            ClientMetrics.ResponseHasAssignment.False
+        }
+        ClientMetrics.recordWatchRequestOutcome(
+          sliceLookupConfig.target,
+          sliceLookupConfig.clientType,
+          latestReadState.requestState,
+          outcome,
+          hasAssignment
+        )
+      }
       // The latest read succeeded, so clear the read state, reset the failure backoff, and update
       // the suggested RPC timeout.
       latestReadStateOpt = None
@@ -316,6 +342,19 @@ class AssignmentSyncStateMachine(config: InternalClientConfig, random: Random)
     if (!isLatestOpId(opId, s"read failure: $error")) {
       // This is a failure response to an old request. Ignore it.
     } else {
+      // Only record a response outcome when it is the latest `opId`: a non-latest request was
+      // already counted as `ResponseOutcome.TimedOut` when its deadline passed.
+      // `latestReadStateOpt` should be non-empty here. Record before `setupRetry` below clears the
+      // read state carrying the request's state.
+      for (latestReadState: ReadState <- latestReadStateOpt) {
+        ClientMetrics.recordWatchRequestOutcome(
+          sliceLookupConfig.target,
+          sliceLookupConfig.clientType,
+          latestReadState.requestState,
+          ClientMetrics.ResponseOutcome.RpcError,
+          ClientMetrics.ResponseHasAssignment.NoResponse
+        )
+      }
       setupRetry(now)
     }
   }
@@ -336,12 +375,21 @@ class AssignmentSyncStateMachine(config: InternalClientConfig, random: Random)
   private def onAdvanceInternal(
       now: TickerTime,
       outputBuilder: StateMachineOutput.Builder[DriverAction]): Unit = {
-    for (latestReadState <- latestReadStateOpt) {
+    for (latestReadState: ReadState <- latestReadStateOpt) {
       // There is an outstanding request.
       if (now >= latestReadState.deadline) {
-        // The outstanding request is at or past its deadline. Clear `latestReadStateOpt` by calling
-        // `setupRetry` to ensure that a new watch request is initiated or scheduled below.
+        // The outstanding request is at or past its deadline. Count it as
+        // `ResponseOutcome.TimedOut`, then clear `latestReadStateOpt` by calling `setupRetry` to
+        // ensure that a new watch request is initiated or scheduled below. A late response to this
+        // request will not be counted again.
         logger.warn("Watch assignment hit internal deadline, will retry", every = 30.seconds)
+        ClientMetrics.recordWatchRequestOutcome(
+          sliceLookupConfig.target,
+          sliceLookupConfig.clientType,
+          latestReadState.requestState,
+          ClientMetrics.ResponseOutcome.TimedOut,
+          ClientMetrics.ResponseHasAssignment.NoResponse
+        )
         setupRetry(now)
       }
     }
@@ -357,7 +405,6 @@ class AssignmentSyncStateMachine(config: InternalClientConfig, random: Random)
       lastOpId += 1
       val opId: Long = lastOpId
       val deadline: TickerTime = now + watchRpcTimeout
-      latestReadStateOpt = Some(ReadState(opId, deadline))
       val syncState: SyncAssignmentState = this.assignmentOpt match {
         case Some(assignment: Assignment)
             if assignment.generation > this.remoteServerKnownGeneration.generation &&
@@ -381,6 +428,21 @@ class AssignmentSyncStateMachine(config: InternalClientConfig, random: Random)
           }
           SyncAssignmentState.KnownGeneration(knownGeneration)
       }
+      // Remembered on the read state so that whichever outcome resolves this request - a response
+      // or the internal deadline - is attributed to the state the request carried. An `Assignment`
+      // always has a non-empty generation, so an empty one means the client holds none and is
+      // asking from scratch.
+      val requestState: ClientMetrics.WatchRequestState = syncState match {
+        case knownAssignment: SyncAssignmentState.KnownAssignment =>
+          ClientMetrics.WatchRequestState.KnownAssignment
+        case knownGeneration: SyncAssignmentState.KnownGeneration =>
+          if (knownGeneration.generation == Generation.EMPTY) {
+            ClientMetrics.WatchRequestState.NoAssignment
+          } else {
+            ClientMetrics.WatchRequestState.GenerationOnly
+          }
+      }
+      latestReadStateOpt = Some(ReadState(opId, deadline, requestState))
       outputBuilder.appendAction(
         DriverAction.SendRequest(redirect, opId, syncState, watchRpcTimeout)
       )
@@ -616,5 +678,8 @@ object AssignmentSyncStateMachine {
    * Tracks metadata corresponding to the outstanding read. See the [[AssignmentSyncStateMachine]]
    * class comment for how this affects behavior.
    */
-  case class ReadState(opId: Long, deadline: TickerTime)
+  case class ReadState(
+      opId: Long,
+      deadline: TickerTime,
+      requestState: ClientMetrics.WatchRequestState)
 }

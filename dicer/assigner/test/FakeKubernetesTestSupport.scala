@@ -15,15 +15,7 @@ import com.databricks.caching.util.AlertOwnerTeam
 import com.databricks.caching.util.SequentialExecutionContext
 
 /**
- * Shared scaffolding for tests that drive a [[KubernetesMembershipChecker]] (and the drivers
- * built on it) against a [[FakeKubernetesServer]]. Centralizes the pieces that were previously
- * copy-pasted across the assigner test suites: building a [[CoreV1Api]] pointed at a fake server,
- * building a `Ready` pod, and building a bare (never-polling) checker factory.
- *
- * The *fake-server-backed* membership-checker factory and execution-context wiring are
- * intentionally NOT shared, because suites differ in their SEC/timing model (single fake SEC +
- * clock advances vs. per-checker dedicated pools). Each suite keeps that wiring local, built on
- * these primitives.
+ * Shared scaffolding for tests that use a [[FakeKubernetesServer]].
  */
 private[assigner] object FakeKubernetesTestSupport {
 

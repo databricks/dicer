@@ -105,6 +105,39 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
     }
   }
 
+  test("Instance-scoped overrides are rejected when reading all scopes") {
+    // Test plan: Verify that reading a config whose override is scoped to an instance id fails,
+    // since instance-scoped overrides are not yet supported. Verify this by writing such a config
+    // and confirming that readFullConfigMapFromDirectories throws.
+    val configWriter = new ConfigWriter
+    configWriter.writeConfig(
+      "softstore-storelet.textproto",
+      """default_config {
+        |  primary_rate_metric_config {
+        |    max_load_hint: 1000
+        |  }
+        |}
+        |overrides {
+        |  override_scopes {
+        |    instance_id: "some-instance"
+        |  }
+        |  override_config {
+        |    primary_rate_metric_config {
+        |      max_load_hint: 2000
+        |    }
+        |  }
+        |}""".stripMargin
+    )
+    assertThrow[IllegalArgumentException](
+      "Instance-scoped config overrides are not yet supported"
+    ) {
+      TargetConfigReader.readFullConfigMapFromDirectories(
+        configWriter.getTargetConfigDirectory,
+        configWriter.getAdvancedTargetConfigDirectory
+      )
+    }
+  }
+
   test("All advanced configs should have corresponding target configs") {
     // Test plan: create a target whose target config is missing, expect exceptions being thrown.
     val configWriter = new ConfigWriter

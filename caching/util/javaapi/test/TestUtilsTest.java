@@ -1,8 +1,11 @@
 package com.databricks.caching.util.javaapi;
 
-import static org.assertj.core.api.Assertions.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatNoException;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.databricks.caching.util.javaapi.test.TestMessage.*;
+import com.databricks.caching.util.javaapi.test.TestMessage.IntTestMessageP;
+import com.databricks.caching.util.javaapi.test.TestMessage.StringTestMessageP;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 

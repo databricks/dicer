@@ -2,9 +2,8 @@ package com.databricks.dicer.common
 
 import com.databricks.caching.util.TestUtils.{assertThrow, loadTestData}
 import com.google.protobuf.ByteString
-import io.prometheus.client.CollectorRegistry
 
-import com.databricks.caching.util.{MetricUtils, TestUtils}
+import com.databricks.caching.util.TestUtils
 import com.databricks.dicer.common.SliceHelper.RichSlice
 import com.databricks.dicer.common.test.SliceKeyTestDataP
 import com.databricks.dicer.common.TestSliceUtils.{
@@ -383,62 +382,6 @@ class SliceKeySuite extends DatabricksTest {
     assertResult(0)(testByteBuffer.position())
     SliceKey.newFingerprintBuilder().putBytes(testByteBuffer).build()
     assertResult(0, "putBytes should not modify ByteBuffer position")(testByteBuffer.position())
-  }
-
-  test("slice key size metrics") {
-    // Test plan: Verify that the metrics tracking the sizes of slice keys are correctly updated
-    // when slice keys being created.
-
-    // Gets the value of slice key byte size bucket metric whose label is "le".
-    def getSliceKeySizeLe(le: Int): Int = {
-      MetricUtils
-        .getMetricValue(
-          CollectorRegistry.defaultRegistry,
-          "dicer_slice_key_byte_size_bucket",
-          Map("le" -> le.toDouble.toString)
-        )
-        .toInt
-    }
-
-    val initialBuckets: Map[Int, Int] = Seq(7, 8, 9, 10, 16, 32, 64, 128).map { le: Int =>
-      (le, getSliceKeySizeLe(le))
-    }.toMap
-
-    // 8-byte slice key, should increase buckets greater than or equal to 8.
-    identityKey(1, 2, 3, 4, 5, 6, 7, 8)
-    assert(getSliceKeySizeLe(7) == initialBuckets(7))
-    assert(getSliceKeySizeLe(8) == initialBuckets(8) + 1)
-    assert(getSliceKeySizeLe(9) == initialBuckets(9) + 1)
-    assert(getSliceKeySizeLe(10) == initialBuckets(10) + 1)
-    assert(getSliceKeySizeLe(16) == initialBuckets(16) + 1)
-
-    // Another 8-byte slice key, should increase buckets greater than or equal to 8.
-    identityKey(0, 0, 0, 0, 0, 0, 0, 0)
-    assert(getSliceKeySizeLe(7) == initialBuckets(7))
-    assert(getSliceKeySizeLe(8) == initialBuckets(8) + 2)
-    assert(getSliceKeySizeLe(9) == initialBuckets(9) + 2)
-    assert(getSliceKeySizeLe(10) == initialBuckets(10) + 2)
-    assert(getSliceKeySizeLe(16) == initialBuckets(16) + 2)
-
-    // 9-byte slice key, should increase buckets greater than or equal to 9.
-    identityKey(0, 0, 0, 0, 0, 0, 0, 0, 0)
-    assert(getSliceKeySizeLe(7) == initialBuckets(7))
-    assert(getSliceKeySizeLe(8) == initialBuckets(8) + 2)
-    assert(getSliceKeySizeLe(9) == initialBuckets(9) + 3)
-    assert(getSliceKeySizeLe(10) == initialBuckets(10) + 3)
-    assert(getSliceKeySizeLe(16) == initialBuckets(16) + 3)
-    assert(getSliceKeySizeLe(128) == initialBuckets(128) + 3)
-
-    // 42-byte slice key, should increase buckets greater or equal to than 42.
-    identityKey(new Array[Byte](42))
-    assert(getSliceKeySizeLe(7) == initialBuckets(7))
-    assert(getSliceKeySizeLe(8) == initialBuckets(8) + 2)
-    assert(getSliceKeySizeLe(9) == initialBuckets(9) + 3)
-    assert(getSliceKeySizeLe(10) == initialBuckets(10) + 3)
-    assert(getSliceKeySizeLe(16) == initialBuckets(16) + 3)
-    assert(getSliceKeySizeLe(32) == initialBuckets(32) + 3)
-    assert(getSliceKeySizeLe(64) == initialBuckets(64) + 4)
-    assert(getSliceKeySizeLe(128) == initialBuckets(128) + 4)
   }
 }
 object SliceKeySuite {
