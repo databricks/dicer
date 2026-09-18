@@ -2,7 +2,12 @@ package com.databricks.dicer.assigner.config
 
 import scala.concurrent.Promise
 import scala.concurrent.duration.Duration
-import com.databricks.caching.util.{SequentialExecutionContext, TestUtils, ValueStreamCallback}
+import com.databricks.caching.util.{
+  AlertOwnerTeam,
+  SequentialExecutionContext,
+  TestUtils,
+  ValueStreamCallback
+}
 import com.databricks.conf.Configs
 import com.databricks.dicer.assigner.TestableDicerAssignerConf
 import com.databricks.testing.DatabricksTest
@@ -16,7 +21,8 @@ class StaticTargetMigrationConfigProviderSuite extends DatabricksTest {
     // returns NO_MIGRATION, and confirming watch delivers NO_MIGRATION to the callback.
     val sec: SequentialExecutionContext =
       SequentialExecutionContext.createWithDedicatedPool(
-        "static-target-migration-config-provider-test"
+        name = "static-target-migration-config-provider-test",
+        alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
       )
     val assignerConf: TestableDicerAssignerConf =
       new TestableDicerAssignerConf(Configs.parseMap())

@@ -15,6 +15,13 @@ public final class Target {
     scalaTarget = com.databricks.dicer.external.Target.apply(name);
   }
 
+  /**
+   * @see com.databricks.dicer.external.Target#name()
+   */
+  public String getName() {
+    return scalaTarget.name();
+  }
+
   @Override
   public String toString() {
     return scalaTarget.toString();

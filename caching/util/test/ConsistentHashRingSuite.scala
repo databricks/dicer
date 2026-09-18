@@ -2,23 +2,24 @@ package com.databricks.caching.util
 
 import scala.collection.mutable
 
+import com.databricks.caching.util.ConsistentHashRingHarness.TypeMapperFunction
 import com.databricks.caching.util.ConsistentHashRingGoldenData.{
   EXPECTED_NODES_WITH_1_VNODE,
   EXPECTED_NODES_WITH_50_VNODES
 }
-import com.google.protobuf.ByteString
 import com.databricks.testing.DatabricksTest
 
 trait ConsistentHashRingSuiteBase extends DatabricksTest {
 
   /**
    * Creates a consistent hash ring with String nodes and keys that the tests run against,
-   * containing `nodes` with `vnodesPerNode` virtual nodes per node and a default TypeMapper that
-   * maps these Strings to their UTF-8 bytes.
+   * containing `nodes` with `vnodesPerNode` virtual nodes per node and using `typeMapper` to map
+   * nodes and keys to bytes.
    */
   protected def createConsistentHashRing(
       nodes: Vector[String],
-      vnodesPerNode: Int): ConsistentHashRingHarness
+      vnodesPerNode: Int,
+      typeMapper: TypeMapperFunction): ConsistentHashRingHarness
 
   test("Create rejects bad arguments") {
     // Test plan: Verify that create() throws an exception when vnodesPerNode is zero or negative.
@@ -26,15 +27,27 @@ trait ConsistentHashRingSuiteBase extends DatabricksTest {
 
     // Non-positive vnodesPerNode.
     TestUtils.assertThrow[Exception]("must be > 0, got 0") {
-      createConsistentHashRing(nodes = Vector("a"), vnodesPerNode = 0)
+      createConsistentHashRing(
+        nodes = Vector("a"),
+        vnodesPerNode = 0,
+        typeMapper = TypeMapperFunction.Utf8
+      )
     }
     TestUtils.assertThrow[Exception]("must be > 0, got -1") {
-      createConsistentHashRing(nodes = Vector("a"), vnodesPerNode = -1)
+      createConsistentHashRing(
+        nodes = Vector("a"),
+        vnodesPerNode = -1,
+        typeMapper = TypeMapperFunction.Utf8
+      )
     }
 
     // Empty nodes set.
     TestUtils.assertThrow[Exception]("nodes must not be empty") {
-      createConsistentHashRing(nodes = Vector.empty[String], vnodesPerNode = 16)
+      createConsistentHashRing(
+        nodes = Vector.empty[String],
+        vnodesPerNode = 16,
+        typeMapper = TypeMapperFunction.Utf8
+      )
     }
   }
 
@@ -43,9 +56,17 @@ trait ConsistentHashRingSuiteBase extends DatabricksTest {
     // nodes, and that two rings built from identical inputs agree on every key.
     val nodes: Vector[String] = Vector("a", "b", "c", "d")
     val ring1: ConsistentHashRingHarness =
-      createConsistentHashRing(nodes = nodes, vnodesPerNode = 16)
+      createConsistentHashRing(
+        nodes = nodes,
+        vnodesPerNode = 16,
+        typeMapper = TypeMapperFunction.Utf8
+      )
     val ring2: ConsistentHashRingHarness =
-      createConsistentHashRing(nodes = nodes, vnodesPerNode = 16)
+      createConsistentHashRing(
+        nodes = nodes,
+        vnodesPerNode = 16,
+        typeMapper = TypeMapperFunction.Utf8
+      )
     assert(ring1.nodes.toSet == nodes.toSet)
     assert(ring2.nodes.toSet == nodes.toSet)
 
@@ -65,7 +86,11 @@ trait ConsistentHashRingSuiteBase extends DatabricksTest {
     // of the mean.
     val nodes: Vector[String] = (0 until 5).map((i: Int) => s"node_$i").toVector
     val ring: ConsistentHashRingHarness =
-      createConsistentHashRing(nodes = nodes, vnodesPerNode = 64)
+      createConsistentHashRing(
+        nodes = nodes,
+        vnodesPerNode = 64,
+        typeMapper = TypeMapperFunction.Utf8
+      )
     assert(ring.nodes.toSet == nodes.toSet)
 
     val totalKeys: Int = 500
@@ -90,7 +115,11 @@ trait ConsistentHashRingSuiteBase extends DatabricksTest {
     // Test plan: Verify that adding a node either maintains the same owner for tested keys or
     // moves them to the new node, following the consistent hashing invariant.
     val originalRing: ConsistentHashRingHarness =
-      createConsistentHashRing(nodes = Vector("a", "b", "c"), vnodesPerNode = 32)
+      createConsistentHashRing(
+        nodes = Vector("a", "b", "c"),
+        vnodesPerNode = 32,
+        typeMapper = TypeMapperFunction.Utf8
+      )
     assert(originalRing.nodes.toSet == Set("a", "b", "c"))
 
     val keys: Seq[String] = (0 until 1000).map((i: Int) => s"key_$i")
@@ -98,7 +127,11 @@ trait ConsistentHashRingSuiteBase extends DatabricksTest {
       keys.map((key: String) => key -> originalRing.lookup(key = key)).toMap
 
     val updatedRing: ConsistentHashRingHarness =
-      createConsistentHashRing(nodes = Vector("a", "b", "c", "d"), vnodesPerNode = 32)
+      createConsistentHashRing(
+        nodes = Vector("a", "b", "c", "d"),
+        vnodesPerNode = 32,
+        typeMapper = TypeMapperFunction.Utf8
+      )
     assert(updatedRing.nodes.toSet == Set("a", "b", "c", "d"))
 
     // Every key must either stay on its original owner or move to "d". No key may have switched
@@ -120,7 +153,11 @@ trait ConsistentHashRingSuiteBase extends DatabricksTest {
     // Test plan: Verify that when a node is removed, the other keys remain on their original node.
     // Keys that were originally owned by the removed node should get moved to another node.
     val originalRing: ConsistentHashRingHarness =
-      createConsistentHashRing(nodes = Vector("a", "b", "c", "d"), vnodesPerNode = 32)
+      createConsistentHashRing(
+        nodes = Vector("a", "b", "c", "d"),
+        vnodesPerNode = 32,
+        typeMapper = TypeMapperFunction.Utf8
+      )
     assert(originalRing.nodes.toSet == Set("a", "b", "c", "d"))
 
     val keys: Seq[String] = (0 until 1000).map((i: Int) => s"key_$i")
@@ -130,7 +167,11 @@ trait ConsistentHashRingSuiteBase extends DatabricksTest {
     assert(originalOwners.values.toSet.contains("d"), "Test setup: d should own at least one key")
 
     val updatedRing: ConsistentHashRingHarness =
-      createConsistentHashRing(nodes = Vector("a", "b", "c"), vnodesPerNode = 32)
+      createConsistentHashRing(
+        nodes = Vector("a", "b", "c"),
+        vnodesPerNode = 32,
+        typeMapper = TypeMapperFunction.Utf8
+      )
     assert(updatedRing.nodes.toSet == Set("a", "b", "c"))
 
     // Keys originally owned by "d" must route to one of the remaining nodes, and every other key
@@ -164,7 +205,11 @@ trait ConsistentHashRingSuiteBase extends DatabricksTest {
     val nodes: Vector[String] = (0 until 500).map((i: Int) => s"node_$i").toVector
     val keys: Seq[String] = (0 until 100).map((i: Int) => s"key_$i")
     val ring: ConsistentHashRingHarness =
-      createConsistentHashRing(nodes = nodes, vnodesPerNode = 1)
+      createConsistentHashRing(
+        nodes = nodes,
+        vnodesPerNode = 1,
+        typeMapper = TypeMapperFunction.Utf8
+      )
     assert(ring.nodes.toSet == nodes.toSet)
     for (i: Int <- keys.indices) {
       val owner: String = ring.lookup(key = keys(i))
@@ -177,7 +222,11 @@ trait ConsistentHashRingSuiteBase extends DatabricksTest {
     // Run the same verification with a new ring with 50 vnodes per node. We use the same keys,
     // though these are likely now assigned to different nodes.
     val newRing: ConsistentHashRingHarness =
-      createConsistentHashRing(nodes = nodes, vnodesPerNode = 50)
+      createConsistentHashRing(
+        nodes = nodes,
+        vnodesPerNode = 50,
+        typeMapper = TypeMapperFunction.Utf8
+      )
     assert(newRing.nodes.toSet == nodes.toSet)
     for (i: Int <- keys.indices) {
       val owner: String = newRing.lookup(key = keys(i))
@@ -187,32 +236,39 @@ trait ConsistentHashRingSuiteBase extends DatabricksTest {
       )
     }
   }
+
+  test("Lookup returns the last writer when ring positions collide") {
+    // Test plan: Force three nodes onto colliding vnode position and verify that lookup selects
+    // the last inserted node.
+    val ring: ConsistentHashRingHarness = createConsistentHashRing(
+      nodes = Vector("a", "b", "c"),
+      vnodesPerNode = 1,
+      typeMapper = TypeMapperFunction.CollidingNode
+    )
+
+    assert(ring.lookup(key = "key") == "c")
+  }
 }
 
 /** Runs [[ConsistentHashRingSuiteBase]] against the in-process Scala [[ConsistentHashRing]]. */
 class ScalaConsistentHashRingSuite extends ConsistentHashRingSuiteBase {
 
-  /** Maps String nodes and keys to their UTF-8 bytes. */
-  private val STRING_TYPE_MAPPER: ConsistentHashRing.TypeMapper[String, String] =
-    new ConsistentHashRing.TypeMapper[String, String] {
-      override def mapNode(node: String): ByteString = ByteString.copyFromUtf8(node)
-      override def mapKey(key: String): ByteString = ByteString.copyFromUtf8(key)
-    }
-
   override protected def createConsistentHashRing(
       nodes: Vector[String],
-      vnodesPerNode: Int): ConsistentHashRingHarness =
+      vnodesPerNode: Int,
+      typeMapper: TypeMapperFunction): ConsistentHashRingHarness =
     new ScalaConsistentHashRingHarness(
       ConsistentHashRing.create[String, String](
         nodes = nodes,
         vnodesPerNode = vnodesPerNode,
-        typeMapper = STRING_TYPE_MAPPER
+        typeMapper = typeMapper.toRealTypeMapper
       )
     )
 
   // TODO(<internal bug>): Move these tests to ConsistentHashRingSuiteBase once lookupIterator is
   // implemented in Rust. This will happen together with the getNextStubForKey implementation in
   // Rust.
+
   test(
     "lookupIterator walks every node exactly `vnodesPerNode` times starting at the key's owner"
   ) {
@@ -225,7 +281,7 @@ class ScalaConsistentHashRingSuite extends ConsistentHashRingSuiteBase {
     val ring: ConsistentHashRing[String, String] = ConsistentHashRing.create[String, String](
       nodes = nodes,
       vnodesPerNode = vnodesPerNode,
-      typeMapper = STRING_TYPE_MAPPER
+      typeMapper = TypeMapperFunction.Utf8.toRealTypeMapper
     )
 
     for (i: Int <- 0 until 200) {
@@ -251,7 +307,7 @@ class ScalaConsistentHashRingSuite extends ConsistentHashRingSuiteBase {
     val ring: ConsistentHashRing[String, String] = ConsistentHashRing.create[String, String](
       nodes = nodes,
       vnodesPerNode = 16,
-      typeMapper = STRING_TYPE_MAPPER
+      typeMapper = TypeMapperFunction.Utf8.toRealTypeMapper
     )
 
     val walk1: Vector[String] = ring.lookupIterator(key = "key_1").toVector
@@ -269,12 +325,12 @@ class ScalaConsistentHashRingSuite extends ConsistentHashRingSuiteBase {
     val ring1: ConsistentHashRing[String, String] = ConsistentHashRing.create[String, String](
       nodes = nodes,
       vnodesPerNode = vnodesPerNode,
-      typeMapper = STRING_TYPE_MAPPER
+      typeMapper = TypeMapperFunction.Utf8.toRealTypeMapper
     )
     val ring2: ConsistentHashRing[String, String] = ConsistentHashRing.create[String, String](
       nodes = nodes,
       vnodesPerNode = vnodesPerNode,
-      typeMapper = STRING_TYPE_MAPPER
+      typeMapper = TypeMapperFunction.Utf8.toRealTypeMapper
     )
 
     for (i: Int <- 0 until 200) {
@@ -293,7 +349,7 @@ class ScalaConsistentHashRingSuite extends ConsistentHashRingSuiteBase {
     val ring: ConsistentHashRing[String, String] = ConsistentHashRing.create[String, String](
       nodes = nodes,
       vnodesPerNode = 1,
-      typeMapper = STRING_TYPE_MAPPER
+      typeMapper = TypeMapperFunction.Utf8.toRealTypeMapper
     )
     for (i: Int <- 0 until 200) {
       val key: String = s"key_$i"
@@ -308,13 +364,25 @@ class ScalaConsistentHashRingSuite extends ConsistentHashRingSuiteBase {
 
   test("lookupIterator on a single-node ring yields that node once") {
     // Test plan: Verify the boundary case where the ring has a single node with `vnodesPerNode` =
-    // 1. The walk must
-    // contain exactly that node and then terminate.
+    // 1. The walk must contain exactly that node and then terminate.
     val ring: ConsistentHashRing[String, String] = ConsistentHashRing.create[String, String](
       nodes = Vector("only"),
       vnodesPerNode = 1,
-      typeMapper = STRING_TYPE_MAPPER
+      typeMapper = TypeMapperFunction.Utf8.toRealTypeMapper
     )
     assert(ring.lookupIterator(key = "any_key").toVector == Vector("only"))
+  }
+
+  test("lookupIterator includes every vnode when ring positions collide") {
+    // Test plan: Verify that colliding vnode hashes remain separate ring entries. Force three
+    // physical nodes onto the same ring position, then confirm lookupIterator visits every
+    // colliding vnode in reverse insertion order.
+    val ring: ConsistentHashRing[String, String] = ConsistentHashRing.create[String, String](
+      nodes = Vector("a", "b", "c"),
+      vnodesPerNode = 1,
+      typeMapper = TypeMapperFunction.CollidingNode.toRealTypeMapper
+    )
+
+    assert(ring.lookupIterator(key = "key").toVector == Vector("c", "b", "a"))
   }
 }

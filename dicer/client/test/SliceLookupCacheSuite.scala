@@ -1,7 +1,7 @@
 package com.databricks.dicer.client
 
 import java.io.File
-import java.net.URI
+import java.net.{InetAddress, URI}
 import java.util.UUID
 import scala.collection.mutable
 import scala.concurrent.duration._
@@ -74,6 +74,7 @@ class SliceLookupCacheSuite extends DatabricksTest with TestName {
       minRetryDelay: FiniteDuration = 1.second,
       maxRetryDelay: FiniteDuration = 10.seconds,
       enableRateLimiting: Boolean = false,
+      sourceIpOpt: Option[InetAddress] = None,
       kubernetesClusterUri: String = ""): InternalClientConfig = {
     val sliceLookupConfig: SliceLookupConfig = WhereAmITestUtils.withLocationConfSingleton(
       LocationConfTestUtils.newTestLocationConf(kubernetesClusterUri = kubernetesClusterUri)
@@ -90,7 +91,8 @@ class SliceLookupCacheSuite extends DatabricksTest with TestName {
         watchRpcTimeout = watchRpcTimeout,
         minRetryDelay = minRetryDelay,
         maxRetryDelay = maxRetryDelay,
-        enableRateLimiting = enableRateLimiting
+        enableRateLimiting = enableRateLimiting,
+        sourceIpOpt = sourceIpOpt
       )
     }
     InternalClientConfig(sliceLookupConfig, subscriberDebugName = s"test-lookup-${target.name}")
@@ -337,18 +339,51 @@ class SliceLookupCacheSuite extends DatabricksTest with TestName {
     assert(lookup3 eq lookup3Again, "config3 lookup should return the same instance")
   }
 
+  test("getOrElseCreate creates new lookup for same target with different source IP") {
+    // Test plan: Verify that the same target with different sourceIpOpt values results in a cache
+    // miss and a new SliceLookup being created, so a Clerk that binds a source address never shares
+    // a lookup, and therefore a watch connection, with one that binds a different address or none.
+
+    val cache = new SliceLookupCache
+    val target = Target(getSafeName)
+
+    val firstNicIp: InetAddress = InetAddress.getByName("10.4.5.6")
+    val secondNicIp: InetAddress = InetAddress.getByName("10.7.8.9")
+
+    // config1, config2, and config3 differ only in sourceIpOpt.
+    val config1: InternalClientConfig = createTestConfig(target, sourceIpOpt = None)
+    val config2: InternalClientConfig = createTestConfig(target, sourceIpOpt = Some(firstNicIp))
+    val config3: InternalClientConfig = createTestConfig(target, sourceIpOpt = Some(secondNicIp))
+
+    val lookup1: SliceLookup = verifyGetOrElseCreate(cache, config1, CacheOutcome.TargetMiss)
+    val lookup2: SliceLookup =
+      verifyGetOrElseCreate(cache, config2, CacheOutcome.TargetHitDiffConfig)
+    val lookup3: SliceLookup =
+      verifyGetOrElseCreate(cache, config3, CacheOutcome.TargetHitDiffConfig)
+
+    val lookup1Again: SliceLookup =
+      verifyGetOrElseCreate(cache, config1, CacheOutcome.TargetHitSameConfig)
+    val lookup2Again: SliceLookup =
+      verifyGetOrElseCreate(cache, config2, CacheOutcome.TargetHitSameConfig)
+    val lookup3Again: SliceLookup =
+      verifyGetOrElseCreate(cache, config3, CacheOutcome.TargetHitSameConfig)
+    assert(lookup1 eq lookup1Again, "config1 lookup should return the same instance")
+    assert(lookup2 eq lookup2Again, "config2 lookup should return the same instance")
+    assert(lookup3 eq lookup3Again, "config3 lookup should return the same instance")
+  }
+
   test("getOrElseCreate treats each differing SliceLookupConfig field as a config mismatch") {
     // Test plan: Verify that varying each field of SliceLookupConfig results in a config mismatch
     // and a new SliceLookup being created. Verify that these distinct configs coexist in the
     // cache (i.e. each distinct config is its own entry and none evicts another). Using one shared
     // cache, (1) look up every variation and verify each is a config mismatch, and (2) look up
     // every variation again and verify each is now a config match that returns the same cached
-    // instance. Varying `target`, `clientIdOpt`, and `tlsOptionsOpt` are intentionally not tested
-    // here, and instead exercised in their own dedicated tests above. `target` is omitted because
-    // a differing target results in a `TargetMiss` rather than a config mismatch. `clientIdOpt`
-    // and `tlsOptionsOpt` are omitted because they are `Option`s, and each require a test that
-    // exercises `None` alongside two variants. The base config leaves the sender cluster URI unset,
-    // so the `clientClusterUriOpt` variation supplies one to differ from it.
+    // instance. Varying `target`, `clientIdOpt`, `tlsOptionsOpt`, and `sourceIpOpt` are
+    // intentionally not tested here, and instead exercised in their own dedicated tests above.
+    // `target` is omitted because a differing target results in a `TargetMiss` rather than a config
+    // mismatch. The other three are omitted because they are `Option`s, and each require a test
+    // that exercises `None` alongside two variants. The base config leaves the sender cluster URI
+    // unset, so the `clientClusterUriOpt` variation supplies one to differ from it.
 
     val cache = new SliceLookupCache
     val target: Target = Target(getSafeName)

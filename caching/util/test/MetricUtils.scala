@@ -115,6 +115,14 @@ object MetricUtils extends Assertions {
     getMetricValueOpt(registry, metric, labels).getOrElse(0.0)
   }
 
+  /** Returns the sum of all metric series containing the given labels. */
+  def getMetricValuesSum(
+      registry: CollectorRegistry,
+      metric: String,
+      labels: Map[String, String]): Double = {
+    getMetricSamplesFilteredByLabels(registry, metric, metric, labels).map(_.value).sum
+  }
+
   /**
    * Returns the value for a given metric with its label names and values, or `None` if it does not
    * exist.

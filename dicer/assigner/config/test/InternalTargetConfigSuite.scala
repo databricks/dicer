@@ -7,6 +7,7 @@ import com.databricks.api.proto.dicer.assigner.config.{
   AdvancedTargetConfigFieldsP,
   HealthWatcherConfigP,
   LoadWatcherConfigP,
+  ReplicationThresholdOverrideP,
   TargetWatchRequestRateLimitConfigP
 }
 import com.databricks.api.proto.dicer.external.LoadBalancingMetricConfigP.{
@@ -30,6 +31,7 @@ import com.databricks.dicer.assigner.config.InternalTargetConfig.{
   LoadBalancingConfig,
   LoadBalancingMetricConfig,
   LoadWatcherTargetConfig,
+  ReplicationThresholdOverride,
   TargetWatchRequestRateLimitConfig
 }
 import com.databricks.dicer.common.SliceKeySensitivity
@@ -556,6 +558,69 @@ class InternalTargetConfigSuite extends DatabricksTest {
     )
     assertResult(None)(
       NamedInternalTargetConfig(name, disabledConfig).toProto.getAdvancedConfig.useAlternativeTarget
+    )
+  }
+
+  test(
+    "InternalTargetConfig replication_threshold_override defaults to Default and serializes only " +
+    "when explicitly overridden"
+  ) {
+    // Test plan: verify that replication_threshold_override parses to Default when unset in
+    // AdvancedTargetConfigFieldsP, parses to the corresponding case when set to MAX_LOAD_HINT_BASED
+    // or MAX_DESIRED_LOAD_BASED, and that NamedInternalTargetConfig.toProto emits the field only
+    // for an explicit override (so configs left at the default are not churned).
+    val targetConfig = TargetConfigFieldsP(
+      primaryRateMetricConfig = Some(LoadBalancingMetricConfigP(maxLoadHint = Some(1000)))
+    )
+    val name = TargetName("softstore-storelet")
+
+    // The default (unset) parses to Default.
+    val disabledConfig =
+      InternalTargetConfig.fromProtos(targetConfig, AdvancedTargetConfigFieldsP())
+    assertResult(ReplicationThresholdOverride.Default)(
+      disabledConfig.loadBalancingConfig.replicationThresholdOverride
+    )
+
+    // MaxLoadHintBased overrides are parsed explicitly.
+    val maxLoadHintConfig = InternalTargetConfig.fromProtos(
+      targetConfig,
+      AdvancedTargetConfigFieldsP(
+        replicationThresholdOverride =
+          Some(ReplicationThresholdOverrideP.REPLICATION_THRESHOLD_OVERRIDE_MAX_LOAD_HINT_BASED)
+      )
+    )
+    assertResult(ReplicationThresholdOverride.MaxLoadHintBased)(
+      maxLoadHintConfig.loadBalancingConfig.replicationThresholdOverride
+    )
+
+    // MaxDesiredLoadBased overrides are parsed explicitly.
+    val maxDesiredLoadConfig = InternalTargetConfig.fromProtos(
+      targetConfig,
+      AdvancedTargetConfigFieldsP(
+        replicationThresholdOverride =
+          Some(ReplicationThresholdOverrideP.REPLICATION_THRESHOLD_OVERRIDE_MAX_DESIRED_LOAD_BASED)
+      )
+    )
+    assertResult(ReplicationThresholdOverride.MaxDesiredLoadBased)(
+      maxDesiredLoadConfig.loadBalancingConfig.replicationThresholdOverride
+    )
+
+    // toProto emits the field for an explicit override, but leaves it unset for the default.
+    val namedMaxLoadHintConfig = NamedInternalTargetConfig(name, maxLoadHintConfig)
+    val namedMaxDesiredLoadConfig = NamedInternalTargetConfig(name, maxDesiredLoadConfig)
+    val namedDisabledConfig = NamedInternalTargetConfig(name, disabledConfig)
+    assertResult(
+      Some(ReplicationThresholdOverrideP.REPLICATION_THRESHOLD_OVERRIDE_MAX_LOAD_HINT_BASED)
+    )(
+      namedMaxLoadHintConfig.toProto.getAdvancedConfig.replicationThresholdOverride
+    )
+    assertResult(
+      Some(ReplicationThresholdOverrideP.REPLICATION_THRESHOLD_OVERRIDE_MAX_DESIRED_LOAD_BASED)
+    )(
+      namedMaxDesiredLoadConfig.toProto.getAdvancedConfig.replicationThresholdOverride
+    )
+    assertResult(None)(
+      namedDisabledConfig.toProto.getAdvancedConfig.replicationThresholdOverride
     )
   }
 

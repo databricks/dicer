@@ -92,7 +92,7 @@ object Clerk {
       stubFactory: ResourceAddress => Stub): Clerk[Stub] = {
     val watchAddress: URI = clerkConf.getSliceletURI(sliceletHostName)
     val clerkImpl =
-      ClerkImpl.create[Stub](clerkConf, target, watchAddress, stubFactory)
+      ClerkImpl.create[Stub](clerkConf, target, watchAddress, stubFactory, sourceIpOpt = None)
     new Clerk[Stub](clerkImpl)
   }
 }

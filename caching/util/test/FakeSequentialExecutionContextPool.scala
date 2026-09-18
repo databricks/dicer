@@ -1,9 +1,8 @@
 package com.databricks.caching.util
 
+import java.util.concurrent.ScheduledThreadPoolExecutor
+
 import com.databricks.caching.util.SequentialExecutionContextPool.ExceptionHandler
-
-import com.databricks.caching.util.ContextAwareUtil.ContextAwareScheduledExecutorService
-
 import com.databricks.caching.util.SequentialExecutionContextPool.UncaughtExceptionSource
 
 /**
@@ -169,7 +168,7 @@ class FakeSequentialExecutionContextPool(
 
   override val name: String = pool.name
 
-  override private[util] val executorService: ContextAwareScheduledExecutorService = {
+  override private[util] val executorService: ScheduledThreadPoolExecutor = {
     pool.executorService
   }
 

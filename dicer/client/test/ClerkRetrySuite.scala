@@ -4,8 +4,12 @@ import scala.collection.mutable
 import scala.concurrent.duration.Duration
 import scala.util.Random
 
+import io.prometheus.client.CollectorRegistry
+
 import com.databricks.caching.util.AssertionWaiter
+import com.databricks.caching.util.MetricUtils
 import com.databricks.caching.util.TestUtils
+import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.common.TestSliceUtils._
 import com.databricks.dicer.common.{Assignment, Generation, ProposedSliceAssignment}
 import com.databricks.dicer.external.{Clerk, ResourceAddress, Slice, SliceKey, Slicelet, Target}
@@ -38,6 +42,25 @@ class ClerkRetrySuite extends DatabricksTest with TestUtils.TestName {
     stubWithTokenOpt.getOrElse(throw new AssertionError("Expected a stub with a retry token"))
   }
 
+  /**
+   * Returns a [[MetricUtils.ChangeTracker]] over the getNextStubForKey call-count metric for
+   * `target` and `resourceType`. The metric is filtered by the target's (per-test unique) name, so
+   * it isolates the calls made by the clerk(s) under test.
+   */
+  private def getNextStubForKeyCallTracker(
+      target: Target,
+      resourceType: String): MetricUtils.ChangeTracker[Double] =
+    MetricUtils.ChangeTracker[Double] { () =>
+      MetricUtils.getMetricValue(
+        CollectorRegistry.defaultRegistry,
+        "dicer_clerk_getnextstubforkey_call_count_total",
+        Map(
+          "targetName" -> target.getTargetNameLabel,
+          "resourceType" -> resourceType
+        )
+      )
+    }
+
   test(
     "ClerkImpl.getNextStubForKey returns the assigned resource when retryToken is None"
   ) {
@@ -65,11 +88,14 @@ class ClerkRetrySuite extends DatabricksTest with TestUtils.TestName {
       )
     }
 
-    for (_ <- 0 until 5) {
+    val assignedCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallTracker(target, "assigned")
+    for (i <- 1 to 5) {
       val (stub, token): (ResourceAddress, RetryTokenImpl) =
         getNextStubForKey(clerk.impl, SliceKey.MIN, None)
       assert(stub.toString() == "Pod1")
       assert(token.pickedResourceIndices.size == 1)
+      assertResult(i)(assignedCallCount.totalChange())
     }
   }
 
@@ -101,12 +127,19 @@ class ClerkRetrySuite extends DatabricksTest with TestUtils.TestName {
       )
     }
 
+    val assignedCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallTracker(target, "assigned")
     val returnedStubs: mutable.Set[ResourceAddress] = mutable.Set.empty
     val expectedStubs: Set[ResourceAddress] = Set("Pod1", "Pod2")
+    // The assertion waiter runs an unknown number of iterations, so track the expected call count
+    // directly.
+    var numAssertionIterations: Int = 0
     // Keep calling until both assigned resources have been returned as the first pick.
     AssertionWaiter("Wait until both assigned resources have been returned").await {
       val (stub, _): (ResourceAddress, RetryTokenImpl) =
         getNextStubForKey(clerk.impl, SliceKey.MIN, None)
+      numAssertionIterations += 1
+      assertResult(numAssertionIterations)(assignedCallCount.totalChange())
       returnedStubs.add(stub)
       assert(returnedStubs == expectedStubs)
     }
@@ -137,17 +170,26 @@ class ClerkRetrySuite extends DatabricksTest with TestUtils.TestName {
       )
     }
 
+    val assignedCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallTracker(target, "assigned")
+    val fallbackCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallTracker(target, "fallback")
+    val tokenResetCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallTracker(target, "assignedAfterTokenReset")
+
     val (firstStub, firstToken): (ResourceAddress, RetryTokenImpl) =
       getNextStubForKey(clerk.impl, SliceKey.MIN, None)
     assert(firstStub.toString() == "Pod1")
     assert(!firstToken.fallbackPicked)
     assert(firstToken.pickedResourceIndices.size == 1)
+    assertResult(1.0)(assignedCallCount.totalChange())
 
     val (secondStub, secondToken): (ResourceAddress, RetryTokenImpl) =
       getNextStubForKey(clerk.impl, SliceKey.MIN, Some(firstToken))
     assert(secondStub.toString() != "Pod1") // fallback resource
     assert(secondToken.fallbackPicked)
     assert(secondToken.pickedResourceIndices.size == 1)
+    assertResult(1.0)(fallbackCallCount.totalChange())
 
     // Create a new assignment. SLICE_MIN is now assigned to Pod3, instead of Pod1.
     val proposal2: SliceMap[ProposedSliceAssignment] = createProposal(
@@ -172,11 +214,12 @@ class ClerkRetrySuite extends DatabricksTest with TestUtils.TestName {
     assert(stub.toString() == "Pod3")
     assert(token.pickedResourceIndices.size == 1)
     assert(!token.fallbackPicked)
+    assertResult(1.0)(tokenResetCallCount.totalChange())
   }
 
-  test("ClerkImpl.getNextStubForKey returns assigned resources before the fallback squid") {
+  test("ClerkImpl.getNextStubForKey returns assigned resources before the fallback resource") {
     // Test plan: Verify that ClerkImpl.getNextStubForKey returns assigned resources first before
-    // returning the fallback squid. Verify this by checking that all assigned resources are
+    // returning the fallback resource. Verify this by checking that all assigned resources are
     // returned by passing back the retry token.
     val target = Target(getSafeName)
     val slicelet: Slicelet =
@@ -197,45 +240,55 @@ class ClerkRetrySuite extends DatabricksTest with TestUtils.TestName {
       )
     }
 
+    val assignedCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallTracker(target, "assigned")
+    val fallbackCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallTracker(target, "fallback")
+    val randomAssignedCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallTracker(target, "randomAssigned")
+
     // The first 3 calls will return the assigned resources in some order.
     val sliceMinAssignedResources: Set[ResourceAddress] = Set("Pod1", "Pod2", "Pod5")
     val seenSoFar: mutable.Set[ResourceAddress] = mutable.Set.empty
     var lastTokenOpt: Option[RetryTokenImpl] = None
-    for (i: Int <- 0 until 3) {
+    for (i: Int <- 1 to 3) {
       val (stub, token): (ResourceAddress, RetryTokenImpl) =
         getNextStubForKey(clerk.impl, SliceKey.MIN, lastTokenOpt)
       assert(sliceMinAssignedResources.contains(stub))
-      assert(token.pickedResourceIndices.size == i + 1)
+      assert(token.pickedResourceIndices.size == i)
       assert(!seenSoFar.contains(stub))
+      assertResult(i)(assignedCallCount.totalChange())
       seenSoFar.add(stub)
       lastTokenOpt = Some(token)
     }
-    // The next call should return the fallback squid.
+    // The next call should return the fallback resource.
     val (fallbackStub, retryToken): (ResourceAddress, RetryTokenImpl) =
       getNextStubForKey(clerk.impl, SliceKey.MIN, lastTokenOpt)
     assert(!sliceMinAssignedResources.contains(fallbackStub))
     assert(retryToken.pickedResourceIndices.size == 3)
     assert(retryToken.fallbackPicked)
+    assertResult(1.0)(fallbackCallCount.totalChange())
     lastTokenOpt = Some(retryToken)
-    // Once the assigned resources and the fallback squid are exhausted, subsequent calls return
+    // Once the assigned resources and the fallback resource are exhausted, subsequent calls return
     // a random assigned resource (same behaviour as getStubForKey).
-    for (_ <- 0 until 5) {
+    for (i <- 1 to 5) {
       val (stub, token): (ResourceAddress, RetryTokenImpl) =
         getNextStubForKey(clerk.impl, SliceKey.MIN, lastTokenOpt)
       assert(sliceMinAssignedResources.contains(stub))
-      // The fallback squid has already been returned, so the token stays in the steady state.
+      // The fallback resource has already been returned, so the token stays in the steady state.
       assert(retryToken.pickedResourceIndices.size == 3)
       assert(token.fallbackPicked)
+      assertResult(i)(randomAssignedCallCount.totalChange())
     }
   }
 
   test(
-    "ClerkImpl.getNextStubForKey returns the same fallback squid for the same slice key " +
+    "ClerkImpl.getNextStubForKey returns the same fallback resource for the same slice key " +
     "across multiple clerks"
   ) {
-    // Test plan: Verify that multiple clerks return the same fallback squid for the same slice.
+    // Test plan: Verify that multiple clerks return the same fallback resource for the same slice.
     // Verify this by spinning up two clerks with the same assignment, advancing both past the
-    // assigned resource to the fallback squid, and checking that both return the same squid.
+    // assigned resource to the fallback resource, and checking that both return the same resource.
     val target = Target(getSafeName)
     val slicelet: Slicelet =
       testEnv.createSlicelet(target).start(selfPort = 1234, listenerOpt = None)
@@ -259,21 +312,31 @@ class ClerkRetrySuite extends DatabricksTest with TestUtils.TestName {
       )
     }
 
+    val assignedCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallTracker(target, "assigned")
+    val fallbackCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallTracker(target, "fallback")
+
     // The first call returns the assigned resource (Pod1) on both clerks.
     val (stub1, token1): (ResourceAddress, RetryTokenImpl) =
       getNextStubForKey(clerk1.impl, SliceKey.MIN, None)
     assert(stub1.toString() == "Pod1")
+    assertResult(1.0)(assignedCallCount.totalChange())
     val (stub2, token2): (ResourceAddress, RetryTokenImpl) =
       getNextStubForKey(clerk2.impl, SliceKey.MIN, None)
     assert(stub2.toString() == "Pod1")
+    assertResult(2.0)(assignedCallCount.totalChange())
 
-    // The second call returns the fallback squid, which must be identical across clerks.
-    val (fallbackSquid1, _): (ResourceAddress, RetryTokenImpl) =
+    // The second call returns the fallback resource, which must be identical across clerks.
+    val (fallbackResource1, _): (ResourceAddress, RetryTokenImpl) =
       getNextStubForKey(clerk1.impl, SliceKey.MIN, Some(token1))
-    val (fallbackSquid2, _): (ResourceAddress, RetryTokenImpl) =
+    assertResult(1.0)(fallbackCallCount.totalChange())
+    val (fallbackResource2, _): (ResourceAddress, RetryTokenImpl) =
       getNextStubForKey(clerk2.impl, SliceKey.MIN, Some(token2))
-    assert(fallbackSquid1.toString() != "Pod1") // A fallback squid, not the assigned resource.
-    assert(fallbackSquid1.toString() == fallbackSquid2.toString())
+    assertResult(2.0)(fallbackCallCount.totalChange())
+    // A fallback resource, not the assigned resource.
+    assert(fallbackResource1.toString() != "Pod1")
+    assert(fallbackResource1.toString() == fallbackResource2.toString())
   }
 
   test("ClerkImpl can resume retrying by handling a retry token returned by another clerk") {
@@ -303,8 +366,15 @@ class ClerkRetrySuite extends DatabricksTest with TestUtils.TestName {
       )
     }
 
+    val assignedCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallTracker(target, "assigned")
+    val fallbackCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallTracker(target, "fallback")
+
     val (_, retryToken1): (ResourceAddress, RetryTokenImpl) =
       getNextStubForKey(clerk1.impl, SliceKey.MIN, None)
+    assertResult(1.0)(assignedCallCount.totalChange())
+
     // Clerk2 resumes from clerk1's token. The fallback stub is returned because clerk1's first
     // getNextStubForKey call already recorded a picked index in the token.
     val (resumedStub, resumedToken): (ResourceAddress, RetryTokenImpl) =
@@ -312,12 +382,13 @@ class ClerkRetrySuite extends DatabricksTest with TestUtils.TestName {
     assert(resumedStub.toString() != "Pod1")
     assert(resumedToken.fallbackPicked)
     assert(resumedToken.pickedResourceIndices.size == 1)
+    assertResult(1.0)(fallbackCallCount.totalChange())
   }
 
-  test("The fallback squid excludes resources that are not part of the assignment") {
-    // Test plan: Verify that a slice's fallback squid is ONLY ever a resource that exists in the
+  test("The fallback resource excludes resources that are not part of the assignment") {
+    // Test plan: Verify that a slice's fallback resource is ONLY ever a resource that exists in the
     // current assignment. Verify this by checking that, after an assignment update with new
-    // resources and old resources removed, the fallback squid for the first slice is a member
+    // resources and old resources removed, the fallback resource for the first slice is a member
     // of the new assignment resources.
     val target = Target(getSafeName)
     val slicelet: Slicelet =
@@ -352,16 +423,30 @@ class ClerkRetrySuite extends DatabricksTest with TestUtils.TestName {
         clerk.impl.forTest.getLatestAssignmentOpt.exists(_.generation == assignment2.generation)
       )
     }
+
+    val assignedCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallTracker(target, "assigned")
+    val fallbackCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallTracker(target, "fallback")
+    val tokenResetCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallTracker(target, "assignedAfterTokenReset")
+
     val (assignedStub, token1): (ResourceAddress, RetryTokenImpl) =
       getNextStubForKey(clerk.impl, SliceKey.MIN, None)
     assert(assignedStub.toString() == "Pod10")
-    // Verify that the fallback squid is now one of the new resources, and not the assigned one.
+    assertResult(1.0)(assignedCallCount.totalChange())
+
+    // Verify that the fallback resource is now one of the new resources, and not the assigned one.
     val newResources: Set[String] = Set("Pod10", "Pod20", "Pod30", "Pod40", "Pod50")
     val (stub2, token2): (ResourceAddress, RetryTokenImpl) =
       getNextStubForKey(clerk.impl, SliceKey.MIN, Some(token1))
     assert(newResources.contains(stub2.toString()))
     assert(stub2.toString() != "Pod10")
     assert(token2.fallbackPicked)
+    assertResult(1.0)(fallbackCallCount.totalChange())
+
+    // Both calls ran against the latest assignment, so neither reset the token.
+    assertResult(0.0)(tokenResetCallCount.totalChange())
   }
 
   test("ClerkImpl.getNextStubForKey returns None when there is no assignment") {
@@ -374,20 +459,38 @@ class ClerkRetrySuite extends DatabricksTest with TestUtils.TestName {
       testEnv.createSlicelet(target).start(selfPort = 1234, listenerOpt = None)
     val clerk: Clerk[ResourceAddress] = testEnv.createClerk(slicelet)
 
-    assert(clerk.impl.getNextStubForKey(SliceKey.MIN, None).isEmpty)
+    val assignedCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallTracker(target, "assigned")
+    val fallbackCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallTracker(target, "fallback")
+    val randomAssignedCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallTracker(target, "randomAssigned")
+    val tokenResetCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallTracker(target, "assignedAfterTokenReset")
 
+    assert(clerk.impl.getNextStubForKey(SliceKey.MIN, None).isEmpty)
+    assertResult(0.0)(assignedCallCount.totalChange())
+    assertResult(0.0)(fallbackCallCount.totalChange())
+    assertResult(0.0)(randomAssignedCallCount.totalChange())
+    assertResult(0.0)(tokenResetCallCount.totalChange())
+
+    // Neither call made a pick (the clerk has no assignment), so no metrics were recorded.
     val callerToken: RetryTokenImpl = RetryTokenImpl.create(Generation.EMPTY)
     assert(clerk.impl.getNextStubForKey(SliceKey.MIN, Some(callerToken)).isEmpty)
+    assertResult(0.0)(assignedCallCount.totalChange())
+    assertResult(0.0)(fallbackCallCount.totalChange())
+    assertResult(0.0)(randomAssignedCallCount.totalChange())
+    assertResult(0.0)(tokenResetCallCount.totalChange())
   }
 
   test(
-    "ClerkImpl.getNextStubForKey never returns a fallback squid when the assignment has " +
+    "ClerkImpl.getNextStubForKey never returns a fallback resource when the assignment has " +
     "none"
   ) {
-    // Test plan: Verify that when the assignment has no squid unassigned to a slice (i.e. the
-    // assigned resources == all assignment resources), the slice has no fallback squid, so
+    // Test plan: Verify that when the assignment has no resource unassigned to a slice (i.e. the
+    // assigned resources == all assignment resources), the slice has no fallback resource, so
     // getNextStubForKey keeps returning the slice's only resource and never advances to a fallback
-    // squid. Verify this by assigning every slice to the same single resource and repeatedly
+    // resource. Verify this by assigning every slice to the same single resource and repeatedly
     // calling getNextStubForKey with the returned token 5 times and only the assigned pod is
     // returned.
     val target = Target(getSafeName)
@@ -409,14 +512,26 @@ class ClerkRetrySuite extends DatabricksTest with TestUtils.TestName {
       )
     }
 
-    var lastTokenOpt: Option[RetryTokenImpl] = None
-    for (_ <- 0 until 5) {
+    val randomAssignedCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallTracker(target, "randomAssigned")
+    val assignedCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallTracker(target, "assigned")
+    // The first call picks the single assigned resource.
+    val (stub, token): (ResourceAddress, RetryTokenImpl) =
+      getNextStubForKey(clerk.impl, SliceKey.MIN, None)
+    assert(stub.toString() == "Pod1")
+    assertResult(1.0)(assignedCallCount.totalChange())
+    var lastTokenOpt: Option[RetryTokenImpl] = Some(token)
+    // Each subsequent call returns a random assigned resource because there is no fallback
+    // resource to advance to.
+    for (i <- 1 to 5) {
       val (stub, token): (ResourceAddress, RetryTokenImpl) =
         getNextStubForKey(clerk.impl, SliceKey.MIN, lastTokenOpt)
       assert(stub.toString() == "Pod1")
-      // The picked-index list stays at size 1: there is no fallback squid to advance to.
+      // The picked-index list stays at size 1: there is no fallback resource to advance to.
       assert(token.pickedResourceIndices.size == 1)
       assert(!token.fallbackPicked)
+      assertResult(i)(randomAssignedCallCount.totalChange())
       lastTokenOpt = Some(token)
     }
   }
@@ -425,9 +540,9 @@ class ClerkRetrySuite extends DatabricksTest with TestUtils.TestName {
     "The fallback selection algorithm is deterministic when slices have more than one assigned " +
     "resource"
   ) {
-    // Test plan: Verify that a slice has the same fallback squid across multiple clerks when the
+    // Test plan: Verify that a slice has the same fallback resource across multiple clerks when the
     // slices in the assignment have more than one assigned resource. Verify this by assigning each
-    // slice to 30 resources and verifying that each slice gets the same fallback squid across
+    // slice to 30 resources and verifying that each slice gets the same fallback resource across
     // multiple clerks.
     val target = Target(getSafeName)
     val slicelet: Slicelet =
@@ -453,33 +568,47 @@ class ClerkRetrySuite extends DatabricksTest with TestUtils.TestName {
       )
     }
 
-    // For each slice, exhaust through all assigned resources and verify their fallback squids
+    // For each slice, exhaust both clerks' assigned resources and verify their fallback resources
     // match.
     for (sliceMapEntry <- proposal.entries) {
       val slice: Slice = sliceMapEntry.slice
       var lastTokenOpt1: Option[RetryTokenImpl] = None
       var lastTokenOpt2: Option[RetryTokenImpl] = None
-      for (i <- 0 until numResources) {
+      for (i <- 1 to numResources) {
+        // The call-count trackers are scoped per slice iteration, so the expected counts restart
+        // for each slice.
+        val assignedCallCount: MetricUtils.ChangeTracker[Double] =
+          getNextStubForKeyCallTracker(target, "assigned")
         val (_, token1): (ResourceAddress, RetryTokenImpl) =
           getNextStubForKey(clerk1.impl, slice.lowInclusive, lastTokenOpt1)
+        assertResult(1.0)(assignedCallCount.totalChange())
+        assert(token1.pickedResourceIndices.size == i)
+        assert(!token1.fallbackPicked)
+
         val (_, token2): (ResourceAddress, RetryTokenImpl) =
           getNextStubForKey(clerk2.impl, slice.lowInclusive, lastTokenOpt2)
+        assertResult(2.0)(assignedCallCount.totalChange())
+        assert(token2.pickedResourceIndices.size == i)
+        assert(!token2.fallbackPicked)
+
         // Pick up the tokens for the next iteration call.
         lastTokenOpt1 = Some(token1)
         lastTokenOpt2 = Some(token2)
-        assert(token1.pickedResourceIndices.size == i + 1)
-        assert(token2.pickedResourceIndices.size == i + 1)
-        assert(!token1.fallbackPicked)
-        assert(!token2.fallbackPicked)
       }
-      // The next call should return the fallback squid.
+      val fallbackCallCount: MetricUtils.ChangeTracker[Double] =
+        getNextStubForKeyCallTracker(target, "fallback")
+      // The next call should return the fallback resource on both clerks.
       val (stub1, token1): (ResourceAddress, RetryTokenImpl) =
         getNextStubForKey(clerk1.impl, slice.lowInclusive, lastTokenOpt1)
+      assertResult(1.0)(fallbackCallCount.totalChange())
+      assert(token1.fallbackPicked)
+
       val (stub2, token2): (ResourceAddress, RetryTokenImpl) =
         getNextStubForKey(clerk2.impl, slice.lowInclusive, lastTokenOpt2)
-      assert(stub1.toString() == stub2.toString())
-      assert(token1.fallbackPicked)
+      assertResult(2.0)(fallbackCallCount.totalChange())
       assert(token2.fallbackPicked)
+
+      assert(stub1.toString() == stub2.toString())
     }
   }
 }

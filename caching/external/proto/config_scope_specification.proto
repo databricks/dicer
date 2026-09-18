@@ -14,13 +14,22 @@ option (scalapb.options) = {
 };
 
 // Specification for a config scope against which a config override can match at runtime. A config
-// scope corresponds to one shard in a particular cloud and region.
+// scope is either a cluster (one shard in a particular cloud and region) or a single service
+// instance.
 message ConfigScopeP {
-  // The URI of the cluster that this config override applies to. The cluster's environment must
-  // match the environment that the config is for.
-  //
-  // Example: "kubernetes-cluster:prod/cloud1/public/region2/clustertype2/01"
-  optional string cluster_uri = 4;
+  // The scope to which a config override applies: either a specific cluster or a specific instance.
+  oneof scope {
+    // The URI of the cluster to which this config override applies. The cluster's environment must
+    // match the environment to which the config is scoped.
+    //
+    // Example: "kubernetes-cluster:prod/cloud1/public/region2/clustertype2/01"
+    string cluster_uri = 4;
+
+    // The instance id (see AppTarget) to which this config override applies. Instance-scoped
+    // overrides are not yet supported.
+    // TODO(<internal bug>): Support instance_id overrides.
+    string instance_id = 5;
+  }
 
   reserved 2, 3;
 }

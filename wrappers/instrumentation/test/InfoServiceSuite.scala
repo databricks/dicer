@@ -1,6 +1,6 @@
 package com.databricks.instrumentation.test
 
-import com.databricks.instrumentation._
+import com.databricks.instrumentation.{DebugStringServlet, DebugStringServletRegistry}
 import com.databricks.testing.DatabricksTest
 import org.scalatest.concurrent.Eventually._
 

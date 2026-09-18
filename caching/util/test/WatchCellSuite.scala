@@ -2,7 +2,10 @@ package com.databricks.caching.util
 
 import java.util.concurrent.CountDownLatch
 
-import io.grpc.Status
+import scala.concurrent.{Await, Future}
+import scala.concurrent.duration.Duration
+
+import io.grpc.{Status, StatusRuntimeException}
 
 import com.databricks.caching.util.TestUtils.assertThrow
 import com.databricks.testing.DatabricksTest
@@ -240,6 +243,61 @@ class WatchCellSuite extends DatabricksTest {
     // Verify that the watch for `callback` was cancelled by starting another watch for `callback`
     // and checking that no error is thrown.
     cell.watch(callback)
+  }
+
+  test("WatchCell notifyInitial()") {
+    // Test plan: Verify that the Future returned by `notifyInitial()` completes correctly in
+    // various conditions.
+
+    // `notifyInitial()` called before a value is set; `setValue` completes the Future successfully.
+    {
+      val watchCell = new WatchCell[String]
+      val (future, _): (Future[Unit], Cancellable) = watchCell.notifyInitial()
+      assert(!future.isCompleted, "notifyInitial Future should not complete before a value is set")
+      watchCell.setValue("Hello")
+      Await.result(future, Duration.Inf)
+    }
+
+    // `notifyInitial()` called before an error is set; `setErrorStatus` completes the Future
+    // successfully.
+    {
+      val watchCell = new WatchCell[String]
+      val (future, _): (Future[Unit], Cancellable) = watchCell.notifyInitial()
+      assert(!future.isCompleted, "notifyInitial Future should not complete before an error is set")
+      watchCell.setErrorStatus(Status.FAILED_PRECONDITION)
+      Await.result(future, Duration.Inf)
+    }
+
+    // `notifyInitial`'s returned cancellable is called; the Future fails with the cancel reason as
+    // a StatusRuntimeException.
+    {
+      val watchCell = new WatchCell[String]
+      val (future, cancellable): (Future[Unit], Cancellable) = watchCell.notifyInitial()
+      assert(!future.isCompleted, "Future should not complete before cancel")
+      cancellable.cancel(Status.CANCELLED)
+      assertThrow[StatusRuntimeException]("CANCELLED") {
+        Await.result(future, Duration.Inf)
+      }
+    }
+
+    // `notifyInitial` is called after a value is already set; returns an already-completed
+    // successful Future.
+    {
+      val watchCell = new WatchCell[String]
+      watchCell.setValue("Hello")
+      val (future, _): (Future[Unit], Cancellable) = watchCell.notifyInitial()
+      assert(future.isCompleted, "Future should be complete when a value is preset")
+      Await.result(future, Duration.Inf)
+    }
+
+    // `ready` called after an error is already set returns an already-completed successful Future.
+    {
+      val watchCell = new WatchCell[String]
+      watchCell.setErrorStatus(Status.FAILED_PRECONDITION)
+      val (ready, _): (Future[Unit], Cancellable) = watchCell.notifyInitial()
+      assert(ready.isCompleted, "ready Future should be complete when an error is preset")
+      Await.result(ready, Duration.Inf)
+    }
   }
 
   /**

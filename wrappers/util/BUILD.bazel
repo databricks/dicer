@@ -55,35 +55,6 @@ scala_library(
 )
 
 scala_library(
-    name = "scheduled_executor",
-    srcs = [
-        "src/InstrumentedScheduledThreadPoolExecutor.scala",
-    ],
-    deps = [
-        "@maven//:com_google_guava_guava",
-    ],
-)
-
-scala_library(
-    name = "executor",
-    srcs = [
-        "src/AdvancedInstrumentedScheduledThreadPoolExecutor.scala",
-        "src/NamedExecutor.scala",
-    ],
-    exports = [
-        # Export for compatibility with internal code patterns.
-        ":scheduled_executor",
-        # Export to make logging available to consumers.
-        "//wrappers/logging",
-    ],
-    deps = [
-        ":scheduled_executor",
-        "//wrappers/logging",
-        "@maven//:com_google_guava_guava",
-    ],
-)
-
-scala_library(
     name = "databricks-test",
     srcs = ["test/DatabricksTest.scala"],
     exports = [

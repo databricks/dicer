@@ -4,9 +4,22 @@ import scala.concurrent.duration._
 import scala.collection.immutable.SortedMap
 
 import com.databricks.caching.util.FakeTypedClock
-import com.databricks.dicer.assigner.config.ChurnConfig
+import com.databricks.dicer.assigner.config.{ChurnConfig, ConfigTestUtil}
 import com.databricks.dicer.common.SliceKeyHelper.RichSliceKey
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.TestSliceUtils.{
+  LowInclusiveLongFluent,
+  LowInclusiveSliceKeyFluent,
+  LowInclusiveStringFluent,
+  SliceAssignmentFluet,
+  SliceAssignmentSliceFluent,
+  createAssignment,
+  createResources,
+  toSliceKey,
+  toSquid,
+  toSquidIterable,
+  toSquidWithValue,
+  ∞
+}
 import com.databricks.dicer.common.{
   Assignment,
   AssignmentConsistencyMode,
@@ -70,7 +83,7 @@ class MutableAssignmentSuite extends DatabricksTest {
       predecessor.sliceMap,
       resources,
       loadMap,
-      ChurnConfig.ZERO_PENALTY
+      ConfigTestUtil.ZERO_PENALTY_CHURN_CONFIG
     )
     mutableAssignment.forTest.checkInvariants()
 
@@ -149,7 +162,7 @@ class MutableAssignmentSuite extends DatabricksTest {
       predecessor.sliceMap,
       resources,
       loadMap,
-      ChurnConfig.ZERO_PENALTY
+      ConfigTestUtil.ZERO_PENALTY_CHURN_CONFIG
     )
     mutableAssignment.forTest.checkInvariants()
 
@@ -273,7 +286,7 @@ class MutableAssignmentSuite extends DatabricksTest {
       predecessor.sliceMap,
       resources,
       loadMap,
-      ChurnConfig.ZERO_PENALTY
+      ConfigTestUtil.ZERO_PENALTY_CHURN_CONFIG
     )
     mutableAssignment.forTest.checkInvariants()
 
@@ -378,7 +391,7 @@ class MutableAssignmentSuite extends DatabricksTest {
       predecessor.sliceMap,
       resources,
       LoadMap.UNIFORM_LOAD_MAP,
-      ChurnConfig.ZERO_PENALTY
+      ConfigTestUtil.ZERO_PENALTY_CHURN_CONFIG
     )
     mutableAssignment.forTest.checkInvariants()
 
@@ -433,7 +446,7 @@ class MutableAssignmentSuite extends DatabricksTest {
       predecessor.sliceMap,
       resources,
       loadMap,
-      ChurnConfig.ZERO_PENALTY
+      ConfigTestUtil.ZERO_PENALTY_CHURN_CONFIG
     )
     mutableAssignment.forTest.checkInvariants()
 
@@ -728,7 +741,7 @@ class MutableAssignmentSuite extends DatabricksTest {
       predecessor.sliceMap,
       resources,
       LoadMap.UNIFORM_LOAD_MAP,
-      ChurnConfig.ZERO_PENALTY
+      ConfigTestUtil.ZERO_PENALTY_CHURN_CONFIG
     )
     mutableAssignment.forTest.checkInvariants()
     assert(mutableAssignment.currentNumTotalSliceReplicas == 6)

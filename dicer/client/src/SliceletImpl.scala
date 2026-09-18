@@ -428,7 +428,8 @@ private[dicer] object SliceletImpl {
       sliceletConf.watchFromDataPlane,
       alternativeTargetOpt,
       // TODO(<internal bug>): Use client side feature flag to gradually rollout rate limiting.
-      enableRateLimiting = false
+      enableRateLimiting = false,
+      sourceIpOpt = None
     )
     val config: InternalClientConfig =
       InternalClientConfig(sliceLookupConfig, subscriberDebugName = sliceletDebugName)

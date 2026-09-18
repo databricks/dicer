@@ -85,23 +85,6 @@ sealed class StateMachineDriver[
     )
   }
 
-  /** Use [[StateMachineDriver]] with an explicit `alertOwnerTeam` instead. */
-  @deprecated(
-    "Provide alertOwnerTeam explicitly; the CachingTeam default is only correct for " +
-    "Caching-owned state machines (<internal bug>)."
-  )
-  def this(
-      sec: SequentialExecutionContext,
-      stateMachine: MachineT,
-      performAction: ActionT => Unit) = {
-    this(
-      sec,
-      stateMachine,
-      performAction,
-      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
-    )
-  }
-
   private val logger = PrefixLogger.create(getClass, "")
 
   /**
@@ -294,29 +277,12 @@ object StateMachineDriver {
       alertOwnerTeam: String
   ): StateMachineDriver[EventT, ActionT, MachineT] = {
     new StateMachineDriver(
-      hybridDomain(hybrid),
-      stateMachine,
-      performAction,
+      domain = hybridDomain(hybrid),
+      stateMachine = stateMachine,
+      performAction = performAction,
       alertOwnerTeam = AlertOwnerTeam.createFromString(alertOwnerTeam)
     )
   }
-
-  /** Use [[inHybridDomain]] with an explicit `alertOwnerTeam` instead. */
-  @deprecated(
-    "Provide alertOwnerTeam explicitly; the CachingTeam default is only correct for " +
-    "Caching-owned state machines (<internal bug>)."
-  )
-  def inHybridDomain[EventT, ActionT, MachineT <: StateMachine[EventT, ActionT]](
-      hybrid: HybridConcurrencyDomain,
-      stateMachine: MachineT,
-      performAction: ActionT => Unit
-  ): StateMachineDriver[EventT, ActionT, MachineT] =
-    inHybridDomain(
-      hybrid,
-      stateMachine,
-      performAction,
-      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
-    )
 
   /**
    * [[StateMachineDriver]]-internal trait that allows the internals to abstract over

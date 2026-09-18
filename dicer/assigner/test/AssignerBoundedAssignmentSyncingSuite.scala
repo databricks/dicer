@@ -80,7 +80,8 @@ class AssignerBoundedAssignmentSyncingSuite extends DatabricksTest with TestName
       clientName = Project.DicerAssigner.name,
       defaultWatchAddress = URI.create(s"http://localhost:${assigner.localUri.getPort}"),
       tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
-      watchFromDataPlane = false
+      watchFromDataPlane = false,
+      sourceIpOpt = None
     ).createWatchStub(redirectAddressOpt = None, target = target, clientIdOpt = None)
   }
 

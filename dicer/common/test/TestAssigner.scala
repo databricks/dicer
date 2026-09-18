@@ -63,7 +63,6 @@ import com.databricks.caching.util.{EtcdClient, EtcdTestEnvironment}
 import com.databricks.dicer.assigner.config.InternalTargetConfig.HealthWatcherTargetConfig
 import com.databricks.rpc.tls.TLSOptions
 import com.databricks.rpc.testing.TestTLSOptions
-import com.databricks.threading.NamedExecutor
 
 /**
  * A test Assigner that allows some test control, e.g.,sending a bogus RPC response to the Clerk.
@@ -131,6 +130,12 @@ class TestAssigner private (
    */
   private val latestValidClerkWatchRequestsByTarget =
     mutable.Map[Target, (RequestHeaders, ClientRequest)]()
+
+  /**
+   * The remote addresses of the connections that carried valid Clerk watch requests, for each
+   * [[Target]] (normalized as above).
+   */
+  private val clerkWatchRemoteAddressesByTarget = mutable.Map[Target, mutable.Set[String]]()
 
   /**
    * The latest, valid Slicelet watch request, together with its headers, received for each
@@ -256,6 +261,9 @@ class TestAssigner private (
           case ClerkData =>
             latestValidClerkWatchRequestsByTarget(clientRequest.target) =
               (requestHeaders, clientRequest)
+            clerkWatchRemoteAddressesByTarget
+              .getOrElseUpdate(clientRequest.target, mutable.Set[String]()) +=
+            rpcContext.httpRequest.getRemoteAddr
             logger.trace(s"Added request info to the latest clerk watch request: $req")
         }
       } catch {
@@ -308,6 +316,17 @@ class TestAssigner private (
     withLock(lock) {
       latestValidSliceletWatchRequestsByTarget.get(getAssignerNormalizedTarget(target))
     }
+
+  /**
+   * Returns the remote addresses of the connections that carried valid Clerk watch requests for the
+   * given target.
+   */
+  def getClerkWatchRemoteAddresses(target: Target): Set[String] = withLock(lock) {
+    clerkWatchRemoteAddressesByTarget
+      .get(getAssignerNormalizedTarget(target))
+      .map((addresses: mutable.Set[String]) => addresses.toSet)
+      .getOrElse(Set.empty)
+  }
 
   /**
    * Returns the latest slicelet watch request (including the headers) received for a given target
@@ -441,7 +460,7 @@ class TestAssigner private (
         generatorOpt.flatMap { generator: AssignmentGeneratorDriver =>
           generator.getGeneratorCell.getLatestValueOpt
         }
-      }(NamedExecutor.globalImplicit)
+      }(sec)
   }
 
   /**
@@ -460,7 +479,7 @@ class TestAssigner private (
         generatorOpt.flatMap { generator: AssignmentGeneratorDriver =>
           generator.getGeneratorCell.getLatestValueOpt
         }
-      }(NamedExecutor.globalImplicit)
+      }(sec)
   }
 
   /** Sends a termination notice to the preferred assigner driver. */

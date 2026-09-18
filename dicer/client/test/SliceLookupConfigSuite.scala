@@ -1,7 +1,7 @@
 package com.databricks.dicer.client
 
 import java.io.File
-import java.net.URI
+import java.net.{InetAddress, URI}
 import java.util.UUID
 
 import scala.collection.mutable
@@ -41,7 +41,8 @@ class SliceLookupConfigSuite extends DatabricksTest {
       watchRpcTimeout: FiniteDuration = 5.seconds,
       minRetryDelay: FiniteDuration = 1.second,
       maxRetryDelay: FiniteDuration = 10.seconds,
-      enableRateLimiting: Boolean = false): SliceLookupConfig =
+      enableRateLimiting: Boolean = false,
+      sourceIpOpt: Option[InetAddress] = None): SliceLookupConfig =
     SliceLookupConfig(
       clientType = clientType,
       watchAddress = watchAddress,
@@ -54,7 +55,8 @@ class SliceLookupConfigSuite extends DatabricksTest {
       watchRpcTimeout = watchRpcTimeout,
       minRetryDelay = minRetryDelay,
       maxRetryDelay = maxRetryDelay,
-      enableRateLimiting = enableRateLimiting
+      enableRateLimiting = enableRateLimiting,
+      sourceIpOpt = sourceIpOpt
     )
 
   /**
@@ -188,7 +190,8 @@ class SliceLookupConfigSuite extends DatabricksTest {
       "watchRpcTimeout" -> createConfig(target, watchRpcTimeout = 10.seconds),
       "minRetryDelay" -> createConfig(target, minRetryDelay = 2.seconds),
       "maxRetryDelay" -> createConfig(target, maxRetryDelay = 20.seconds),
-      "enableRateLimiting" -> createConfig(target, enableRateLimiting = true)
+      "enableRateLimiting" -> createConfig(target, enableRateLimiting = true),
+      "sourceIpOpt" -> createConfig(target, sourceIpOpt = Some(InetAddress.getByName("10.4.5.6")))
     )
 
     // Verify: Every variant is unequal to the base config.
@@ -271,6 +274,47 @@ class SliceLookupConfigSuite extends DatabricksTest {
     assertResult(Some("slicelet"))(configLabelMap.get(differingConfig))
   }
 
+  test("equals distinguishes configs that differ only in source IP so each binds its own lookup") {
+    // Test plan: Verify that `sourceIpOpt` distinguishes configs, so a Clerk binding a source
+    // address cannot share a cached SliceLookup (and therefore a watch connection) with one that
+    // binds a different address or none at all. Verify this by building three configs that
+    // differ only in `sourceIpOpt` and confirming they are unequal and coexist as three distinct
+    // map keys.
+
+    // Setup: Build an unbound config and two bound to different NIC addresses.
+    val target: Target = Target("source-ip-keys-test")
+    val unboundConfig: SliceLookupConfig = createConfig(target, sourceIpOpt = None)
+    val firstNicConfig: SliceLookupConfig =
+      createConfig(target, sourceIpOpt = Some(InetAddress.getByName("10.4.5.6")))
+    val secondNicConfig: SliceLookupConfig =
+      createConfig(target, sourceIpOpt = Some(InetAddress.getByName("10.7.8.9")))
+
+    // Verify: The three configs are pairwise unequal.
+    assert(unboundConfig != firstNicConfig, "an unbound config should not equal a bound one")
+    assert(unboundConfig != secondNicConfig, "an unbound config should not equal a bound one")
+    assert(firstNicConfig != secondNicConfig, "configs bound to different NICs should be unequal")
+
+    // Verify: Bound and unbound lookups use distinct channel names, including two different NICs.
+    assertResult("dicer-clerk-source-ip-keys-test")(unboundConfig.clientName)
+    assertResult("dicer-clerk-source-ip-keys-test-source-ip-10.4.5.6")(
+      firstNicConfig.clientName
+    )
+    assertResult("dicer-clerk-source-ip-keys-test-source-ip-10.7.8.9")(
+      secondNicConfig.clientName
+    )
+
+    // Verify: The three coexist as distinct keys rather than collapsing onto one.
+    val configLabelMap: mutable.Map[SliceLookupConfig, String] = mutable.Map.empty
+    configLabelMap.put(unboundConfig, "unbound")
+    configLabelMap.put(firstNicConfig, "first-nic")
+    configLabelMap.put(secondNicConfig, "second-nic")
+
+    assertResult(3)(configLabelMap.size)
+    assertResult(Some("unbound"))(configLabelMap.get(unboundConfig))
+    assertResult(Some("first-nic"))(configLabelMap.get(firstNicConfig))
+    assertResult(Some("second-nic"))(configLabelMap.get(secondNicConfig))
+  }
+
   test("toString names every field") {
     // Test plan: Verify that toString reports each field by name, since it is what logs and test
     // failure messages surface when a config is unexpected. Verify this by rendering a config with
@@ -286,7 +330,7 @@ class SliceLookupConfigSuite extends DatabricksTest {
       "tlsOptionsOpt=None, target=to-string-test, clientIdOpt=None, " +
       "watchStubCacheTime=5 minutes, watchFromDataPlane=false, watchRpcTimeout=5 seconds, " +
       "minRetryDelay=1 second, maxRetryDelay=10 seconds, enableRateLimiting=false, " +
-      "alternativeTargetOpt=None, " +
+      "sourceIpOpt=None, alternativeTargetOpt=None, " +
       s"clientClusterUriOpt=Some($TEST_CLUSTER_URI), clientRegionUriOpt=Some($TEST_REGION_URI))"
     assertResult(expectedRendering)(config.toString)
   }

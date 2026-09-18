@@ -325,7 +325,7 @@ abstract class TargetMetricsSuiteBase extends DatabricksTest with TestName {
     TargetMetrics.reportReassignmentStats(
       defaultTarget,
       reassignmentStats,
-      desiredLoad
+      Some(desiredLoad)
     )
 
     // All churn metrics -- both counters and gauges -- should match the assignment change stats.
@@ -372,7 +372,7 @@ abstract class TargetMetricsSuiteBase extends DatabricksTest with TestName {
     TargetMetrics.reportReassignmentStats(
       defaultTarget,
       finalReassignmentStats,
-      finalDesiredLoad
+      Some(finalDesiredLoad)
     )
 
     // All churn metrics counters should match the sum of the two assignment change stats, while
@@ -482,7 +482,7 @@ abstract class TargetMetricsSuiteBase extends DatabricksTest with TestName {
       TargetMetrics.reportReassignmentStats(
         defaultTarget,
         reassignmentStats,
-        desiredLoad
+        Some(desiredLoad)
       )
 
       // Verify that the per-resource load metrics for the current (three-resource) assignment are
@@ -557,7 +557,7 @@ abstract class TargetMetricsSuiteBase extends DatabricksTest with TestName {
       TargetMetrics.reportReassignmentStats(
         defaultTarget,
         reassignmentStats,
-        desiredLoad
+        Some(desiredLoad)
       )
 
       // Verify that the per-resource load metrics for the current (two-resource) assignment is set
@@ -600,7 +600,6 @@ abstract class TargetMetricsSuiteBase extends DatabricksTest with TestName {
       assertResult(expected = desiredLoad.maxDesiredLoad)(
         getMaxDesiredLoadAtGenerationGauge(defaultTarget)
       )
-
       // Since pod2 was removed, all of its load metrics (except per-resource load
       // before generation) should be set to 0.0.
       val pod2Hash: Int = allResourceHashes(allResources(2))
@@ -610,6 +609,69 @@ abstract class TargetMetricsSuiteBase extends DatabricksTest with TestName {
       assertResult(0.0)(getRealTimePerResourceLoadGauge(defaultTarget, pod2Hash, LoadType.Reserved))
       assertResult(0.0)(getNumAssignedSlicesPerResourceGauge(defaultTarget, pod2Hash))
     }
+  }
+
+  test("reportReassignmentStats skips desired-load gauges when the range is absent") {
+    // Test plan: Verify that when reportReassignmentStats is called with no desired load range
+    // (the case where the algorithm performed no load balancing, e.g. no available resources or a
+    // homomorphic generation), the min/max desired-load gauges keep their previous values rather
+    // than being reset. Do this by first reporting with a concrete desired load range to populate
+    // the gauges, then reporting again with None and confirming the gauges are unchanged.
+
+    val loadBalancingConfig = LoadBalancingConfig(
+      loadBalancingInterval = 1.minute,
+      ChurnConfig.DEFAULT,
+      LoadBalancingMetricConfig(
+        maxLoadHint = 10,
+        uniformLoadReservationHint = ReservationHintP.SMALL_RESERVATION // 0.1
+      )
+    )
+
+    val HALF_POINT: Long = Long.MaxValue
+    val loadMap: LoadMap =
+      LoadMap
+        .newBuilder()
+        .putLoad(
+          Entry("" -- HALF_POINT, 1.0 / 3.0),
+          Entry(HALF_POINT -- ∞, 2.0 / 3.0)
+        )
+        .build()
+    val assignment: Assignment = createAssignment(
+      12 ## 42,
+      AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
+      ("" -- HALF_POINT) @@ (12 ## 42) -> Seq("pod0"),
+      (HALF_POINT -- ∞) @@ (12 ## 42) -> Seq("pod1")
+    )
+
+    val reassignmentStats: ReassignmentChurnAndLoadStats =
+      ReassignmentChurnAndLoadStats.calculate(assignment, assignment, loadMap)
+    val totalAdjustedLoad: Double = Algorithm
+      .computeAdjustedLoadMap(loadBalancingConfig, assignment.assignedResources.size, loadMap)
+      .getLoad(Slice.FULL)
+    val desiredLoad: Algorithm.DesiredLoadRange = Algorithm.calculateDesiredLoadRange(
+      loadBalancingConfig,
+      assignment.assignedResources.size,
+      totalAdjustedLoad
+    )
+
+    // First report with a concrete desired load range to populate the gauges.
+    TargetMetrics.reportReassignmentStats(defaultTarget, reassignmentStats, Some(desiredLoad))
+    assertResult(expected = desiredLoad.minDesiredLoadExistingResource)(
+      getMinDesiredLoadAtGenerationGauge(defaultTarget)
+    )
+    assertResult(expected = desiredLoad.maxDesiredLoad)(
+      getMaxDesiredLoadAtGenerationGauge(defaultTarget)
+    )
+
+    // Reporting again with no desired load range must leave the gauges at their previous values.
+    TargetMetrics.reportReassignmentStats(defaultTarget, reassignmentStats, desiredLoadOpt = None)
+    assertResult(expected = desiredLoad.minDesiredLoadExistingResource)(
+      getMinDesiredLoadAtGenerationGauge(defaultTarget)
+    )
+    assertResult(expected = desiredLoad.maxDesiredLoad)(
+      getMaxDesiredLoadAtGenerationGauge(defaultTarget)
+    )
   }
 
   test("reportAssignmentSnapshotStats exports load metrics correctly") {

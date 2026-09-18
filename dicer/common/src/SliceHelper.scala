@@ -25,7 +25,10 @@ object SliceHelper {
   }
 
   /** Internal extensions for [[Slice]]. */
-  implicit class RichSlice(slice: Slice) {
+  // Extend AnyVal so that the wrapper is erased at the call site instead of incurring an
+  // allocation on every use. These extensions are called frequently enough that additional
+  // allocations cause unacceptable GC overheads.
+  implicit class RichSlice(private val slice: Slice) extends AnyVal {
 
     /** Converts `slice` to its proto form. */
     def toProto: SliceP = {

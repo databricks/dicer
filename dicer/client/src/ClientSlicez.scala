@@ -85,12 +85,12 @@ private[client] class ClientSlicez {
               body(
                 h3("Client Information"),
                 p(
-                  "This table lists Dicer Clients that are running in this pod."
+                  "This table lists Dicer Clerks and/or the Slicelet running in this pod."
                 ),
                 table(
                   p(
                     style := "line-height: 0;",
-                    s"Clerks/Slicelets (Current time ${Instant.now()})"
+                    s"Current time ${Instant.now()}"
                   ),
                   // Append the table header.
                   tr(
@@ -158,10 +158,8 @@ private[client] class ClientSlicez {
       } else {
         div(
           p(
-            "This table presents a list of Clerks and Slicelets that subscribed to " +
-            "the Slicelets running in this pod. ",
-            br(),
-            "Additionally, for Slicelets, it contains local load information on assigned slices."
+            "This table presents a list of Clerks that subscribe to the Slicelet running in this" +
+            " pod."
           ),
           table(
             p(
@@ -508,10 +506,13 @@ private[client] case class ClientTargetSlicezData(
         squidOpt
       )
     val asnHtml: TypedTag[String] = CommonSlicez.getAssignmentHtml(generationString, asnString)
+    val localSlicesNote: String =
+      if (squidOpt.isDefined) " (this assignment includes slices assigned to this Slicelet only)"
+      else ""
     div(
       tr(
         backgroundColor := TARGET_NAME_BACKGROUND_COLOR,
-        th(colspan := 2, "Target: ", strong(target.toParseableDescription))
+        th(colspan := 2, "Target: ", strong(target.toParseableDescription), localSlicesNote)
       ),
       asnHtml
     )

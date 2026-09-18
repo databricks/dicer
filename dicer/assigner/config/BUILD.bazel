@@ -200,6 +200,7 @@ scala_test(
     deps = [
         ":config_provider",
         ":config_test_util",
+        "//caching/util:alert_owner_team",
         "//caching/util:sequential_execution_context",
         "//caching/util:server_conf",
         "//caching/util:test_util",
@@ -222,6 +223,7 @@ scala_test(
     ],
     deps = [
         ":config_provider",
+        "//caching/util:alert_owner_team",
         "//caching/util:sequential_execution_context",
         "//caching/util:server_conf",
         "//caching/util:test_util",
@@ -270,6 +272,7 @@ scala_test(
     timeout = "short",
     deps = [
         ":authorizer",
+        ":config_test_util",
         ":internal_target_config",
         "//caching/util:test_util",
         "//caching/util:unix_time_version",

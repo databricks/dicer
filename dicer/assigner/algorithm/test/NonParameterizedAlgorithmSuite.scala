@@ -10,11 +10,12 @@ import com.databricks.caching.util.UnixTimeVersion
 import com.databricks.caching.util.TestUtils.assertThrow
 import com.databricks.dicer.assigner.algorithm.Algorithm.computeAdjustedLoadMap
 import com.databricks.dicer.assigner.AssignmentStats.AssignmentLoadStats
-import com.databricks.dicer.assigner.config.{ChurnConfig, InternalTargetConfig}
+import com.databricks.dicer.assigner.config.{ChurnConfig, ConfigTestUtil, InternalTargetConfig}
 import com.databricks.dicer.assigner.config.InternalTargetConfig.{
   KeyReplicationConfig,
   LoadBalancingConfig,
-  LoadBalancingMetricConfig
+  LoadBalancingMetricConfig,
+  ReplicationThresholdOverride
 }
 import com.databricks.dicer.assigner.MigrationTestAssignment
 import com.databricks.dicer.assigner.MigrationTestAssignment._
@@ -61,7 +62,7 @@ class NonParameterizedAlgorithmSuite extends AlgorithmSuiteBase {
       predecessor: MigrationTestAssignment,
       expectedOutput: MigrationTestAssignment,
       // Disable churn penalties by default so that it's easier to reason about the effective load.
-      churnConfig: ChurnConfig = ChurnConfig.ZERO_PENALTY,
+      churnConfig: ChurnConfig = ConfigTestUtil.ZERO_PENALTY_CHURN_CONFIG,
       keyReplicationConfig: KeyReplicationConfig = KeyReplicationConfig.DEFAULT_SINGLE_REPLICA,
       // Default assignment age chosen such that there's no lingering churn penalty for previously
       // assigned Slices for tests that don't care about churn.
@@ -96,14 +97,16 @@ class NonParameterizedAlgorithmSuite extends AlgorithmSuiteBase {
         this.predecessor.assignment.generation.number.value + this.assignmentAge.toMillis
       val proposal: ProposedAssignment = ProposedAssignment(
         predecessorOpt = Some(this.predecessor.assignment),
-        sliceMap = Algorithm.generateAssignment(
-          Instant.ofEpochMilli(generateInstantEpochMilli),
-          target,
-          targetConfig,
-          resources,
-          predecessorAssignment.sliceMap,
-          loadMap
-        ),
+        sliceMap = Algorithm
+          .generateAssignment(
+            Instant.ofEpochMilli(generateInstantEpochMilli),
+            target,
+            targetConfig,
+            resources,
+            predecessorAssignment.sliceMap,
+            loadMap
+          )
+          .sliceAssignments,
         assignerServiceInfoOpt = None
       )
       val assignment: Assignment = proposal.commit(
@@ -627,7 +630,7 @@ class NonParameterizedAlgorithmSuite extends AlgorithmSuiteBase {
         )
       // Disable churn penalties, since they make reasoning about the load more challenging.
       val config: InternalTargetConfig =
-        createConfigForLoadBalancing(ChurnConfig.ZERO_PENALTY, maxLoadHint = 1)
+        createConfigForLoadBalancing(ConfigTestUtil.ZERO_PENALTY_CHURN_CONFIG, maxLoadHint = 1)
 
       // Assume that all resources in the predecessor are available if the test case does not
       // provide them.
@@ -746,7 +749,10 @@ class NonParameterizedAlgorithmSuite extends AlgorithmSuiteBase {
     // effectively zero (Double.MinPositiveValue to ensure that at least something gets assigned to
     // all resources).
     val config: InternalTargetConfig =
-      createConfigForLoadBalancing(ChurnConfig.ZERO_PENALTY, maxLoadHint = Int.MaxValue)
+      createConfigForLoadBalancing(
+        ConfigTestUtil.ZERO_PENALTY_CHURN_CONFIG,
+        maxLoadHint = Int.MaxValue
+      )
 
     val loadMap = LoadMap
       .newBuilder()
@@ -870,7 +876,7 @@ class NonParameterizedAlgorithmSuite extends AlgorithmSuiteBase {
     // Test plan: Verify that `calculateDesiredLoadRange` checks that the number of resources is
     // positive.
     val targetConfig: InternalTargetConfig =
-      createConfigForLoadBalancing(ChurnConfig.ZERO_PENALTY, maxLoadHint = 1)
+      createConfigForLoadBalancing(ConfigTestUtil.ZERO_PENALTY_CHURN_CONFIG, maxLoadHint = 1)
 
     assertThrow[IllegalArgumentException]("numResources must be positive") {
       Algorithm.calculateDesiredLoadRange(

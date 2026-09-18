@@ -11,7 +11,7 @@ import com.databricks.api.proto.dicer.external.LoadBalancingMetricConfigP.{
 }
 import com.databricks.caching.util.AsciiTable
 import com.databricks.dicer.assigner.AssignmentStats.AssignmentLoadStats
-import com.databricks.dicer.assigner.config.ChurnConfig
+import com.databricks.dicer.assigner.config.{ChurnConfig, ConfigTestUtil}
 import com.databricks.dicer.assigner.config.InternalTargetConfig.{
   KeyReplicationConfig,
   LoadBalancingMetricConfig
@@ -52,7 +52,7 @@ class AlgorithmChaosSuite extends AlgorithmSuiteBase {
   private case class ChaosTestCase(
       churnConfig: ChurnConfig,
       minToAvgImbalanceRatioIcdfBound: DiscreteInverseCdf,
-      avgToMaxImbalanceRatioIcdfBound: DiscreteInverseCdf
+      avgToMaxImbalanceRatioIcdfBound: DiscreteInverseCdf,
   )
 
   /** The parameters for the chaos test. */
@@ -87,7 +87,7 @@ class AlgorithmChaosSuite extends AlgorithmSuiteBase {
         ),
       ),
       ChaosTestCase(
-        churnConfig = ChurnConfig.ZERO_PENALTY,
+        churnConfig = ConfigTestUtil.ZERO_PENALTY_CHURN_CONFIG,
         // When using the zero churn penalty, we should almost always be able to satisfy the ideal
         // 2.5% imbalance tolerance target, so we can observe the p99 imbalance ratio bound is
         // about 2.5%. But given that the replication case makes the Algorithm more restricted,
@@ -253,12 +253,13 @@ class AlgorithmChaosSuite extends AlgorithmSuiteBase {
         }
         LoadMap.newBuilder().putLoad(entries: _*).build()
       }
-      val targetConfig = createConfigForLoadBalancing(
+      val baseConfig = createConfigForLoadBalancing(
         chaosTestCase.churnConfig,
         maxLoadHint,
         imbalanceToleranceHint = loadImbalanceToleranceHintP,
         uniformLoadReservationHint = pickUniformLoadReservationHintP
-      ).copy(
+      )
+      val targetConfig = baseConfig.copy(
         keyReplicationConfig =
           pickKeyReplicationConfig(resources.availableResources.size, hasHotKey)
       )

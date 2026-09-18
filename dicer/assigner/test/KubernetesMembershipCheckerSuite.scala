@@ -817,6 +817,7 @@ class KubernetesMembershipCheckerSuite extends DatabricksTest with TestName {
       rpcPort = rpcPort,
       kubeContextLabelOpt = None
     )
+    assert(getConnectionUnhealthyCount(namespace, appName) == 0.0)
     val resourcesCb: CollectingCallback[VersionedResourceSet] = new CollectingCallback(sec)
     val healthCb: CollectingCallback[Boolean] = new CollectingCallback(sec)
 
@@ -918,8 +919,9 @@ class KubernetesMembershipCheckerSuite extends DatabricksTest with TestName {
 
   test("Consecutive failures trigger unhealthy connection") {
     // Test plan: Start the checker with the fake server returning errors. After 3 consecutive
-    // failures (the failure threshold), verify that connectionHealthCell transitions to false.
-    // No resources are delivered because every poll failed (not because of health state).
+    // failures (the failure threshold), verify that connectionHealthCell transitions to false and
+    // the unhealthy-transition counter increments exactly once. No resources are delivered because
+    // every poll failed (not because of health state).
     val namespace: String = "ns-" + getSafeName
     val appName: String = "app-" + getSafeName
 
@@ -952,6 +954,7 @@ class KubernetesMembershipCheckerSuite extends DatabricksTest with TestName {
     for (i: Int <- 1 to 3) {
       sec.advanceBySync(pollingInterval)
       awaitPollComplete(s"failure poll $i", totalPolls, expectedChange = i)
+      assert(getConnectionUnhealthyCount(namespace, appName) == (if (i < 3) 0.0 else 1.0))
     }
 
     AssertionWaiter("connection unhealthy", ecOpt = Some(sec)).await {

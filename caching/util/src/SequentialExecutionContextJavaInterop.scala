@@ -15,13 +15,12 @@ object SequentialExecutionContextJavaInterop {
    * Creates a [[SequentialExecutionContext]] backed by a dedicated single-threaded pool.
    *
    * @param name the context name, used for debugging and pool naming.
-   * @param alertOwnerTeam the alert routing name of the team owning the pool. Required rather than
-   *                       defaulted: the defaulting overload is deprecated because its Caching
-   *                       default misroutes other teams' alerts (<internal bug>).
+   * @param alertOwnerTeam the alert routing name of the team owning the pool. This is required to
+   *                       avoid routing other teams' alerts to Caching.
    */
   def createWithDedicatedPool(name: String, alertOwnerTeam: String): SequentialExecutionContext =
     SequentialExecutionContext.createWithDedicatedPool(
-      name,
+      name = name,
       alertOwnerTeam = alertOwnerTeam,
       enableContextPropagation = true
     )
@@ -31,17 +30,16 @@ object SequentialExecutionContextJavaInterop {
    *
    * @param poolName the name of the thread pool.
    * @param numThreads the number of threads in the pool.
-   * @param alertOwnerTeam the alert routing name of the team owning the pool. Required rather than
-   *                       defaulted: the defaulting overload is deprecated because its Caching
-   *                       default misroutes other teams' alerts (<internal bug>).
+   * @param alertOwnerTeam the alert routing name of the team owning the pool. This is required to
+   *                       avoid routing other teams' alerts to Caching.
    */
   def createPool(
       poolName: String,
       numThreads: Int,
       alertOwnerTeam: String): SequentialExecutionContextPool =
     SequentialExecutionContextPool.create(
-      poolName,
-      numThreads,
+      poolName = poolName,
+      numThreads = numThreads,
       alertOwnerTeam = alertOwnerTeam,
       enableContextPropagation = true
     )

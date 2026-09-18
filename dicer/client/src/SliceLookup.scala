@@ -94,7 +94,8 @@ class SliceLookup private (
     clientName = sliceLookupConfig.clientName,
     defaultWatchAddress = sliceLookupConfig.watchAddress,
     tlsOptionsOpt = sliceLookupConfig.tlsOptionsOpt,
-    watchFromDataPlane = sliceLookupConfig.watchFromDataPlane
+    watchFromDataPlane = sliceLookupConfig.watchFromDataPlane,
+    sourceIpOpt = sliceLookupConfig.sourceIpOpt
   )
 
   /**

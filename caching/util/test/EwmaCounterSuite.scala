@@ -12,7 +12,18 @@ import com.databricks.caching.util.TestUtils.{TestName, assertThrow}
 import com.databricks.caching.util.EwmaCounter.Value
 import com.databricks.caching.util.test.EwmaCounterTestDataP
 import com.databricks.caching.util.test.EwmaCounterTestDataP.ActionP.Action
-import com.databricks.caching.util.test.EwmaCounterTestDataP._
+import com.databricks.caching.util.test.EwmaCounterTestDataP.{
+  ActionP,
+  AssertCountersValueMatchP,
+  AssertValueEqualsP,
+  AssertValueInRangeP,
+  IncrementByP,
+  RepeatedGetValueP,
+  RepeatedIncrementByPoissonSample,
+  RepeatedIncrementP,
+  TestCaseP,
+  messageCompanion
+}
 import com.databricks.testing.DatabricksTest
 
 class EwmaCounterSuite extends DatabricksTest with TestName {
