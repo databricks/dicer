@@ -8,7 +8,7 @@ import scala.language.implicitConversions
 import scala.util.control.NonFatal
 import scala.util.{Failure, Success, Try}
 
-import com.databricks.caching.util.ContextAwareUtil.ContextAwareExecutionContext
+import com.databricks.caching.util.ExecutorUtil.ContextAwareExecutionContext
 import com.databricks.caching.util.Pipeline.PipelineExecutor
 import com.databricks.logging.AttributionContext
 
@@ -348,13 +348,10 @@ object Pipeline {
    * part we expect inline callbacks to run either directly on the calling thread or on explicitly
    * specified executors, so this thread pool should not be used much.
    */
-  private val inlineExecutor: ContextAwareExecutionContext =
-    ContextAwareUtil.createThreadPoolExecutionContext(
-      "pipeline-inline",
-      maxThreads = 4,
-      // TODO(<internal bug>): support disabling attribution context propagation
-      enableContextPropagation = true
-    )
+  private val inlineExecutor: ContextAwareExecutionContext = {
+    // TODO(<internal bug>): support disabling attribution context propagation
+    ExecutorUtil.createContextPropagatingExecutionContext("pipeline-inline", maxThreads = 4)
+  }
 
   /**
    * Base implementation for pipelines. Concrete implementations must implement `transformInternal`

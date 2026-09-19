@@ -183,14 +183,16 @@ abstract class AlgorithmSuiteBase extends DatabricksTest with TestName {
       loadMap: LoadMap): Assignment = {
     val proposal: ProposedAssignment = ProposedAssignment(
       predecessorOpt = Some(predecessorAndBaseAssignment),
-      sliceMap = Algorithm.generateAssignment(
-        fakeClock.instant(),
-        target,
-        targetConfig,
-        resources,
-        predecessorAndBaseAssignment.sliceMap,
-        loadMap
-      ),
+      sliceMap = Algorithm
+        .generateAssignment(
+          fakeClock.instant(),
+          target,
+          targetConfig,
+          resources,
+          predecessorAndBaseAssignment.sliceMap,
+          loadMap
+        )
+        .sliceAssignments,
       assignerServiceInfoOpt = None
     )
     commitProposal(proposal)
@@ -206,11 +208,13 @@ abstract class AlgorithmSuiteBase extends DatabricksTest with TestName {
       predecessorAndBaseAssignment: Assignment): Assignment = {
     val proposal: ProposedAssignment = ProposedAssignment(
       predecessorOpt = Some(predecessorAndBaseAssignment),
-      sliceMap = Algorithm.generateHomomorphicAssignment(
-        target,
-        resources,
-        baseAssignmentSliceMap = predecessorAndBaseAssignment.sliceMap
-      ),
+      sliceMap = Algorithm
+        .generateHomomorphicAssignment(
+          target,
+          resources,
+          baseAssignmentSliceMap = predecessorAndBaseAssignment.sliceMap
+        )
+        .sliceAssignments,
       assignerServiceInfoOpt = None
     )
     commitProposal(proposal)

@@ -62,6 +62,10 @@ message AdvancedTargetConfigFieldsP {
   // See the migration design doc for details:
   // <internal link>
   optional bool use_alternative_target = 6;
+
+  // OPTIONAL: Selects how the Assigner derives the key replication threshold. When unset, the
+  // Assigner uses the default, average-per-resource-load-based formula. See `ReplicationThresholdOverrideP`.
+  optional ReplicationThresholdOverrideP replication_threshold_override = 7;
 }
 
 // Override of a Dicer advanced target configuration that applies to specific clusters.
@@ -139,4 +143,20 @@ message TargetWatchRequestRateLimitConfigP {
   // target. If not specified, defaults to a value defined in
   // `TargetWatchRequestRateLimitConfig.DEFAULT`.
   optional int64 client_requests_per_second = 2;
+}
+
+// Override for the replication threshold computation.
+enum ReplicationThresholdOverrideP {
+  // Default. Behaves identically to `MAX_DESIRED_LOAD_BASED`.
+  REPLICATION_THRESHOLD_OVERRIDE_P_UNSPECIFIED = 0;
+
+  // The Assigner derives the replication threshold from the max load hint, and prefers not to
+  // replicate a key until the pod's load has almost reached the max load hint.
+  REPLICATION_THRESHOLD_OVERRIDE_MAX_LOAD_HINT_BASED = 1;
+
+  // The Assigner derives the replication threshold from the default formula based on the
+  // sum of the average per-resource load and the imbalance tolerance of the target. As a result,
+  // the Assigner may replicate a key when its load is unbalanced in comparison to the average
+  // per-resource load, even if the key is not consuming the full capacity of its pod.
+  REPLICATION_THRESHOLD_OVERRIDE_MAX_DESIRED_LOAD_BASED = 2;
 }

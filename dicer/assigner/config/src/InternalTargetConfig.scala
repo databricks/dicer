@@ -9,6 +9,7 @@ import com.databricks.api.proto.dicer.assigner.config.{
   InternalDicerTargetConfigP,
   LoadWatcherConfigP,
   HealthWatcherConfigP,
+  ReplicationThresholdOverrideP,
   TargetWatchRequestRateLimitConfigP
 }
 import com.databricks.api.proto.dicer.external.LoadBalancingMetricConfigP.{
@@ -159,12 +160,20 @@ object InternalTargetConfig {
         .map(TargetWatchRequestRateLimitConfig.fromProto)
         .getOrElse(TargetWatchRequestRateLimitConfig.DEFAULT)
 
+    // replication_threshold_override is an optional field in AdvancedTargetConfigFields. When not
+    // defined, it defaults to the max-desired-load-based threshold.
+    val replicationThresholdOverride: ReplicationThresholdOverride =
+      advancedProto.replicationThresholdOverride
+        .map(ReplicationThresholdOverride.fromProto)
+        .getOrElse(ReplicationThresholdOverride.Default)
+
     // TODO(<internal bug>): populate load balancing interval from advanced config proto.
     val loadBalancingConfig =
       LoadBalancingConfig(
         loadBalancingInterval = LoadBalancingConfig.DEFAULT_LOAD_BALANCING_INTERVAL,
         ChurnConfig.DEFAULT,
-        primaryRateMetric
+        primaryRateMetric,
+        replicationThresholdOverride
       )
 
     // TODO(<internal bug>): Populate the key of death protection config from advanced config proto
@@ -273,11 +282,17 @@ object InternalTargetConfig {
    *                          Dicer does not support LB using multiple metrics or non-rate metrics,
    *                          but it is convenient to group related configuration parameters in this
    *                          field.
+   * @param replicationThresholdOverride Selects how the assigner derives the key replication
+   *                                     threshold, either from the max load hint or from the
+   *                                     default average per-resource load plus imbalance
+   *                                     tolerance. See [[ReplicationThresholdOverride]].
    */
   case class LoadBalancingConfig(
       loadBalancingInterval: FiniteDuration,
       churnConfig: ChurnConfig,
-      primaryRateMetric: LoadBalancingMetricConfig) {
+      primaryRateMetric: LoadBalancingMetricConfig,
+      replicationThresholdOverride: ReplicationThresholdOverride =
+        ReplicationThresholdOverride.Default) {
     require(loadBalancingInterval > Duration.Zero, "LB interval must be positive")
 
     override def toString: String = {
@@ -289,6 +304,9 @@ object InternalTargetConfig {
       }
       if (churnConfig != ChurnConfig.DEFAULT) {
         builder.append(s", $churnConfig")
+      }
+      if (replicationThresholdOverride != ReplicationThresholdOverride.Default) {
+        builder.append(s", replicationThresholdOverride=$replicationThresholdOverride")
       }
       builder.append(")").toString()
     }
@@ -388,6 +406,45 @@ object InternalTargetConfig {
         uniformLoadReservationHint = proto.getUniformLoadReservationHint
       )
     }
+  }
+
+  /**
+   * Selects how the assigner derives the key replication threshold: the per-replica load above
+   * which a key is replicated onto an additional resource.
+   * See [[AdvancedTargetConfigFieldsP.replication_threshold_override]].
+   */
+  sealed trait ReplicationThresholdOverride
+
+  object ReplicationThresholdOverride {
+
+    /**
+     * See [[ReplicationThresholdOverrideP.REPLICATION_THRESHOLD_OVERRIDE_P_UNSPECIFIED]].
+     */
+    case object Default extends ReplicationThresholdOverride
+
+    /**
+     * See [[ReplicationThresholdOverrideP.REPLICATION_THRESHOLD_OVERRIDE_MAX_LOAD_HINT_BASED]].
+     */
+    case object MaxLoadHintBased extends ReplicationThresholdOverride
+
+    /**
+     * See [[ReplicationThresholdOverrideP.REPLICATION_THRESHOLD_OVERRIDE_MAX_DESIRED_LOAD_BASED]].
+     */
+    case object MaxDesiredLoadBased extends ReplicationThresholdOverride
+
+    /**
+     * Converts a [[ReplicationThresholdOverrideP]] to a [[ReplicationThresholdOverride]]. An
+     * unspecified proto value maps to [[Default]].
+     */
+    def fromProto(proto: ReplicationThresholdOverrideP): ReplicationThresholdOverride =
+      proto match {
+        case ReplicationThresholdOverrideP.REPLICATION_THRESHOLD_OVERRIDE_MAX_LOAD_HINT_BASED =>
+          MaxLoadHintBased
+        case ReplicationThresholdOverrideP.REPLICATION_THRESHOLD_OVERRIDE_MAX_DESIRED_LOAD_BASED =>
+          MaxDesiredLoadBased
+        case ReplicationThresholdOverrideP.REPLICATION_THRESHOLD_OVERRIDE_P_UNSPECIFIED =>
+          Default
+      }
   }
 
   /**
@@ -779,6 +836,18 @@ case class NamedInternalTargetConfig(targetName: TargetName, config: InternalTar
     val useAlternativeTargetOpt: Option[Boolean] =
       if (config.useAlternativeTarget) Some(true) else None
 
+    // Only set replication_threshold_override in the proto when the target explicitly chose an
+    // override; leave it unset for the default to avoid updating the dynamic config for targets
+    // that don't specify this field.
+    val replicationThresholdOverrideOpt: Option[ReplicationThresholdOverrideP] =
+      config.loadBalancingConfig.replicationThresholdOverride match {
+        case InternalTargetConfig.ReplicationThresholdOverride.MaxLoadHintBased =>
+          Some(ReplicationThresholdOverrideP.REPLICATION_THRESHOLD_OVERRIDE_MAX_LOAD_HINT_BASED)
+        case InternalTargetConfig.ReplicationThresholdOverride.MaxDesiredLoadBased =>
+          Some(ReplicationThresholdOverrideP.REPLICATION_THRESHOLD_OVERRIDE_MAX_DESIRED_LOAD_BASED)
+        case InternalTargetConfig.ReplicationThresholdOverride.Default => None
+      }
+
     val targetConfigProto: TargetConfigFieldsP = TargetConfigFieldsP.of(
       primaryRateMetricConfig = Some(config.loadBalancingConfig.primaryRateMetric.toProto),
       keyReplicationConfig = keyReplicationConfigProtoOpt,
@@ -808,7 +877,8 @@ case class NamedInternalTargetConfig(targetName: TargetName, config: InternalTar
       keyReplicationConfig = keyReplicationConfigProtoOpt,
       healthWatcherConfig = healthWatcherConfigProtoOpt,
       targetWatchRequestRateLimitConfig = targetRateLimitConfigProtoOpt,
-      useAlternativeTarget = useAlternativeTargetOpt
+      useAlternativeTarget = useAlternativeTargetOpt,
+      replicationThresholdOverride = replicationThresholdOverrideOpt
     )
     InternalDicerTargetConfigP(
       target = Some(targetName.value),

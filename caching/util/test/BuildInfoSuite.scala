@@ -2,7 +2,11 @@ package com.databricks.caching.util
 
 import com.databricks.testing.DatabricksTest
 import com.databricks.caching.util.test.BuildInfoTestDataP
-import com.databricks.caching.util.test.BuildInfoTestDataP._
+import com.databricks.caching.util.test.BuildInfoTestDataP.{
+  BuildInfoP,
+  BuildInfoTestCaseP,
+  messageCompanion
+}
 
 class BuildInfoSuite extends DatabricksTest {
 

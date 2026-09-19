@@ -1,6 +1,6 @@
 package com.databricks.dicer.client
 
-import java.net.URI
+import java.net.{InetAddress, URI}
 import java.util.{Objects, UUID}
 
 import scala.concurrent.duration._
@@ -38,6 +38,9 @@ import com.databricks.rpc.tls.TLSOptions
  * @param minRetryDelay Minimum time to retry a failed RPC call for exponential backoff.
  * @param maxRetryDelay Maximum time to retry a failed RPC call for exponential backoff.
  * @param enableRateLimiting Whether rate limiting is enabled for watch RPC calls.
+ * @param sourceIpOpt Local (source) address to bind the watch connection to, so it egresses through
+ *                    the interface owning that address. `None` lets the kernel pick a source
+ *                    address from the route.
  * @param alternativeTargetOpt See [[ClientRequestP.alternativeTarget]].
  * @param clientClusterUriOpt The Kubernetes cluster URI of the pod running this client, or `None`
  *                            when WhereAmI is unavailable.
@@ -61,12 +64,21 @@ class SliceLookupConfig private (
     val minRetryDelay: FiniteDuration,
     val maxRetryDelay: FiniteDuration,
     val enableRateLimiting: Boolean,
+    val sourceIpOpt: Option[InetAddress],
     val clientClusterUriOpt: Option[KubernetesClusterUri],
     val clientRegionUriOpt: Option[RegionUri]) {
   validateWatchRpcTimeout(watchRpcTimeout)
 
-  /** Client name to use for the RPC stub. */
-  val clientName: String = s"dicer-$clientType-${target.name}"
+  /**
+   * Client name to use for the RPC stub. A source-bound lookup includes the address so its channels
+   * and metrics stay distinct from unbound or differently bound lookups.
+   */
+  val clientName: String = {
+    val baseClientName: String = s"dicer-$clientType-${target.name}"
+    sourceIpOpt.fold(baseClientName)(
+      (sourceIp: InetAddress) => s"$baseClientName-source-ip-${sourceIp.getHostAddress}"
+    )
+  }
 
   override def equals(obj: Any): Boolean = obj match {
     case that: SliceLookupConfig =>
@@ -81,6 +93,7 @@ class SliceLookupConfig private (
       minRetryDelay == that.minRetryDelay &&
       maxRetryDelay == that.maxRetryDelay &&
       enableRateLimiting == that.enableRateLimiting &&
+      sourceIpOpt == that.sourceIpOpt &&
       alternativeTargetOpt == that.alternativeTargetOpt &&
       clientClusterUriOpt == that.clientClusterUriOpt &&
       clientRegionUriOpt == that.clientRegionUriOpt
@@ -99,6 +112,7 @@ class SliceLookupConfig private (
     minRetryDelay,
     maxRetryDelay,
     enableRateLimiting: java.lang.Boolean,
+    sourceIpOpt,
     alternativeTargetOpt,
     clientClusterUriOpt,
     clientRegionUriOpt
@@ -110,7 +124,7 @@ class SliceLookupConfig private (
     s"watchStubCacheTime=$watchStubCacheTime, watchFromDataPlane=$watchFromDataPlane, " +
     s"watchRpcTimeout=$watchRpcTimeout, minRetryDelay=$minRetryDelay, " +
     s"maxRetryDelay=$maxRetryDelay, enableRateLimiting=$enableRateLimiting, " +
-    s"alternativeTargetOpt=$alternativeTargetOpt, " +
+    s"sourceIpOpt=$sourceIpOpt, alternativeTargetOpt=$alternativeTargetOpt, " +
     s"clientClusterUriOpt=$clientClusterUriOpt, clientRegionUriOpt=$clientRegionUriOpt)"
 }
 
@@ -157,7 +171,8 @@ object SliceLookupConfig {
       watchRpcTimeout: FiniteDuration = WATCH_RPC_TIMEOUT,
       minRetryDelay: FiniteDuration = 1.second,
       maxRetryDelay: FiniteDuration = 10.seconds,
-      enableRateLimiting: Boolean): SliceLookupConfig = {
+      enableRateLimiting: Boolean,
+      sourceIpOpt: Option[InetAddress]): SliceLookupConfig = {
     val clientClusterUriOpt: Option[KubernetesClusterUri] =
       WhereAmIHelper.getClusterUri.flatMap { (uri: URI) =>
         KubernetesClusterUri.fromUri(uri.toASCIIString)
@@ -177,6 +192,7 @@ object SliceLookupConfig {
       minRetryDelay = minRetryDelay,
       maxRetryDelay = maxRetryDelay,
       enableRateLimiting = enableRateLimiting,
+      sourceIpOpt = sourceIpOpt,
       clientClusterUriOpt = clientClusterUriOpt,
       clientRegionUriOpt = clientRegionUriOpt
     )

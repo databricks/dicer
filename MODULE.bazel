@@ -177,3 +177,81 @@ maven.install(
 # Reexport `contrib_rules_jvm_deps` from `contrib_rules_jvm`, so that we use the same version of
 # JUnit libraries.
 use_repo(maven, "contrib_rules_jvm_deps", "maven")
+
+
+# ========================================
+# Rust Dependencies
+# ========================================
+
+bazel_dep(name = "rules_rust", version = "0.64.0")
+
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+crate.spec(
+    package = "prometheus-client",
+    version = "=0.24.0",
+)
+crate.spec(
+    package = "async-trait",
+    version = "=0.1.89",
+)
+crate.spec(
+    package = "http",
+    version = "=1.2.0",
+)
+crate.spec(
+    features = ["derive"],
+    package = "serde",
+    version = "=1.0.228",
+)
+crate.spec(
+    package = "serde_json",
+    version = "=1.0.149",
+)
+crate.spec(
+    package = "thiserror",
+    version = "=2.0.18",
+)
+crate.spec(
+    features = [
+        "macros",
+        "rt",
+        "sync",
+        "test-util",
+        "time",
+    ],
+    package = "tokio",
+    version = "=1.52.3",
+)
+crate.spec(
+    package = "futures",
+    version = "=0.3.31",
+)
+crate.spec(
+    features = ["rt"],
+    package = "tokio-util",
+    version = "=0.7.18",
+)
+crate.spec(
+    package = "tracing",
+    version = "=0.1.41",
+)
+crate.spec(
+    package = "anyhow",
+    version = "=1.0.102",
+)
+crate.spec(
+    default_features = False,
+    features = [
+        "debug",
+        "display",
+    ],
+    package = "derive_more",
+    version = "=1.0.0",
+)
+# Both lockfiles are required for reproducible (no-repin) builds: `lockfile` is crate_universe's own
+# lock, and `cargo_lockfile` is the Cargo.lock. Both are regenerated with `CARGO_BAZEL_REPIN=true`.
+crate.from_specs(
+    cargo_lockfile = "//:Cargo.lock",
+    lockfile = "//bazel:Cargo.Bazel.lock",
+)
+use_repo(crate, "crates")

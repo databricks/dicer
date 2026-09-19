@@ -41,6 +41,9 @@ import com.databricks.dicer.external.Target
  */
 object ConfigTestUtil {
 
+  /** Churn configuration in which there is no penalty for churn. */
+  val ZERO_PENALTY_CHURN_CONFIG: ChurnConfig = ChurnConfig.DEFAULT.copy(maxPenaltyRatio = 0.0)
+
   /**
    * Helper writing target configs to temporary directories. Delegates to the shared
    * [[com.databricks.caching.util.ConfigTestUtil.ConfigWriter]], and exists so that Dicer tests
@@ -274,8 +277,8 @@ object ConfigTestUtil {
     val loadWatcherConfig: LoadWatcherTargetConfig = config.loadWatcherConfig
     assertResult(loadWatcherConfig.minDuration.toSeconds)(minDurationSeconds)
     assertResult(loadWatcherConfig.maxAge.toSeconds)(maxAgeSeconds)
-    assertResult(loadWatcherConfig.useTopKeys)(useTopKeys == 1)
-    assertResult(loadWatcherConfig.useLoadDistribution)(useLoadDistribution == 1)
+    assertResult(if (loadWatcherConfig.useTopKeys) 1 else 0)(useTopKeys)
+    assertResult(if (loadWatcherConfig.useLoadDistribution) 1 else 0)(useLoadDistribution)
 
     val stateTransferConfigEnabledValue: Double = MetricUtils
       .getMetricValue(
@@ -286,6 +289,15 @@ object ConfigTestUtil {
     // State transfer metric is always exported to be 1 to indicate that Dicer always generates
     // state transfer annotation for all targets.
     assertResult(1)(stateTransferConfigEnabledValue)
+
+    // Compare use_alternative_target flag.
+    val useAlternativeTargetEnabledValue: Double = MetricUtils
+      .getMetricValue(
+        registry,
+        "dicer_assigner_use_alternative_target_enabled",
+        Map("targetName" -> target.getTargetNameLabel)
+      )
+    assertResult(if (config.useAlternativeTarget) 1 else 0)(useAlternativeTargetEnabledValue)
 
     // Compare key replication config.
     val minReplicas: Double = MetricUtils

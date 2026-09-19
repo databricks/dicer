@@ -18,7 +18,11 @@ import com.google.common.hash.Hashing
  * greater than or equal to that hash, and returns the physical node that owns that position. If
  * no such position exists, the lookup wraps to the smallest entry.
  *
- * @param nodes the physical nodes to place on the ring, in arbitrary order. Must be non-empty.
+ * If two virtual nodes hash to the same ring position, the one whose physical node comes later
+ * in `nodes` wins. The ring therefore depends on the order of `nodes`, so callers that need
+ * independent processes to build identical rings must order `nodes` deterministically everywhere.
+ *
+ * @param nodes the physical nodes to place on the ring. Must be non-empty.
  * @param vnodesPerNode the number of virtual nodes to create for each physical node.
  * @param typeMapper maps physical nodes and lookup keys to their byte representations.
  * @tparam T Physical node type. Each `T` is placed at `vnodesPerNode` positions on the ring.
@@ -32,11 +36,15 @@ final class ConsistentHashRing[T, K] private (
   require(vnodesPerNode > 0, s"vnodesPerNode must be > 0, got $vnodesPerNode")
 
   /**
-   * A tree map containing the 64-bit ring positions as keys and the owning physical nodes as
-   * values. Each physical node appears at `vnodesPerNode` distinct positions.
+   * A tree map containing the 64-bit ring positions and insertion sequence numbers as keys, and
+   * the owning physical nodes as values. Each physical node appears `vnodesPerNode` times.
    */
-  private val ring: immutable.TreeMap[Long, T] = {
-    val builder = immutable.TreeMap.newBuilder[Long, T]
+  private val ring: immutable.TreeMap[(Long, Long), T] = {
+    val builder = immutable.TreeMap.newBuilder[(Long, Long), T]
+    // To preserve last-writer-wins semantics while traversing toward the first vnode at or above a
+    // key's hash, count down from the Long maximum. A lookup from `(hash, Long.MinValue)` then
+    // encounters the most recently inserted vnode first when positions collide.
+    var insertionSequencer: Long = Long.MaxValue
     for (node: T <- nodes) {
       val nodeByteString: ByteString = typeMapper.mapNode(node)
       for (vnodeIndex: Int <- 1 to vnodesPerNode) {
@@ -46,7 +54,8 @@ final class ConsistentHashRing[T, K] private (
         buffer.putInt(vnodeIndex)
         // Change the buffer to read mode.
         buffer.flip()
-        builder += (hashBytes(buffer) -> node)
+        builder += ((hashBytes(buffer), insertionSequencer) -> node)
+        insertionSequencer -= 1
       }
     }
     builder.result()
@@ -55,10 +64,11 @@ final class ConsistentHashRing[T, K] private (
   /** Returns the node responsible for `key`. */
   def lookup(key: K): T = {
     val hashedValue: Long = hashBytes(typeMapper.mapKey(key).asReadOnlyByteBuffer())
-    val ceilingIterator: Iterator[(Long, T)] = ring.iteratorFrom(hashedValue)
+    val lookupKey: (Long, Long) = (hashedValue, Long.MinValue)
+    val owningVnodeIterator: Iterator[((Long, Long), T)] = ring.iteratorFrom(lookupKey)
     // Wrap to the first entry if no iterator entry is >= the hashed value.
-    val (_, node): (Long, T) =
-      if (ceilingIterator.hasNext) ceilingIterator.next() else ring.head
+    val (_, node): ((Long, Long), T) =
+      if (owningVnodeIterator.hasNext) owningVnodeIterator.next() else ring.head
     node
   }
 
@@ -71,28 +81,29 @@ final class ConsistentHashRing[T, K] private (
    */
   def lookupIterator(key: K): Iterator[T] = {
     val hashedValue: Long = hashBytes(typeMapper.mapKey(key).asReadOnlyByteBuffer())
+    val lookupKey: (Long, Long) = (hashedValue, Long.MinValue)
     // Start from the first entry >= `hashedValue`, or wrap to the first entry on the ring if no
     // such entry exists. A `def` (not a `val`) is used so that each reference below creates a fresh
     // iterator instance.
-    def keyOwnerIterator: Iterator[(Long, T)] = {
-      val ceilingIterator: Iterator[(Long, T)] = ring.iteratorFrom(hashedValue)
-      if (ceilingIterator.hasNext) ceilingIterator else ring.iterator
+    def keyOwnerIterator: Iterator[((Long, Long), T)] = {
+      val owningVnodeIterator: Iterator[((Long, Long), T)] = ring.iteratorFrom(lookupKey)
+      if (owningVnodeIterator.hasNext) owningVnodeIterator else ring.iterator
     }
     // Safe to call next() since `nodes` must be non-empty.
-    val keyOwnerHash: Long = keyOwnerIterator.next() match {
-      case (hash, _) => hash
+    val keyOwnerRingKey: (Long, Long) = keyOwnerIterator.next() match {
+      case (ringKey, _) => ringKey
     }
     // An iterator that collects entries from the start of the ring until the node responsible for
-    // `key`. In the case where `keyOwnerHash` corresponds to the first node on the ring, this
+    // `key`. In the case where `keyOwnerRingKey` corresponds to the first node on the ring, this
     // iterator will be empty.
-    val wrapAroundIterator: Iterator[(Long, T)] = ring.iterator.takeWhile(
+    val wrapAroundIterator: Iterator[((Long, Long), T)] = ring.iterator.takeWhile(
       entry => {
-        val (hash, _): (Long, T) = entry
-        keyOwnerHash != hash
+        val (ringKey, _): ((Long, Long), T) = entry
+        keyOwnerRingKey != ringKey
       }
     )
     // Concatenate the two iterators to get the full set of nodes in ring order starting from
-    // `keyOwnerHash` and wrapping around.
+    // `keyOwnerRingKey` and wrapping around.
     val orderedNodes: Iterator[T] = (keyOwnerIterator ++ wrapAroundIterator).map(
       entry => {
         // Extract the node from the ring entry.

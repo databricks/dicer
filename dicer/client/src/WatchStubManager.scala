@@ -1,6 +1,6 @@
 package com.databricks.dicer.client
 
-import java.net.URI
+import java.net.{InetAddress, URI}
 
 import io.grpc.ChannelCredentials
 import io.grpc.Grpc
@@ -20,14 +20,15 @@ import com.databricks.rpc.tls.TLSOptions
 /**
  * Manages the creation of watch stubs for watching assignments.
  *
- * @note `watchFromDataPlane` is unused but matches the internal implementation signature for
- * compatibility.
+ * @note `watchFromDataPlane` and `sourceIpOpt` are unused but match the internal implementation
+ * signature for compatibility.
  */
 class WatchStubManager private[dicer] (
     clientName: String,
     defaultWatchAddress: URI,
     tlsOptionsOpt: Option[TLSOptions],
-    watchFromDataPlane: Boolean) {
+    watchFromDataPlane: Boolean,
+    sourceIpOpt: Option[InetAddress]) {
 
   /**
    * The default channel to use for watching assignments.

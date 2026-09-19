@@ -6,9 +6,10 @@ import java.time.Instant
 import java.util.{Base64, UUID}
 
 import com.databricks.api.proto.dicer.client.ClientTargetViewP
+import com.databricks.api.proto.dicer.common.ClientResponseP
 import com.databricks.rpc.RequestHeaders
 import io.grpc.Metadata
-import scala.concurrent.{Await, Future}
+import scala.concurrent.{Await, Future, Promise}
 import scala.concurrent.duration._
 import scala.util.matching.Regex
 
@@ -259,7 +260,8 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
         watchRpcTimeout = LOW_RPC_TIMEOUT,
         watchFromDataPlane = watchFromDataPlane,
         alternativeTargetOpt = None,
-        enableRateLimiting = enableRateLimiting
+        enableRateLimiting = enableRateLimiting,
+        sourceIpOpt = None
       ),
       subscriberDebugName = subscriberDebugName
     )
@@ -287,14 +289,26 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
     callback.waitForPredicate(_.generation == generation, fromElem)
   }
 
-  /** Reads and returns the value of the empty watch responses Prometheus counter. */
-  private def getNumEmptyWatchResponses(target: Target): Double = {
+  /**
+   * Reads and returns the value of the watch request outcome Prometheus counter for a single
+   * `requestState`/`responseOutcome` bucket.
+   */
+  private def getNumWatchRequestOutcomes(
+      target: Target,
+      clientType: ClientType,
+      requestState: String,
+      responseOutcome: String,
+      hasAssignment: String): Double = {
     readPrometheusMetric(
-      "dicer_empty_watch_responses_total",
+      "dicer_client_watch_request_outcomes_total",
       Vector(
         "targetCluster" -> target.getTargetClusterLabel,
         "targetName" -> target.getTargetNameLabel,
-        "targetInstanceId" -> target.getTargetInstanceIdLabel
+        "targetInstanceId" -> target.getTargetInstanceIdLabel,
+        "clientType" -> clientType.getMetricLabel,
+        "requestState" -> requestState,
+        "responseOutcome" -> responseOutcome,
+        "responseHasAssignment" -> hasAssignment
       )
     )
   }
@@ -364,14 +378,19 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
 
   test("Receive empty message from Assigner") {
     // Test plan: Create a SliceLookup. Do not provide the assigner with any assignment and ensure
-    // that the watcher gets an empty assignment.
-    val initialNumEmptyResponses: Double = getNumEmptyWatchResponses(target)
+    // that the watcher gets an empty assignment. Neither side has an assignment, so the client
+    // sends `NoAssignment` requests and the response generation matches the client's, classifying
+    // the outcome as `InSync`.
+    val requestState: String = "noAssignment"
+    val initialNumEmptyResponses: Double =
+      getNumWatchRequestOutcomes(target, ClientType.Clerk, requestState, "inSync", "false")
     TestUtils.awaitResult(singleAssignerTestEnv.testAssigner.blockAssignment(target), Duration.Inf)
     withLookup(singleAssignerTestEnv.testAssigner) {
       (_: SliceLookupHarness, _: LoggingStreamCallback[Assignment]) =>
         // Now wait for an empty message by waiting for the metric to increment.
         AssertionWaiter("Wait for empty message").await {
-          val numEmptyResponses: Double = getNumEmptyWatchResponses(target)
+          val numEmptyResponses: Double =
+            getNumWatchRequestOutcomes(target, ClientType.Clerk, requestState, "inSync", "false")
           assert(numEmptyResponses > initialNumEmptyResponses)
         }
     }
@@ -418,9 +437,16 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
   }
 
   test("Send assignment, receive empty message then assignment") {
-    // Test plan: Create a SliceLookup. Send an assignment and then have the client's next RPC
-    // return an empty message and then send another assignment.
-    val initialNumEmptyResponses: Double = getNumEmptyWatchResponses(target)
+    // Test plan: Create a SliceLookup. Send an assignment, have the client's next RPC return an
+    // empty message, then send another assignment. Verify the first assignment is recorded as
+    // `NoAssignment`/`ServerAhead` and the empty message as `GenerationOnly`/`InSync`.
+    val firstAssignmentTracker: ChangeTracker[Double] = ChangeTracker(
+      () =>
+        getNumWatchRequestOutcomes(target, ClientType.Clerk, "noAssignment", "serverAhead", "true")
+    )
+    val requestState: String = "generationOnly"
+    val initialNumEmptyResponses: Double =
+      getNumWatchRequestOutcomes(target, ClientType.Clerk, requestState, "inSync", "false")
     withLookup(singleAssignerTestEnv.testAssigner) {
       (_: SliceLookupHarness, callback: LoggingStreamCallback[Assignment]) =>
         // Set the assignment and wait for the first assignment to be received.
@@ -434,10 +460,19 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
         waitForGeneration(callback, assignment.generation, numInitialElements)
         log.info("First assignment received")
 
+        AssertionWaiter("Wait for the first assignment to be recorded as serverAhead").await {
+          assert(
+            firstAssignmentTracker.totalChange() >= 1.0,
+            s"Expected noAssignment/serverAhead count to increase by at least 1, " +
+            s"but increased by ${firstAssignmentTracker.totalChange()}"
+          )
+        }
+
         // Do nothing, there will be an empty message.
         // Wait for an empty message by waiting for the metric to increment.
         AssertionWaiter("Wait for empty message").await {
-          val numEmptyResponses: Double = getNumEmptyWatchResponses(target)
+          val numEmptyResponses: Double =
+            getNumWatchRequestOutcomes(target, ClientType.Clerk, requestState, "inSync", "false")
           assert(numEmptyResponses > initialNumEmptyResponses)
         }
         log.info("Empty message received")
@@ -455,8 +490,11 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
   test("Empty message then assignment") {
     // Test plan: Start the SliceLookup and make the assigner have no assignment. The SliceLookup
     // should receive an empty message. Then provide an assignment and make sure the watcher
-    // receives it.
-    val initialNumEmptyResponses: Double = getNumEmptyWatchResponses(target)
+    // receives it. Neither side has an assignment while the message is empty, so the client sends a
+    // `NoAssignment` request and the outcome is classified as `InSync`.
+    val requestState: String = "noAssignment"
+    val initialNumEmptyResponses: Double =
+      getNumWatchRequestOutcomes(target, ClientType.Clerk, requestState, "inSync", "false")
     TestUtils.awaitResult(singleAssignerTestEnv.testAssigner.blockAssignment(target), Duration.Inf)
 
     withLookup(singleAssignerTestEnv.testAssigner) {
@@ -464,7 +502,8 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
         // Do nothing, there will be an empty message.
         // Wait for an empty message by waiting for the metric to increment.
         AssertionWaiter("Wait for empty message").await {
-          val numEmptyResponses: Double = getNumEmptyWatchResponses(target)
+          val numEmptyResponses: Double =
+            getNumWatchRequestOutcomes(target, ClientType.Clerk, requestState, "inSync", "false")
           assert(numEmptyResponses > initialNumEmptyResponses)
         }
 
@@ -481,6 +520,122 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
             Duration.Inf
           )
         waitForGeneration(callback, assignment.generation, numInitialElements)
+    }
+  }
+
+  test("Watch request left unanswered is recorded as timedOut") {
+    // Test plan: Verify a watch request that hits its internal deadline is recorded as `TimedOut`,
+    // as follows:
+    //    1. Let the lookup complete a normal exchange, so the client adopts the assigner's
+    //       suggested RPC timeout and its deadline becomes short.
+    //    2. Leave the next response hanging, and verify the request is recorded as
+    //       `NoAssignment`/`TimedOut` once that deadline passes.
+    val inSyncTracker: ChangeTracker[Double] = ChangeTracker(
+      () => getNumWatchRequestOutcomes(target, ClientType.Clerk, "noAssignment", "inSync", "false")
+    )
+    val timedOutTracker: ChangeTracker[Double] = ChangeTracker(
+      () =>
+        getNumWatchRequestOutcomes(
+          target,
+          ClientType.Clerk,
+          "noAssignment",
+          "timedOut",
+          "noResponse"
+        )
+    )
+
+    withLookup(singleAssignerTestEnv.testAssigner) {
+      (_: SliceLookupHarness, _: LoggingStreamCallback[Assignment]) =>
+        AssertionWaiter("Wait for a normal watch exchange").await {
+          assert(
+            inSyncTracker.totalChange() >= 1.0,
+            s"Expected noAssignment/inSync count to increase by at least 1, " +
+            s"but increased by ${inSyncTracker.totalChange()}"
+          )
+        }
+
+        // A promise that is never completed leaves the watch RPC outstanding, so the client's own
+        // deadline fires before the RPC does.
+        singleAssignerTestEnv.testAssigner.setReplyType(
+          AssignerReplyType.FutureOverride(Promise[ClientResponseP]().future)
+        )
+        AssertionWaiter("Wait for the unanswered request to time out").await {
+          assert(
+            timedOutTracker.totalChange() >= 1.0,
+            s"Expected noAssignment/timedOut count to increase by at least 1, " +
+            s"but increased by ${timedOutTracker.totalChange()}"
+          )
+        }
+    }
+  }
+
+  test("Server reporting an older generation is recorded as serverBehind") {
+    // Test plan: Verify the outcomes recorded when the server reports a generation older than the
+    // one the client holds, as follows:
+    //    1. Give the client an assignment, so its next request reports `GenerationOnly`.
+    //    2. Override the assigner to answer with an older generation and no assignment, and verify
+    //       the response is recorded as `GenerationOnly`/`ServerBehind`.
+    //    3. Verify the client then sends a diff to catch the server up, so the following response
+    //       is recorded as `KnownAssignment`/`ServerBehind`.
+    val generationOnlyTracker: ChangeTracker[Double] = ChangeTracker(
+      () =>
+        getNumWatchRequestOutcomes(
+          target,
+          ClientType.Clerk,
+          "generationOnly",
+          "serverBehind",
+          "false"
+        )
+    )
+    val knownAssignmentTracker: ChangeTracker[Double] = ChangeTracker(
+      () =>
+        getNumWatchRequestOutcomes(
+          target,
+          ClientType.Clerk,
+          "knownAssignment",
+          "serverBehind",
+          "false"
+        )
+    )
+
+    withLookup(singleAssignerTestEnv.testAssigner) {
+      (_: SliceLookupHarness, callback: LoggingStreamCallback[Assignment]) =>
+        val proposal: SliceMap[ProposedSliceAssignment] = sampleProposal()
+        val numInitialElements = callback.numElements
+        val assignment: Assignment =
+          TestUtils.awaitResult(
+            singleAssignerTestEnv.setAndFreezeAssignment(target, proposal),
+            Duration.Inf
+          )
+        waitForGeneration(callback, assignment.generation, numInitialElements)
+
+        // `Generation.EMPTY` is older than any real assignment generation. The large suggested
+        // timeout keeps the client's own deadline from firing while the override is in place.
+        val staleResponse: ClientResponse = ClientResponse(
+          SyncAssignmentState.KnownGeneration(Generation.EMPTY),
+          30.seconds,
+          Redirect.EMPTY
+        )
+        singleAssignerTestEnv.testAssigner.setReplyType(
+          AssignerReplyType.FutureOverride(Future.successful(staleResponse.toProto))
+        )
+
+        AssertionWaiter("Wait for a generationOnly request answered with an older generation")
+          .await {
+            assert(
+              generationOnlyTracker.totalChange() >= 1.0,
+              s"Expected generationOnly/serverBehind count to increase by at least 1, " +
+              s"but increased by ${generationOnlyTracker.totalChange()}"
+            )
+          }
+
+        AssertionWaiter("Wait for the client to send a diff to catch the server up").await {
+          assert(
+            knownAssignmentTracker.totalChange() >= 1.0,
+            s"Expected knownAssignment/serverBehind count to increase by at least 1, " +
+            s"but increased by ${knownAssignmentTracker.totalChange()}"
+          )
+        }
     }
   }
 
@@ -548,7 +703,8 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
     // Test plan: Verify that watch request metrics are recorded with the correct status and
     // grpc_status labels. This test verifies both success and a few failure cases:
     // 1. Successful watch requests (status=success, grpc_status=OK).
-    // 2. gRPC status errors (status=failure, grpc_status=ABORTED).
+    // 2. gRPC status errors (status=failure, grpc_status=ABORTED), which also land on
+    //    dicer_client_watch_request_outcomes_total as NoAssignment/RpcError.
     // 3. Invalid proto responses (status=failure, grpc_status=INVALID_ARGUMENT).
 
     def getWatchRequestCount(status: String, grpcStatus: String): Double = {
@@ -569,6 +725,18 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
     val abortedErrorTracker = ChangeTracker(() => getWatchRequestCount("failure", "ABORTED"))
     val invalidArgumentErrorTracker =
       ChangeTracker(() => getWatchRequestCount("failure", "INVALID_ARGUMENT"))
+    // The client never holds an assignment in this test, so failed requests resolve as
+    // NoAssignment/RpcError.
+    val rpcErrorOutcomeTracker: ChangeTracker[Double] = ChangeTracker(
+      () =>
+        getNumWatchRequestOutcomes(
+          target,
+          ClientType.Clerk,
+          "noAssignment",
+          "rpcError",
+          "noResponse"
+        )
+    )
 
     withLookup(singleAssignerTestEnv.testAssigner) {
       (_: SliceLookupHarness, _: LoggingStreamCallback[Assignment]) =>
@@ -589,6 +757,15 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
             abortedErrorTracker.totalChange() >= 1.0,
             s"Expected ABORTED error count to increase by at least 1, " +
             s"but increased by ${abortedErrorTracker.totalChange()}"
+          )
+        }
+
+        // The same failures are attributed to the request that hit them on the outcome metric.
+        AssertionWaiter("Wait for rpcError watch outcome metric").await {
+          assert(
+            rpcErrorOutcomeTracker.totalChange() >= 1.0,
+            s"Expected noAssignment/rpcError count to increase by at least 1, " +
+            s"but increased by ${rpcErrorOutcomeTracker.totalChange()}"
           )
         }
 

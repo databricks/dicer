@@ -14,8 +14,6 @@ import com.databricks.caching.util.Bytes
  */
 final class SliceKey private (val bytes: ByteString) extends AnyRef with HighSliceKey {
 
-  SliceKey.slice_key_byte_size_histogram.observe(bytes.size())
-
   /**
    * The first 8 bytes of this key's `bytes` field formatted as a big-endian [[Long]]. If `bytes` is
    * shorter than 8 bytes, this prefix is padded with 0-bytes at the end.
@@ -119,32 +117,6 @@ final class SliceKey private (val bytes: ByteString) extends AnyRef with HighSli
 
 /** Companion object for creating [[SliceKey]]s and for getting min keys. */
 object SliceKey {
-
-  /**
-   * Buckets used by [[slice_key_byte_size_histogram]].
-   *
-   * We expect all slice keys created by Dicer customers to have 8 bytes, and a few slice keys
-   * created internally by Dicer to represent high boundaries of hot keys to have 9 bytes. So we
-   * add 7, 8, 9, 10 as bucket boundaries to verify this. In addition, we add a few larger buckets
-   * in case there're larger slice keys created by Dicer customers in production.
-   */
-  private val SLICE_KEY_BYTE_SIZE_BUCKETS: Seq[Double] =
-    Seq(7.0, 8.0, 9.0, 10.0, 16.0, 32.0, 64.0, 128.0)
-
-  /**
-   * Histogram tracking sizes of slice keys in bytes.
-   *
-   * We don't append target information as labels for this metric as we do for other Dicer metrics,
-   * because target information is not available here, and it's not necessarily associated with
-   * slice keys. If we need target information, we can get it from kubernetes_pod_name or
-   * kubernetes_namespace labels in production metrics.
-   */
-  private val slice_key_byte_size_histogram = io.prometheus.client.Histogram
-    .build()
-    .name("dicer_slice_key_byte_size")
-    .help("Histogram tracking sizes of slice keys in bytes")
-    .buckets(SLICE_KEY_BYTE_SIZE_BUCKETS: _*)
-    .register(io.prometheus.client.CollectorRegistry.defaultRegistry)
 
   /** The minimum key value. */
   val MIN: SliceKey = new SliceKey(ByteString.EMPTY)

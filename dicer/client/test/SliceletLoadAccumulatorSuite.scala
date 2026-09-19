@@ -10,7 +10,7 @@ import scala.util.Random
 import scala.util.control.NonFatal
 
 import com.databricks.api.proto.dicer.common.ClientRequestP.SliceletDataP.SliceLoadP
-import com.databricks.caching.util.{FakeTypedClock, RealtimeTypedClock}
+import com.databricks.caching.util.{ExecutorUtil, FakeTypedClock, RealtimeTypedClock}
 import com.databricks.caching.util.TestUtils
 import com.databricks.caching.util.TestUtils.{TestName, loadTestData}
 import com.databricks.dicer.client.TestClientUtils.{
@@ -40,7 +40,6 @@ import com.databricks.dicer.common.test.SliceletLoadAccumulatorTestDataP.ActionP
 import com.databricks.dicer.common.test.SliceletLoadAccumulatorTestDataP.IncrementPrimaryLoadP.IncrementByKey
 import com.databricks.dicer.common.test.SliceletLoadAccumulatorTestDataP._
 import com.databricks.testing.DatabricksTest
-import com.databricks.threading.NamedExecutor
 import org.scalatest.TestData
 
 class SliceletLoadAccumulatorSuite extends DatabricksTest with TestName {
@@ -313,7 +312,7 @@ class SliceletLoadAccumulatorSuite extends DatabricksTest with TestName {
     // Setup: Execute 10k concurrent requests using 8 threads on random SliceKeys. Record the bucket
     // counts ourselves to check that the counts match at the end of the test.
     val NUM_REQUESTS: Int = 10000
-    val ec = NamedExecutor.create(getSafeName + "-Executor", 8)
+    val ec = ExecutorUtil.createContextPropagatingExecutionContext(getSafeName + "-Executor", 8)
     val randomSliceKeyMSBs = new Array[Byte](NUM_REQUESTS)
     rng.nextBytes(randomSliceKeyMSBs)
     val expectedCounts = new Array[Long](256)
@@ -361,7 +360,7 @@ class SliceletLoadAccumulatorSuite extends DatabricksTest with TestName {
     val seed: Long = Random.nextLong()
     logger.info(s"Creating RNG with seed $seed")
     val rng = new Random(seed)
-    val ec = NamedExecutor.create(getSafeName + "-Executor", 8)
+    val ec = ExecutorUtil.createContextPropagatingExecutionContext(getSafeName + "-Executor", 8)
 
     val target = Target(getSafeName)
 

@@ -41,6 +41,13 @@ object InternalTargetConfigMetrics {
     .labelNames("targetName")
     .register()
 
+  private val useAlternativeTargetEnabled = Gauge
+    .build()
+    .name("dicer_assigner_use_alternative_target_enabled")
+    .help("Set to 1 for target names with use_alternative_target enabled and 0 otherwise.")
+    .labelNames("targetName")
+    .register()
+
   /*
    * Metric containing configured values for fields in [[LoadBalancingMetricConfigP]] for each
    * target name. These values are configured through target config and they become irrelevant when
@@ -141,6 +148,9 @@ object InternalTargetConfigMetrics {
     // TODO(<internal bug>): Remove the stateTransferConfigEnabled metric and graph after the
     //                  enableStateTransfer config is removed from the code in all places.
     stateTransferConfigEnabled.labels(targetName.value).set(1)
+    useAlternativeTargetEnabled
+      .labels(targetName.value)
+      .set(if (targetConfig.useAlternativeTarget) 1 else 0)
     setKeyReplicationConfigStats(targetName, targetConfig.keyReplicationConfig)
     setWatchRequestRateLimitConfigStats(targetName, targetConfig.targetRateLimitConfig)
   }
@@ -276,6 +286,7 @@ object InternalTargetConfigMetrics {
       targetConfigured.clear()
       loadBalancingConfigEnabled.clear()
       stateTransferConfigEnabled.clear()
+      useAlternativeTargetEnabled.clear()
       targetConfigPrimaryRateMetricConfigMaxLoadHint.clear()
       targetConfigPrimaryRateMetricConfigImbalanceToleranceRatio.clear()
       targetConfigPrimaryRateMetricConfigLoadReservationRatio.clear()

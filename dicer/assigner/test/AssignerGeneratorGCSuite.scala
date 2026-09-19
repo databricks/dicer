@@ -90,7 +90,8 @@ class AssignerGeneratorGCSuite extends DatabricksTest with TestName {
     clientName = "dicer-assigner",
     defaultWatchAddress = URI.create(s"http://localhost:${testEnv.getAssignerPort}"),
     tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
-    watchFromDataPlane = false
+    watchFromDataPlane = false,
+    sourceIpOpt = None
   )
 
   /** RPC stub for sending Watch requests to the Assigner.  */

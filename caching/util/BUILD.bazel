@@ -301,10 +301,9 @@ scala_library(
     name = "delegating_sequential_execution_context",
     srcs = ["test/DelegatingSequentialExecutionContext.scala"],
     deps = [
-        ":context_aware_util",
+        ":executor_util",
         ":sequential_execution_context",
         ":typed_clock",
-        "//wrappers/util:executor",
         "@com_google_protobuf_protobuf_java",
         "@maven//:com_google_code_findbugs_jsr305",
         "@maven//:com_google_guava_guava",
@@ -423,13 +422,13 @@ scala_library(
         ":sequential_execution_context",
     ],
     deps = [
-        ":context_aware_util",
         ":delegating_sequential_execution_context",
+        ":executor_util",
         ":fake_typed_clock",
         ":lock",
         ":prefix_logger",
         ":sequential_execution_context",
-        "//caching/util:caching_error_code",
+        "//caching/util:alert_owner_team",
         "@com_google_protobuf_protobuf_java",
         "@maven//:com_google_code_findbugs_jsr305",
         "@maven//:com_google_guava_guava",
@@ -566,12 +565,12 @@ scala_test(
     srcs = ["test/NonReentrantLockSuite.scala"],
     timeout = "short",
     deps = [
+        ":executor_util",
         ":lock",
         ":non_reentrant_lock",
         ":test_util",
         "//wrappers/util:async_test_helpers",
         "//wrappers/util:databricks-test",
-        "//wrappers/util:executor",
     ],
 )
 
@@ -633,6 +632,7 @@ scala_library(
         ":sequential_execution_context",
         ":ticker_time",
         ":typed_clock",
+        "//caching/util:alert_owner_team",
         "//caching/util:caching_error_code",
         "@com_google_protobuf_protobuf_java",
         "@maven//:com_google_code_findbugs_jsr305",
@@ -678,14 +678,14 @@ scala_test(
 )
 
 scala_library(
-    name = "context_aware_util",
+    name = "executor_util",
     srcs = [
-        "src/ContextAwareUtil.scala",
+        "src/ExecutorUtil.scala",
     ],
     deps = [
-        "//wrappers/util:executor",
         "@maven//:com_google_guava_guava",
     ],
+    visibility = ["//visibility:public"],
 )
 
 
@@ -698,19 +698,18 @@ scala_library(
     ],
     exports = [
         ":cancellable",
-        ":context_aware_util",
-        "//wrappers/util:executor",
+        ":executor_util",
     ],
     deps = [
         ":cancellable",
-        ":context_aware_util",
+        ":executor_util",
         ":intrusive_min_heap",
         ":prefix_logger",
         ":ticker_time",
         ":typed_clock",
+        "//caching/util:alert_owner_team",
         "//caching/util:caching_error_code",
         "//caching/util:lock",
-        "//wrappers/util:executor",
         "@com_google_protobuf_protobuf_java",
         "@maven//:com_google_code_findbugs_jsr305",
         "@maven//:com_google_guava_guava",
@@ -735,6 +734,7 @@ scala_test(
         ":test_util",
         ":ticker_time",
         ":typed_clock",
+        "//caching/util:alert_owner_team",
         "//caching/util:caching_error_code",
         "//caching/util:lock",
         "//wrappers/logging:activity-context-factory",
@@ -769,6 +769,7 @@ scala_test(
         ":test_util",
         ":ticker_time",
         ":typed_clock",
+        "//caching/util:alert_owner_team",
         "//caching/util:caching_error_code",
         "//wrappers/util:async_test_helpers",
         "//wrappers/util:databricks-test",
@@ -784,7 +785,7 @@ scala_test(
         ":test_util",
         ":ticker_time",
         ":typed_clock",
-        "//caching/util:caching_error_code",
+        "//caching/util:alert_owner_team",
         "//wrappers/logging:sourcecode",
         "//wrappers/util:async_test_helpers",
         "//wrappers/util:databricks-test",
@@ -971,9 +972,15 @@ scala_test(
 )
 
 scala_library(
+    name = "alert_owner_team",
+    srcs = ["src/AlertOwnerTeam.scala"],
+)
+
+scala_library(
     name = "caching_error_code",
     srcs = ["src/CachingErrorCode.scala"],
     visibility = ["//caching:all_caching"],
+    deps = [":alert_owner_team"],
 )
 
 scala_library(
@@ -981,6 +988,7 @@ scala_library(
     srcs = ["src/CachingErrorMetrics.scala"],
     visibility = ["//caching:all_caching"],
     deps = [
+        ":alert_owner_team",
         ":caching_error_code",
         "@maven//:io_prometheus_simpleclient",
     ],
@@ -1013,6 +1021,7 @@ scala_test(
     srcs = ["test/PrefixLoggerSuite.scala"],
     timeout = "short",
     deps = [
+        ":alert_owner_team",
         ":fake_typed_clock",
         ":metric_utils",
         ":prefix_logger",
@@ -1160,6 +1169,7 @@ scala_library(
     name = "pipeline",
     srcs = ["src/Pipeline.scala"],
     deps = [
+        ":executor_util",
         ":hybrid_concurrency_domain",
         ":prefix_logger",
         ":sequential_execution_context",
@@ -1179,10 +1189,9 @@ scala_test(
         ":rich_pipeline",
         ":sequential_execution_context",
         ":test_util",
-        "//caching/util:caching_error_code",
+        "//caching/util:alert_owner_team",
         "//wrappers/util:async_test_helpers",
         "//wrappers/util:databricks-test",
-        "//wrappers/util:executor",
         "@maven//:com_google_code_findbugs_jsr305",
         "@maven//:com_google_guava_guava",
     ],
@@ -1199,7 +1208,7 @@ scala_library(
     name = "hybrid_concurrency_domain",
     srcs = ["src/HybridConcurrencyDomain.scala"],
     deps = [
-        ":context_aware_util",
+        ":executor_util",
         ":lock",
         ":prefix_logger",
         ":sequential_execution_context",
@@ -1220,7 +1229,7 @@ scala_test(
         ":sequential_execution_context",
         ":test_util",
         ":typed_clock",
-        "//caching/util:caching_error_code",
+        "//caching/util:alert_owner_team",
         "//wrappers/util:async_test_helpers",
         "//wrappers/util:databricks-test",
         "@maven//:com_google_guava_guava",
@@ -1252,7 +1261,7 @@ scala_test(
         ":sequential_execution_context",
         ":test_util",
         ":watch_cell",
-        "//caching/util:caching_error_code",
+        "//caching/util:alert_owner_team",
         "//wrappers/util:async_test_helpers",
         "//wrappers/util:databricks-test",
         "@com_google_protobuf_protobuf_java",
@@ -1295,6 +1304,7 @@ scala_test(
         ":test_util",
         ":watch_cell",
         ":watch_cell_adapter",
+        "//caching/util:alert_owner_team",
         "//caching/util:caching_error_code",
         "//wrappers/logging:sourcecode",
         "//wrappers/util:async_test_helpers",
@@ -1343,6 +1353,7 @@ scala_library(
     srcs = ["test/MetricUtils.scala"],
     testonly = True,
     deps = [
+        ":alert_owner_team",
         ":assert_macros",
         ":prefix_logger",
         ":registry_helper",
@@ -1380,7 +1391,7 @@ scala_test(
         ":sequential_execution_context",
         ":test_util",
         ":typed_clock",
-        "//caching/util:caching_error_code",
+        "//caching/util:alert_owner_team",
         "//wrappers/rpc:error_code",
         "//wrappers/rpc:rpc_exceptions",
         "//wrappers/util:async_test_helpers",
@@ -1565,12 +1576,11 @@ scala_library(
     srcs = ["test/CountingExecutors.scala"],
     testonly = True,
     deps = [
-        ":context_aware_util",
         ":delegating_sequential_execution_context",
+        ":executor_util",
         ":hybrid_concurrency_domain",
         ":sequential_execution_context",
         ":typed_clock",
-        "//wrappers/util:executor",
     ],
 )
 
@@ -1593,7 +1603,6 @@ scala_library(
         "//caching/util:typed_clock",
         "//wrappers/util:jsonutil",
         "//wrappers/logging",
-        "//wrappers/util:executor",
         "@com_google_protobuf_protobuf_java",
         "@maven//:com_google_guava_guava",
         "@maven//:io_etcd_jetcd_core",
@@ -1623,6 +1632,7 @@ scala_library(
         ":typed_clock",
         ":unix_time_version",
         ":watch_cell",
+        "//caching/util:alert_owner_team",
         "//caching/util:caching_error_code",
         "//wrappers/rpc:client",
         "//wrappers/rpc:rich_scalapb",
@@ -1648,7 +1658,7 @@ scala_test(
         ":sequential_execution_context",
         ":test_util",
         ":typed_clock",
-        "//caching/util:caching_error_code",
+        "//caching/util:alert_owner_team",
         "//wrappers/util:async_test_helpers",
         "//wrappers/util:databricks-test",
         "@maven//:io_prometheus_simpleclient",
@@ -1666,7 +1676,7 @@ scala_library(
         ":sequential_execution_context",
         ":ticker_time",
         ":typed_clock",
-        "//caching/util:caching_error_code",
+        "//caching/util:alert_owner_team",
         "@maven//:com_google_code_findbugs_jsr305",
         "@maven//:io_etcd_jetcd_core",
         "@maven//:io_etcd_jetcd_grpc",
@@ -1711,6 +1721,7 @@ scala_test(
         ":typed_clock",
         ":unix_time_version",
         ":watch_cell",
+        "//caching/util:alert_owner_team",
         "//caching/util:caching_error_code",
         "//wrappers/logging",
         "//wrappers/logging:sourcecode",

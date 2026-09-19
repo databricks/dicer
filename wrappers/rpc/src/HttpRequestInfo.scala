@@ -5,5 +5,6 @@ class HttpRequestInfo {
   def getHeader(name: String): Option[String] = None
   def getHeaderNames: Set[String] = Set.empty
   def getMethod: String = "POST"
+  def getRemoteAddr: String = ""
   def getRequestURI: String = "/"
 }

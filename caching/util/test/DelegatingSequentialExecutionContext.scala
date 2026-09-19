@@ -2,7 +2,7 @@ package com.databricks.caching.util
 
 import scala.concurrent.duration._
 
-import com.databricks.caching.util.ContextAwareUtil.ContextAwareExecutionContext
+import com.databricks.caching.util.ExecutorUtil.ContextAwareExecutionContext
 
 /**
  * A delegating implementation of [[SequentialExecutionContext]] that passes all requests through

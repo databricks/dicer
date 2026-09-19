@@ -49,6 +49,10 @@ service ClerkTestHarness {
   rpc CreateCrossClusterClerk(CreateCrossClusterClerkRequestP)
       returns (CreateCrossClusterClerkResponseP);
 
+  // Creates a Rust `Clerk` whose watch connection is bound to a source address, through the
+  // multi-NIC friend accessor.
+  rpc CreateMultiNicClerk(CreateMultiNicClerkRequestP) returns (CreateMultiNicClerkResponseP);
+
   // Gets the debug name of a Rust `Clerk` instance.
   rpc GetClerkDebugName(GetClerkDebugNameRequestP) returns (GetClerkDebugNameResponseP);
 
@@ -173,6 +177,23 @@ message CreateCrossClusterClerkRequestP {
 
 // The response to a `CreateCrossClusterClerk` request.
 message CreateCrossClusterClerkResponseP {
+  // The ID that can be passed to other RPCs to interact with the Clerk.
+  optional int64 clerk_id = 1;
+}
+
+// A request to create a Rust `Clerk` whose watch connection egresses from a chosen local address.
+message CreateMultiNicClerkRequestP {
+  optional TargetP target = 1;
+
+  // The Slicelet port for the Clerk to connect to.
+  optional int32 slicelet_port = 2;
+
+  // The local (source) address to bind the Clerk's watch connection to.
+  optional string source_ip = 3;
+}
+
+// The response to a `CreateMultiNicClerk` request.
+message CreateMultiNicClerkResponseP {
   // The ID that can be passed to other RPCs to interact with the Clerk.
   optional int64 clerk_id = 1;
 }

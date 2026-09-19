@@ -70,15 +70,20 @@ object Algorithm {
       targetConfig: InternalTargetConfig,
       resources: Resources,
       baseAssignmentSliceMap: SliceMap[SliceAssignment],
-      loadMap: LoadMap): SliceMap[ProposedSliceAssignment] = {
+      loadMap: LoadMap): AssignmentGenerationResult = {
     val availableResourceCount: Int = resources.availableResources.size
-    val sliceAssignments: SliceMap[SliceWithResources] =
+    val (sliceAssignments, desiredLoadRangeOpt): (
+        SliceMap[SliceWithResources],
+        Option[DesiredLoadRange]) =
       if (availableResourceCount == 0) {
-        // No available resources, return the same assignment.
-        baseAssignmentSliceMap.map((_: SliceWithResources).slice) {
-          sliceAssignment: SliceAssignment =>
-            sliceAssignment.sliceWithResources
-        }
+        // No available resources, return the same assignment. No load balancing is performed, so
+        // there is no desired load range to report.
+        val unchangedAssignments: SliceMap[SliceWithResources] =
+          baseAssignmentSliceMap.map((_: SliceWithResources).slice) {
+            sliceAssignment: SliceAssignment =>
+              sliceAssignment.sliceWithResources
+          }
+        (unchangedAssignments, None)
       } else {
         // Load balance while accounting for predicted future uniformly-distributed load.
         val adjustedLoadMap: LoadMap =
@@ -106,17 +111,20 @@ object Algorithm {
           )
         AlgorithmExecutor.run(config, resources, assignment)
         validateAssignment(config, resources, assignment)
-        assignment.toSliceAssignments
+
+        (assignment.toSliceAssignments, Some(config.desiredLoadRange))
       }
     // Record the application-measured load (not the uniform reservation adjusted load, which is
     // only used internally by the algorithm for decision-making).
-    sliceAssignments.map(SliceMapHelper.PROPOSED_SLICE_ASSIGNMENT_ACCESSOR) {
-      sliceWithResources: SliceWithResources =>
-        ProposedSliceAssignment(
-          sliceWithResources,
-          Some(loadMap.getLoad(sliceWithResources.slice))
-        )
-    }
+    val proposedSliceAssignments: SliceMap[ProposedSliceAssignment] =
+      sliceAssignments.map(SliceMapHelper.PROPOSED_SLICE_ASSIGNMENT_ACCESSOR) {
+        sliceWithResources: SliceWithResources =>
+          ProposedSliceAssignment(
+            sliceWithResources,
+            Some(loadMap.getLoad(sliceWithResources.slice))
+          )
+      }
+    AssignmentGenerationResult(proposedSliceAssignments, desiredLoadRangeOpt)
   }
 
   /**
@@ -131,20 +139,22 @@ object Algorithm {
    *
    * @param targetForDebug the target for which the assignment is being generated, used for
    *                       debugging only.
-   * @param targetConfig the configuration parameters specific to the target
    * @param resources the current set of healthy pods.
    * @param baseAssignmentSliceMap the slice map of the predecessor for the new assignment.
    */
   def generateHomomorphicAssignment(
       targetForDebug: Target,
       resources: Resources,
-      baseAssignmentSliceMap: SliceMap[SliceAssignment]): SliceMap[ProposedSliceAssignment] = {
+      baseAssignmentSliceMap: SliceMap[SliceAssignment]): AssignmentGenerationResult = {
     // Generate a new homomorphic assignment, taking into account any resource health changes.
-    HomomorphicAssignmentAlgorithm.run(
-      targetForDebug,
-      resources,
-      baseAssignmentSliceMap
-    )
+    val sliceAssignments: SliceMap[ProposedSliceAssignment] =
+      HomomorphicAssignmentAlgorithm.run(
+        targetForDebug,
+        resources,
+        baseAssignmentSliceMap
+      )
+    // Homomorphic generation performs no load balancing, so there is no desired load range.
+    AssignmentGenerationResult(sliceAssignments, desiredLoadRangeOpt = None)
   }
 
   /**
@@ -165,6 +175,21 @@ object Algorithm {
       )
     loadMap.withAddedUniformLoad(uniformReservedLoad)
   }
+
+  /**
+   * The result of an assignment generation, either through [[generateAssignment()]] or
+   * [[generateHomomorphicAssignment()]].
+   *
+   * @param sliceAssignments the proposed slice assignments.
+   * @param desiredLoadRangeOpt the desired load range that the algorithm used to generate the
+   *                            assignment, or None when no load balancing was performed (no
+   *                            resources were available, or the assignment was generated
+   *                            homomorphically). Included to allow metrics to be reported without
+   *                            recomputing it from the predecessor/committed assignments.
+   */
+  private[assigner] case class AssignmentGenerationResult(
+      sliceAssignments: SliceMap[ProposedSliceAssignment],
+      desiredLoadRangeOpt: Option[DesiredLoadRange])
 
   /**
    * Configuration of the algorithm. Defines the thresholds used in the policy and migration phases,

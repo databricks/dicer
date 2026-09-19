@@ -1,7 +1,7 @@
 package com.databricks.caching.util
 
+import java.util.concurrent.{ExecutorService, Executors}
 import scala.util.DynamicVariable
-import java.util.concurrent.Executors
 
 import com.databricks.rpc.DatabricksServerWrapper
 import io.grpc.ServerBuilder
@@ -53,8 +53,8 @@ object ServerTestUtils {
    */
   def createUnresponsiveServer(port: Int): DatabricksServerWrapper = {
     val serverBuilder = ServerBuilder.forPort(port)
-    val server =
-      new DatabricksServerWrapper(serverBuilder.build, Executors.newFixedThreadPool(1))
+    val executor: ExecutorService = Executors.newFixedThreadPool(1)
+    val server = new DatabricksServerWrapper(serverBuilder.executor(executor).build, executor)
     server.start()
     server
   }

@@ -3,6 +3,7 @@ package com.databricks.caching.util
 import javax.annotation.concurrent.{GuardedBy, ThreadSafe}
 import io.grpc.Status
 
+import scala.concurrent.Future
 import scala.concurrent.duration.FiniteDuration
 
 /**
@@ -96,6 +97,8 @@ sealed class WatchValueCellPollAdapter[T, R] @throws[IllegalArgumentException]()
       cancellable.cancel(reason)
     }
   }
+
+  override def notifyInitial(): (Future[Unit], Cancellable) = cell.notifyInitial()
 
   override def getLatestValueOpt: Option[R] = cell.getLatestValueOpt
 

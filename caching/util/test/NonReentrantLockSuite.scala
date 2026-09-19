@@ -9,7 +9,6 @@ import scala.util.Random
 import com.databricks.caching.util.Lock.withLock
 import com.databricks.caching.util.TestUtils.assertThrow
 import com.databricks.testing.DatabricksTest
-import com.databricks.threading.NamedExecutor
 
 /**
  * Test suite for [[NonReentrantLock]]. Since we largely rely on
@@ -131,8 +130,9 @@ private class ParameterizedNonReentrantLockSuite(useFairUnderlyingLock: Boolean 
     val numThreads = 4
     val numIterations = 100
 
+    val executionContext =
+      ExecutorUtil.createContextPropagatingExecutionContext("Reentrant-Test", numThreads)
     // Use a Future so that any potential exceptions get propagated when we do `Await.result`.
-    val ec = NamedExecutor.create("Reentrant-Test", numThreads)
     // Create one future per thread that runs `numIterations`.
     val futures = (0 until numThreads).map(_ => {
       Future {
@@ -148,7 +148,7 @@ private class ParameterizedNonReentrantLockSuite(useFairUnderlyingLock: Boolean 
           // Try to get more interleaving.
           Thread.sleep(1)
         }
-      }(ec)
+      }(executionContext)
     })
 
     for (future <- futures) {

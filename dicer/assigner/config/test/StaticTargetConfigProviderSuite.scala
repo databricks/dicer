@@ -2,7 +2,12 @@ package com.databricks.dicer.assigner.config
 
 import scala.concurrent.Promise
 import scala.concurrent.duration._
-import com.databricks.caching.util.{SequentialExecutionContext, TestUtils, ValueStreamCallback}
+import com.databricks.caching.util.{
+  AlertOwnerTeam,
+  SequentialExecutionContext,
+  TestUtils,
+  ValueStreamCallback
+}
 import com.databricks.conf.Configs
 import com.databricks.dicer.assigner.TestableDicerAssignerConf
 import com.databricks.dicer.common.TargetName
@@ -13,7 +18,10 @@ import scala.util.Random
 class StaticTargetConfigProviderSuite extends DatabricksTest {
 
   /** Sequential execution context for tests. */
-  private val sec = SequentialExecutionContext.createWithDedicatedPool("static-provider-test")
+  private val sec = SequentialExecutionContext.createWithDedicatedPool(
+    name = "static-provider-test",
+    alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
+  )
 
   /** Test configuration for the assigner. */
   private val defaultAssignerConfig: TestableDicerAssignerConf =

@@ -967,11 +967,17 @@ object TargetMetrics {
    *    indicated by `desiredLoad`.
    *  - The number of assigned slices per resource in the new assignment, included in
    *    `churnAndLoadStats.loadStatsAfter`.
+   *
+   * @param target the target for which the assignment change is being reported.
+   * @param churnAndLoadStats the churn and load statistics for the assignment change.
+   * @param desiredLoadOpt the desired load range that was used to generate the new assignment, if
+   *                       present. None when no load balancing was attempted in assignment
+   *                       generation.
    */
   def reportReassignmentStats(
       target: Target,
       churnAndLoadStats: ReassignmentChurnAndLoadStats,
-      desiredLoad: Algorithm.DesiredLoadRange): Unit = {
+      desiredLoadOpt: Option[Algorithm.DesiredLoadRange]): Unit = {
 
     // Export churn ratios.
     val churnStats: AssignmentChangeStats = churnAndLoadStats.churnStats
@@ -1022,21 +1028,24 @@ object TargetMetrics {
       previousResourceMapping.values.toSet.diff(currentResourceMapping.values.toSet)
     clearRemovedResourcesFromMetrics(target, removedHashes)
 
-    // Export min/max desired load metrics.
-    maxDesiredLoadAtGeneration
-      .labels(
-        target.getTargetClusterLabel,
-        target.getTargetNameLabel,
-        target.getTargetInstanceIdLabel
-      )
-      .set(desiredLoad.maxDesiredLoad)
-    minDesiredLoadAtGeneration
-      .labels(
-        target.getTargetClusterLabel,
-        target.getTargetNameLabel,
-        target.getTargetInstanceIdLabel
-      )
-      .set(desiredLoad.minDesiredLoadExistingResource)
+    for (desiredLoad: Algorithm.DesiredLoadRange <- desiredLoadOpt) {
+      // Export min/max desired load metrics if present.
+      maxDesiredLoadAtGeneration
+        .labels(
+          target.getTargetClusterLabel,
+          target.getTargetNameLabel,
+          target.getTargetInstanceIdLabel
+        )
+        .set(desiredLoad.maxDesiredLoad)
+      minDesiredLoadAtGeneration
+        .labels(
+          target.getTargetClusterLabel,
+          target.getTargetNameLabel,
+          target.getTargetInstanceIdLabel
+        )
+        .set(desiredLoad.minDesiredLoadExistingResource)
+
+    }
   }
 
   /**
@@ -1411,7 +1420,6 @@ object TargetMetrics {
     numTopKeys.remove(targetClusterLabel, targetNameLabel, targetInstanceIdLabel)
     maxDesiredLoadAtGeneration.remove(targetClusterLabel, targetNameLabel, targetInstanceIdLabel)
     minDesiredLoadAtGeneration.remove(targetClusterLabel, targetNameLabel, targetInstanceIdLabel)
-
     // Clean up replica count distribution metrics.
     for (bucketLabel: String <- REPLICA_COUNT_BUCKETS.map(_.toDouble.toString) ++ Seq("+Inf")) {
       sliceReplicaCountHistogram.remove(

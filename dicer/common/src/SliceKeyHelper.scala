@@ -62,7 +62,10 @@ object SliceKeyHelper {
   }
 
   /** Internal extensions for [[SliceKey]]. */
-  implicit class RichSliceKey(key: SliceKey) {
+  // Extend AnyVal so that the wrapper is erased at the call site instead of incurring an
+  // allocation on every use. These extensions are called frequently enough that additional
+  // allocations cause unacceptable GC overheads.
+  implicit class RichSliceKey(private val key: SliceKey) extends AnyVal {
 
     /**
      * Translates `key` into a non-negative integer where the key's bytes are treated as the big-

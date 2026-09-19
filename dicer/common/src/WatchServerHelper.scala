@@ -1,5 +1,6 @@
 package com.databricks.dicer.common
 
+import java.util.concurrent.{ExecutorService, Executors}
 import scala.concurrent.duration._
 
 import com.databricks.ErrorCode
@@ -7,10 +8,8 @@ import com.databricks.api.base.DatabricksServiceException
 import com.databricks.rpc.DatabricksServerWrapper
 import scala.concurrent.Future
 import scala.util.control.NonFatal
-import java.util.concurrent.ExecutorService
 
 import com.databricks.rpc.RPCContext
-import com.databricks.threading.InstrumentedScheduledThreadPoolExecutor
 import io.grpc.Grpc
 import io.grpc.InsecureServerCredentials
 import io.grpc.ServerBuilder
@@ -117,8 +116,7 @@ object WatchServerHelper {
     // Configure a few critical knobs:
     // - cap message sizes to handle large assignment payloads
     // - use a dedicated thread pool sized by config
-    val executor: ExecutorService =
-      InstrumentedScheduledThreadPoolExecutor.create("watch-server", conf.watchServerNumThreads)
+    val executor: ExecutorService = Executors.newFixedThreadPool(conf.watchServerNumThreads)
 
     // Use gRPC's transport-independent TLS API.
     val credentials: ServerCredentials = conf.getDicerServerTlsOptions match {

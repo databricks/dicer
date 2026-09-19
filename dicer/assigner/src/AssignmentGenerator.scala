@@ -760,24 +760,13 @@ class AssignmentGenerator(
               committedAssignment,
               context.primaryRateLoadMap
             )
-            val totalAdjustedLoad: Double = Algorithm
-              .computeAdjustedLoadMap(
-                targetConfig.loadBalancingConfig,
-                committedAssignment.assignedResources.size,
-                context.primaryRateLoadMap
-              )
-              .getLoad(Slice.FULL)
-            val desiredLoad: Algorithm.DesiredLoadRange = Algorithm.calculateDesiredLoadRange(
-              targetConfig.loadBalancingConfig,
-              committedAssignment.assignedResources.size,
-              totalAdjustedLoad
-            )
 
-            // Export the metrics to Prometheus.
+            // Export the metrics to Prometheus, using the desired load range that the algorithm
+            // used to generate this assignment.
             TargetMetrics.reportReassignmentStats(
               target,
               churnAndLoadStats,
-              desiredLoad
+              context.desiredLoadRangeOpt
             )
 
             // Update the generator Slicez data.
@@ -1015,8 +1004,10 @@ class AssignmentGenerator(
 
           // If we do not have complete load information, we fall back on uniform load.
           val loadMap: LoadMap = loadMapOpt.getOrElse(LoadMap.UNIFORM_LOAD_MAP)
-          val proposedSliceMap: SliceMap[ProposedSliceAssignment] =
-            TargetMetrics.recordAssignmentGeneratorLatencySync[SliceMap[ProposedSliceAssignment]](
+          val generationResult: Algorithm.AssignmentGenerationResult =
+            TargetMetrics.recordAssignmentGeneratorLatencySync[
+              Algorithm.AssignmentGenerationResult
+            ](
               TargetMetrics.AssignmentGeneratorOpType.GENERATE_ASSIGNMENT,
               target
             ) {
@@ -1030,6 +1021,8 @@ class AssignmentGenerator(
                   loadMap
                 )
             }
+          val proposedSliceMap: SliceMap[ProposedSliceAssignment] =
+            generationResult.sliceAssignments
 
           // If the latest known assignment isn't from this incarnation, don't attempt to claim
           // continuity from the existing assignment in the store, as we can only have continuity
@@ -1045,7 +1038,12 @@ class AssignmentGenerator(
           (
             proposedAssignment,
             Some(
-              AssignmentGenerationContext(target, loadMap, baseAssignment = latestKnownAssignment)
+              AssignmentGenerationContext(
+                target,
+                loadMap,
+                baseAssignment = latestKnownAssignment,
+                desiredLoadRangeOpt = generationResult.desiredLoadRangeOpt
+              )
             )
           )
       }
@@ -1285,13 +1283,17 @@ object AssignmentGenerator {
    * [[GeneratorTargetSlicezData]] to use the exact loadMap when the assignment is
    * generated.
    *
-   * @param target             the sharded service.
-   * @param primaryRateLoadMap latest measurements of the primary rate load.
+   * @param target              the sharded service.
+   * @param primaryRateLoadMap  latest measurements of the primary rate load.
+   * @param desiredLoadRangeOpt the desired load range that the algorithm used to generate the
+   *                            assignment, or None when the algorithm did not attempt to perform
+   *                            any load balancing.
    */
   case class AssignmentGenerationContext(
       target: Target,
       primaryRateLoadMap: LoadMap,
-      baseAssignment: Assignment)
+      baseAssignment: Assignment,
+      desiredLoadRangeOpt: Option[Algorithm.DesiredLoadRange])
 
   /** The state of assignment generation. */
   sealed trait RunState

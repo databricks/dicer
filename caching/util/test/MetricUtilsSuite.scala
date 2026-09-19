@@ -324,6 +324,43 @@ class MetricUtilsSuite extends DatabricksTest with TestName {
     )
   }
 
+  test("getMetricValuesSum aggregates matching series") {
+    // Test plan: Verify a partial label set sums every matching series while excluding series
+    // whose labels do not match.
+    val metricName: String = getSafeMetricName
+    val gauge = Gauge
+      .build()
+      .name(metricName)
+      .labelNames("outcome_type", "outcome")
+      .help("testing")
+      .register()
+    gauge.labels("Success", "read_hit").set(2.0)
+    gauge.labels("Success", "read_miss").set(3.0)
+    gauge.labels("InternalError", "UNAVAILABLE").set(7.0)
+
+    assert(
+      MetricUtils.getMetricValuesSum(
+        registry,
+        metricName,
+        Map("outcome_type" -> "Success")
+      ) == 5.0
+    )
+    assert(
+      MetricUtils.getMetricValuesSum(
+        registry,
+        metricName,
+        Map("outcome_type" -> "InternalError")
+      ) == 7.0
+    )
+    assert(
+      MetricUtils.getMetricValuesSum(
+        registry,
+        metricName,
+        Map("outcome_type" -> "CallerError")
+      ) == 0.0
+    )
+  }
+
   test("Change Tracker for Int") {
     // Test plan: Create a change tracker on top of an Int "counter". Verify that `change()`
     // returns the correct differences from the initial value as the counter changes.

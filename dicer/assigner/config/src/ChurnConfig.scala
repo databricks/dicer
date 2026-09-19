@@ -18,10 +18,4 @@ object ChurnConfig {
 
   /** Default churn configuration. */
   val DEFAULT: ChurnConfig = ChurnConfig(maxPenaltyRatio = 0.25)
-
-  /**
-   * Churn configuration in which there is no penalty for churn. Used when load balancing is not
-   * enabled.
-   */
-  val ZERO_PENALTY: ChurnConfig = ChurnConfig(maxPenaltyRatio = 0.0)
 }

@@ -1,0 +1,5 @@
+# Root BUILD.bazel for the public OSS repo. Exports the Cargo.lock that MODULE.bazel's
+# crate.from_specs(cargo_lockfile = "//:Cargo.lock") references by label.
+exports_files([
+    "Cargo.lock",
+])

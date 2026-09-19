@@ -11,12 +11,14 @@ import scala.concurrent.duration._
 import com.google.protobuf.ByteString
 import io.grpc.Status
 import javax.annotation.concurrent.{GuardedBy, ThreadSafe}
+import io.prometheus.client.CollectorRegistry
 
 import com.databricks.caching.util.{
   AlertOwnerTeam,
   AssertionWaiter,
   FakeSequentialExecutionContext,
   FakeTypedClock,
+  MetricUtils,
   SequentialExecutionContext,
   StateMachineDriver,
   StateMachineOutput,
@@ -38,6 +40,7 @@ import com.databricks.dicer.common.{
   SyncAssignmentState,
   TestSliceUtils
 }
+import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.common.TestSliceUtils._
 import com.databricks.dicer.external.{Slice, Target}
 import com.databricks.rpc.tls.TLSOptionsMigration
@@ -120,6 +123,43 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
   private def target: Target = Target(getSafeName)
 
   /**
+   * Returns the watch request outcome counter for the `requestState`/`responseOutcome` bucket, the
+   * current test's target and a Clerk client.
+   */
+  private def watchRequestOutcomeCount(
+      requestState: String,
+      responseOutcome: String,
+      hasAssignment: String): Double = {
+    MetricUtils.getMetricValue(
+      CollectorRegistry.defaultRegistry,
+      "dicer_client_watch_request_outcomes_total",
+      Map(
+        "targetCluster" -> target.getTargetClusterLabel,
+        "targetName" -> target.getTargetNameLabel,
+        "targetInstanceId" -> target.getTargetInstanceIdLabel,
+        "clientType" -> ClientType.Clerk.getMetricLabel,
+        "requestState" -> requestState,
+        "responseOutcome" -> responseOutcome,
+        "responseHasAssignment" -> hasAssignment
+      )
+    )
+  }
+
+  /** Returns the late watch response counter for the current test's target and a Clerk client. */
+  private def lateWatchResponseCount(): Double = {
+    MetricUtils.getMetricValue(
+      CollectorRegistry.defaultRegistry,
+      "dicer_client_late_watch_responses_total",
+      Map(
+        "targetCluster" -> target.getTargetClusterLabel,
+        "targetName" -> target.getTargetNameLabel,
+        "targetInstanceId" -> target.getTargetInstanceIdLabel,
+        "clientType" -> ClientType.Clerk.getMetricLabel
+      )
+    )
+  }
+
+  /**
    * Creates the client configuration for a AssignmentSyncStateMachine, with test SSL parameters
    * and the given rate limiting flag.
    */
@@ -133,8 +173,108 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
       watchStubCacheTime = 10.seconds,
       watchFromDataPlane = false,
       alternativeTargetOpt = None,
-      enableRateLimiting = enableRateLimiting
+      enableRateLimiting = enableRateLimiting,
+      sourceIpOpt = None
     )
+  }
+
+  test("Response for a superseded request is counted as a late response") {
+    // Test plan: Verify a response arriving for a request that already timed out is counted as a
+    // late response rather than as a second outcome for that request. The `TimedOut` outcome
+    // itself is covered end to end in [[SliceLookupSuiteBase]]; only answering one specific
+    // request needs the state machine, as follows:
+    //    1. Leave the first request unanswered until its internal deadline passes, and verify it is
+    //       recorded as `NoAssignment`/`TimedOut` and that no late response is counted yet.
+    //    2. Let the backoff retry go out, deliver a response for the superseded request, and verify
+    //       it lands in the late response counter and adds no further outcome.
+
+    val config: SliceLookupConfig = createSliceLookupConfig(enableRateLimiting = false)
+    val driver = new AssignmentSyncStateMachineDriverWrapper(sec, config)
+
+    driver.start()
+    val firstRequest: DriverAction.SendRequest =
+      AssertionWaiter("Initial SendRequest action").await {
+        val sendRequests: Vector[DriverAction.SendRequest] =
+          driver.getReceivedActions.collect { case request: DriverAction.SendRequest => request }
+        assert(sendRequests.size == 1)
+        sendRequests.last
+      }
+    assert(firstRequest.syncState == SyncAssignmentState.KnownGeneration(Generation.EMPTY))
+
+    sec.getClock.advanceBy(config.watchRpcTimeout)
+    AssertionWaiter("Request past its deadline recorded as timedOut").await {
+      assert(watchRequestOutcomeCount("noAssignment", "timedOut", "noResponse") == 1.0)
+    }
+    assert(lateWatchResponseCount() == 0.0)
+
+    // The retry supersedes the timed-out request, so a late response to it is counted as a late
+    // response instead of as another outcome for that request.
+    sec.getClock.advanceBy(config.minRetryDelay * 2)
+    AssertionWaiter("SendRequest action after backoff").await {
+      assert(driver.getNumSendRequests == 2)
+    }
+    driver.handleEvent(
+      Event.ReadSuccess(
+        None,
+        firstRequest.opId,
+        ClientResponse(
+          SyncAssignmentState.KnownGeneration(Generation.EMPTY),
+          config.watchRpcTimeout,
+          Redirect.EMPTY
+        )
+      )
+    )
+    assert(driver.getNumSendRequests == 2)
+    assert(
+      watchRequestOutcomeCount("noAssignment", "inSync", "false") == 0.0
+    )
+    assert(
+      watchRequestOutcomeCount("noAssignment", "timedOut", "noResponse") == 1.0
+    )
+    assert(lateWatchResponseCount() == 1.0)
+  }
+
+  test("Failure for a superseded request is not counted") {
+    // Test plan: Verify a failure arriving for a request that already timed out is not counted. The
+    // `RpcError` outcome itself is covered end to end in [[SliceLookupSuiteBase]]; only failing one
+    // specific request needs the state machine, as follows:
+    //    1. Leave the first request unanswered until its internal deadline passes, and verify it is
+    //       recorded as `NoAssignment`/`TimedOut`.
+    //    2. Let the backoff retry go out, fail the superseded request, and verify no further
+    //       outcome is counted.
+
+    val config: SliceLookupConfig = createSliceLookupConfig(enableRateLimiting = false)
+    val driver = new AssignmentSyncStateMachineDriverWrapper(sec, config)
+
+    driver.start()
+    val firstRequest: DriverAction.SendRequest =
+      AssertionWaiter("Initial SendRequest action").await {
+        val sendRequests: Vector[DriverAction.SendRequest] =
+          driver.getReceivedActions.collect { case request: DriverAction.SendRequest => request }
+        assert(sendRequests.size == 1)
+        sendRequests.last
+      }
+
+    sec.getClock.advanceBy(config.watchRpcTimeout)
+    AssertionWaiter("Request past its deadline recorded as timedOut").await {
+      assert(watchRequestOutcomeCount("noAssignment", "timedOut", "noResponse") == 1.0)
+    }
+
+    // The retry supersedes the timed-out request, so its RPC failing later is not counted.
+    sec.getClock.advanceBy(config.minRetryDelay * 2)
+    AssertionWaiter("SendRequest action after backoff").await {
+      assert(driver.getNumSendRequests == 2)
+    }
+    driver.handleEvent(Event.ReadFailure(firstRequest.opId, Status.UNAVAILABLE))
+    assert(driver.getNumSendRequests == 2)
+    assert(
+      watchRequestOutcomeCount("noAssignment", "rpcError", "noResponse") == 0.0
+    )
+    assert(
+      watchRequestOutcomeCount("noAssignment", "timedOut", "noResponse") == 1.0
+    )
+    // A failure is not a response, so it is not counted as a late response either.
+    assert(lateWatchResponseCount() == 0.0)
   }
 
   test("StateMachine deadline exceeded") {
