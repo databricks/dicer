@@ -3,10 +3,7 @@ package com.databricks.caching.util
 import scala.concurrent.duration._
 import scala.concurrent.{Await, Future, Promise}
 import scala.util.{Failure, Success, Try}
-import com.databricks.caching.util.CountingExecutors.{
-  CountingHybridConcurrencyDomain,
-  CountingSequentialExecutionContext
-}
+import com.databricks.caching.util.CountingExecutors.CountingSequentialExecutionContext
 import com.databricks.caching.util.Pipeline.{InlinePipelineExecutor, PipelineExecutor}
 import com.databricks.caching.util.RichPipeline.Implicits
 import com.databricks.caching.util.ServerTestUtils.AttributionContextPropagationTester
@@ -25,18 +22,8 @@ class PipelineSuite
   )
   private val sec1 = secPool.createExecutionContext("sec1")
   private val sec2 = secPool.createExecutionContext("sec2")
-
-  /** Hybrid domains shared across tests to reduce thread creation overhead. */
-  private val hybrid1 = HybridConcurrencyDomain.create(
-    name = "hybrid1",
-    alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
-    enableContextPropagation = true
-  )
-  private val hybrid2 = HybridConcurrencyDomain.create(
-    name = "hybrid2",
-    alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
-    enableContextPropagation = true
-  )
+  private val sec3 = secPool.createExecutionContext("sec3")
+  private val sec4 = secPool.createExecutionContext("sec4")
 
   /** The thread on which the test is running. Used to assert that a callback is running inline. */
   private val testThread = Thread.currentThread()
@@ -61,10 +48,6 @@ class PipelineSuite
     def from(sec: SequentialExecutionContext): AssertableDomainPipelineExecutor = {
       new AssertableDomainPipelineExecutor(sec, sec.assertCurrentContext)
     }
-
-    def from(hybrid: HybridConcurrencyDomain): AssertableDomainPipelineExecutor = {
-      new AssertableDomainPipelineExecutor(hybrid, hybrid.assertInDomain)
-    }
   }
 
   test("Pipeline(thunk)") {
@@ -80,12 +63,6 @@ class PipelineSuite
       42
     }(InlinePipelineExecutor)
     assert(inline.getNonBlocking == Success(42))
-
-    val hybrid: Pipeline[Int] = Pipeline {
-      hybrid1.assertInDomain()
-      42
-    }(hybrid1)
-    assert(hybrid.await() == Success(42))
   }
 
   test("Pipeline(thunk) failure") {
@@ -102,11 +79,6 @@ class PipelineSuite
       throw exception
     }(InlinePipelineExecutor)
     assert(inline.getNonBlocking == Failure(exception))
-    val hybrid: Pipeline[Int] = Pipeline {
-      hybrid1.assertInDomain()
-      throw exception
-    }(hybrid1)
-    assert(hybrid.await() == Failure(exception))
   }
 
   test("Pipeline.successful") {
@@ -506,8 +478,8 @@ class PipelineSuite
 
   gridTest("transformer throws")(
     Seq[AssertableDomainPipelineExecutor](
-      AssertableDomainPipelineExecutor.from(hybrid1),
-      AssertableDomainPipelineExecutor.from(sec1)
+      AssertableDomainPipelineExecutor.from(sec1),
+      AssertableDomainPipelineExecutor.from(sec2)
     )
   ) { executor: AssertableDomainPipelineExecutor =>
     // Test plan: verify that when transformer functions throw an exception, the pipeline outcome is
@@ -643,8 +615,8 @@ class PipelineSuite
 
   gridTest("delayed transformer throws")(
     Seq[AssertableDomainPipelineExecutor](
-      AssertableDomainPipelineExecutor.from(hybrid1),
-      AssertableDomainPipelineExecutor.from(sec1)
+      AssertableDomainPipelineExecutor.from(sec1),
+      AssertableDomainPipelineExecutor.from(sec2)
     )
   ) { executor: AssertableDomainPipelineExecutor =>
     // Test plan: similar to "transformer throws", but for inline transformer functions running on
@@ -676,8 +648,8 @@ class PipelineSuite
 
   gridTest("inline transformer in pipeline")(
     Seq[AssertableDomainPipelineExecutor](
-      AssertableDomainPipelineExecutor.from(hybrid1),
-      AssertableDomainPipelineExecutor.from(sec1)
+      AssertableDomainPipelineExecutor.from(sec1),
+      AssertableDomainPipelineExecutor.from(sec2)
     )
   ) { executor: AssertableDomainPipelineExecutor =>
     // Test plan: verify that an inline transformer chained to an incomplete pipeline runs on the
@@ -739,10 +711,9 @@ class PipelineSuite
   gridTest("mixed pipeline")(
     Seq[(AssertableDomainPipelineExecutor, AssertableDomainPipelineExecutor)](
       (AssertableDomainPipelineExecutor.from(sec1), AssertableDomainPipelineExecutor.from(sec2)),
-      (AssertableDomainPipelineExecutor.from(sec1), AssertableDomainPipelineExecutor.from(hybrid1)),
       (
-        AssertableDomainPipelineExecutor.from(hybrid1),
-        AssertableDomainPipelineExecutor.from(hybrid2)
+        AssertableDomainPipelineExecutor.from(sec3),
+        AssertableDomainPipelineExecutor.from(sec4)
       )
     )
   ) {
@@ -780,9 +751,8 @@ class PipelineSuite
 
     val countingSec1 = new CountingSequentialExecutionContext(sec1)
     val countingSec2 = new CountingSequentialExecutionContext(sec2)
-
-    val countingHybrid1 = new CountingHybridConcurrencyDomain(hybrid1)
-    val countingHybrid2 = new CountingHybridConcurrencyDomain(hybrid2)
+    val countingSec3 = new CountingSequentialExecutionContext(sec3)
+    val countingSec4 = new CountingSequentialExecutionContext(sec4)
 
     val pipelined: Pipeline[Int] = Pipeline
       .successful(1)
@@ -802,42 +772,42 @@ class PipelineSuite
         i + 1
       }(countingSec2)
       .map { i: Int =>
-        countingHybrid1.assertInDomain()
+        countingSec3.assertCurrentContext()
         assert(i == 4)
         i + 1
-      }(countingHybrid1)
+      }(countingSec3)
       .map { i: Int =>
-        countingHybrid1.assertInDomain()
+        countingSec3.assertCurrentContext()
         assert(i == 5)
         i + 1
-      }(countingHybrid1)
+      }(countingSec3)
       .map { i: Int =>
-        countingHybrid2.assertInDomain()
+        countingSec4.assertCurrentContext()
         assert(i == 6)
         i + 1
-      }(countingHybrid2)
-      // Now switch back to hybrid1, which should be scheduled separately.
+      }(countingSec4)
+      // Now switch back to `countingSec3`, which should be scheduled separately.
       .map { i: Int =>
-        countingHybrid1.assertInDomain()
+        countingSec3.assertCurrentContext()
         assert(i == 7)
         i + 1
-      }(countingHybrid1)
+      }(countingSec3)
       .map { i: Int =>
-        countingHybrid1.assertInDomain()
+        countingSec3.assertCurrentContext()
         assert(i == 8)
         i + 1
-      }(countingHybrid1)
+      }(countingSec3)
       .map { i: Int =>
-        countingHybrid1.assertInDomain()
+        countingSec3.assertCurrentContext()
         assert(i == 9)
         i + 1
-      }(countingHybrid1)
+      }(countingSec3)
 
     assert(pipelined.await() == Success(10))
     assert(countingSec1.getNumExecutionsViaPreparedExecutor == 1)
     assert(countingSec2.getNumExecutionsViaPreparedExecutor == 1)
-    assert(countingHybrid1.getNumAsyncExecutions == 2)
-    assert(countingHybrid2.getNumAsyncExecutions == 1)
+    assert(countingSec3.getNumExecutionsViaPreparedExecutor == 2)
+    assert(countingSec4.getNumExecutionsViaPreparedExecutor == 1)
   }
 
   test("context propagation for inline pipeline") {

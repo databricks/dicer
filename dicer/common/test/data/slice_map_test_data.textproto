@@ -25,6 +25,16 @@ validate_complete_slices_test_cases: [
     ]
     expected_error: "Overlap between successive entries"
   },
+  # These slices partition the full key space, but are supplied out of order.
+  {
+    slices: [
+      { low_inclusive: "" high_exclusive: "Balin" },
+      { low_inclusive: "Fili" high_exclusive: "Nori" },
+      { low_inclusive: "Balin" high_exclusive: "Fili" },
+      { low_inclusive: "Nori" }
+    ]
+    expected_error: "Gap between successive entries"
+  },
   {
     slices: [
       { low_inclusive: "" high_exclusive: "Balin" }
@@ -359,6 +369,14 @@ partial_slice_map_test_cases: [
 ]
 
 partial_slice_map_error_test_cases: [
+  # Disjoint slices still must be supplied in increasing key order.
+  {
+    input_slices: [
+      { low_inclusive: "c" high_exclusive: "d" },
+      { low_inclusive: "a" high_exclusive: "b" }
+    ]
+    expected_error: "Overlap between successive entries"
+  },
   {
     input_slices: [
       { low_inclusive: "a" high_exclusive: "d" },

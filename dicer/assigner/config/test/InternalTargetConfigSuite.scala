@@ -1,5 +1,7 @@
 package com.databricks.dicer.assigner.config
 
+import com.databricks.dicer.assigner.config.testing.{ConfigTestUtils}
+
 import java.time.Instant
 import scala.concurrent.duration._
 
@@ -36,7 +38,16 @@ import com.databricks.dicer.assigner.config.InternalTargetConfig.{
 }
 import com.databricks.dicer.common.SliceKeySensitivity
 import com.databricks.dicer.common.TargetName
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  LowInclusiveLongFluent,
+  SliceAssignmentFluet,
+  SliceAssignmentSliceFluent,
+  createLooseGeneration,
+  createTestSquid,
+  toSliceKey,
+  toSquid,
+  toSquidWithValue
+}
 import com.databricks.dicer.common.{SliceAssignment, SubsliceAnnotation}
 import com.databricks.dicer.friend.Squid
 import com.databricks.rpc.DatabricksObjectMapper

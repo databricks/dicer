@@ -14,7 +14,16 @@ import com.databricks.dicer.common.{
   SliceWithResources
 }
 import com.databricks.dicer.common.SliceHelper.RichSlice
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  LowInclusiveLongFluent,
+  LowInclusiveStringFluent,
+  SliceAssignmentSliceFluent,
+  createCompleteSlices,
+  identityKey,
+  toSliceKey,
+  toSquid,
+  `∞`
+}
 import com.databricks.dicer.common.test.SliceMapTestDataP
 import com.databricks.dicer.common.test.SliceMapTestDataP.IntersectTestCaseP.{
   LeftEntryP,

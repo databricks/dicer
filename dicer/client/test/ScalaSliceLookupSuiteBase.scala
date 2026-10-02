@@ -1,5 +1,9 @@
 package com.databricks.dicer.client
 
+import com.databricks.dicer.client.testing.{ScalaSliceLookupHarness}
+
+import com.databricks.dicer.client.testing.{SliceLookupHarness}
+
 import java.time.Instant
 import java.util.UUID
 
@@ -30,12 +34,12 @@ import com.databricks.dicer.common.{
   ClerkData,
   ProposedSliceAssignment,
   SliceletData,
-  SliceletState,
-  TestAssigner
+  SliceletState
 }
+import com.databricks.dicer.common.testing.{TestAssigner}
 import com.databricks.dicer.common.SliceletData.{KeyLoad, SliceLoad}
-import com.databricks.dicer.common.TestAssigner.AssignerReplyType
-import com.databricks.dicer.common.TestSliceUtils.{createTestSquid, sampleProposal}
+import com.databricks.dicer.common.testing.TestAssigner.AssignerReplyType
+import com.databricks.dicer.common.testing.SliceTestUtils.{createTestSquid, sampleProposal}
 import com.databricks.dicer.external.{Slice, SliceKey}
 import com.databricks.dicer.friend.{SliceMap, Squid}
 import io.grpc.Status

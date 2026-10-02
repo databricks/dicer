@@ -6,19 +6,31 @@ import scala.concurrent.duration._
 import scala.language.implicitConversions
 
 import com.databricks.caching.util.RealtimeTypedClock
-import com.databricks.dicer.assigner.MigrationTestAssignment._
+import com.databricks.dicer.assigner.MigrationTestAssignment.{
+  TestResourceAssignment,
+  TestSliceReplica
+}
 import com.databricks.dicer.assigner.AssignmentStats.AssignmentLoadStats
 import com.databricks.dicer.assigner.algorithm.LoadMap
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  LowInclusiveLongFluent,
+  LowInclusiveStringFluent,
+  SliceAssignmentFluet,
+  SliceAssignmentSliceFluent,
+  assert,
+  toSliceKey,
+  toSquid,
+  `∞`
+}
 import com.databricks.dicer.common.{
   Assignment,
   AssignmentConsistencyMode,
   Generation,
   SliceAssignment,
   SliceMapHelper,
-  SubsliceAnnotation,
-  TestSliceUtils
+  SubsliceAnnotation
 }
+import com.databricks.dicer.common.testing.{SliceTestUtils}
 import com.databricks.dicer.external.Slice
 import com.databricks.dicer.friend.Squid
 import com.databricks.caching.util.UnixTimeVersion
@@ -127,7 +139,7 @@ class MigrationTestAssignment(resourceAssignments: Seq[TestResourceAssignment]) 
     val interestingSliceAssignments = ArrayBuffer.empty[SliceAssignment]
 
     val generation: Generation =
-      TestSliceUtils.createLooseGeneration(RealtimeTypedClock.instant().toEpochMilli)
+      SliceTestUtils.createLooseGeneration(RealtimeTypedClock.instant().toEpochMilli)
 
     val sliceAssignmentsBuilder = Vector.newBuilder[SliceAssignment]
     val loadMapBuilder = LoadMap.newBuilder()
@@ -257,7 +269,7 @@ class MigrationTestAssignment(resourceAssignments: Seq[TestResourceAssignment]) 
             sliceAssignment.primaryRateLoadOpt.get -
             expectedSliceAssignment.primaryRateLoadOpt.get
           ) < 1e-6 &&
-          sliceAssignment.resources == expectedSliceAssignment.resources &&
+          sliceAssignment.resourcesSet == expectedSliceAssignment.resourcesSet &&
           !matchedSlices.contains(sliceAssignment.slice)
         }
       assert(

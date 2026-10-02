@@ -529,7 +529,7 @@ class EtcdPreferredAssignerStoreSuite extends DatabricksTest with TestName {
 
     // Write a corrupted value.
     val version: Version =
-      EtcdClientHelper.getVersionFromNonLooseGeneration(prevCommittedAssigner.generation)
+      EtcdClientHelper.getVersionFromGeneration(prevCommittedAssigner.generation)
 
     val newVersion: Version = version.copy(lowBits = version.lowBits.value + 1)
     TestUtils.awaitResult(
@@ -637,7 +637,7 @@ class EtcdPreferredAssignerStoreSuite extends DatabricksTest with TestName {
     }
 
     // Inform store1 about an older preferred assigner; nothing should change.
-    val version = EtcdClientHelper.getVersionFromNonLooseGeneration(committed2.generation)
+    val version = EtcdClientHelper.getVersionFromGeneration(committed2.generation)
     val olderPreferredAssigner = PreferredAssignerValue.SomeAssigner(
       ASSIGNER3,
       EtcdClientHelper.createGenerationFromVersion(
@@ -661,20 +661,6 @@ class EtcdPreferredAssignerStoreSuite extends DatabricksTest with TestName {
     assert(store1.getPreferredAssignerWatchCell.getLatestValueOpt.get == committed2)
 
     cancellable.cancel(Status.CANCELLED)
-  }
-
-  test("Loose store incarnation causes exception") {
-    // Test plan: verify that creating a store with a loose store incarnation value causes an
-    // exception to be thrown.
-    assertThrow[IllegalArgumentException]("must be non-loose") {
-      EtcdPreferredAssignerStore.create(
-        storeIncarnation = Incarnation.MIN,
-        client = createClientWithInitializedStoreMetadata(),
-        random = testRandom,
-        config = CONFIG,
-        sec = pool.createExecutionContext(s"$getSafeName-store")
-      )
-    }
   }
 
   test("InterceptableEtcdPreferredAssignerStore.blockWrites() and unblockWrites()") {

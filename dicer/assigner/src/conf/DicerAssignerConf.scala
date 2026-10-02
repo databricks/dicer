@@ -10,7 +10,7 @@ import com.databricks.caching.util.AssertMacros.iassert
 import com.databricks.caching.util.SafeConfigUtil.DICER_TARGET_CONFIG_FLAGS_NAME_PREFIX
 import com.databricks.caching.util.{
   CachingErrorCode,
-  ConfigScope,
+  ClusterConfigScope,
   PrefixLogger,
   SafeBatchFlagHelper,
   ServerConf,
@@ -746,12 +746,12 @@ class DicerAssignerConf(config: Config)
     )
 
   /**
-   * Tries to derive [[ConfigScope]] from `conf`. Returns `Some` scope if successful; if there is a
-   * failure, returns `None`.
+   * Tries to derive [[ClusterConfigScope]] from `conf`. Returns `Some` scope if successful; if
+   * there is a failure, returns `None`.
    */
-  def getConfigScope: Option[ConfigScope] = {
+  def getConfigScope: Option[ClusterConfigScope] = {
     try {
-      Some(ConfigScope.fromLocationConf(this))
+      Some(ClusterConfigScope.fromLocationConf(this))
     } catch {
       case NonFatal(e) =>
         DicerAssignerConf.logger.alert(

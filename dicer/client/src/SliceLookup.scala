@@ -307,6 +307,7 @@ class SliceLookup private (
   private def performAction(action: DriverAction): Unit = {
     sec.assertCurrentContext()
     action match {
+      // TODO(<internal bug>): Bring cross-language parity for recording assignment metrics.
       case DriverAction.UseAssignment(assignment: Assignment) =>
         // Record the propagation latency from assignment generation to client application
         ClientMetrics.recordAssignmentPropagationLatency(

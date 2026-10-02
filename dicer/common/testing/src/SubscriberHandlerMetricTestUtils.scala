@@ -1,0 +1,130 @@
+package com.databricks.dicer.common.testing
+
+import io.prometheus.client.CollectorRegistry
+
+import com.databricks.caching.util.{KubernetesClusterUri, MetricUtils}
+import com.databricks.dicer.common.SubscriberHandler.{Location, MetricsKey}
+import com.databricks.dicer.common.SubscriberHandlerMetrics
+import com.databricks.dicer.common.SubscriberHandlerMetrics.TargetMatchedLabels
+import com.databricks.dicer.common.TargetHelper.TargetOps
+import com.databricks.dicer.external.{AppTarget, Target}
+
+object SubscriberHandlerMetricTestUtils {
+
+  /** The default metrics collector registry. */
+  private val registry = CollectorRegistry.defaultRegistry
+
+  /** Gets the number of Clerks for the `target` handled by `location` at `version`. */
+  def getNumClerksByHandler(location: Location, target: Target, version: Long): Long = {
+    MetricUtils
+      .getMetricValue(
+        registry,
+        metric = "dicer_subscriber_num_subscribers",
+        Map(
+          "targetCluster" -> target.getTargetClusterLabel,
+          "targetName" -> target.getTargetNameLabel,
+          "targetInstanceId" -> target.getTargetInstanceIdLabel,
+          "type" -> "Clerk",
+          "version" -> version.toString,
+          "handlerLocation" -> location.toString
+        )
+      )
+      .toLong
+  }
+
+  /**
+   * Gets the number of Clerks for the `target` handled by `location`, without specifying the
+   * reported client code version. Prefer the version-qualified overload when the version is known.
+   *
+   * Only the first matching sample's value is returned rather than the sum across versions.
+   */
+  def getNumClerksByHandler(location: Location, target: Target): Long = {
+    MetricUtils
+      .getMetricValue(
+        registry,
+        metric = "dicer_subscriber_num_subscribers",
+        Map(
+          "targetCluster" -> target.getTargetClusterLabel,
+          "targetName" -> target.getTargetNameLabel,
+          "targetInstanceId" -> target.getTargetInstanceIdLabel,
+          "type" -> "Clerk",
+          "handlerLocation" -> location.toString
+        )
+      )
+      .toLong
+  }
+
+  /** Gets the number of Slicelets for the `target` handled by location` at `version`. */
+  def getNumSliceletsByHandler(location: Location, target: Target, version: Long): Long = {
+    MetricUtils
+      .getMetricValue(
+        registry,
+        metric = "dicer_subscriber_num_subscribers",
+        Map(
+          "targetCluster" -> target.getTargetClusterLabel,
+          "targetName" -> target.getTargetNameLabel,
+          "targetInstanceId" -> target.getTargetInstanceIdLabel,
+          "type" -> "Slicelet",
+          "version" -> version.toString,
+          "handlerLocation" -> location.toString
+        )
+      )
+      .toLong
+  }
+
+  /** Gets the number of watch requests received by the subscriber handler. */
+  def getNumWatchRequests(
+      handlerTarget: Target,
+      requestTarget: Target,
+      alternativeTargetOpt: Option[AppTarget],
+      senderClusterUriOpt: Option[KubernetesClusterUri],
+      callerService: String,
+      metricsKey: MetricsKey,
+      handlerLocation: Location): Long = {
+    val matchedLabels: TargetMatchedLabels =
+      SubscriberHandlerMetrics.getWatchRequestTargetMatchedLabels(handlerTarget, requestTarget)
+    val (alternativeTargetName, alternativeTargetInstanceId): (String, String) =
+      SubscriberHandlerMetrics.getAlternativeTargetLabels(alternativeTargetOpt)
+    MetricUtils
+      .getMetricValue(
+        registry,
+        metric = "dicer_watch_requests_total",
+        Map(
+          "handlerTargetCluster" -> handlerTarget.getTargetClusterLabel,
+          "handlerTargetName" -> handlerTarget.getTargetNameLabel,
+          "handlerTargetInstanceId" -> handlerTarget.getTargetInstanceIdLabel,
+          "requestTargetCluster" -> requestTarget.getTargetClusterLabel,
+          "requestTargetName" -> requestTarget.getTargetNameLabel,
+          "requestTargetInstanceId" -> requestTarget.getTargetInstanceIdLabel,
+          "callerService" -> callerService,
+          "type" -> metricsKey.typeLabel,
+          "version" -> metricsKey.versionLabel,
+          "handlerLocation" -> handlerLocation.toString,
+          "matchedName" -> matchedLabels.matchedName,
+          "matchedCluster" -> matchedLabels.matchedCluster,
+          "matchedInstanceId" -> matchedLabels.matchedInstanceId,
+          "alternativeTargetName" -> alternativeTargetName,
+          "alternativeTargetInstanceId" -> alternativeTargetInstanceId,
+          "senderClusterUri" ->
+          SubscriberHandlerMetrics.getSenderClusterUriLabel(senderClusterUriOpt)
+        )
+      )
+      .toLong
+  }
+
+  /** Gets the number of watch requests that were load shed. */
+  def getNumWatchRequestsLoadShed(target: Target): Long = {
+    MetricUtils
+      .getMetricValue(
+        registry,
+        metric = "dicer_watch_requests_load_shed_total",
+        Map(
+          "targetCluster" -> target.getTargetClusterLabel,
+          "targetName" -> target.getTargetNameLabel,
+          "targetInstanceId" -> target.getTargetInstanceIdLabel
+        )
+      )
+      .toLong
+  }
+
+}

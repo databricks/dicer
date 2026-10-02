@@ -837,12 +837,6 @@ class EtcdPreferredAssignerStateMachineSuite extends DatabricksTest {
     )
   }
 
-  test("Store incarnation validation") {
-    assertThrow[IllegalArgumentException]("Store incarnation must be non-loose") {
-      new EtcdPreferredAssignerStateMachine(selfAssignerInfo, Incarnation.MIN, config)
-    }
-  }
-
   test("Config validation") {
     assertThrow[IllegalArgumentException]("") {
       EtcdPreferredAssignerDriver.Config(heartbeatFailureThreshold = 0)
@@ -1023,7 +1017,7 @@ class EtcdPreferredAssignerStateMachineSuite extends DatabricksTest {
     // incarnation.
     val preferredAssignerAtLaterStoreIncarnation = PreferredAssignerValue.SomeAssigner(
       otherAssignerInfo,
-      Generation(STORE_INCARNATION.getNextNonLooseIncarnation, clock.tickerTime().nanos)
+      Generation(Incarnation(STORE_INCARNATION.value + 1), clock.tickerTime().nanos)
     )
     val preferredAssignerAtLaterStoreIncarnationConfig = PreferredAssignerConfig.create(
       preferredAssignerAtLaterStoreIncarnation,

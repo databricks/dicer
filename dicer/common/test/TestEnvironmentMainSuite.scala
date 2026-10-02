@@ -1,10 +1,16 @@
 package com.databricks.dicer.common
 
+import com.databricks.dicer.common.testing.{
+  SubscriberHandlerMetricTestUtils,
+  TestAssigner,
+  TestEnvironmentMain
+}
+
 import scala.concurrent.duration.Duration
 
 import com.databricks.caching.util.AssertionWaiter
 import com.databricks.dicer.assigner.TargetMetricsUtils
-import com.databricks.dicer.common.TestEnvironmentMain.{
+import com.databricks.dicer.common.testing.TestEnvironmentMain.{
   DEFAULT_CLERKS,
   DEFAULT_SLICELETS,
   DEFAULT_TARGET
@@ -54,7 +60,7 @@ class TestEnvironmentMainSuite extends DatabricksTest {
     AssertionWaiter("Wait for Clerks/Slicelets to show up").await {
       assert(TargetMetricsUtils.getPodSetSize(target, "Running") == numSlicelets)
       assert(
-        SubscriberHandlerMetricUtils
+        SubscriberHandlerMetricTestUtils
           .getNumSliceletsByHandler(SubscriberHandler.Location.Assigner, target, LATEST_VERSION)
         == numSlicelets
       )

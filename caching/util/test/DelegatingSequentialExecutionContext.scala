@@ -23,6 +23,9 @@ class DelegatingSequentialExecutionContext(delegate: SequentialExecutionContext)
 
   override def run[U](func: => U): Unit = delegate.run(func)
 
+  override private[caching] def callSyncInternal[T](func: => T): T =
+    delegate.callSyncInternal(func)
+
   override private[util] val contextAwareExecutionContext: ContextAwareExecutionContext = {
     delegate.contextAwareExecutionContext
   }

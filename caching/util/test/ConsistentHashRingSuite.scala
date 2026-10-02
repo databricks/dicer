@@ -1,6 +1,7 @@
 package com.databricks.caching.util
 
 import scala.collection.mutable
+import scala.util.Random
 
 import com.databricks.caching.util.ConsistentHashRingHarness.TypeMapperFunction
 import com.databricks.caching.util.ConsistentHashRingGoldenData.{
@@ -9,6 +10,7 @@ import com.databricks.caching.util.ConsistentHashRingGoldenData.{
 }
 import com.databricks.testing.DatabricksTest
 
+/** Tests node lookup and complete, deterministic clockwise walks through a consistent hash ring. */
 trait ConsistentHashRingSuiteBase extends DatabricksTest {
 
   /**
@@ -248,45 +250,25 @@ trait ConsistentHashRingSuiteBase extends DatabricksTest {
 
     assert(ring.lookup(key = "key") == "c")
   }
-}
-
-/** Runs [[ConsistentHashRingSuiteBase]] against the in-process Scala [[ConsistentHashRing]]. */
-class ScalaConsistentHashRingSuite extends ConsistentHashRingSuiteBase {
-
-  override protected def createConsistentHashRing(
-      nodes: Vector[String],
-      vnodesPerNode: Int,
-      typeMapper: TypeMapperFunction): ConsistentHashRingHarness =
-    new ScalaConsistentHashRingHarness(
-      ConsistentHashRing.create[String, String](
-        nodes = nodes,
-        vnodesPerNode = vnodesPerNode,
-        typeMapper = typeMapper.toRealTypeMapper
-      )
-    )
-
-  // TODO(<internal bug>): Move these tests to ConsistentHashRingSuiteBase once lookupIterator is
-  // implemented in Rust. This will happen together with the getNextStubForKey implementation in
-  // Rust.
 
   test(
-    "lookupIterator walks every node exactly `vnodesPerNode` times starting at the key's owner"
+    "iteratorFrom walks every node exactly `vnodesPerNode` times starting at the key's owner"
   ) {
-    // Test plan: Verify that lookupIterator yields a full walk of the ring's nodes. Verify by
-    // calling `lookupIterator` for 200 keys and confirming the first element matches `lookup` (the
+    // Test plan: Verify that iteratorFrom yields a full walk of the ring's nodes. Verify by
+    // calling `iteratorFrom` for 200 keys and confirming the first element matches `lookup` (the
     // owning node) and that it terminates after `nodes.size` * `vnodesPerNode` elements. Verify
     // each node appears exactly `vnodesPerNode` times for each walk.
     val nodes: Vector[String] = Vector("a", "b", "c", "d", "e")
     val vnodesPerNode: Int = 16
-    val ring: ConsistentHashRing[String, String] = ConsistentHashRing.create[String, String](
+    val ring: ConsistentHashRingHarness = createConsistentHashRing(
       nodes = nodes,
       vnodesPerNode = vnodesPerNode,
-      typeMapper = TypeMapperFunction.Utf8.toRealTypeMapper
+      typeMapper = TypeMapperFunction.Utf8
     )
 
     for (i: Int <- 0 until 200) {
       val key: String = s"key_$i"
-      val walk: Vector[String] = ring.lookupIterator(key = key).toVector
+      val walk: Vector[String] = ring.iteratorFrom(key = key)
       // The walk starts at the same node that lookup returns.
       assert(walk.head == ring.lookup(key = key))
       assert(walk.size == nodes.size * vnodesPerNode)
@@ -299,61 +281,89 @@ class ScalaConsistentHashRingSuite extends ConsistentHashRingSuiteBase {
     }
   }
 
-  test("lookupIterator order is deterministic for the same key") {
+  test("iteratorFrom order is deterministic for the same key") {
     // Test plan: Verify that the walk order is deterministic for the same key. Verify this by
     // doing the same walk twice for the same key and confirming they produce the same order of
     // nodes.
     val nodes: Vector[String] = Vector("a", "b", "c", "d")
-    val ring: ConsistentHashRing[String, String] = ConsistentHashRing.create[String, String](
+    val ring: ConsistentHashRingHarness = createConsistentHashRing(
       nodes = nodes,
       vnodesPerNode = 16,
-      typeMapper = TypeMapperFunction.Utf8.toRealTypeMapper
+      typeMapper = TypeMapperFunction.Utf8
     )
 
-    val walk1: Vector[String] = ring.lookupIterator(key = "key_1").toVector
-    val walk2: Vector[String] = ring.lookupIterator(key = "key_1").toVector
+    val walk1: Vector[String] = ring.iteratorFrom(key = "key_1")
+    val walk2: Vector[String] = ring.iteratorFrom(key = "key_1")
     // The walks are deterministic for the same key.
     assert(walk1 == walk2)
   }
 
-  test("lookupIterator order is deterministic across identical rings") {
+  test("iteratorFrom order is deterministic across identical rings") {
     // Test plan: Verify that the walk order is deterministic across identical rings. Verify
     // this by building two rings from identical nodes and confirming they produce the same walk for
     // every key.
     val nodes: Vector[String] = Vector("a", "b", "c", "d")
     val vnodesPerNode: Int = 16
-    val ring1: ConsistentHashRing[String, String] = ConsistentHashRing.create[String, String](
+    val ring1: ConsistentHashRingHarness = createConsistentHashRing(
       nodes = nodes,
       vnodesPerNode = vnodesPerNode,
-      typeMapper = TypeMapperFunction.Utf8.toRealTypeMapper
+      typeMapper = TypeMapperFunction.Utf8
     )
-    val ring2: ConsistentHashRing[String, String] = ConsistentHashRing.create[String, String](
+    val ring2: ConsistentHashRingHarness = createConsistentHashRing(
       nodes = nodes,
       vnodesPerNode = vnodesPerNode,
-      typeMapper = TypeMapperFunction.Utf8.toRealTypeMapper
+      typeMapper = TypeMapperFunction.Utf8
     )
 
     for (i: Int <- 0 until 200) {
       val key: String = s"key_$i"
-      val walk1: Vector[String] = ring1.lookupIterator(key = key).toVector
-      val walk2: Vector[String] = ring2.lookupIterator(key = key).toVector
+      val walk1: Vector[String] = ring1.iteratorFrom(key = key)
+      val walk2: Vector[String] = ring2.iteratorFrom(key = key)
       assert(walk1 == walk2)
     }
   }
 
-  test("lookupIterator with vnodesPerNode = 1 yields distinct nodes") {
-    // Test plan: Verify that `lookupIterator` on a `ConsistentHashRing` with `vnodesPerNode` = 1
+  test("iteratorFrom order is independent of node insertion order without hash collisions") {
+    // Test plan: Verify that insertion order does not affect the walk when hashes do not collide.
+    // Build two rings from the same nodes shuffled into two random orders and confirm they produce
+    // the same walk for every key. Colliding hashes use insertion order to break ties instead.
+    val nodes: Vector[String] = Vector("a", "b", "c", "d")
+    val vnodesPerNode: Int = 16
+    val random: Random = TestUtils.newRandomWithLoggedSeed()
+    val ring: ConsistentHashRingHarness =
+      createConsistentHashRing(
+        nodes = random.shuffle(nodes),
+        vnodesPerNode = vnodesPerNode,
+        typeMapper = TypeMapperFunction.Utf8
+      )
+    val reorderedRing: ConsistentHashRingHarness =
+      createConsistentHashRing(
+        nodes = random.shuffle(nodes),
+        vnodesPerNode = vnodesPerNode,
+        typeMapper = TypeMapperFunction.Utf8
+      )
+
+    for (i: Int <- 0 until 200) {
+      val key: String = s"key_$i"
+      val walk: Vector[String] = ring.iteratorFrom(key = key)
+      val reorderedWalk: Vector[String] = reorderedRing.iteratorFrom(key = key)
+      assert(walk == reorderedWalk)
+    }
+  }
+
+  test("iteratorFrom with vnodesPerNode = 1 yields distinct nodes") {
+    // Test plan: Verify that `iteratorFrom` on a `ConsistentHashRing` with `vnodesPerNode` = 1
     // yields a walk with distinct nodes. Verify this by creating a ring with `vnodesPerNode` = 1
     // and confirming the walk contains only distinct nodes.
     val nodes: Vector[String] = Vector("a", "b", "c", "d")
-    val ring: ConsistentHashRing[String, String] = ConsistentHashRing.create[String, String](
+    val ring: ConsistentHashRingHarness = createConsistentHashRing(
       nodes = nodes,
       vnodesPerNode = 1,
-      typeMapper = TypeMapperFunction.Utf8.toRealTypeMapper
+      typeMapper = TypeMapperFunction.Utf8
     )
     for (i: Int <- 0 until 200) {
       val key: String = s"key_$i"
-      val walk: Vector[String] = ring.lookupIterator(key = key).toVector
+      val walk: Vector[String] = ring.iteratorFrom(key = key)
       // The walk starts at the same node that lookup returns.
       assert(walk.head == ring.lookup(key = key))
       // The walk contains only distinct nodes.
@@ -362,27 +372,43 @@ class ScalaConsistentHashRingSuite extends ConsistentHashRingSuiteBase {
     }
   }
 
-  test("lookupIterator on a single-node ring yields that node once") {
+  test("iteratorFrom on a single-node ring yields that node once") {
     // Test plan: Verify the boundary case where the ring has a single node with `vnodesPerNode` =
     // 1. The walk must contain exactly that node and then terminate.
-    val ring: ConsistentHashRing[String, String] = ConsistentHashRing.create[String, String](
+    val ring: ConsistentHashRingHarness = createConsistentHashRing(
       nodes = Vector("only"),
       vnodesPerNode = 1,
-      typeMapper = TypeMapperFunction.Utf8.toRealTypeMapper
+      typeMapper = TypeMapperFunction.Utf8
     )
-    assert(ring.lookupIterator(key = "any_key").toVector == Vector("only"))
+    assert(ring.iteratorFrom(key = "any_key") == Vector("only"))
   }
 
-  test("lookupIterator includes every vnode when ring positions collide") {
+  test("iteratorFrom includes every vnode when ring positions collide") {
     // Test plan: Verify that colliding vnode hashes remain separate ring entries. Force three
-    // physical nodes onto the same ring position, then confirm lookupIterator visits every
+    // physical nodes onto the same ring position, then confirm iteratorFrom visits every
     // colliding vnode in reverse insertion order.
-    val ring: ConsistentHashRing[String, String] = ConsistentHashRing.create[String, String](
+    val ring: ConsistentHashRingHarness = createConsistentHashRing(
       nodes = Vector("a", "b", "c"),
       vnodesPerNode = 1,
-      typeMapper = TypeMapperFunction.CollidingNode.toRealTypeMapper
+      typeMapper = TypeMapperFunction.CollidingNode
     )
 
-    assert(ring.lookupIterator(key = "key").toVector == Vector("c", "b", "a"))
+    assert(ring.iteratorFrom(key = "key") == Vector("c", "b", "a"))
   }
+}
+
+/** Runs [[ConsistentHashRingSuiteBase]] against the in-process Scala [[ConsistentHashRing]]. */
+class ScalaConsistentHashRingSuite extends ConsistentHashRingSuiteBase {
+
+  override protected def createConsistentHashRing(
+      nodes: Vector[String],
+      vnodesPerNode: Int,
+      typeMapper: TypeMapperFunction): ScalaConsistentHashRingHarness =
+    new ScalaConsistentHashRingHarness(
+      ConsistentHashRing.create[String, String](
+        nodes = nodes,
+        vnodesPerNode = vnodesPerNode,
+        typeMapper = typeMapper.toRealTypeMapper
+      )
+    )
 }

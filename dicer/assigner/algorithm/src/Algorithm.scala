@@ -741,7 +741,7 @@ private[assigner] object HomomorphicAssignmentAlgorithm {
       mutable.Map.empty.withDefaultValue(Set.empty)
     for (sliceAssignment: SliceAssignment <- baseAssignmentSliceMap.entries) {
       val slice: Slice = SliceMapHelper.SLICE_ASSIGNMENT_ACCESSOR(sliceAssignment)
-      for (resource: Squid <- sliceAssignment.resources) {
+      for (resource: Squid <- sliceAssignment.resourcesSet) {
         baseReplicasPerResource(resource) += slice
       }
     }

@@ -14,7 +14,14 @@ import com.databricks.caching.util.{
   StateMachineOutput,
   TickerTime
 }
-import com.databricks.dicer.assigner.TargetMigratorStateMachine._
+import com.databricks.dicer.assigner.KubernetesMembershipChecker.VersionedResourceSet
+import com.databricks.dicer.assigner.TargetMigratorStateMachine.{
+  AssignerEndpointSetLocation,
+  DriverAction,
+  Event,
+  MigratorState
+}
+import com.databricks.dicer.assigner.TargetMigratorStateMachine.setConfigVersion
 import com.databricks.dicer.assigner.config.{
   TargetMigrationConfig,
   TargetMigrationRole,

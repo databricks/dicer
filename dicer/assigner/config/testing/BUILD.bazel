@@ -1,0 +1,33 @@
+load("@rules_scala//scala:scala.bzl", "scala_library")
+
+package(
+    default_visibility = ["//dicer:internal"],
+)
+
+scala_library(
+    name = "config_test_utils",
+    srcs = ["src/ConfigTestUtils.scala"],
+    testonly = True,
+    deps = [
+        "//caching/util:config_test_util",
+        "//caching/util:metric_utils",
+        "//caching/util:prefix_logger",
+        "//caching/util:test_util",
+        "//dicer/assigner/config/proto:advanced_target_config_scala_lib",
+        "//dicer/assigner/config:authorizer",
+        "//dicer/assigner/config:internal_target_config",
+        "//dicer/common:target_helper",
+        "//dicer/external/proto",
+        "//dicer/external:conf",
+        "//wrappers/util:async_test_helpers",
+        "//wrappers/util:databricks-test",
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_code_findbugs_jsr305",
+        "@maven//:com_google_guava_guava",
+        "@maven//:io_prometheus_simpleclient",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
+    ],
+)

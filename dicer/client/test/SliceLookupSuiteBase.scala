@@ -1,5 +1,7 @@
 package com.databricks.dicer.client
 
+import com.databricks.dicer.client.testing.{SliceLookupHarness}
+
 import java.net.URI
 import java.nio.charset.StandardCharsets.UTF_8
 import java.time.Instant
@@ -34,23 +36,34 @@ import com.databricks.dicer.assigner.TargetMetricsUtils
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
 import com.databricks.dicer.common.TargetHelper
 import com.databricks.dicer.common.TargetHelper.TargetOps
-import com.databricks.dicer.common.TestAssigner.AssignerReplyType
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.TestAssigner.AssignerReplyType
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  LowInclusiveSliceKeyFluent,
+  LowInclusiveStringFluent,
+  SliceAssignmentSliceFluent,
+  createProposal,
+  createTestSquid,
+  fp,
+  sampleProposal,
+  toProposedAssignmentEntry,
+  toSliceKey,
+  toSquid,
+  `∞`
+}
 import com.databricks.dicer.common.{
   Assignment,
   ClientRequest,
   ClientResponse,
   ClientType,
   Generation,
-  InternalDicerTestEnvironment,
   ProposedSliceAssignment,
   Redirect,
   SliceSetImpl,
   ClerkSubscriberSlicezData,
   SyncAssignmentState,
-  SliceletSubscriberSlicezData,
-  TestAssigner
+  SliceletSubscriberSlicezData
 }
+import com.databricks.dicer.common.testing.{InternalDicerTestEnvironment, TestAssigner}
 import com.databricks.dicer.external.Target
 import com.databricks.dicer.friend.{SliceMap, Squid}
 import com.databricks.rpc.testing.TestTLSOptions
@@ -1436,7 +1449,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
         // Now check with synchronous calls since the assignment is cached.
         assert(
           lookup
-            .isAssignedKey(fp("Nori"), assignment.sliceMap.entries(4).resources.head)
+            .isAssignedKey(fp("Nori"), assignment.sliceMap.entries(4).resourcesSet.head)
             .contains(true)
         )
 

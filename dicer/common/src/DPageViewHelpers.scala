@@ -109,7 +109,7 @@ object DPageViewHelpers {
             lowKey = Some(sa.slice.lowInclusive.toString),
             highKey = Some(sa.slice.highExclusive.toString),
             generation = Some(generationToViewProto(sa.generation)),
-            resources = sa.resources.map((_: Squid).resourceAddress.toString).toSeq,
+            resources = sa.resourcesSet.map((_: Squid).resourceAddress.toString).toSeq,
             // None when no load measurement is available for this slice.
             load = loadOpt,
             topKeys = topKeysInSlice,

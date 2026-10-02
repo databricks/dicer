@@ -1,6 +1,6 @@
 package com.databricks.dicer.friend.external.javaapi;
 
-import static com.databricks.dicer.external.javaapi.TestSliceUtils.highSliceKeyFromProto;
+import static com.databricks.dicer.external.javaapi.SliceTestUtils.highSliceKeyFromProto;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.databricks.caching.util.javaapi.TestUtils;

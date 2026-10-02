@@ -1,7 +1,10 @@
 package com.databricks.dicer.client.featurerollouts
 
 import java.io.File
+import java.net.{URI, URL}
+import java.util.jar.{JarEntry, JarFile}
 
+import scala.collection.JavaConverters.enumerationAsScalaIteratorConverter
 import scala.io.{BufferedSource, Source}
 
 import javax.annotation.concurrent.ThreadSafe
@@ -77,7 +80,7 @@ private[featurerollouts] class DicerClientFeatureRolloutFlagImpl private (
 private[dicer] object DicerClientFeatureRolloutFlagImpl {
 
   /**
-   * Universe-relative root containing per-environment subdirectories (dev/, staging/, prod/)
+   * Classpath resource root containing per-environment subdirectories (dev/, staging/, prod/)
    * of .textproto rollout files.
    */
   private val CONFIG_BASE_DIR: String = "dicer/client/feature-rollouts"
@@ -221,37 +224,68 @@ private[dicer] object DicerClientFeatureRolloutFlagImpl {
   @throws[IllegalArgumentException]("if any `.textproto` file in `configDirPath` is malformed.")
   private def loadConfigsByFlagName(
       configDirPath: String): Map[String, DicerClientFeatureRolloutConfig] = {
-    val configDir = new File(configDirPath)
+    // The trailing slash matches the directory's own entry in a jar.
+    val configDirUrls: Seq[URL] =
+      getClass.getClassLoader.getResources(s"$configDirPath/").asScala.toVector
     require(
-      configDir.isDirectory,
+      configDirUrls.nonEmpty,
       s"Feature rollout config directory does not exist: $configDirPath"
     )
-    val configFiles: Array[File] = configDir.listFiles.filter { file: File =>
-      file.isFile && file.getName.endsWith(CONFIG_FILE_SUFFIX)
+    val configFileNames: Seq[String] = listFileNames(configDirUrls).filter { fileName: String =>
+      fileName.endsWith(CONFIG_FILE_SUFFIX)
     }
-    configFiles.map { file: File =>
-      val featureName: String = file.getName.stripSuffix(CONFIG_FILE_SUFFIX)
-      featureName -> parseConfigFile(file)
+    configFileNames.map { fileName: String =>
+      val featureName: String = fileName.stripSuffix(CONFIG_FILE_SUFFIX)
+      featureName -> parseConfigFile(s"$configDirPath/$fileName")
     }.toMap
+  }
+
+  /**
+   * Returns the names of the files directly inside the classpath directories at `dirUrls`, each of
+   * which must be in a jar.
+   */
+  @throws[IllegalArgumentException]("if a directory in `dirUrls` is not in a jar.")
+  private def listFileNames(dirUrls: Seq[URL]): Seq[String] = {
+    dirUrls.flatMap { dirUrl: URL =>
+      // A jar URL's path is `<jar file URL>!/<entry name>`, e.g. `file:/lib.jar!/dir/`.
+      val jarAndEntry: Array[String] = dirUrl.getPath.split("!/", 2)
+      require(
+        dirUrl.getProtocol == "jar" && jarAndEntry.length == 2,
+        s"Not a directory in a jar: $dirUrl"
+      )
+      val dirEntryName: String = jarAndEntry(1)
+      val jarFile = new JarFile(new File(new URI(jarAndEntry(0))))
+      try {
+        // A jar names every entry by its full path, so keep only the files directly inside.
+        val relativeNames: Iterator[String] = jarFile.entries.asScala.collect {
+          case entry: JarEntry if entry.getName.startsWith(dirEntryName) =>
+            entry.getName.stripPrefix(dirEntryName)
+        }
+        relativeNames.filter((name: String) => name.nonEmpty && !name.contains('/')).toVector
+      } finally {
+        jarFile.close()
+      }
+    }
   }
 
   /** Parses a single textproto file into a [[DicerClientFeatureRolloutConfig]] instance. */
   @throws[IllegalArgumentException]("if the is not a valid textproto.")
-  private def parseConfigFile(file: File): DicerClientFeatureRolloutConfig = {
-    val fileContent: String = readFileContents(file)
+  private def parseConfigFile(path: String): DicerClientFeatureRolloutConfig = {
+    val fileContent: String = readFileContents(path)
     try {
       val proto: DicerClientFeatureRolloutConfigP =
         DicerClientFeatureRolloutConfigP.fromAscii(fileContent)
       DicerClientFeatureRolloutConfig.fromProto(proto)
     } catch {
       case e: TextFormatException =>
-        throw new IllegalArgumentException(s"Bad textproto format in $file: ${e.getMessage}", e)
+        throw new IllegalArgumentException(s"Bad textproto format in $path: ${e.getMessage}", e)
     }
   }
 
-  /** Reads `file`'s full contents as a UTF-8 string. */
-  private def readFileContents(file: File): String = {
-    val fileSource: BufferedSource = Source.fromFile(file, "utf-8")
+  /** Reads the full contents of the classpath resource at `path` as a UTF-8 string. */
+  private def readFileContents(path: String): String = {
+    val fileSource: BufferedSource =
+      Source.fromInputStream(getClass.getClassLoader.getResourceAsStream(path), "utf-8")
     try {
       fileSource.mkString
     } finally {

@@ -6,7 +6,10 @@ import scala.collection.mutable
 import scala.concurrent.duration._
 
 import com.databricks.caching.util.AssertMacros.iassert
-import com.databricks.caching.util.CachingErrorCode.TOP_KEYS_LOAD_EXCEEDS_SLICE_LOAD
+import com.databricks.caching.util.CachingErrorCode.{
+  INCONGRUENT_LOAD_DISTRIBUTION,
+  TOP_KEYS_LOAD_EXCEEDS_SLICE_LOAD
+}
 import com.databricks.caching.util.{
   IntrusiveMinHeap,
   IntrusiveMinHeapElement,
@@ -24,9 +27,10 @@ import com.databricks.dicer.assigner.LoadWatcher.{
   StaticConfig
 }
 import com.databricks.dicer.assigner.conf.LoadWatcherConf
+import com.databricks.dicer.common.SliceKeyHelper.RichSliceKey
 import com.databricks.dicer.common.SliceletData.{KeyLoad, LoadDistribution}
 import com.databricks.dicer.common.{Assignment, LoadMeasurement, SliceAssignment}
-import com.databricks.dicer.external.{ResourceAddress, Slice, SliceKey}
+import com.databricks.dicer.external.{InfinitySliceKey, ResourceAddress, Slice, SliceKey}
 
 /**
  * This abstraction tracks the load reported by Slicelets for a particular target. Load on
@@ -162,10 +166,11 @@ private[assigner] class LoadWatcher(config: LoadWatcherTargetConfig, staticConfi
 
       sliceLoadWatcherOpt match {
         case Some(sliceLoadWatcher: SliceLoadWatcher) =>
-          val (loadMapEntry, keyLoadMap): (LoadMap.Entry, KeyLoadMap) =
-            sliceLoadWatcher.getLoadForSlice(now)
-          allTopKeysBuilder ++= keyLoadMap
-          loadMapBuilder.putLoad(loadMapEntry, keyLoadMap)
+          for (loadEntryWithTopKeys <- sliceLoadWatcher.getLoadEntries(now)) {
+            val (loadMapEntry, keyLoadMap): (LoadMap.Entry, KeyLoadMap) = loadEntryWithTopKeys
+            allTopKeysBuilder ++= keyLoadMap
+            loadMapBuilder.putLoad(loadMapEntry, keyLoadMap)
+          }
         case None =>
           // There's a gap in our measurements, check for history in the assignment.
           val historicLoadOpt: Option[Double] = sliceAssignment.primaryRateLoadOpt
@@ -545,10 +550,7 @@ private[assigner] object LoadWatcher {
         measurementsByResource.get(newMeasurement.resource) match {
           case Some(existingMeasurement: MeasurementElement) =>
             if (existingMeasurement.time < newMeasurement.time) {
-              // If there's an existing measurement, only update it if the new measurement is no
-              // older than the existing one.
-              removeExistingMeasurement(existingMeasurement)
-              putNewMeasurement(newMeasurement)
+              replaceMeasurement(existingMeasurement, newMeasurement)
             }
           case None =>
             putNewMeasurement(newMeasurement)
@@ -560,93 +562,38 @@ private[assigner] object LoadWatcher {
     /**
      * PRECONDITION: The SliceLoadWatcher is non-empty.
      *
-     * Aggregates the load information tracked by SliceLoadWatcher into a pair of [[LoadMap.Entry]]
-     * and keyLoadMap, where the KeyLoadMap contains aggregated loads for top keys, and the
-     * [[LoadMap.Entry]] contains the load for the Slice excluding the top keys. The aggregation is
-     * done using the strategy described "Load report and aggregation" section in the main doc of
-     * [[LoadWatcher]].
+     * Returns this Slice's load as [[LoadMap.Entry]]s, each paired with the top keys it contains.
+     * When the freshest Measurement carries a load distribution, the Slice is apportioned into one
+     * entry per CDF bucket (see [[apportionLoadUsingDistribution]]); otherwise the whole Slice's
+     * load is reported as a single entry.
+     *
+     * Each entry's load ''excludes'' its top keys, matching the input contract of
+     * [[LoadMap.Builder.putLoad]].
      */
-    def getLoadForSlice(now: TickerTime): (LoadMap.Entry, KeyLoadMap) = {
-      iassert(measurementsByResource.nonEmpty)
-      iassert(highestMeasurementTimeOpt.nonEmpty)
+    def getLoadEntries(now: TickerTime): Seq[(LoadMap.Entry, KeyLoadMap)] = {
+      val (fullSliceLoad, topKeys, loadDistributionOpt): (
+          Double,
+          KeyLoadMap,
+          Option[LoadDistribution]) = aggregateLoadFromReplicas(now)
 
-      // See `highestMeasurementTimeOpt` for how this will be used.
-      val youngestAge: FiniteDuration = now - highestMeasurementTimeOpt.get
-
-      // Accumulator for total Slice load, including top keys.
-      val sliceLoadAccumulatorIncludingTopKeys = new WeightedLoadAccumulator(
-        LOAD_WEIGHT_DECAYING_HALFLIFE
-      )
-      // Map containing the accumulators for all keys we need to process when aggregating the load
-      // for the Slice, i.e. all the keys that have appeared in currently tracked Measurements for
-      // at least once. Note that when the LoadWatcher is configured to not use top keys, they are
-      // empty.
-      val topKeyAccumulators: Map[SliceKey, WeightedLoadAccumulator] =
-        measurementsByResource.values
-          .flatMap((_: MeasurementElement).topKeys.map { keyLoad: KeyLoad =>
-            (keyLoad.key, new WeightedLoadAccumulator(LOAD_WEIGHT_DECAYING_HALFLIFE))
-          })
-          .toMap
-
-      // For each Measurement tracked, accumulate its Slice load on
-      // `sliceLoadAccumulatorIncludingTopKeys`, and accumulate its top keys' load on
-      // `topKeyAccumulators`. We assume 0 load for top keys when they don't appear in a load
-      // report.
-      for (measurement: MeasurementElement <- measurementsByResource.values) {
-        val numReplicas: Int = measurement.numReplicas
-        // See `highestMeasurementTimeOpt` for information about normalized age.
-        val measurementNormalizedAge: FiniteDuration = now - measurement.time - youngestAge
-        sliceLoadAccumulatorIncludingTopKeys
-          .accumulate(measurementNormalizedAge, measurement.load, numReplicas)
-
-        // For each Measurement, try rescaling the key load if they exceed the slice load in this
-        // Measurement.
-        val adjustedTopKeyLoadMap: KeyLoadMap =
-          rescaleKeyLoadsIfExceedingSliceLoad(
-            measurement.load,
-            toKeyLoadMap(measurement.topKeys),
-            resourceOptForDebug = Some(measurement.resource)
-          )
-
-        for (key: SliceKey <- topKeyAccumulators.keys) {
-          // Note that all Measurements are for the same Slice, which is SliceLoadWatcher.slice, and
-          // all the `key`s are within this Slice.
-          topKeyAccumulators(key).accumulate(
-            measurementNormalizedAge,
-            // Note we assume 0 load for top keys when they don't appear in a load report. See
-            // "Top keys handling" section of LoadWatcher's main doc.
-            adjustedTopKeyLoadMap.getOrElse(key, 0.0),
-            numReplicas
-          )
-        }
+      // When the Slice is exactly one key and that key is a top key, the key is the whole
+      // Slice and must carry its entire load.
+      if (slice.highExclusive == slice.lowInclusive.successor() &&
+        topKeys.contains(slice.lowInclusive)) {
+        return Seq((LoadMap.Entry(slice, 0.0), KeyLoadMap(slice.lowInclusive -> fullSliceLoad)))
       }
 
-      // Build results from the accumulators for Slice and top keys.
-      val accumulatedSliceLoadIncludingTopKeys: Double =
-        sliceLoadAccumulatorIncludingTopKeys.result()
-      val accumulatedTopKeyLoadMap: KeyLoadMap =
-        KeyLoadMap.empty ++ topKeyAccumulators.mapValues { accumulator: WeightedLoadAccumulator =>
-          accumulator.result()
-        }
-
-      // Based on the way we estimate the load of missing keys (missing keys have 0 load), the
-      // the accumulated key load sum should mathematically be no greater than the accumulated slice
-      // load. However taking floating point error into consideration, we still try rescaling the
-      // accumulated load to ensure the key load will not exceed Slice load in practice.
-      val adjustedAccumulatedTopKeyLoadMap: KeyLoadMap = rescaleKeyLoadsIfExceedingSliceLoad(
-        accumulatedSliceLoadIncludingTopKeys,
-        accumulatedTopKeyLoadMap,
-        resourceOptForDebug = None
-      )
-      // Calculate the Slice's load excluding its top keys' load, as required by LoadMap.
-      val adjustedAccumulatedTopKeyLoadSum: Double = adjustedAccumulatedTopKeyLoadMap.values.sum
-      val accumulatedSliceLoadExcludingTopKeys: Double =
-        Math.max(accumulatedSliceLoadIncludingTopKeys - adjustedAccumulatedTopKeyLoadSum, 0.0)
-
-      (
-        LoadMap.Entry(slice, accumulatedSliceLoadExcludingTopKeys),
-        adjustedAccumulatedTopKeyLoadMap
-      )
+      loadDistributionOpt match {
+        case Some(loadDistribution: LoadDistribution)
+            if loadDistribution.points.nonEmpty && fullSliceLoad > 0.0 =>
+          // Apportion the Slice into CDF buckets: returns one (Entry, KeyLoadMap) pair per bucket.
+          apportionLoadUsingDistribution(fullSliceLoad, loadDistribution, topKeys)
+        case _ =>
+          // No distribution, or no load to apportion: return one entry with top keys carved out.
+          val loadExcludingTopKeys: Double =
+            Math.max(fullSliceLoad - topKeys.values.sum, 0.0)
+          Seq((LoadMap.Entry(slice, loadExcludingTopKeys), topKeys))
+      }
     }
 
     /**
@@ -700,6 +647,36 @@ private[assigner] object LoadWatcher {
 
     /**
      * PRECONDITION: `existingMeasurement` is contained in SliceLoadWatcher.
+     * PRECONDITION: `newMeasurement` is for the same Slice and resource, and is newer.
+     *
+     * Replaces a tracked measurement with a newer measurement for the same resource, keeping the
+     * measurement indexes in sync. Does not perform garbage collection.
+     */
+    private def replaceMeasurement(
+        existingMeasurement: MeasurementElement,
+        newMeasurement: MeasurementElement): Unit = {
+      iassert(existingMeasurement.slice == newMeasurement.slice)
+      iassert(existingMeasurement.resource == newMeasurement.resource)
+      iassert(existingMeasurement.time < newMeasurement.time)
+      if (existingMeasurement.numReplicas == newMeasurement.numReplicas) {
+        // Replacing a measurement with the same replica count leaves the counts unchanged, avoiding
+        // cancelling tree mutations and node allocation in the steady state.
+        val replacedMeasurementOpt: Option[MeasurementElement] =
+          measurementsByResource.put(newMeasurement.resource, newMeasurement)
+        iassert(replacedMeasurementOpt.contains(existingMeasurement))
+        existingMeasurement.removeFromHeap()
+        measurementsByAge.push(newMeasurement)
+        if (highestMeasurementTimeOpt.forall((_: TickerTime) < newMeasurement.time)) {
+          highestMeasurementTimeOpt = Some(newMeasurement.time)
+        }
+      } else {
+        removeExistingMeasurement(existingMeasurement)
+        putNewMeasurement(newMeasurement)
+      }
+    }
+
+    /**
+     * PRECONDITION: `measurement` is contained in SliceLoadWatcher.
      *
      * Removes an existing `measurement` from `measurementsByResource` and `measurementsByAge` while
      * adjusting `measurementsCountsByNumReplicas` based on the change. Does not perform garbage
@@ -732,9 +709,9 @@ private[assigner] object LoadWatcher {
     }
 
     /**
-     * PRECONDITION: `newMeasurement.resource` is not contained in SliceLoadWatcher.
+     * PRECONDITION: `measurement.resource` is not contained in SliceLoadWatcher.
      *
-     * Puts a new `measurement` from `measurementsByResource` and `measurementsByAge` while
+     * Puts a new `measurement` into `measurementsByResource` and `measurementsByAge` while
      * adjusting `measurementsCountsByNumReplicas` based on the change. Does not perform garbage
      * collection.
      */
@@ -803,6 +780,241 @@ private[assigner] object LoadWatcher {
     private def toKeyLoadMap(keyLoads: Seq[KeyLoad]): KeyLoadMap = {
       KeyLoadMap.empty ++ keyLoads.map { keyLoad: KeyLoad =>
         (keyLoad.key, keyLoad.underestimatedPrimaryRateLoad)
+      }
+    }
+
+    /**
+     * PRECONDITION: The SliceLoadWatcher is non-empty.
+     *
+     * Returns the Slice's aggregated total load (including top-key load), the top keys' aggregated
+     * loads, and the load distribution from the freshest Measurement (if any). The load and top
+     * keys are aggregated across the tracked Measurements using the strategy from the "Load report
+     * and aggregation" and "Top keys handling" sections of the main doc of [[LoadWatcher]].
+     */
+    private def aggregateLoadFromReplicas(
+        now: TickerTime): (Double, KeyLoadMap, Option[LoadDistribution]) = {
+      iassert(measurementsByResource.nonEmpty)
+      iassert(highestMeasurementTimeOpt.nonEmpty)
+
+      // See `highestMeasurementTimeOpt` for how this will be used.
+      val youngestAge: FiniteDuration = now - highestMeasurementTimeOpt.get
+
+      // Accumulator for total Slice load, including top keys.
+      val sliceLoadAccumulatorIncludingTopKeys = new WeightedLoadAccumulator(
+        LOAD_WEIGHT_DECAYING_HALFLIFE
+      )
+      // Map containing the accumulators for all keys we need to process when aggregating the load
+      // for the Slice, i.e. all the keys that have appeared in currently tracked Measurements for
+      // at least once. Note that when the LoadWatcher is configured to not use top keys, they are
+      // empty.
+      val topKeyAccumulators: Map[SliceKey, WeightedLoadAccumulator] =
+        measurementsByResource.values
+          .flatMap((_: MeasurementElement).topKeys.map { keyLoad: KeyLoad =>
+            (keyLoad.key, new WeightedLoadAccumulator(LOAD_WEIGHT_DECAYING_HALFLIFE))
+          })
+          .toMap
+
+      // For each Measurement tracked, accumulate its Slice load on
+      // `sliceLoadAccumulatorIncludingTopKeys`, and accumulate its top keys' load on
+      // `topKeyAccumulators`. We assume 0 load for top keys when they don't appear in a load
+      // report.
+      for (measurement: MeasurementElement <- measurementsByResource.values) {
+        val numReplicas: Int = measurement.numReplicas
+        // See `highestMeasurementTimeOpt` for information about normalized age.
+        val measurementNormalizedAge: FiniteDuration = now - measurement.time - youngestAge
+        sliceLoadAccumulatorIncludingTopKeys
+          .accumulate(measurementNormalizedAge, measurement.load, numReplicas)
+
+        // For each Measurement, try rescaling the key load if they exceed the slice load in this
+        // Measurement.
+        val adjustedTopKeyLoadMap: KeyLoadMap =
+          rescaleKeyLoadsIfExceedingSliceLoad(
+            measurement.load,
+            toKeyLoadMap(measurement.topKeys),
+            resourceOptForDebug = Some(measurement.resource)
+          )
+
+        for (key: SliceKey <- topKeyAccumulators.keys) {
+          // Note that all Measurements are for the same Slice, which is SliceLoadWatcher.slice, and
+          // all the `key`s are within this Slice.
+          topKeyAccumulators(key).accumulate(
+            measurementNormalizedAge,
+            // Note we assume 0 load for top keys when they don't appear in a load report. See
+            // "Top keys handling" section of LoadWatcher's main doc.
+            adjustedTopKeyLoadMap.getOrElse(key, 0.0),
+            numReplicas
+          )
+        }
+      }
+
+      // Build results from the accumulators for Slice and top keys.
+      val accumulatedSliceLoadIncludingTopKeys: Double =
+        sliceLoadAccumulatorIncludingTopKeys.result()
+      val accumulatedTopKeyLoadMap: KeyLoadMap =
+        KeyLoadMap.empty ++ topKeyAccumulators.mapValues { accumulator: WeightedLoadAccumulator =>
+          accumulator.result()
+        }
+
+      // Based on the way we estimate the load of missing keys (missing keys have 0 load), the
+      // accumulated key load sum should mathematically be no greater than the accumulated slice
+      // load. However taking floating point error into consideration, we still rescale the
+      // accumulated load to ensure the key load will not exceed Slice load in practice.
+      val adjustedAccumulatedTopKeyLoadMap: KeyLoadMap = rescaleKeyLoadsIfExceedingSliceLoad(
+        accumulatedSliceLoadIncludingTopKeys,
+        accumulatedTopKeyLoadMap,
+        resourceOptForDebug = None
+      )
+
+      // Unlike scalar load and top keys, we don't aggregate load distributions across Measurements;
+      // the freshest histogram should suffice as a representative load distribution. See the "Load
+      // distribution" section of the main doc.
+      //
+      // TODO(<internal bug>): Picking the freshest distribution is an interim strategy. It is correct when
+      // there is only a single replica, or if a Slice's Measurements come from replicas with
+      // interchangeable key distributions. It does not, however, accurately reflect load that is
+      // distributed asymmetrically across replicas. Refine this to combine the distributions across
+      // replicas, weighted by each replica's age-decayed load.
+      val freshestLoadDistributionOpt: Option[LoadDistribution] =
+        measurementsByResource.values.maxBy((_: MeasurementElement).time).loadDistributionOpt
+
+      (
+        accumulatedSliceLoadIncludingTopKeys,
+        adjustedAccumulatedTopKeyLoadMap,
+        freshestLoadDistributionOpt
+      )
+    }
+
+    /**
+     * PRECONDITION: `loadDistribution.points` is non-empty.
+     *
+     * Apportions the Slice's total load into finer-grained entries following the per-key load CDF
+     * in `loadDistribution`, reserving each of `topKeys` at its load so it can later be split into
+     * its own single-key entry. Each returned entry's load ''excludes'' its contained top keys
+     * (which are returned alongside it), matching the contract [[getPrimaryRateLoadMap]] expects
+     * (no double counting of load).
+     *
+     * For a Slice `[low, high)` whose distribution has key samples `K_0 < K_1 < ... < K_n` with
+     * cumulative load fractions `f_0 <= f_1 <= ... <= f_n`, the *gross* per-bucket CDF load is:
+     * {{{
+     *   [low, K_0.successor())                  -> f_0 * fullSliceLoad
+     *   [K_{i-1}.successor(), K_i.successor())  -> (f_i - f_{i-1}) * fullSliceLoad  for 1 <= i <= n
+     *   [K_n.successor(), high)                 -> (1 - f_n) * fullSliceLoad
+     * }}}
+     * Note: Each bucket's exclusive high bound is `K.successor()` (not `K`) because `f_i` counts
+     * keys *at or below* `K_i`, so `K_i` must fall inside its own bucket.
+     *
+     * Each bucket then reserves the load of each top key it contains, and computes a background
+     * load by subtracting the top keys load from the gross CDF load. When the CDF and the top keys
+     * are not perfectly in sync, a bucket's top keys load can exceed its gross CDF load; we drain
+     * the resulting overshoot by rescaling all buckets' background loads to ensure the total
+     * background load + top keys load equals the Slice's total load. If the top keys load exceeds
+     * the Slice's total load, we preserve the top keys load and assign zero background load.
+     *
+     * @param fullSliceLoad The Slice's total load, top keys included.
+     * @param loadDistribution The Slice's load distribution.
+     * @param topKeys The Slice's top keys, and their loads.
+     * @return A sequence of (background Entry, reserved keys) pairs.
+     */
+    private def apportionLoadUsingDistribution(
+        fullSliceLoad: Double,
+        loadDistribution: LoadDistribution,
+        topKeys: KeyLoadMap): Seq[(LoadMap.Entry, KeyLoadMap)] = {
+      iassert(loadDistribution.points.nonEmpty, "loadDistribution.points must be non-empty")
+
+      // An intermediary representation of a CDF bucket before its background load is finalized:
+      // contains the bucket's key range, the top keys it encompasses, and its tentative background
+      // load - the bucket's gross CDF load minus the load reserved for those top keys (at least 0).
+      // This tentative load may be rescaled later to ensure we respect the Slice's total load.
+      case class LoadBucket(subSlice: Slice, topKeys: KeyLoadMap, backgroundLoad: Double)
+
+      // Builds a LoadBucket for `subSlice`, reserving the load of each top key within it.
+      def buildLoadBucket(subSlice: Slice, grossLoad: Double): LoadBucket = {
+        val keysInSubSlice: KeyLoadMap = subSlice.highExclusive match {
+          case highKey: SliceKey => topKeys.range(subSlice.lowInclusive, highKey)
+          case InfinitySliceKey => topKeys.from(subSlice.lowInclusive)
+        }
+        // Flooring background at zero can make reserved keys plus background exceed the Slice's
+        // total load across buckets. Step 2 rescales backgrounds to remove this excess.
+        LoadBucket(subSlice, keysInSubSlice, Math.max(grossLoad - keysInSubSlice.values.sum, 0.0))
+      }
+
+      // Step 1: build one sub-slice bucket per CDF sample (plus a tail bucket to cover potential
+      // residual load), reserving the top keys each contains.
+      val loadBuckets = Seq.newBuilder[LoadBucket]
+      var bucketLowInclusive: SliceKey = slice.lowInclusive
+      var previousFraction: Double = 0.0
+      // Accumulate the total gross background load (load before rescaling).
+      var unscaledBackground: Double = 0.0
+      for (point: LoadDistribution.CdfPoint <- loadDistribution.points) {
+        // Keys at or below `point.key` fall in `[bucketLowInclusive, point.key.successor())`.
+        val bucketHighExclusive: SliceKey = point.key.successor()
+        // When this bucket already reaches the Slice's high bound, every key is <= `point.key`, so
+        // its cumulative fraction must be 1.0 (there is no tail range left to carry a residual).
+        val canonicalCumulativeLoadFraction: Double =
+          if (bucketHighExclusive == slice.highExclusive) {
+            // If the reported fraction is below 1.0 the distribution is incongruent: we fold the
+            // residual into this bucket rather than dropping it, and alert for investigation.
+            if (point.cumulativeLoadFraction < 1.0) {
+              logger.alert(
+                Severity.DEGRADED,
+                INCONGRUENT_LOAD_DISTRIBUTION,
+                s"Load distribution for Slice $slice tops out at less than 1.0 (" +
+                s"${point.cumulativeLoadFraction}) at the Slice's last key ${point.key}."
+              )
+            }
+            1.0
+          } else {
+            point.cumulativeLoadFraction
+          }
+        val bucketFraction: Double = canonicalCumulativeLoadFraction - previousFraction
+        val bucket: LoadBucket = buildLoadBucket(
+          Slice(bucketLowInclusive, bucketHighExclusive),
+          bucketFraction * fullSliceLoad
+        )
+        loadBuckets += bucket
+        unscaledBackground += bucket.backgroundLoad
+        bucketLowInclusive = bucketHighExclusive
+        previousFraction = canonicalCumulativeLoadFraction
+      }
+      // Emit a tail bucket to cover potential residual load in the remaining key range.
+      if (bucketLowInclusive < slice.highExclusive) {
+        val tailSlice: Slice = Slice(bucketLowInclusive, slice.highExclusive)
+        // Note: The tailFraction may be 0.0. We compute a bucket for it regardless to ensure that
+        // we correctly account for any top keys that may live in the tail range.
+        // If the fraction is 0.0 AND there are no top keys in the tail range, this bucket is not
+        // strictly necessary, but it is simpler (and harmless) to always emit it.
+        val tailFraction: Double = 1.0 - previousFraction
+        val tailBucket: LoadBucket = buildLoadBucket(tailSlice, tailFraction * fullSliceLoad)
+        loadBuckets += tailBucket
+        unscaledBackground += tailBucket.backgroundLoad
+      }
+      val buckets: Seq[LoadBucket] = loadBuckets.result()
+
+      // Step 2: rescale the buckets' background load to respect the Slice's total load, and emit
+      // each bucket as a (background Entry, reserved keys) pair.
+      val topKeysLoad: Double = topKeys.values.sum
+      // Target background is at least 0.0; we clamp here in case topKeysLoad exceeds fullSliceLoad.
+      val targetBackground: Double = Math.max(fullSliceLoad - topKeysLoad, 0.0)
+      // backgroundScale is always in [0, 1], subject to float drift in the two sums which we clamp
+      // away: each bucket's background is its gross CDF load minus its reserved keys, floored at
+      // zero. Their sum is therefore >= targetBackground. If unscaledBackground is 0,
+      // targetBackground is 0 too, so scaling is a no-op.
+      val backgroundScale: Double =
+        if (unscaledBackground > 0.0) (targetBackground / unscaledBackground).min(1.0) else 0.0
+
+      buckets.map { bucket: LoadBucket =>
+        val scaledBackgroundLoad: Double = bucket.backgroundLoad * backgroundScale
+        // A single-key bucket (its high bound is its low key's successor) is fully occupied by its
+        // lone key: if that key is reserved as a top key, there is no range left to carry the
+        // bucket's background so we fold it into the key instead to ensure we do not drop load.
+        val isSingleKeyBucket: Boolean =
+          bucket.subSlice.highExclusive == bucket.subSlice.lowInclusive.successor()
+        if (isSingleKeyBucket && bucket.topKeys.nonEmpty) {
+          val (key, keyLoad): (SliceKey, Double) = bucket.topKeys.head
+          (LoadMap.Entry(bucket.subSlice, 0.0), KeyLoadMap(key -> (keyLoad + scaledBackgroundLoad)))
+        } else {
+          (LoadMap.Entry(bucket.subSlice, scaledBackgroundLoad), bucket.topKeys)
+        }
       }
     }
 

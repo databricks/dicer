@@ -210,7 +210,9 @@ object AssignmentFormatter {
       builder: StringBuilder
   ): Unit = {
     builder.append("\n")
-    val shortResourceAddresses: Map[Squid, String] = createShortAddrMap(sliceAssignment.resources)
+    val shortResourceAddresses: Map[Squid, String] = createShortAddrMap(
+      sliceAssignment.resourcesSet
+    )
     val sliceAssignmentTable: AsciiTable = createSliceAssignmentTable(
       shortResourceAddresses,
       sliceAssignment.generation,
@@ -298,7 +300,7 @@ object AssignmentFormatter {
     val selectedSliceAssignments: Vector[SliceAssignment] = squidFilterOpt match {
       case Some(squid: Squid) =>
         assignment.sliceAssignments.flatMap { sliceAssignment: SliceAssignment =>
-          if (sliceAssignment.resources.contains(squid)) {
+          if (sliceAssignment.resourcesSet.contains(squid)) {
             Some(
               SliceAssignment(
                 SliceWithResources(sliceAssignment.slice, Set(squid)),
@@ -689,7 +691,7 @@ object AssignmentFormatter {
       // In each run of the loop body, we will append assignment information for one intersection
       // that starts from `intersectionLowKey` (and ends at the next intersection low key).
       var isFirstRowInIntersection: Boolean = true
-      for (resource: Squid <- sliceAssignment.resources) {
+      for (resource: Squid <- sliceAssignment.resourcesSet) {
         // In each run of the loop body, we will append information of one resource for the current
         // intersection as one row in the ascii table.
 

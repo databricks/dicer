@@ -23,6 +23,7 @@ import com.databricks.dicer.assigner.ConsistentHashingPreferredAssignerStateMach
   Event,
   RunState
 }
+import com.databricks.dicer.assigner.KubernetesMembershipChecker.ResourceVersion
 import com.databricks.dicer.assigner.PreferredAssignerMetrics.MonitoredAssignerRole
 import com.databricks.dicer.common.{Generation, Incarnation}
 
@@ -105,7 +106,7 @@ private[assigner] class ConsistentHashingPreferredAssignerStateMachine(
     outputBuilder.build()
   }
 
-  /** Handles a new versioned resource set from the [[ResourceWatcher]]. */
+  /** Handles a new resource membership snapshot. */
   private def onResourceSetReceived(
       version: ResourceVersion,
       resources: Map[UUID, AssignerInfo],
@@ -333,8 +334,9 @@ object ConsistentHashingPreferredAssignerStateMachine {
   object Event {
 
     /**
-     * The [[ResourceWatcher]] has delivered an updated resource set. The driver converts
-     * [[VersionedResourceSet]] entries to [[AssignerInfo]] before delivering this event.
+     * The membership checker has delivered an updated resource set. The driver converts
+     * [[KubernetesMembershipChecker.VersionedResourceSet]] entries to [[AssignerInfo]] before
+     * delivering this event.
      *
      * @param version The version of this resource set, used to reject out-of-order updates.
      * @param resources The mapping from resource UUID to its [[AssignerInfo]].

@@ -14,14 +14,28 @@ import com.databricks.dicer.assigner.config.InternalTargetConfig.{
 }
 import com.databricks.dicer.assigner.algorithm.LoadMap
 import com.databricks.dicer.assigner.algorithm.LoadMap.Entry
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  GenerationIncarnationFluent,
+  LowInclusiveLongFluent,
+  LowInclusiveStringFluent,
+  SliceAssignmentFluet,
+  SliceAssignmentSliceFluent,
+  createAssignment,
+  createRandomLoadMap,
+  createRandomProposal,
+  createTestSquid,
+  toSliceKey,
+  toSquid,
+  toSquidWithValue,
+  `∞`
+}
 import com.databricks.dicer.common.{
   Assignment,
   AssignmentConsistencyMode,
   ProposedAssignment,
-  SliceAssignment,
-  TestSliceUtils
+  SliceAssignment
 }
+import com.databricks.dicer.common.testing.{SliceTestUtils}
 import com.databricks.dicer.external.Slice
 import com.databricks.dicer.friend.Squid
 import com.databricks.testing.DatabricksTest
@@ -457,7 +471,7 @@ class AssignmentStatsSuite extends DatabricksTest with TestName {
       ).commit(
         isFrozen = false,
         AssignmentConsistencyMode.Affinity,
-        TestSliceUtils.createLooseGeneration(fakeClock.instant().toEpochMilli)
+        SliceTestUtils.createLooseGeneration(fakeClock.instant().toEpochMilli)
       )
 
     for (_ <- 0 until 10000) {
@@ -481,7 +495,7 @@ class AssignmentStatsSuite extends DatabricksTest with TestName {
         ).commit(
           isFrozen = false,
           AssignmentConsistencyMode.Affinity,
-          TestSliceUtils.createLooseGeneration(fakeClock.instant().toEpochMilli)
+          SliceTestUtils.createLooseGeneration(fakeClock.instant().toEpochMilli)
         )
 
       // Calculate the assignment change stats, and just verify that it does not throw.

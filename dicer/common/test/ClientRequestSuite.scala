@@ -21,7 +21,13 @@ import com.databricks.caching.util.TestUtils.{assertThrow, loadTestData}
 import com.databricks.caching.util.{CachingErrorCode, HyperLogLog, MetricUtils, Severity}
 import com.google.protobuf.ByteString
 import com.databricks.dicer.common.SliceletData.{KeyLoad, SliceLoad}
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.{SliceTestUtils}
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  LowInclusiveStringFluent,
+  createLooseGeneration,
+  createTestSquid,
+  toSliceKey
+}
 import com.databricks.dicer.common.test.{
   ClientRequestTestDataP,
   ClientResponseTestDataP,
@@ -286,13 +292,13 @@ class ClientRequestSuite extends DatabricksTest {
 
     // Create a random assignment and convert to a ClientResponseP.
     val generation: Generation = 43
-    val sliceAssignment: SliceAssignment = TestSliceUtils.createRandomSliceAssignment(
+    val sliceAssignment: SliceAssignment = SliceTestUtils.createRandomSliceAssignment(
       slice = Slice.FULL,
       subslices = Vector.empty,
       generation = generation,
       rng = new scala.util.Random(2)
     )
-    val assignment: Assignment = TestSliceUtils.createAssignment(
+    val assignment: Assignment = SliceTestUtils.createAssignment(
       generation = generation,
       consistencyMode = AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,

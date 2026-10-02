@@ -14,6 +14,9 @@ trait ConsistentHashRingHarness {
 
   /** See [[ConsistentHashRing.lookup]]. */
   def lookup(key: String): String
+
+  /** See [[ConsistentHashRing.iteratorFrom]], returning the walk materialized in ring order. */
+  def iteratorFrom(key: String): Vector[String]
 }
 
 object ConsistentHashRingHarness {
@@ -54,4 +57,6 @@ class ScalaConsistentHashRingHarness(ring: ConsistentHashRing[String, String])
   override def nodes: Vector[String] = ring.nodes
 
   override def lookup(key: String): String = ring.lookup(key = key)
+  override def iteratorFrom(key: String): Vector[String] =
+    ring.iteratorFrom(key = key).toVector
 }

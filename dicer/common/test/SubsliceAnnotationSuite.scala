@@ -1,7 +1,11 @@
 package com.databricks.dicer.common
 
 import com.databricks.api.proto.dicer.common.DiffAssignmentP.SubsliceAnnotationP
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  LowInclusiveStringFluent,
+  toSliceKey,
+  toSquid
+}
 import com.databricks.dicer.friend.Squid
 import com.databricks.caching.util.TestUtils.assertThrow
 import com.databricks.caching.util.UnixTimeVersion

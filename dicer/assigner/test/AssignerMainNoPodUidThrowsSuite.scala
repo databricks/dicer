@@ -12,11 +12,9 @@ class AssignerMainNoPodUidThrowsSuite extends DatabricksTest {
     // Test plan: Verify that the Assigner checks that POD_UID is set before starting, otherwise
     // throws an exception.
     assertThrow[IllegalStateException]("Environment variable POD_UID is not set.") {
-      AssignerMain.staticForTest.wrappedMainInternalWithCheckerFactory(
+      AssignerMain.staticForTest.wrappedMainInternal(
         new DicerAssignerConf(Configs.empty),
-        localClusterMembershipCheckerFactory =
-          FakeKubernetesTestSupport.inertMembershipCheckerFactory,
-        remoteClusterMembershipCheckerFactoryOpt = None
+        KubernetesApiClientFactory.localCluster()
       )
     }
   }

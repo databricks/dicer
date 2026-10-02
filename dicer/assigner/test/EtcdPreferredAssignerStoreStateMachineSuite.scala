@@ -17,7 +17,12 @@ import com.databricks.dicer.assigner.EtcdPreferredAssignerStore.{
 }
 import com.databricks.dicer.common.{EtcdClientHelper, Generation, Incarnation}
 import com.databricks.testing.DatabricksTest
-import com.databricks.dicer.assigner.EtcdPreferredAssignerStoreStateMachine._
+import com.databricks.dicer.assigner.EtcdPreferredAssignerStoreStateMachine.{
+  DriverAction,
+  Event,
+  StoreErrorCode,
+  StoreErrorReason
+}
 import com.databricks.caching.util.EtcdClient.{Version, WatchEvent, WriteResponse}
 import com.databricks.caching.util.EtcdClient.WriteResponse.KeyState
 import io.grpc.{Status, StatusException}
@@ -253,7 +258,7 @@ class EtcdPreferredAssignerStoreStateMachineSuite extends DatabricksTest {
     // even if there's cached knowledge from the configured incarnation.
     val preferredAssigner1 = PreferredAssignerValue.SomeAssigner(
       ASSIGNERS(2),
-      Generation(Incarnation(STORE_INCARNATION.value + 2), 42)
+      Generation(Incarnation(STORE_INCARNATION.value + 1), 42)
     )
     assert(
       stateMachine.onEvent(
@@ -274,7 +279,7 @@ class EtcdPreferredAssignerStoreStateMachineSuite extends DatabricksTest {
         // Lower incarnation.
         Generation(STORE_INCARNATION, 42),
         // Same incarnation, lower generation number.
-        Generation(Incarnation(STORE_INCARNATION.value + 2), 40)
+        Generation(Incarnation(STORE_INCARNATION.value + 1), 40)
       )) {
       assert(
         stateMachine.onEvent(
@@ -323,7 +328,7 @@ class EtcdPreferredAssignerStoreStateMachineSuite extends DatabricksTest {
     val expectedDriverAction1 = DriverAction
       .WritePreferredAssignerToEtcd(
         promise,
-        Some(EtcdClientHelper.getVersionFromNonLooseGeneration(wrongPredecessor1.generation)),
+        Some(EtcdClientHelper.getVersionFromGeneration(wrongPredecessor1.generation)),
         PreferredAssignerValue.SomeAssigner(
           ASSIGNERS(1),
           Generation(incarnation, nextInstant.toEpochMilli)
@@ -344,7 +349,7 @@ class EtcdPreferredAssignerStoreStateMachineSuite extends DatabricksTest {
     val expectedDriverAction2 = DriverAction
       .WritePreferredAssignerToEtcd(
         promise,
-        Some(EtcdClientHelper.getVersionFromNonLooseGeneration(wrongPredecessor2.generation)),
+        Some(EtcdClientHelper.getVersionFromGeneration(wrongPredecessor2.generation)),
         PreferredAssignerValue.SomeAssigner(
           ASSIGNERS(2),
           Generation(incarnation, nextInstant.toEpochMilli)
@@ -364,7 +369,7 @@ class EtcdPreferredAssignerStoreStateMachineSuite extends DatabricksTest {
     val expectedDriverAction3 = DriverAction
       .WritePreferredAssignerToEtcd(
         promise,
-        Some(EtcdClientHelper.getVersionFromNonLooseGeneration(correctPredecessor.generation)),
+        Some(EtcdClientHelper.getVersionFromGeneration(correctPredecessor.generation)),
         PreferredAssignerValue.SomeAssigner(
           ASSIGNERS(2),
           Generation(incarnation, nextInstant.toEpochMilli)
@@ -397,7 +402,7 @@ class EtcdPreferredAssignerStoreStateMachineSuite extends DatabricksTest {
     assert(stateMachine.forTest.getLatestPreferredAssigner == assigner1)
 
     val proposedPredecessorVersionOpt: Option[Version] =
-      Some(EtcdClientHelper.getVersionFromNonLooseGeneration(assigner1.generation))
+      Some(EtcdClientHelper.getVersionFromGeneration(assigner1.generation))
     val proposedPreferredAssigner =
       PreferredAssignerValue.SomeAssigner(ASSIGNERS(2), Generation(incarnation, 50))
 
@@ -748,11 +753,11 @@ class EtcdPreferredAssignerStoreStateMachineSuite extends DatabricksTest {
     assert(storeCorruptedCountAfterEvent5 == storeCorruptedCountAfterEvent4)
   }
 
-  test("State machine chooses non-loose incarnations in configured store incarnation") {
-    // Test plan: Verify that when the state machine brings a preferred assigner into existence for
-    // the first time in the store, it chooses a generation with an incarnation that is non-loose
-    // and in the configured store incarnation. Verify this by attempting a write of a brand new
-    // preferred assigner, and checking the chosen generation for the new preferred assigner.
+  test("State machine chooses generations in the configured store incarnation") {
+    // Test plan: Verify that when the state machine brings a preferred assigner into existence
+    // for the first time in the store, it chooses a generation with an incarnation that is the
+    // configured store incarnation. Verify this by attempting a write of a brand new preferred
+    // assigner, and checking the chosen generation for the new preferred assigner.
     val stateMachine = createAndStartStateMachine()
     val promise = Promise[WriteResult]()
     val preferredAssignerProposal = PreferredAssignerProposal(
@@ -775,7 +780,6 @@ class EtcdPreferredAssignerStoreStateMachineSuite extends DatabricksTest {
       case _ => fail("expected a WritePreferredAssignerToEtcd action")
     }
     assert(chosenGeneration.incarnation.value == STORE_INCARNATION.value)
-    assert(chosenGeneration.incarnation.isNonLoose)
   }
 
   test("State machine maintains the same incarnation on preferred assigner updates") {
@@ -917,7 +921,7 @@ class EtcdPreferredAssignerStoreStateMachineSuite extends DatabricksTest {
 
     // Propose a preferred assigner with a generation number higher than the store's knowledge.
     val predecessorVersion: Version =
-      EtcdClientHelper.getVersionFromNonLooseGeneration(Generation(STORE_INCARNATION, 42))
+      EtcdClientHelper.getVersionFromGeneration(Generation(STORE_INCARNATION, 42))
 
     // Verify: the state machine outputs OccFailure, and a caching degraded error is emitted.
     assert(
@@ -956,9 +960,9 @@ class EtcdPreferredAssignerStoreStateMachineSuite extends DatabricksTest {
     assert(stateMachine.forTest.getLatestPreferredAssigner == assigner1)
 
     // The assigner proposes a predecessor which has a higher generation than store's knowledge.
-    val predecessorGeneration2 = Generation(STORE_INCARNATION.getNextNonLooseIncarnation, 42)
+    val predecessorGeneration2 = Generation(Incarnation(STORE_INCARNATION.value + 1), 42)
     val predecessorVersion2 =
-      EtcdClientHelper.getVersionFromNonLooseGeneration(predecessorGeneration2)
+      EtcdClientHelper.getVersionFromGeneration(predecessorGeneration2)
 
     // `nextSafeKeyVersionLowerBoundExclusive` is set to be higher than `assigner1`'s generation.
     nextSafeKeyVersionLowerBoundExclusive =

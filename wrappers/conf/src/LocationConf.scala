@@ -55,7 +55,7 @@ case class KubernetesLocation(
 }
 
 /**
- * Provides information about the currently running process, as needed by ConfigScope and
+ * Provides information about the currently running process, as needed by ClusterConfigScope and
  * WhereAmIHelper.
  */
 trait LocationConf extends DbConf {

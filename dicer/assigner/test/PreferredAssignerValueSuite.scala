@@ -231,23 +231,32 @@ class PreferredAssignerValueSuite extends DatabricksTest {
     val thisAssignerInfo = AssignerInfo(UUID.randomUUID(), new URI("http://localhost:1234"))
     val otherAssignerInfo = AssignerInfo(UUID.randomUUID(), new URI("http://localhost:5678"))
 
-    val nonLooseIncarnation = Incarnation(42) // An arbitrary non-loose incarnation.
-    val looseIncarnation = Incarnation(41) // An arbitrary loose incarnation.
+    val incarnationA = Incarnation(42) // An arbitrary non-loose incarnation.
+    val incarnationB = Incarnation(41) // An arbitrary loose incarnation.
 
-    // List of possible cases for the `PreferredAssignerValue`.
+    // List of possible cases for `PreferredAssignerValue`, where each value can be associated with
+    // a non-loose or a loose incarnation.
     val modeDisabledValue = PreferredAssignerValue.ModeDisabled(Generation.EMPTY)
     val modeDisabledValue2 =
-      PreferredAssignerValue.ModeDisabled(Generation(looseIncarnation, number = 123))
+      PreferredAssignerValue.ModeDisabled(Generation(incarnationA, number = 123))
+    val modeDisabledValue3 =
+      PreferredAssignerValue.ModeDisabled(Generation(incarnationB, number = 123))
     val noAssignerValue = PreferredAssignerValue.NoAssigner(Generation.EMPTY)
     val noAssignerValue2 =
-      PreferredAssignerValue.NoAssigner(Generation(nonLooseIncarnation, number = 123))
+      PreferredAssignerValue.NoAssigner(Generation(incarnationA, number = 123))
+    val noAssignerValue3 =
+      PreferredAssignerValue.NoAssigner(Generation(incarnationB, number = 123))
     val thisAssignerPreferredValue =
-      PreferredAssignerValue.SomeAssigner(thisAssignerInfo, Generation(nonLooseIncarnation, 123))
+      PreferredAssignerValue.SomeAssigner(thisAssignerInfo, Generation(incarnationA, 123))
     val otherAssignerPreferredValue =
-      PreferredAssignerValue.SomeAssigner(otherAssignerInfo, Generation(nonLooseIncarnation, 123))
+      PreferredAssignerValue.SomeAssigner(otherAssignerInfo, Generation(incarnationB, 123))
 
     // If PA is disabled, we should assume the role of preferred.
-    for (value: PreferredAssignerValue <- Seq(modeDisabledValue, modeDisabledValue2)) {
+    for (value: PreferredAssignerValue <- Seq(
+        modeDisabledValue,
+        modeDisabledValue2,
+        modeDisabledValue3
+      )) {
       val config = PreferredAssignerConfig.create(
         value,
         thisAssignerInfo
@@ -257,7 +266,11 @@ class PreferredAssignerValueSuite extends DatabricksTest {
     }
 
     // - For `PreferredAssignerValue.NoAssigner`, always not preferred and no known preferred URI.
-    for (value: PreferredAssignerValue <- Seq(noAssignerValue, noAssignerValue2)) {
+    for (value: PreferredAssignerValue <- Seq(
+        noAssignerValue,
+        noAssignerValue2,
+        noAssignerValue3
+      )) {
       val config = PreferredAssignerConfig.create(
         value,
         thisAssignerInfo
@@ -288,7 +301,7 @@ class PreferredAssignerValueSuite extends DatabricksTest {
     val sameUriDifferentUuidPreferredValue =
       PreferredAssignerValue.SomeAssigner(
         AssignerInfo(UUID.randomUUID(), thisAssignerInfo.uri),
-        Generation(nonLooseIncarnation, 123)
+        Generation(incarnationA, 123)
       )
     val config3 = PreferredAssignerConfig.create(
       sameUriDifferentUuidPreferredValue,
@@ -304,7 +317,7 @@ class PreferredAssignerValueSuite extends DatabricksTest {
     val sameUuidDifferentUriPreferredValue =
       PreferredAssignerValue.SomeAssigner(
         AssignerInfo(thisAssignerInfo.uuid, differentUri),
-        Generation(nonLooseIncarnation, 123)
+        Generation(incarnationA, 123)
       )
     val config4 = PreferredAssignerConfig.create(
       sameUuidDifferentUriPreferredValue,

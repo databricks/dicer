@@ -6,9 +6,9 @@ import com.databricks.api.proto.dicer.external.LoadBalancingMetricConfigP.{
   ImbalanceToleranceHintP,
   ReservationHintP
 }
-import com.databricks.caching.util.{ConfigScope, TestUtils}
+import com.databricks.caching.util.{ClusterConfigScope, InstanceConfigScope, TestUtils}
 import com.databricks.caching.util.TestUtils.assertThrow
-import com.databricks.dicer.assigner.config.ConfigTestUtil.{ConfigWriter, createConfig}
+import com.databricks.dicer.assigner.config.testing.ConfigTestUtils.{ConfigWriter, createConfig}
 import com.databricks.dicer.assigner.config.TargetConfigReader.TargetDefaultAndOverride
 import com.databricks.dicer.common.TargetName
 import com.databricks.testing.DatabricksTest
@@ -105,39 +105,6 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
     }
   }
 
-  test("Instance-scoped overrides are rejected when reading all scopes") {
-    // Test plan: Verify that reading a config whose override is scoped to an instance id fails,
-    // since instance-scoped overrides are not yet supported. Verify this by writing such a config
-    // and confirming that readFullConfigMapFromDirectories throws.
-    val configWriter = new ConfigWriter
-    configWriter.writeConfig(
-      "softstore-storelet.textproto",
-      """default_config {
-        |  primary_rate_metric_config {
-        |    max_load_hint: 1000
-        |  }
-        |}
-        |overrides {
-        |  override_scopes {
-        |    instance_id: "some-instance"
-        |  }
-        |  override_config {
-        |    primary_rate_metric_config {
-        |      max_load_hint: 2000
-        |    }
-        |  }
-        |}""".stripMargin
-    )
-    assertThrow[IllegalArgumentException](
-      "Instance-scoped config overrides are not yet supported"
-    ) {
-      TargetConfigReader.readFullConfigMapFromDirectories(
-        configWriter.getTargetConfigDirectory,
-        configWriter.getAdvancedTargetConfigDirectory
-      )
-    }
-  }
-
   test("All advanced configs should have corresponding target configs") {
     // Test plan: create a target whose target config is missing, expect exceptions being thrown.
     val configWriter = new ConfigWriter
@@ -162,14 +129,11 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
     }
   }
 
-  test("Regional overrides are correctly applied") {
-    // Test plan: Create InternalTargetConfigs from a valid file path including configurations
-    // with overrides. Validate that the expected override is used for each region. Overrides are
-    // defined for the cons-manager target in cloud1-region2 (`tightConfig`), and in
-    // cloud1-region1/cloud2-region4 (`highCapacityConfig`). All other scopes should use the default
-    // configuration (`defaultManagerConfig`). Target softstore-storelet  does not have any regular
-    // config overrides, but does specify an advanced override in cloud1-region2
-    // (`lessHistoryConfig`).
+  test("Cluster and instance overrides are applied independently") {
+    // Test plan: Verify that each cluster or instance config merges defaults with only its own
+    // ordinary and advanced overrides. Verify this by reading configs with shared cluster/instance
+    // override entries, an instance with both kinds of overrides, and an advanced-only instance.
+    // Check the full config map and that selected-cluster reads still return the expected configs.
 
     // Define targets for which we have explicit configurations.
     val managerTargetName = TargetName("cons-manager")
@@ -189,9 +153,9 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
         |}
         |overrides {
         |  # `tightConfig` override.
-        |  override_scopes {
-        |    cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region2/clustertype2/01"
-        |  }
+        |  override_scopes: [
+        |    { cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region2/clustertype2/01" }
+        |  ]
         |  override_config {
         |    primary_rate_metric_config {
         |      imbalance_tolerance_hint: TIGHT
@@ -201,12 +165,10 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
         |}
         |overrides {
         |  # `highCapacityConfig` override.
-        |  override_scopes {
-        |    cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01"
-        |  }
-        |  override_scopes {
-        |    cluster_uri: "kubernetes-cluster:test-env/cloud2/public/region4/clustertype2/01"
-        |  }
+        |  override_scopes: [
+        |    { cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01" },
+        |    { cluster_uri: "kubernetes-cluster:test-env/cloud2/public/region4/clustertype2/01" }
+        |  ]
         |  override_config {
         |    primary_rate_metric_config {
         |      max_load_hint: 4000000
@@ -224,9 +186,10 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
         |  }
         |}
         |overrides {
-        |  override_scopes {
-        |    cluster_uri: "kubernetes-cluster:test-env/cloud2/public/region4/clustertype2/01"
-        |  }
+        |  override_scopes: [
+        |    { cluster_uri: "kubernetes-cluster:test-env/cloud2/public/region4/clustertype2/01" },
+        |    { instance_id: "instance-1" }
+        |  ]
         |  override_config {
         |    primary_rate_metric_config {
         |      max_load_hint: 2000
@@ -240,9 +203,11 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
       """
         |overrides {
         |  # `lessHistoryConfig` override.
-        |  override_scopes {
-        |    cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region2/clustertype2/01"
-        |  }
+        |  override_scopes: [
+        |    { cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region2/clustertype2/01" },
+        |    { instance_id: "instance-1" },
+        |    { instance_id: "instance-2" }
+        |  ]
         |  override_config {
         |    load_watcher_config {
         |      min_duration_seconds: 30 # half of the default
@@ -289,26 +254,26 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
     // overrides declared.
     val west2Map: Map[TargetName, InternalTargetConfig] =
       TargetConfigReader.readScopeConfigMapFromDirectories(
-        Some(ConfigScope("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01")),
+        Some(ClusterConfigScope("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01")),
         configWriter.getTargetConfigDirectory,
         configWriter.getAdvancedTargetConfigDirectory
       )
     val region4Map: Map[TargetName, InternalTargetConfig] =
       TargetConfigReader.readScopeConfigMapFromDirectories(
-        Some(ConfigScope("kubernetes-cluster:test-env/cloud2/public/region4/clustertype2/01")),
+        Some(ClusterConfigScope("kubernetes-cluster:test-env/cloud2/public/region4/clustertype2/01")),
         configWriter.getTargetConfigDirectory,
         configWriter.getAdvancedTargetConfigDirectory
       )
 
     val east1Map: Map[TargetName, InternalTargetConfig] =
       TargetConfigReader.readScopeConfigMapFromDirectories(
-        Some(ConfigScope("kubernetes-cluster:test-env/cloud1/public/region2/clustertype2/01")),
+        Some(ClusterConfigScope("kubernetes-cluster:test-env/cloud1/public/region2/clustertype2/01")),
         configWriter.getTargetConfigDirectory,
         configWriter.getAdvancedTargetConfigDirectory
       )
     val otherMap: Map[TargetName, InternalTargetConfig] =
       TargetConfigReader.readScopeConfigMapFromDirectories(
-        Some(ConfigScope("kubernetes-cluster:test-env/cloud3/public/region7/clustertype2/01")),
+        Some(ClusterConfigScope("kubernetes-cluster:test-env/cloud3/public/region7/clustertype2/01")),
         configWriter.getTargetConfigDirectory,
         configWriter.getAdvancedTargetConfigDirectory
       )
@@ -341,37 +306,54 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
     val softstoreConfigs: TargetDefaultAndOverride = fullConfigs(softstoreTargetName)
 
     assert(
-      managerConfigs.overrides(ConfigScope("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01")) ==
+      managerConfigs.overrides(
+        ClusterConfigScope("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01")
+      ) ==
       highCapacityConfig
     )
     assert(
-      managerConfigs.overrides(ConfigScope("kubernetes-cluster:test-env/cloud2/public/region4/clustertype2/01")) ==
+      managerConfigs.overrides(
+        ClusterConfigScope("kubernetes-cluster:test-env/cloud2/public/region4/clustertype2/01")
+      ) ==
       highCapacityConfig
     )
     assert(
-      managerConfigs
-        .overrides(ConfigScope("kubernetes-cluster:test-env/cloud1/public/region2/clustertype2/01")) == tightConfig
+      managerConfigs.overrides(
+        ClusterConfigScope("kubernetes-cluster:test-env/cloud1/public/region2/clustertype2/01")
+      ) == tightConfig
     )
     assert(managerConfigs.default == defaultManagerConfig)
 
     assert(
-      softstoreConfigs.overrides(ConfigScope("kubernetes-cluster:test-env/cloud1/public/region2/clustertype2/01"))
+      softstoreConfigs.overrides(
+        ClusterConfigScope("kubernetes-cluster:test-env/cloud1/public/region2/clustertype2/01")
+      )
       == lessHistoryConfig
     )
     assert(
-      softstoreConfigs.overrides(ConfigScope("kubernetes-cluster:test-env/cloud2/public/region4/clustertype2/01")) ==
+      softstoreConfigs.overrides(
+        ClusterConfigScope("kubernetes-cluster:test-env/cloud2/public/region4/clustertype2/01")
+      ) ==
       largerMaxLoadConfig
     )
     assert(softstoreConfigs.default == softstoreConfig)
+    assert(
+      softstoreConfigs.overrides(InstanceConfigScope("instance-1")) == createConfig(
+        2000,
+        Some(ImbalanceToleranceHintP.TIGHT),
+        watchMinDurationSecondsOpt = Some(30)
+      )
+    )
+    assert(softstoreConfigs.overrides(InstanceConfigScope("instance-2")) == lessHistoryConfig)
 
     // cloud3-region7 has no overrides defined, so it shouldn't appear in the overrides map.
     assert(
       !managerConfigs.overrides
-        .contains(ConfigScope("kubernetes-cluster:test-env/cloud3/public/region7/clustertype2/01"))
+        .contains(ClusterConfigScope("kubernetes-cluster:test-env/cloud3/public/region7/clustertype2/01"))
     )
     assert(
       !softstoreConfigs.overrides
-        .contains(ConfigScope("kubernetes-cluster:test-env/cloud3/public/region7/clustertype2/01"))
+        .contains(ClusterConfigScope("kubernetes-cluster:test-env/cloud3/public/region7/clustertype2/01"))
     )
   }
 
@@ -389,16 +371,12 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
         |  }
         |}
         |overrides {
-        |  override_scopes {
-        |    cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region2/clustertype2/01"
-        |  }
-        |  # This duplicate is OK because it's in the same override.
-        |  override_scopes {
-        |    cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region2/clustertype2/01"
-        |  }
-        |  override_scopes {
-        |    cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01"
-        |  }
+        |  override_scopes: [
+        |    { cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region2/clustertype2/01" },
+        |    # This duplicate is OK because it's in the same override.
+        |    { cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region2/clustertype2/01" },
+        |    { cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01" }
+        |  ]
         |  override_config {
         |    primary_rate_metric_config {
         |      max_load_hint: 2000
@@ -407,12 +385,10 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
         |}
         |overrides {
         |  # This duplicate is not OK because it's in a different override.
-        |  override_scopes {
-        |    cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01"
-        |  }
-        |  override_scopes {
-        |    cluster_uri: "kubernetes-cluster:test-env/cloud2/public/region4/clustertype2/01"
-        |  }
+        |  override_scopes: [
+        |    { cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01" },
+        |    { cluster_uri: "kubernetes-cluster:test-env/cloud2/public/region4/clustertype2/01" }
+        |  ]
         |  override_config {
         |    primary_rate_metric_config {
         |      max_load_hint: 3000
@@ -429,7 +405,7 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
       "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01"
     ) {
       TargetConfigReader.readScopeConfigMapFromDirectories(
-        Some(ConfigScope("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01")),
+        Some(ClusterConfigScope("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01")),
         configWriter.getTargetConfigDirectory,
         configWriter.getAdvancedTargetConfigDirectory
       )
@@ -437,7 +413,7 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
     // cloud1-east-1 should get the first override; cloud2-region4 should get the second override.
     val east1Config: InternalTargetConfig =
       TargetConfigReader.readScopeConfigMapFromDirectories(
-        Some(ConfigScope("kubernetes-cluster:test-env/cloud1/public/region2/clustertype2/01")),
+        Some(ClusterConfigScope("kubernetes-cluster:test-env/cloud1/public/region2/clustertype2/01")),
         configWriter.getTargetConfigDirectory,
         configWriter.getAdvancedTargetConfigDirectory
       )(targetName)
@@ -445,7 +421,7 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
     assert(east1Config == firstOverrideConfig)
     val region4Config: InternalTargetConfig =
       TargetConfigReader.readScopeConfigMapFromDirectories(
-        Some(ConfigScope("kubernetes-cluster:test-env/cloud2/public/region4/clustertype2/01")),
+        Some(ClusterConfigScope("kubernetes-cluster:test-env/cloud2/public/region4/clustertype2/01")),
         configWriter.getTargetConfigDirectory,
         configWriter.getAdvancedTargetConfigDirectory
       )(targetName)
@@ -455,9 +431,9 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
 
     // All other scopes should get the default config.
     val defaultConfig: InternalTargetConfig = createConfig(1000)
-    for (configScopeOpt: Option[ConfigScope] <- Seq(
+    for (configScopeOpt: Option[ClusterConfigScope] <- Seq(
         None,
-        Some(ConfigScope("kubernetes-cluster:test-env/cloud1/public/region9/clustertype2/01"))
+        Some(ClusterConfigScope("kubernetes-cluster:test-env/cloud1/public/region9/clustertype2/01"))
       )) {
       assert(
         TargetConfigReader.readScopeConfigMapFromDirectories(
@@ -483,9 +459,9 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
         |  }
         |}
         |overrides {
-        |  override_scopes {
-        |    cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01"
-        |  }
+        |  override_scopes: [
+        |    { cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01" }
+        |  ]
         |  override_config {
         |    primary_rate_metric_config {
         |      max_load_hint: -1
@@ -493,12 +469,10 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
         |  }
         |}
         |overrides {
-        |  override_scopes {
-        |    cluster_uri: "kubernetes-cluster:test-env/cloud2/public/region4/clustertype2/01"
-        |  }
-        |  override_scopes {
-        |    cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region2/clustertype2/01"
-        |  }
+        |  override_scopes: [
+        |    { cluster_uri: "kubernetes-cluster:test-env/cloud2/public/region4/clustertype2/01" },
+        |    { cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region2/clustertype2/01" }
+        |  ]
         |  override_config {
         |    primary_rate_metric_config {
         |      max_load_hint: 3000
@@ -514,7 +488,7 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
       "max load must be a positive, finite number"
     ) {
       TargetConfigReader.readScopeConfigMapFromDirectories(
-        Some(ConfigScope("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01")),
+        Some(ClusterConfigScope("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01")),
         configWriter.getTargetConfigDirectory,
         configWriter.getAdvancedTargetConfigDirectory
       )(targetName)
@@ -522,7 +496,7 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
     // cloud1-east-1 and cloud2-region4 should get the second override.
     val east1Config: InternalTargetConfig =
       TargetConfigReader.readScopeConfigMapFromDirectories(
-        Some(ConfigScope("kubernetes-cluster:test-env/cloud1/public/region2/clustertype2/01")),
+        Some(ClusterConfigScope("kubernetes-cluster:test-env/cloud1/public/region2/clustertype2/01")),
         configWriter.getTargetConfigDirectory,
         configWriter.getAdvancedTargetConfigDirectory
       )(targetName)
@@ -530,7 +504,7 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
     assert(east1Config == firstOverrideConfig)
     val region4Config: InternalTargetConfig =
       TargetConfigReader.readScopeConfigMapFromDirectories(
-        Some(ConfigScope("kubernetes-cluster:test-env/cloud2/public/region4/clustertype2/01")),
+        Some(ClusterConfigScope("kubernetes-cluster:test-env/cloud2/public/region4/clustertype2/01")),
         configWriter.getTargetConfigDirectory,
         configWriter.getAdvancedTargetConfigDirectory
       )(targetName)
@@ -539,9 +513,9 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
 
     // All other scopes should get the default config.
     val defaultConfig: InternalTargetConfig = createConfig(1000)
-    for (configScopeOpt: Option[ConfigScope] <- Seq(
+    for (configScopeOpt: Option[ClusterConfigScope] <- Seq(
         None,
-        Some(ConfigScope("kubernetes-cluster:test-env/cloud1/public/region9/clustertype2/01"))
+        Some(ClusterConfigScope("kubernetes-cluster:test-env/cloud1/public/region9/clustertype2/01"))
       )) {
       assert(
         TargetConfigReader.readScopeConfigMapFromDirectories(
@@ -553,115 +527,78 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
     }
   }
 
-  test("Throws if any scope is duplicated when reading the full config") {
-    // Test plan: define configurations such that some config scopes are specified multiple times.
-    // The attempt to read configs for all scopes should fail.
-
-    // Define targets for which we have explicit configurations.
-    val configWriter = new ConfigWriter
-    val targetName1 = TargetName("dup-in-one-override")
-    configWriter.writeConfig(
-      s"$targetName1.textproto",
-      """default_config {
-        |  primary_rate_metric_config {
-        |    max_load_hint: 1000
-        |  }
-        |}
-        |overrides {
-        |  override_scopes {
-        |    cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region2/clustertype2/01"
-        |  }
-        |  override_scopes {
-        |    cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region2/clustertype2/01"
-        |  }
-        |  override_config {
-        |    primary_rate_metric_config {
-        |      max_load_hint: 2000
-        |    }
-        |  }
-        |}
-        |overrides {
-        |  override_scopes {
-        |    cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01"
-        |  }
-        |  override_config {
-        |    primary_rate_metric_config {
-        |      max_load_hint: 3000
-        |    }
-        |  }
-        |}
-        |""".stripMargin
+  gridTest("Throws if any scope is duplicated when reading the full config")(
+    Seq(
+      """cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region2/clustertype2/01"""",
+      """instance_id: "instance-1""""
     )
-
-    assertThrow[IllegalArgumentException](
-      "Scope cannot be duplicated in overrides"
-    ) {
-      TargetConfigReader.readFullConfigMapFromDirectories(
-        configWriter.getTargetConfigDirectory,
-        configWriter.getAdvancedTargetConfigDirectory
-      )
-    }
-
-    val targetName2 = TargetName("dup-in-two-override")
-    configWriter.writeConfig(
-      s"$targetName2.textproto",
-      """default_config {
-        |  primary_rate_metric_config {
-        |    max_load_hint: 1000
-        |  }
-        |}
-        |overrides {
-        |  override_scopes {
-        |    cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region2/clustertype2/01"
-        |  }
-        |  override_config {
-        |    primary_rate_metric_config {
-        |      max_load_hint: 2000
-        |    }
-        |  }
-        |}
-        |overrides {
-        |  override_scopes {
-        |    cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region2/clustertype2/01"
-        |  }
-        |  override_scopes {
-        |    cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01"
-        |  }
-        |  override_config {
-        |    primary_rate_metric_config {
-        |      max_load_hint: 3000
-        |    }
-        |  }
-        |}
-        |""".stripMargin
+  ) { scope: String =>
+    // Test plan: Verify that full config reads reject duplicate cluster and instance scopes.
+    // Verify this by repeating a scope within one override entry and across two entries, reading
+    // each case from its own directory and checking that both fail with a duplicate-scope error.
+    val duplicateOverrides: Seq[String] = Seq(
+      s"""overrides {
+         |  override_scopes: [
+         |    { $scope },
+         |    { $scope }
+         |  ]
+         |  override_config { primary_rate_metric_config { max_load_hint: 2000 } }
+         |}""".stripMargin,
+      s"""overrides {
+         |  override_scopes: [
+         |    { $scope }
+         |  ]
+         |  override_config { primary_rate_metric_config { max_load_hint: 2000 } }
+         |}
+         |overrides {
+         |  override_scopes: [
+         |    { $scope }
+         |  ]
+         |  override_config { primary_rate_metric_config { max_load_hint: 3000 } }
+         |}""".stripMargin
     )
-
-    assertThrow[IllegalArgumentException](
-      "Scope cannot be duplicated in overrides"
-    ) {
-      TargetConfigReader.readFullConfigMapFromDirectories(
-        configWriter.getTargetConfigDirectory,
-        configWriter.getAdvancedTargetConfigDirectory
+    for (overrides: String <- duplicateOverrides) {
+      val configWriter = new ConfigWriter
+      configWriter.writeConfig(
+        "target.textproto",
+        s"""default_config {
+           |  primary_rate_metric_config { max_load_hint: 1000 }
+           |}
+           |$overrides""".stripMargin
       )
+      withClue(overrides) {
+        assertThrow[IllegalArgumentException]("Scope cannot be duplicated in overrides") {
+          TargetConfigReader.readFullConfigMapFromDirectories(
+            configWriter.getTargetConfigDirectory,
+            configWriter.getAdvancedTargetConfigDirectory
+          )
+        }
+      }
     }
   }
 
-  test("Throws if any scope has invalid config values when reading the full config") {
-    // Test plan: define configurations such that some config scopes have invalid config values.
-    // The attempt to read configs for all scopes should fail.
+  gridTest("Throws if any scope has invalid config values when reading the full config")(
+    Seq(
+      """cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region2/clustertype2/01"""",
+      """instance_id: "instance-1""""
+    )
+  ) { scope: String =>
+    // Test plan: Verify that full config reads reject invalid cluster and instance configs.
+    // Verify this by setting a negative max load in an override for each scope type and checking
+    // that reading the config fails with the invalid-max-load error.
     val configWriter = new ConfigWriter
     val targetName = TargetName("target")
     configWriter.writeConfig(
       s"$targetName.textproto",
-      """default_config {
+      s"""default_config {
         |  primary_rate_metric_config {
         |    max_load_hint: 1000
         |  }
         |}
         |overrides {
-        |  override_scopes {
-        |    cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region2/clustertype2/01"
-        |  }
+        |  override_scopes: [
+        |    { $scope }
+        |  ]
         |  override_config {
         |    primary_rate_metric_config {
         |      max_load_hint: -1
@@ -669,12 +606,10 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
         |  }
         |}
         |overrides {
-        |  override_scopes {
-        |    cluster_uri: "kubernetes-cluster:test-env/cloud2/public/region4/clustertype2/01"
-        |  }
-        |  override_scopes {
-        |    cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01"
-        |  }
+        |  override_scopes: [
+        |    { cluster_uri: "kubernetes-cluster:test-env/cloud2/public/region4/clustertype2/01" },
+        |    { cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01" }
+        |  ]
         |  override_config {
         |    primary_rate_metric_config {
         |      max_load_hint: 3000

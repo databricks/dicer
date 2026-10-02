@@ -17,23 +17,15 @@ import com.databricks.dicer.assigner.config.InternalTargetConfig.{
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
 
 import com.databricks.dicer.assigner.InterposingEtcdPreferredAssignerDriver
-import com.databricks.dicer.assigner.config.{
-  ConfigTestUtil,
-  InternalTargetConfig,
-  InternalTargetConfigMap
-}
+import com.databricks.dicer.assigner.config.{InternalTargetConfig, InternalTargetConfigMap}
+import com.databricks.dicer.assigner.config.testing.{ConfigTestUtils}
 import com.databricks.dicer.common.TargetName
-import com.databricks.dicer.common.TestSliceUtils._
-import com.databricks.dicer.common.{
-  ClientRequest,
-  Generation,
-  InternalDicerTestEnvironment,
-  SliceletData,
-  TestAssigner
-}
+import com.databricks.dicer.common.testing.SliceTestUtils.toSliceKey
+import com.databricks.dicer.common.{ClientRequest, Generation, SliceletData}
 import com.databricks.dicer.external.Target
 import com.databricks.testing.DatabricksTest
 import com.databricks.rpc.RequestHeaders
+import com.databricks.dicer.common.testing.{InternalDicerTestEnvironment, TestAssigner}
 
 class TopKeysSuite extends DatabricksTest {
 
@@ -82,7 +74,7 @@ class TopKeysSuite extends DatabricksTest {
       )
     val loadBalancingConfig = LoadBalancingConfig(
       loadBalancingInterval = 1.second, // Use a shorter interval to speed up the test.
-      ConfigTestUtil.ZERO_PENALTY_CHURN_CONFIG,
+      ConfigTestUtils.ZERO_PENALTY_CHURN_CONFIG,
       LoadBalancingMetricConfig(maxLoadHint = 1)
     )
     val config = InternalTargetConfig.forTest.DEFAULT.copy(

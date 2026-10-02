@@ -1,0 +1,187 @@
+package com.databricks.dicer.client.testing
+
+import com.databricks.caching.util.TestUtils
+import com.databricks.caching.util.ExecutorUtil
+import com.databricks.dicer.client.RetryTokenImpl
+import com.databricks.dicer.common.{
+  Assignment,
+  ClerkCheckInvariantsRequestP,
+  ClerkGetStubForKeyRequestP,
+  ClerkGetStubForKeyResponseP,
+  ClerkGetStubForKeyTwoLevelRequestP,
+  ClerkGetStubForKeyTwoLevelResponseP,
+  ClerkReadyRequestP,
+  ClerkReadyResponseP,
+  ClerkSampleStubForKeyRequestP,
+  ClerkSampleStubForKeyResponseP,
+  CreateClerkRequestP,
+  CreateClerkResponseP,
+  CreateCrossClusterClerkRequestP,
+  CreateCrossClusterClerkResponseP,
+  CreateMultiNicClerkRequestP,
+  CreateMultiNicClerkResponseP,
+  Generation,
+  GetClerkDebugNameRequestP,
+  GetClerkDebugNameResponseP,
+  GetClerkLatestGenerationRequestP,
+  GetClerkLatestGenerationResponseP,
+  StopClerkRequestP
+}
+import com.databricks.dicer.common.TargetHelper.TargetOps
+import com.databricks.dicer.friend.external.TwoLevelShardingClerkAccessor
+import com.databricks.dicer.external.{
+  AppTarget,
+  Clerk,
+  KubernetesTarget,
+  ResourceAddress,
+  SliceKey,
+  Target
+}
+import scala.concurrent.duration.Duration
+import scala.concurrent.{ExecutionContext, Future}
+import scala.collection.mutable
+
+import java.net.URI
+
+import com.databricks.dicer.common.ClerkSampleStubForKeyResponseP.ResultEntry
+
+object ClerkHarness {
+
+  /**
+   * Computes the expected target identifier used by a Clerk internally (for sending requests and
+   * metrics labeling).
+   *
+   * This is necessary because the Clerk public API only supports creating a [[Clerk]] with a
+   * [[Target]] without a cluster URI. The cluster URI is best-effort picked up from the LOCATION
+   * environment variable during the Clerk's creation process to form a fully-qualified target and
+   * the fully-qualified target is used for metrics labeling internally.
+   *
+   * @param target The target used to create the Clerk.
+   * @param clusterUriOpt The cluster URI from the location config, if provided.
+   */
+  def computeExpectedTargetIdentifier(target: Target, clusterUriOpt: Option[URI]): Target = {
+    target match {
+      case _: AppTarget => target
+      case _: KubernetesTarget =>
+        clusterUriOpt match {
+          case Some(uri) => Target.createKubernetesTarget(uri, target.name)
+          case None => target
+        }
+    }
+  }
+
+  /**
+   * Compares two [[ResourceAddress]] instances for equality, normalizing trailing slashes.
+   *
+   * This is necessary because Rust's Uri applies root-path normalization where a trailing slash
+   * is added when accessing the root path URI as a string. Whereas, Java's `java.net.URI` preserves
+   * the original form without adding the trailing slash. Since `URI.equals()` considers these as
+   * different URIs, we normalize by stripping trailing slashes before comparing.
+   *
+   * TODO(<internal bug>): Normalize URI for ResourceAddress in Scala/Java.
+   */
+  def resourceAddressEquals(actual: ResourceAddress, expected: ResourceAddress): Boolean = {
+    actual.uri.toString.stripSuffix("/") == expected.uri.toString.stripSuffix("/")
+  }
+}
+
+/**
+ * A wrapper around a [[Clerk]] to provide a common interface to both the Scala version (running
+ * in the main test process) or the Rust version (running in a subprocess).
+ *
+ * This allows the same test suite to be run against both implementations.
+ */
+trait ClerkHarness {
+
+  /** See [[Clerk.ready]]. */
+  def ready: Future[Unit]
+
+  /** See [[Clerk.getStubForKey]]. */
+  def getStubForKey(key: SliceKey): Option[ResourceAddress]
+
+  /**
+   * Two-level sharding variant of [[getStubForKey]]. See
+   * [[com.databricks.dicer.friend.external.TwoLevelShardingClerkAccessor.getStubForKey]].
+   */
+  def getStubForKey(primaryKey: SliceKey, secondaryKey: SliceKey): Option[ResourceAddress]
+
+  /** See [[ClerkImpl.forTest.checkInvariants]]. */
+  def checkInvariants(): Unit
+
+  /**
+   * Samples `getStubForKey` multiple times and returns a map of results.
+   *
+   * This method exists because the Rust Clerk runs in a subprocess, and each `getStubForKey` call
+   * requires an RPC round-trip. For tests that need samples, the per-call RPC adds significant
+   * overhead.
+   *
+   * @param key The slice key to look up.
+   * @param sampleCount The number of times to sample.
+   * @return A map from resource address to hit count.
+   */
+  def sampleStubForKey(key: SliceKey, sampleCount: Int): Map[ResourceAddress, Int]
+
+  /** See [[Clerk.forTest.stop]]. */
+  def stop(): Unit
+
+  /** Gets the debug name for the Clerk. */
+  def getDebugName: String
+
+  /** Returns the generation of the latest assignment known to the Clerk. */
+  def getLatestGenerationOpt: Option[Generation]
+}
+
+/**
+ * The [[ClerkHarness]] that exercises the Scala [[Clerk]] implementation.
+ *
+ * @param clerk The Scala Clerk instance.
+ */
+class ScalaClerkHarness private (clerk: Clerk[ResourceAddress]) extends ClerkHarness {
+
+  override def ready: Future[Unit] = clerk.ready
+
+  override def getStubForKey(key: SliceKey): Option[ResourceAddress] = clerk.getStubForKey(key)
+
+  override def getStubForKey(
+      primaryKey: SliceKey,
+      secondaryKey: SliceKey): Option[ResourceAddress] =
+    TwoLevelShardingClerkAccessor.getStubForKey(clerk, primaryKey, secondaryKey)
+
+  /**
+   * See [[com.databricks.dicer.client.ClerkImpl.getNextStubForKey]]. Returns `None` when the Clerk
+   * has no assignment.
+   */
+  def getNextStubForKey(
+      key: SliceKey,
+      tokenOpt: Option[RetryTokenImpl]): Option[(ResourceAddress, RetryTokenImpl)] =
+    clerk.impl.getNextStubForKey(key, tokenOpt)
+
+  override def checkInvariants(): Unit = clerk.impl.forTest.checkInvariants()
+
+  override def sampleStubForKey(key: SliceKey, sampleCount: Int): Map[ResourceAddress, Int] = {
+    val hitCounts = mutable.Map[ResourceAddress, Int]().withDefaultValue(0)
+    for (_ <- 0 until sampleCount) {
+      clerk
+        .getStubForKey(key)
+        .map((addr: ResourceAddress) => {
+          hitCounts(addr) += 1
+        })
+    }
+    hitCounts.toMap
+  }
+
+  override def stop(): Unit = clerk.forTest.stop()
+
+  override def getDebugName: String = clerk.impl.toString
+
+  override def getLatestGenerationOpt: Option[Generation] =
+    clerk.impl.forTest.getLatestAssignmentOpt.map((assignment: Assignment) => assignment.generation)
+}
+
+object ScalaClerkHarness {
+
+  def create(clerk: Clerk[ResourceAddress]): ScalaClerkHarness = {
+    new ScalaClerkHarness(clerk)
+  }
+}
+

@@ -170,15 +170,6 @@ object Pipeline {
   }
 
   /**
-   * Converts `domain` to a [[PipelineExecutor]]. Implicit so that callers can pass a
-   * hybrid domain to a pipeline operator, and the compiler automatically converts it to
-   * [[PipelineExecutor]].
-   */
-  implicit def fromHybridConcurrencyDomain(domain: HybridConcurrencyDomain): PipelineExecutor = {
-    new HybridConcurrencyDomainPipelineExecutor(domain)
-  }
-
-  /**
    * Indicates that an operator continuation may be called on an arbitrary pipeline execution
    * context, or immediately on the calling thread when the source for the operator is complete. See
    * remarks on [[Pipeline]] for more information.
@@ -199,9 +190,6 @@ object Pipeline {
         val future: Future[T] = Future(thunk)(spe.executor.prepare())
         new FutureImpl[T](future)
 
-      case hybrid: HybridConcurrencyDomainPipelineExecutor =>
-        val future: Future[T] = Future(thunk)(hybrid.domain.prepare())
-        new FutureImpl[T](future)
     }
   }
 
@@ -318,20 +306,6 @@ object Pipeline {
         false
     }
     override def hashCode(): Int = System.identityHashCode(executor)
-  }
-
-  /** [[PipelineExecutor]] referencing a hybrid concurrency domain. */
-  private final class HybridConcurrencyDomainPipelineExecutor(val domain: HybridConcurrencyDomain)
-      extends PipelineExecutor {
-    override def equals(obj: Any): Boolean = {
-      obj match {
-        case that: HybridConcurrencyDomainPipelineExecutor =>
-          this.domain eq that.domain
-        case _ =>
-          false
-      }
-    }
-    override def hashCode(): Int = System.identityHashCode(domain)
   }
 
   private val logger = PrefixLogger.create(this.getClass, "")
@@ -495,7 +469,6 @@ object Pipeline {
         preparedExecutor = executor match {
           case InlinePipelineExecutor => inlineExecutor.prepare()
           case spe: SequentialPipelineExecutor => spe.executor.prepare()
-          case hybrid: HybridConcurrencyDomainPipelineExecutor => hybrid.domain.prepare()
         },
         attributionContext,
         source,

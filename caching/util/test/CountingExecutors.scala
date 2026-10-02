@@ -3,7 +3,6 @@ package com.databricks.caching.util
 import java.util.concurrent.atomic.AtomicInteger
 
 import scala.concurrent.ExecutionContext
-import scala.concurrent.duration.FiniteDuration
 
 import com.databricks.caching.util.ExecutorUtil.ContextAwareExecutionContext
 
@@ -28,35 +27,6 @@ object CountingExecutors {
         new CountingExecutionContext(delegate.contextAwareExecutionContext, counter),
         enableContextPropagation = false // `delegate` handles context propagation if so configured
       )
-    }
-  }
-
-  /**
-   * A [[HybridConcurrencyDomain]] wrapping `delegate` which exposes a running count of async task
-   * executions. Used to verify that a workflow incurred the expected number of executor hops.
-   */
-  final class CountingHybridConcurrencyDomain(delegate: HybridConcurrencyDomain)
-      extends HybridConcurrencyDomain {
-
-    private val counter = new AtomicInteger(0)
-
-    /**
-     * The number of asynchronous tasks executed in this domain. Excludes tasks executed via
-     * [[HybridConcurrencyDomain.executeSync]], in particular.
-     */
-    def getNumAsyncExecutions: Int = counter.get
-
-    override def assertInDomain(): Unit = delegate.assertInDomain()
-
-    override def executeSync[T](thunk: => T): T = delegate.executeSync(thunk)
-
-    override def getClock: TypedClock = delegate.getClock
-
-    override private[util] def schedule(name: String, delay: FiniteDuration, runnable: Runnable) =
-      delegate.schedule(name, delay, runnable)
-
-    override private[util] def prepare(): ExecutionContext = {
-      new CountingExecutionContext(delegate.prepare(), counter)
     }
   }
 

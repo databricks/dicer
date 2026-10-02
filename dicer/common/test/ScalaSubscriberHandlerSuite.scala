@@ -1,5 +1,7 @@
 package com.databricks.dicer.common
 
+import com.databricks.dicer.common.testing.{SubscriberHandlerHarness, SubscriberHandlerSuiteBase}
+
 import java.net.URI
 import java.util.concurrent.locks.ReentrantLock
 import javax.annotation.concurrent.GuardedBy
@@ -12,7 +14,7 @@ import com.databricks.caching.util.{FakeSequentialExecutionContext, Lock, Metric
 import com.databricks.caching.util.TestUtils.assertThrow
 import com.databricks.dicer.common.Assignment.AssignmentValueCell
 import com.databricks.dicer.common.SubscriberHandler.Location
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.SliceTestUtils.createLooseGeneration
 import com.databricks.dicer.external.Target
 import com.databricks.rpc.RPCContext
 import com.databricks.rpc.testing.JettyTestRPCContext

@@ -4,7 +4,6 @@ import java.io.File
 import java.net.URI
 import java.util.UUID
 
-import scala.util.{Failure, Success}
 import scala.concurrent.duration._
 import scala.util.control.NonFatal
 
@@ -44,14 +43,13 @@ import com.databricks.dicer.common.{
  * @param rawConfigOverrideOpt overrides the process-wide config; production passes `None`.
  * @param confFactory builds the Assigner config from the resolved [[Config]]; production passes a
  *                    plain [[DicerAssignerConf]] and tests pass one with test SSL args.
- * @param kubernetesMembershipCheckerFactoryOverrideOpt overrides the membership-checker factory
- *                    (e.g. with a fake-Kubernetes-backed one); production passes `None` and builds
- *                    the default factory from env vars at startup.
+ * @param localClusterApiClientFactory produces clients for the Kubernetes API server in the local
+ *                                    cluster.
  */
 private[assigner] class AssignerMainBase(
     rawConfigOverrideOpt: Option[Config],
     confFactory: Config => DicerAssignerConf,
-    kubernetesMembershipCheckerFactoryOverrideOpt: Option[KubernetesMembershipChecker.Factory])
+    localClusterApiClientFactory: KubernetesApiClientFactory)
     extends DatabricksMain(Project.DicerAssigner, rawConfigOpt = rawConfigOverrideOpt) {
 
   private val prefixLogger = PrefixLogger.create(this.getClass, "")
@@ -117,7 +115,11 @@ private[assigner] class AssignerMainBase(
    *   code depending on the result of the initialization.
    */
   override final def wrappedMain(args: Array[String]): Unit = {
-    wrappedMainInternal(conf, lingerAfterFinish = BOOTSTRAPPER_LINGER_AFTER_FINISH) match {
+    wrappedMainInternal(
+      conf,
+      localClusterApiClientFactory,
+      lingerAfterFinish = BOOTSTRAPPER_LINGER_AFTER_FINISH
+    ) match {
       case Left(assigner: Assigner) =>
         // Bind the shared connection-health cell now that the Assigner is live; see
         // [[AssignerProbeSource]] for the contract.
@@ -138,100 +140,42 @@ private[assigner] class AssignerMainBase(
     Some(assignerProbeSource.forLiveness(conf.gateProbesOnK8sConnectionHealthFlagProvider))
 
   /**
-   * See [[wrappedMain]]. Extracted into its own method for testing. Reads the env-driven inputs
-   * (NAMESPACE / APP_NAME), builds the production [[KubernetesMembershipChecker.DefaultFactory]]
-   * from them, and dispatches to [[wrappedMainInternalWithCheckerFactory]]. Tests that need to
-   * inject a fake/no-op checker factory call [[wrappedMainInternalWithCheckerFactory]] directly.
-   *
-   * TODO(<internal bug>): Refactor this function so we don't build the K8s membership checker factories
-   * when running in ETCD_BOOTSTRAPPER mode, which does not require them.
+   * See [[wrappedMain]]. Extracted into its own method for testing. Starts the configured execution
+   * mode and returns the running Assigner in [[Left]], or the bootstrapper's exit code in
+   * [[Right]].
    */
   private def wrappedMainInternal(
       conf: DicerAssignerConf,
+      localClusterApiClientFactory: KubernetesApiClientFactory,
       lingerAfterFinish: FiniteDuration): Either[Assigner, Int] = {
-    // Build the checker factory from env vars. The assigner service requires a checker, so if these
-    // are unset the checker construction in `Assigner.createAndStart` fails startup (bootstrapper
-    // mode never constructs one).
+    conf.executionMode match {
+      case DicerAssignerConf.ExecutionMode.ASSIGNER_SERVICE =>
+        Left(startAssignerService(conf, localClusterApiClientFactory))
+      case DicerAssignerConf.ExecutionMode.ETCD_BOOTSTRAPPER =>
+        Right(bootstrapPreferredAssignerEtcdNamespaceBlocking(conf, lingerAfterFinish).value)
+    }
+  }
+
+  /** Starts the Assigner using clients for the Kubernetes API server in the local cluster. */
+  private def startAssignerService(
+      conf: DicerAssignerConf,
+      localClusterApiClientFactory: KubernetesApiClientFactory): Assigner = {
     val membershipCheckerNamespace: String = Option(System.getenv("NAMESPACE")).getOrElse("")
     val membershipCheckerAppName: String = Option(System.getenv("APP_NAME")).getOrElse("")
     val localClusterMembershipCheckerFactory: KubernetesMembershipChecker.Factory =
-      kubernetesMembershipCheckerFactoryOverrideOpt.getOrElse(
-        KubernetesMembershipChecker.DefaultFactory.create(
-          membershipCheckerNamespace,
-          membershipCheckerAppName,
-          pollingInterval = KubernetesMembershipChecker.DEFAULT_POLLING_INTERVAL,
-          rpcPort = conf.dicerAssignerRpcPort
-        )
+      KubernetesMembershipChecker.DefaultFactory.create(
+        localClusterApiClientFactory,
+        membershipCheckerNamespace,
+        membershipCheckerAppName,
+        pollingInterval = KubernetesMembershipChecker.DEFAULT_POLLING_INTERVAL,
+        rpcPort = conf.dicerAssignerRpcPort
       )
-
-    // Build a factory that creates a Kubernetes membership checker targeting a remote cluster.
-    //
-    // NOTE: This is currently only used by the [[TargetMigrator]] for Assigners participating
-    // in an active target migration. These Assigners must have the relevant configuration to build
-    // a remote cluster membership checker factory.
-    //
-    // However, not all Assigner deployments participate in this target migration and thus not all
-    // Assigners have the relevant configuration to build a remote cluster membership checker
-    // factory. In this case, the factory creation will return None.
     val remoteClusterMembershipCheckerFactoryOpt: Option[KubernetesMembershipChecker.Factory] =
       RemoteMembershipCheckerFactory.tryCreate(
         conf,
         membershipCheckerNamespace,
         membershipCheckerAppName
       )
-
-    wrappedMainInternalWithCheckerFactory(
-      conf,
-      localClusterMembershipCheckerFactory,
-      remoteClusterMembershipCheckerFactoryOpt,
-      lingerAfterFinish
-    )
-  }
-
-  /**
-   * See [[wrappedMainInternal]]. Extracted into its own method for testing. Returns [[Left]]
-   * with the [[Assigner]] when starting the assigner service, or [[Right]] with a status code
-   * to indicate failure in bootstrapper mode, in which case the caller should [[sys.exit()]]
-   * with that code.
-   *
-   * @param conf the assigner configuration.
-   * @param localClusterMembershipCheckerFactory factory for creating a
-   *        [[KubernetesMembershipChecker]] that discovers assigner pods in the local cluster via
-   *        the Kubernetes API. In production, this is a
-   *        [[KubernetesMembershipChecker.DefaultFactory]]; in tests, a no-op or fake-backed
-   *        factory.
-   * @param remoteClusterMembershipCheckerFactoryOpt factory for creating a
-   *        [[KubernetesMembershipChecker]] that discovers assigner pods in a remote cluster (i.e.
-   *        clusters other than the one this Assigner is running in) via the Kubernetes API. If no
-   *        remote cluster to watch is configured in the `conf`, this factory will not create any
-   *        watchers.
-   */
-  private def wrappedMainInternalWithCheckerFactory(
-      conf: DicerAssignerConf,
-      localClusterMembershipCheckerFactory: KubernetesMembershipChecker.Factory,
-      remoteClusterMembershipCheckerFactoryOpt: Option[KubernetesMembershipChecker.Factory],
-      lingerAfterFinish: FiniteDuration
-  ): Either[Assigner, Int] = {
-    conf.executionMode match {
-      case DicerAssignerConf.ExecutionMode.ASSIGNER_SERVICE =>
-        Left(
-          startAssignerService(
-            conf,
-            localClusterMembershipCheckerFactory,
-            remoteClusterMembershipCheckerFactoryOpt
-          )
-        )
-      case DicerAssignerConf.ExecutionMode.ETCD_BOOTSTRAPPER =>
-        Right(bootstrapPreferredAssignerEtcdNamespaceBlocking(conf, lingerAfterFinish).value)
-    }
-  }
-
-  private def startAssignerService(
-      conf: DicerAssignerConf,
-      localClusterMembershipCheckerFactory: KubernetesMembershipChecker.Factory,
-      remoteClusterMembershipCheckerFactoryOpt: Option[KubernetesMembershipChecker.Factory]
-  ): Assigner = {
-    // The main function factored in such a way that startServer can be called from here and tests.
 
     // Initialize and start the target config provider.
     val configProvider: TargetConfigProvider =
@@ -302,19 +246,18 @@ private[assigner] class AssignerMainBase(
     // pod terminations in a timely fashion from Slicelets for planned restarts. Taking a hard
     // dependency on creating a k8s watcher, thus, would unnecessarily compromise the availability
     // of Dicer.
-    val kubernetesTargetWatcherFactory: KubernetesTargetWatcher.Factory =
-      KubernetesTargetWatcher.newFactory() match {
-        case Success(kubernetesTargetWatcherFactory: KubernetesTargetWatcher.Factory) =>
-          kubernetesTargetWatcherFactory
-        case Failure(ex: Throwable) =>
-          prefixLogger.alert(
-            Severity.DEGRADED,
-            CachingErrorCode.KUBERNETES_INIT,
-            "Failed to create KubernetesTargetWatcher factory. Falling back to a factory which " +
-            s"will generate no-op target watchers: $ex"
-          )
-          KubernetesTargetWatcher.NoOpFactory
-      }
+    val kubernetesTargetWatcherFactory: KubernetesTargetWatcher.Factory = try {
+      KubernetesTargetWatcher.newFactory(localClusterApiClientFactory)
+    } catch {
+      case NonFatal(ex) =>
+        prefixLogger.alert(
+          Severity.DEGRADED,
+          CachingErrorCode.KUBERNETES_INIT,
+          "Failed to create KubernetesTargetWatcher factory. Falling back to a factory which " +
+          s"will generate no-op target watchers: $ex"
+        )
+        KubernetesTargetWatcher.NoOpFactory
+    }
 
     // Create the assigner and start the RPC server.
     Assigner.createAndStart(
@@ -369,18 +312,14 @@ private[assigner] class AssignerMainBase(
 
   /** Test-only access to the otherwise-private boot internals (used by `AssignerMainSuite`). */
   private[assigner] object staticForTest {
-    def wrappedMainInternal(conf: DicerAssignerConf): Either[Assigner, Int] =
-      AssignerMainBase.this.wrappedMainInternal(conf, lingerAfterFinish = Duration.Zero)
-    def wrappedMainInternalWithCheckerFactory(
+
+    /** Runs the configured execution mode without lingering after bootstrapper completion. */
+    def wrappedMainInternal(
         conf: DicerAssignerConf,
-        localClusterMembershipCheckerFactory: KubernetesMembershipChecker.Factory,
-        remoteClusterMembershipCheckerFactoryOpt: Option[KubernetesMembershipChecker.Factory]
-    ): Either[Assigner, Int] =
-      AssignerMainBase.this.wrappedMainInternalWithCheckerFactory(
+        localClusterApiClientFactory: KubernetesApiClientFactory): Either[Assigner, Int] =
+      AssignerMainBase.this.wrappedMainInternal(
         conf,
-        localClusterMembershipCheckerFactory,
-        remoteClusterMembershipCheckerFactoryOpt,
-        // Don't linger the bootstrapper in tests.
+        localClusterApiClientFactory,
         lingerAfterFinish = Duration.Zero
       )
   }
@@ -391,7 +330,7 @@ object AssignerMain
     extends AssignerMainBase(
       rawConfigOverrideOpt = None,
       confFactory = config => new DicerAssignerConf(config),
-      kubernetesMembershipCheckerFactoryOverrideOpt = None
+      localClusterApiClientFactory = KubernetesApiClientFactory.localCluster()
     )
 
 /**

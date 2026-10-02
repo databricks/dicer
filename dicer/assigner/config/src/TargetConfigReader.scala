@@ -19,7 +19,7 @@ import com.databricks.api.proto.dicer.external.{
   TargetConfigOverrideP,
   TargetConfigP
 }
-import com.databricks.caching.util.{ConfigScope, PrefixLogger}
+import com.databricks.caching.util.{ClusterConfigScope, ConfigScope, PrefixLogger}
 import com.databricks.common.alias.RichScalaPB.RichMessage
 import com.databricks.dicer.common.TargetName
 import com.google.protobuf.{CodedInputStream, DynamicMessage, TextFormat, TypeRegistry}
@@ -93,13 +93,16 @@ object TargetConfigReader {
    * Creates a mapping from [[TargetName]]s to [[InternalTargetConfig]]s specifically for
    * `configScopeOpt`.
    *
-   * @param configScopeOpt the [[ConfigScope]] that this assigner is currently running in, or None
-   *                       if the (cloud, region) tuple cannot be parsed into a valid scope, in
-   *                       which case default configs are used.
+   * Runtime static-config reads apply only the selected cluster's overrides. Instance-scoped
+   * overrides are ignored even if they bypass pre-merge validation.
+   *
+   * @param configScopeOpt the [[ClusterConfigScope]] that this assigner is currently running in,
+   *                       or None if the (cloud, region) tuple cannot be parsed into a valid
+   *                       scope, in which case default configs are used.
    * @note `new java.io.File` only throws if a null path argument is provided.
    */
   private[assigner] def readScopeConfigMapFromDirectories(
-      configScopeOpt: Option[ConfigScope],
+      configScopeOpt: Option[ClusterConfigScope],
       targetConfigDirectory: File,
       advancedTargetConfigDirectory: File): Map[TargetName, InternalTargetConfig] = {
 
@@ -140,6 +143,9 @@ object TargetConfigReader {
   /**
    * Computes a map from [[Target]] names to [[TargetDefaultAndOverride]]s. Each value represents
    * the computed [[InternalTargetConfig]]s for all scopes within a target.
+   *
+   * Retains instance-scoped overrides so [[TargetConfigValidator]] can reject them before merge.
+   * The runtime path, [[readScopeConfigMapFromDirectories]], ignores instance scopes.
    *
    * @note `new java.io.File` only throws if a null path argument is provided.
    */
@@ -405,12 +411,12 @@ object TargetConfigReader {
    * Finds the target and advance target config overrides (if any) for the given `configScopeOpt`.
    */
   private def getScopeOverride(
-      configScopeOpt: Option[ConfigScope],
+      configScopeOpt: Option[ClusterConfigScope],
       targetConfig: TargetConfigP,
       advancedConfig: AdvancedTargetConfigP)
       : (Option[TargetConfigFieldsP], Option[AdvancedTargetConfigFieldsP]) = {
     val targetConfigOverrideOpt: Option[TargetConfigFieldsP] =
-      configScopeOpt.flatMap { scope: ConfigScope =>
+      configScopeOpt.flatMap { scope: ClusterConfigScope =>
         ConfigScope
           .findScopeOverride(scope, targetConfig.overrides.map {
             overrideProto: TargetConfigOverrideP =>
@@ -419,7 +425,7 @@ object TargetConfigReader {
       }
 
     val advancedConfigOverrideOpt: Option[AdvancedTargetConfigFieldsP] =
-      configScopeOpt.flatMap { scope: ConfigScope =>
+      configScopeOpt.flatMap { scope: ClusterConfigScope =>
         ConfigScope
           .findScopeOverride(
             scope,

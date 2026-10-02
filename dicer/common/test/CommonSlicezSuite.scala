@@ -1,7 +1,18 @@
 package com.databricks.dicer.common
 
 import org.apache.commons.lang3.StringUtils
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  GenerationIncarnationFluent,
+  LowInclusiveStringFluent,
+  SliceAssignmentSliceFluent,
+  createAssignment,
+  encryptedFp,
+  fp,
+  identityKey,
+  toSliceKey,
+  toSquid,
+  `∞`
+}
 import com.databricks.dicer.external.{SliceKey, Target}
 import com.databricks.testing.DatabricksTest
 import scalatags.Text.TypedTag

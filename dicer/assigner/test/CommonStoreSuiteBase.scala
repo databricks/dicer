@@ -21,7 +21,7 @@ import com.databricks.caching.util.{
   StatusOr
 }
 import com.databricks.dicer.assigner.Store.WriteAssignmentResult
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.SliceTestUtils.{createRandomProposal, createTestSquid}
 import com.databricks.dicer.common.{
   AssignmentConsistencyMode,
   Assignment,
@@ -469,7 +469,7 @@ abstract class CommonStoreSuiteBase extends DatabricksTest with TestName {
             ) { sliceAssignment =>
               ProposedSliceAssignment(
                 sliceAssignment.slice,
-                sliceAssignment.resources,
+                sliceAssignment.resourcesSet,
                 sliceAssignment.primaryRateLoadOpt
               )
             }

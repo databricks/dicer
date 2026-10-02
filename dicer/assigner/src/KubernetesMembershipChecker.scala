@@ -1,5 +1,6 @@
 package com.databricks.dicer.assigner
 
+import java.io.InterruptedIOException
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
@@ -20,7 +21,6 @@ import io.kubernetes.client.openapi.models.{
   V1PodList,
   V1PodStatus
 }
-import io.kubernetes.client.util.ClientBuilder
 import io.prometheus.client.{Counter, Gauge, Histogram}
 import okhttp3.OkHttpClient
 
@@ -35,13 +35,18 @@ import com.databricks.caching.util.{
 }
 import com.databricks.dicer.assigner.KubernetesMembershipChecker.{
   CheckerState,
-  KubernetesConnectionHealthMonitor
+  ConnectionHealthState,
+  KubernetesConnectionHealthMonitor,
+  PollOutcome,
+  ResourceVersion,
+  VersionedResourceSet
 }
 import com.databricks.dicer.external.ResourceAddress
 
 /**
- * A [[ResourceWatcher]] that discovers resources by polling the Kubernetes API for pods and
- * tracks connection health with hysteresis to avoid flapping.
+ * Discovers resources by polling the Kubernetes API for pods and tracks connection health using
+ * a consecutive-failure threshold to avoid unnecessarily marking the connection the connection
+ * as unhealthy for short periods of time.
  *
  * Resource updates are delivered to [[watch]] subscribers. Each successful poll publishes a
  * [[VersionedResourceSet]] tagged with a monotonically increasing version stamped by this
@@ -77,7 +82,6 @@ import com.databricks.dicer.external.ResourceAddress
  * @throws IllegalArgumentException if `namespace` is empty.
  * @throws IllegalArgumentException if `appName` is empty.
  * @throws IllegalArgumentException if `pollingInterval` is not positive.
- * @throws IllegalArgumentException if `rpcPort` is not positive.
  */
 private[dicer] class KubernetesMembershipChecker(
     sec: SequentialExecutionContext,
@@ -87,13 +91,11 @@ private[dicer] class KubernetesMembershipChecker(
     appName: String,
     pollingInterval: FiniteDuration,
     rpcPort: Int,
-    kubeContextLabelOpt: Option[String])
-    extends ResourceWatcher {
+    kubeContextLabelOpt: Option[String]) {
 
   require(namespace.nonEmpty, "namespace must not be empty")
   require(appName.nonEmpty, "appName must not be empty")
   require(pollingInterval > Duration.Zero, "pollingInterval must be positive")
-  require(rpcPort > 0, "rpcPort must be positive")
 
   /** The kubeContext metric label value. */
   private val kubeContextLabel: String = kubeContextLabelOpt.getOrElse("")
@@ -105,12 +107,9 @@ private[dicer] class KubernetesMembershipChecker(
   /** Pre-computed string form of the assigner's UUID, used on every poll to check self-presence. */
   private val assignerUuidStr: String = assignerUuid.toString
 
-  /** Tracks connection health with hysteresis based on consecutive poll results. */
+  /** Tracks connection health using a consecutive-failure threshold. */
   private val connectionHealthMonitor: KubernetesConnectionHealthMonitor =
-    new KubernetesConnectionHealthMonitor(
-      KubernetesMembershipChecker.DEFAULT_FAILURE_THRESHOLD,
-      KubernetesMembershipChecker.DEFAULT_RECOVERY_THRESHOLD
-    )
+    new KubernetesConnectionHealthMonitor(KubernetesMembershipChecker.DEFAULT_FAILURE_THRESHOLD)
 
   /** Eagerly created with an initial zero value. */
   private val connectionUnhealthyCounterChild: Counter.Child =
@@ -152,7 +151,7 @@ private[dicer] class KubernetesMembershipChecker(
    * PRECONDITION: May only be called once on a newly constructed checker (i.e. one that has not
    * already been started or stopped).
    */
-  override def start(assignerProtoLogger: AssignerProtoLogger): Unit = sec.run {
+  def start(assignerProtoLogger: AssignerProtoLogger): Unit = sec.run {
     checkerState match {
       case CheckerState.Running =>
         throw new IllegalStateException(
@@ -177,8 +176,8 @@ private[dicer] class KubernetesMembershipChecker(
     }
   }
 
-  /** {@inheritDoc} */
-  override def watch(callback: ValueStreamCallback[VersionedResourceSet]): Cancellable = {
+  /** Watches for resource-set updates until some time after the returned handle is cancelled. */
+  def watch(callback: ValueStreamCallback[VersionedResourceSet]): Cancellable = {
     resourceCell.watch(callback)
   }
 
@@ -253,8 +252,8 @@ private[dicer] class KubernetesMembershipChecker(
    * Publishes the current Kubernetes-connection health value to both [[healthCell]] (for
    * cross-component watchers) and the per-pod
    * [[KubernetesMembershipChecker.connectionHealthGauge]] (for monitoring), and increments the
-   * unhealthy-transition counter when appropriate. Called from the polling path on the first poll
-   * (the cell is unpublished until then) and whenever the hysteresis monitor flips.
+   * unhealthy-transition counter when appropriate. Called from the polling path whenever the
+   * connection-health monitor's state is known and experiences a change.
    */
   private def publishConnectionHealth(healthy: Boolean): Unit = {
     healthCell.setValue(healthy)
@@ -291,7 +290,7 @@ private[dicer] class KubernetesMembershipChecker(
       podCount: Int,
       selfPresent: Boolean): Unit = {
     sec.assertCurrentContext()
-    observeLatency(statusCode, latency)
+    observeLatency(statusCode, latency, outcome = PollOutcome.Success)
     KubernetesMembershipChecker.responseSizeCounter
       .labels(namespace, appName, podCount.toString, kubeContextLabel)
       .inc()
@@ -305,10 +304,13 @@ private[dicer] class KubernetesMembershipChecker(
    *
    * PRECONDITION: Must be called on [[sec]].
    */
-  private def observeLatency(statusCode: Int, latency: FiniteDuration): Unit = {
+  private def observeLatency(
+      statusCode: Int,
+      latency: FiniteDuration,
+      outcome: PollOutcome): Unit = {
     sec.assertCurrentContext()
     KubernetesMembershipChecker.latencyHistogram
-      .labels(namespace, appName, statusCode.toString, kubeContextLabel)
+      .labels(namespace, appName, statusCode.toString, kubeContextLabel, outcome.toString)
       .observe(latency.toMillis.toDouble)
   }
 
@@ -642,7 +644,15 @@ private[dicer] class KubernetesMembershipChecker(
     sec.assertCurrentContext()
     val latency: FiniteDuration = sec.getClock.tickerTime() - startTime
     val statusCode: Int = ex.getCode
-    observeLatency(statusCode, latency)
+    // Note that the outcome cannot be inferred from the HTTP status code alone. Timeouts have
+    // status code 0, but 0 means that no HTTP response was received and can also indicate failures
+    // such as a refused connection.
+    val outcome: PollOutcome = ex.getCause match {
+      case _: InterruptedIOException => PollOutcome.Timeout
+      case _ => PollOutcome.Failure
+    }
+    observeLatency(statusCode, latency, outcome)
+
     // Reset self-present gauge manually rather than going through updateMetrics, since the
     // failure path has different semantics (unknown state rather than observed state).
     KubernetesMembershipChecker.selfPresentGauge
@@ -711,9 +721,14 @@ private[dicer] class KubernetesMembershipChecker(
     }
     // Publish once the monitor resolves its verdict (the first success, or the failure that
     // reaches the threshold) and on every subsequent flip. The cell stays unpublished (UNKNOWN)
-    // while the monitor's verdict is still `None`, so a pod that has not confirmed connectivity
+    // while the monitor's state is still `Unknown`, so a pod that has not confirmed connectivity
     // does not advertise a health value.
-    for (isHealthy: Boolean <- connectionHealthMonitor.health) {
+    val reportedHealthOpt: Option[Boolean] = connectionHealthMonitor.getState match {
+      case ConnectionHealthState.Unknown(_: Int) => None
+      case ConnectionHealthState.Healthy(_: Int) => Some(true)
+      case ConnectionHealthState.Unhealthy => Some(false)
+    }
+    for (isHealthy: Boolean <- reportedHealthOpt) {
       if (!healthCell.getLatestValueOpt.contains(isHealthy)) {
         publishConnectionHealth(healthy = isHealthy)
       }
@@ -723,6 +738,37 @@ private[dicer] class KubernetesMembershipChecker(
 }
 
 object KubernetesMembershipChecker {
+
+  /**
+   * An opaque version identifier for a resource set, comparable by length first and then
+   * lexicographically.
+   *
+   * This implements the resource version spec described by the k8s docs here:
+   * https://kubernetes.io/docs/reference/using-api/api-concepts/#resource-versions.
+   *
+   * Note: values are only comparable across [[ResourceVersion]]s emitted by a single producer
+   * instance and MUST NOT be externalized.
+   *
+   * @param value the underlying version string.
+   */
+  case class ResourceVersion(value: String) extends Ordered[ResourceVersion] {
+
+    override def compare(that: ResourceVersion): Int = {
+      val lengthDiff: Int = this.value.length - that.value.length
+      if (lengthDiff != 0) lengthDiff
+      else this.value.compareTo(that.value)
+    }
+  }
+
+  /**
+   * A versioned snapshot of resources identified by their UUIDs and routable addresses.
+   *
+   * TODO(<internal bug>): Change this to return URI instead of ResourceAddress.
+   *
+   * @param version the version of this resource set, used to compare freshness.
+   * @param resources mapping from resource UUID to its routable address.
+   */
+  case class VersionedResourceSet(version: ResourceVersion, resources: Map[UUID, ResourceAddress])
 
   /** The lifecycle state of a [[KubernetesMembershipChecker]]. */
   private sealed trait CheckerState
@@ -748,85 +794,55 @@ object KubernetesMembershipChecker {
    * Default number of consecutive failures to transition the connection state from healthy to
    * unhealthy.
    */
-  val DEFAULT_FAILURE_THRESHOLD: Int = 3
-
-  /**
-   * Default number of consecutive successes to transition the connection state from unhealthy
-   * to healthy.
-   */
-  val DEFAULT_RECOVERY_THRESHOLD: Int = 3
+  private val DEFAULT_FAILURE_THRESHOLD: Int = 3
 
   /** Rate-limit interval for warning-level log messages. */
   private val WARN_INTERVAL: FiniteDuration = FiniteDuration(30, TimeUnit.SECONDS)
 
   /**
-   * Tracks the health of the Kubernetes API connection using simple consecutive-event
-   * counters with hysteresis to avoid flapping.
+   * Tracks the health of the Kubernetes API connection using a simple consecutive-failure
+   * counter. Failure-side hysteresis (the [[failureThreshold]]) avoids flapping to unhealthy on a
+   * transient failure; recovery has no hysteresis to avoid marking the connection as unhealthy for
+   * too long.
    *
-   * Starts in the healthy state. Transitions to unhealthy after [[failureThreshold]]
-   * consecutive poll failures, and back to healthy after [[recoveryThreshold]] consecutive poll
-   * successes from the unhealthy state. A single success/failure while healthy/unhealthy resets
-   * the counter.
+   * Starts in the unknown state (no verdict is published until the polls have resolved it). A
+   * first success resolves to healthy; from unknown or healthy the connection transitions to
+   * unhealthy after [[failureThreshold]] consecutive poll failures; and from unhealthy a single
+   * successful poll restores health.
    *
    * Not thread-safe. Access must be serialized by the caller's
    * [[com.databricks.caching.util.SequentialExecutionContext]].
    *
    * @param failureThreshold Number of consecutive failures to transition from healthy to unhealthy.
-   * @param recoveryThreshold Number of consecutive successes to transition from unhealthy to
-   *                          healthy.
    *
    * @throws IllegalArgumentException if `failureThreshold` is not positive.
-   * @throws IllegalArgumentException if `recoveryThreshold` is not positive.
    */
-  private class KubernetesConnectionHealthMonitor(failureThreshold: Int, recoveryThreshold: Int) {
+  private class KubernetesConnectionHealthMonitor(failureThreshold: Int) {
 
     require(failureThreshold > 0, "failureThreshold must be positive")
-    require(recoveryThreshold > 0, "recoveryThreshold must be positive")
 
     /** Logger for state transitions. */
     private val logger: PrefixLogger =
       PrefixLogger.create(getClass, "KubernetesConnectionHealthMonitor")
 
-    /**
-     * The current health verdict, or `None` until the first poll resolves it. `None` means the
-     * connection health is unknown (no poll has completed yet). A first success resolves it to
-     * `Some(true)` immediately; failures from `None` accumulate toward [[failureThreshold]] just
-     * like from a healthy state and only resolve to `Some(false)` once the threshold is reached.
-     */
-    private var healthy: Option[Boolean] = None
+    private var state: ConnectionHealthState = ConnectionHealthState.Unknown(failureCount = 0)
 
-    /**
-     * Counter tracking consecutive events toward the next health transition. While healthy or
-     * unknown, counts consecutive failures; while unhealthy, counts consecutive successes.
-     */
-    private var transitionCount: Int = 0
-
-    /** The current health verdict, or `None` if no poll has resolved it yet. */
-    def health: Option[Boolean] = healthy
+    /** The connection health state as of the latest poll result. */
+    def getState: ConnectionHealthState = state
 
     /**
      * Records a successful poll.
      *
      * When unknown: resolves the verdict to healthy (a first success is confidently healthy).
      * When healthy: resets the failure counter.
-     * When unhealthy: increments the consecutive success counter. If the counter reaches
-     * [[recoveryThreshold]], transitions to healthy.
+     * When unhealthy: resolves the verdict back to healthy immediately. Recovery has no hysteresis:
+     * a single successful poll is enough to restore health.
      */
-    def onPollSuccess(): Unit = healthy match {
-      case None =>
-        // First poll succeeded: resolve directly to healthy.
-        healthy = Some(true)
-        transitionCount = 0
-      case Some(true) =>
-        // Any success while healthy resets the failure counter.
-        transitionCount = 0
-      case Some(false) =>
-        transitionCount += 1
-        if (transitionCount >= recoveryThreshold) {
-          logger.debug(s"Connection recovered after $transitionCount consecutive successes")
-          healthy = Some(true)
-          transitionCount = 0
-        }
+    def onPollSuccess(): Unit = {
+      if (state == ConnectionHealthState.Unhealthy) {
+        logger.info("Connection recovered after a successful poll")
+      }
+      state = ConnectionHealthState.Healthy(failureCount = 0)
     }
 
     /**
@@ -834,21 +850,55 @@ object KubernetesMembershipChecker {
      *
      * When unknown or healthy: increments the consecutive failure counter. If the counter reaches
      * [[failureThreshold]], transitions to unhealthy; otherwise the verdict is left unchanged (a
-     * short failure run does not resolve an unknown connection or flip a healthy one).
-     * When unhealthy: resets the consecutive success counter.
+     * short failure run does not resolve an unknown connection or flip a healthy one). Failures
+     * while already unhealthy leave the verdict unchanged.
      */
-    def onPollFailure(): Unit = healthy match {
-      case Some(false) =>
-        // Any failure while unhealthy resets the recovery counter.
-        transitionCount = 0
-      case None | Some(true) =>
-        transitionCount += 1
-        if (transitionCount >= failureThreshold) {
-          logger.debug(s"Connection unhealthy after $transitionCount consecutive failures")
-          healthy = Some(false)
-          transitionCount = 0
-        }
+    def onPollFailure(): Unit = {
+      val nextState: ConnectionHealthState = state match {
+        case ConnectionHealthState.Unknown(failureCount) =>
+          val nextFailureCount: Int = failureCount + 1
+          if (nextFailureCount >= failureThreshold) {
+            logger.info(s"Connection unhealthy after $nextFailureCount consecutive failures")
+            ConnectionHealthState.Unhealthy
+          } else {
+            ConnectionHealthState.Unknown(nextFailureCount)
+          }
+        case ConnectionHealthState.Healthy(failureCount) =>
+          val nextFailureCount: Int = failureCount + 1
+          if (nextFailureCount >= failureThreshold) {
+            logger.info(s"Connection unhealthy after $nextFailureCount consecutive failures")
+            ConnectionHealthState.Unhealthy
+          } else {
+            ConnectionHealthState.Healthy(nextFailureCount)
+          }
+        case ConnectionHealthState.Unhealthy =>
+          ConnectionHealthState.Unhealthy
+      }
+      state = nextState
     }
+  }
+
+  /** The health state of the Kubernetes API connection. */
+  private sealed trait ConnectionHealthState
+
+  private object ConnectionHealthState {
+
+    /**
+     * The connection is new and health is yet to be determined.
+     *
+     * `failureCount` tracks the number of consecutive poll failures since creation.
+     */
+    final case class Unknown(failureCount: Int) extends ConnectionHealthState
+
+    /**
+     * The connection is healthy.
+     *
+     * `failureCount` tracks the number of consecutive poll failures since the last successful poll.
+     */
+    final case class Healthy(failureCount: Int) extends ConnectionHealthState
+
+    /** The connection is unhealthy. */
+    case object Unhealthy extends ConnectionHealthState
   }
 
   /**
@@ -868,17 +918,18 @@ object KubernetesMembershipChecker {
   }
 
   /**
-   * Factory that creates a [[KubernetesMembershipChecker]] using the real Kubernetes
-   * in-cluster API client. Exceptions from [[KubernetesMembershipChecker.create()]] (e.g. empty
-   * namespace/app name, or unavailable in-cluster config) propagate to the caller and fail startup.
-   * Each call creates a dedicated [[SequentialExecutionContext]] for the checker.
+   * Factory that creates a [[KubernetesMembershipChecker]] using the supplied Kubernetes API
+   * client factory. Exceptions from [[KubernetesMembershipChecker.create()]] propagate to the
+   * caller and fail startup. Each call creates a new [[SequentialExecutionContext]] and API client.
    *
+   * @param apiClientFactory Creates a new Kubernetes API client for each checker.
    * @param namespace The Kubernetes namespace to poll for pods.
    * @param appName The Kubernetes app label to filter pods by.
    * @param pollingInterval The interval between successive polls.
    * @param rpcPort The RPC port used to construct resource URIs for discovered pods.
    */
   class DefaultFactory private (
+      apiClientFactory: KubernetesApiClientFactory,
       namespace: String,
       appName: String,
       pollingInterval: FiniteDuration,
@@ -893,6 +944,7 @@ object KubernetesMembershipChecker {
         )
       KubernetesMembershipChecker.create(
         checkerSec,
+        apiClientFactory.create(),
         assignerUuid,
         namespace,
         appName,
@@ -906,20 +958,21 @@ object KubernetesMembershipChecker {
   object DefaultFactory {
 
     /**
-     * Creates a new [[DefaultFactory]]. Checkers created by this factory target the local
-     * cluster (the same cluster that the current pod is running in).
+     * Creates a new [[DefaultFactory]] backed by `apiClientFactory`.
      *
+     * @param apiClientFactory Creates a new Kubernetes API client for each checker.
      * @param namespace The Kubernetes namespace to poll for pods.
      * @param appName The Kubernetes app label to filter pods by.
      * @param pollingInterval The interval between successive polls.
      * @param rpcPort The RPC port used to construct resource URIs for discovered pods.
      */
     def create(
+        apiClientFactory: KubernetesApiClientFactory,
         namespace: String,
         appName: String,
         pollingInterval: FiniteDuration,
         rpcPort: Int): DefaultFactory = {
-      new DefaultFactory(namespace, appName, pollingInterval, rpcPort)
+      new DefaultFactory(apiClientFactory, namespace, appName, pollingInterval, rpcPort)
     }
   }
 
@@ -930,13 +983,10 @@ object KubernetesMembershipChecker {
   private[assigner] val CONNECT_TIMEOUT: FiniteDuration = FiniteDuration(5, TimeUnit.SECONDS)
 
   /**
-   * Read timeout for the K8s pod List/Get HTTP calls. Deliberately short so a stalled call fails
-   * fast and the membership checker retries promptly, rather than a hung request blocking
-   * convergence on the healthy pod set. Raising it trades faster failure detection for tolerance of
-   * transient K8s API slowness; before changing it, confirm the value still bounds detection
-   * latency within what preferred-assigner election can tolerate.
+   * Read timeout for the K8s pod List/Get HTTP calls. Deliberately long to collect data on
+   * actual K8s API server response times and inform true K8s API server response time limits.
    */
-  private[assigner] val READ_TIMEOUT: FiniteDuration = FiniteDuration(5, TimeUnit.SECONDS)
+  private[assigner] val READ_TIMEOUT: FiniteDuration = FiniteDuration(1, TimeUnit.MINUTES)
 
   /**
    * Safety limit for listNamespacedPod pagination. If the Assigner service has more pods than
@@ -949,9 +999,31 @@ object KubernetesMembershipChecker {
     .build()
     .name("dicer_assigner_k8s_list_pods_latency_millis")
     .help("Latency of the Kubernetes listNamespacedPod API call.")
-    .labelNames("namespace", "appName", "statusCode", "kubeContext")
-    .buckets(5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000)
+    .labelNames("namespace", "appName", "statusCode", "kubeContext", "outcome")
+    .buckets(5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 20000, 30000, 40000, 60000)
     .register()
+
+  /** Classification recorded in the outcome label for a completed Kubernetes poll. */
+  private[assigner] sealed trait PollOutcome
+
+  /** Possible classifications for a completed Kubernetes poll. */
+  private[assigner] object PollOutcome {
+
+    /** The Kubernetes poll completed successfully. */
+    case object Success extends PollOutcome {
+      override def toString: String = "success"
+    }
+
+    /** The Kubernetes poll failed because an operation timed out. */
+    case object Timeout extends PollOutcome {
+      override def toString: String = "timeout"
+    }
+
+    /** The Kubernetes poll failed for a reason other than a timeout. */
+    case object Failure extends PollOutcome {
+      override def toString: String = "failure"
+    }
+  }
 
   /**
    * Counter tracking the total number of `listNamespacedPod` responses received, labeled by the
@@ -980,42 +1052,41 @@ object KubernetesMembershipChecker {
     .register()
 
   /**
-   * Gauge tracking whether the Kubernetes API connection is currently considered healthy
-   * by the [[KubernetesConnectionHealthMonitor]] hysteresis logic (1.0 if healthy, 0.0 if
-   * unhealthy). Mirrors the value published on [[healthCell]] and observed by the CH
-   * preferred-assigner driver for suppression.
+   * Gauge tracking whether the Kubernetes API connection is currently considered healthy by the
+   * [[KubernetesConnectionHealthMonitor]] (1.0 if healthy, 0.0 if unhealthy). Mirrors the value
+   * published on [[healthCell]] and observed by the CH preferred-assigner driver for suppression.
    */
   private val connectionHealthGauge: Gauge = Gauge
     .build()
     .name("dicer_assigner_k8s_connection_healthy_gauge")
     .help(
       "Whether the Kubernetes API connection is currently considered healthy by the " +
-      "membership checker's hysteresis monitor (1 = healthy, 0 = unhealthy)."
+      "membership checker's connection-health monitor (1 = healthy, 0 = unhealthy)."
     )
     .labelNames("namespace", "appName")
     .register()
 
   /**
    * Counter tracking the total number of times the Kubernetes API connection has transitioned
-   * to the unhealthy state as determined by the [[KubernetesConnectionHealthMonitor]] hysteresis
-   * logic. Incremented each time [[publishConnectionHealth]] is called with `healthy = false`.
+   * to the unhealthy state as determined by the [[KubernetesConnectionHealthMonitor]]. Incremented
+   * each time [[publishConnectionHealth]] is called with `healthy = false`.
    */
   private val connectionUnhealthyCounter: Counter = Counter
     .build()
     .name("dicer_assigner_k8s_connection_unhealthy_total")
     .help(
       "Total number of times the Kubernetes API connection transitioned to unhealthy " +
-      "as determined by the membership checker's hysteresis monitor."
+      "as determined by the membership checker's connection-health monitor."
     )
     .labelNames("namespace", "appName")
     .register()
 
   /**
-   * Creates a new [[KubernetesMembershipChecker]], initializing the Kubernetes API client
-   * using in-cluster configuration. Adapts client creation from
-   * [[KubernetesTargetWatcher.newFactory()]].
+   * Creates a new [[KubernetesMembershipChecker]] backed by `apiClient`.
    *
    * @param sec The [[SequentialExecutionContext]] that guards mutable state.
+   * @param apiClient The Kubernetes API client used to list pods. The checker takes ownership,
+   *                  including its HTTP client, which must not be shared with other integrations.
    * @param assignerUuid UUID identifying this assigner pod.
    * @param namespace The Kubernetes namespace to poll for pods.
    * @param appName The Kubernetes app label to filter pods by.
@@ -1027,13 +1098,12 @@ object KubernetesMembershipChecker {
    *                            with an empty string.
    * @return A new [[KubernetesMembershipChecker]] instance.
    */
-  @throws[java.io.IOException]("if K8s in-cluster config is unavailable")
   @throws[IllegalArgumentException]("if namespace is empty")
   @throws[IllegalArgumentException]("if appName is empty")
   @throws[IllegalArgumentException]("if pollingInterval is not positive")
-  @throws[IllegalArgumentException]("if rpcPort is not positive")
   def create(
       sec: SequentialExecutionContext,
+      apiClient: ApiClient,
       assignerUuid: UUID,
       namespace: String,
       appName: String,
@@ -1041,14 +1111,12 @@ object KubernetesMembershipChecker {
       rpcPort: Int,
       kubeContextLabelOpt: Option[String]
   ): KubernetesMembershipChecker = {
-    // Create the Kubernetes API client using in-cluster configuration.
-    val client: ApiClient = ClientBuilder.cluster().build()
-    val okHttpClient: OkHttpClient = client.getHttpClient.newBuilder
+    val okHttpClient: OkHttpClient = apiClient.getHttpClient.newBuilder
       .connectTimeout(CONNECT_TIMEOUT.toMillis, TimeUnit.MILLISECONDS)
       .readTimeout(READ_TIMEOUT.toMillis, TimeUnit.MILLISECONDS)
       .build
-    client.setHttpClient(okHttpClient)
-    val coreV1Api: CoreV1Api = new CoreV1Api(client)
+    apiClient.setHttpClient(okHttpClient)
+    val coreV1Api: CoreV1Api = new CoreV1Api(apiClient)
 
     new KubernetesMembershipChecker(
       sec,

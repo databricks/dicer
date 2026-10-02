@@ -6,7 +6,8 @@ import com.databricks.conf.Configs
 import com.databricks.conf.RichConfig
 import com.databricks.conf.trusted.ProjectConfByName
 import com.databricks.dicer.client.TestClientUtils
-import com.databricks.dicer.common.{InternalClientConf, InternalDicerTestEnvironment}
+import com.databricks.dicer.common.{InternalClientConf}
+import com.databricks.dicer.common.testing.{InternalDicerTestEnvironment}
 import com.databricks.testing.DatabricksTest
 
 import java.net.URI
@@ -40,7 +41,9 @@ private class SingletonSliceletSuite extends DatabricksTest with TestName {
         "localhost",
         clientTlsFilePathsOpt = None,
         serverTlsFilePathsOpt = None,
-        watchFromDataPlane = false
+        watchFromDataPlane = false,
+        watchRpcTimeoutOpt = None,
+        enableRateLimitingOverrideOpt = Some(false)
       )
       .merge(
         Configs.parseMap(

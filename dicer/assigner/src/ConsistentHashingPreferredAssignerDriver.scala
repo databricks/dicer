@@ -19,21 +19,22 @@ import com.databricks.dicer.assigner.ConsistentHashingPreferredAssignerStateMach
   DriverAction,
   Event
 }
+import com.databricks.dicer.assigner.KubernetesMembershipChecker.VersionedResourceSet
 import com.databricks.dicer.common.Generation
 import com.databricks.dicer.external.ResourceAddress
 
 /**
- * Driver for the [[ConsistentHashingPreferredAssignerStateMachine]]. Bridges a [[ResourceWatcher]]
- * to the state machine by converting resource set updates to [[Event.ResourceSetReceived]] events
- * and connection health updates to [[Event.SuppressionNotice]] events (suppressing when the
- * connection is unhealthy).
+ * Driver for the [[ConsistentHashingPreferredAssignerStateMachine]]. Bridges a
+ * [[KubernetesMembershipChecker]] to the state machine by converting resource set updates to
+ * [[Event.ResourceSetReceived]] events and connection health updates to
+ * [[Event.SuppressionNotice]] events (suppressing when the connection is unhealthy).
  *
  * See [[StateMachineDriver]] for the active-passive driver/state-machine collaboration model.
  *
  * @param sec The [[SequentialExecutionContext]] within which all driver and state machine state
  *            is accessed.
- * @param localClusterMembershipChecker The [[KubernetesMembershipChecker]] used as the
- *                                      [[ResourceWatcher]] that feeds the selection state machine.
+ * @param localClusterMembershipChecker The [[KubernetesMembershipChecker]] that feeds the selection
+ *                                      state machine.
  */
 private[dicer] class ConsistentHashingPreferredAssignerDriver(
     sec: SequentialExecutionContext,
@@ -169,15 +170,15 @@ private[dicer] class ConsistentHashingPreferredAssignerDriver(
   }
 
   /**
-   * Watches the given [[ResourceWatcher]] for resource set updates and delivers them to the state
-   * machine as [[Event.ResourceSetReceived]] events. Converts [[ResourceAddress]] entries to
-   * [[AssignerInfo]] for the state machine.
+   * Watches the given [[KubernetesMembershipChecker]] for resource set updates and delivers them to
+   * the state machine as [[Event.ResourceSetReceived]] events. Converts [[ResourceAddress]] entries
+   * to [[AssignerInfo]] for the state machine.
    */
   @throws[AssertionError]("if not called within sec")
-  private def watchResourceUpdates(resourceWatcher: ResourceWatcher): Unit = {
+  private def watchResourceUpdates(membershipChecker: KubernetesMembershipChecker): Unit = {
     sec.assertCurrentContext()
 
-    resourceWatcher.watch(
+    membershipChecker.watch(
       new ValueStreamCallback[VersionedResourceSet](sec) {
         override protected def onSuccess(resourceSet: VersionedResourceSet): Unit = {
           sec.assertCurrentContext()

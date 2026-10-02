@@ -11,14 +11,18 @@ import com.databricks.api.proto.dicer.external.LoadBalancingMetricConfigP.{
 }
 import com.databricks.caching.util.AsciiTable
 import com.databricks.dicer.assigner.AssignmentStats.AssignmentLoadStats
-import com.databricks.dicer.assigner.config.{ChurnConfig, ConfigTestUtil}
+import com.databricks.dicer.assigner.config.{ChurnConfig}
+import com.databricks.dicer.assigner.config.testing.{ConfigTestUtils}
 import com.databricks.dicer.assigner.config.InternalTargetConfig.{
   KeyReplicationConfig,
   LoadBalancingMetricConfig
 }
 import com.databricks.dicer.common.Assignment
 import com.databricks.dicer.common.SliceKeyHelper.RichSliceKey
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  assertDesirableAssignmentProperties,
+  createRandomLoadMap
+}
 import com.databricks.dicer.external.{Slice, SliceKey}
 import com.databricks.dicer.friend.Squid
 
@@ -87,7 +91,7 @@ class AlgorithmChaosSuite extends AlgorithmSuiteBase {
         ),
       ),
       ChaosTestCase(
-        churnConfig = ConfigTestUtil.ZERO_PENALTY_CHURN_CONFIG,
+        churnConfig = ConfigTestUtils.ZERO_PENALTY_CHURN_CONFIG,
         // When using the zero churn penalty, we should almost always be able to satisfy the ideal
         // 2.5% imbalance tolerance target, so we can observe the p99 imbalance ratio bound is
         // about 2.5%. But given that the replication case makes the Algorithm more restricted,

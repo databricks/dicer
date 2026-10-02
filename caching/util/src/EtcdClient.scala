@@ -17,6 +17,11 @@ import io.etcd.jetcd.resolver.IPResolverProvider
 import io.etcd.jetcd.{ByteSequence, KeyValue, Watch}
 import io.grpc.NameResolverRegistry
 import com.databricks.caching.util.AssertMacros.{iassert, ifail}
+import com.databricks.caching.util.EtcdClient.NewKeyVersionTxnBuilder.FailedTxnReadResponse
+import com.databricks.caching.util.EtcdKeyValueMapper.{
+  ParsedGlobalLogVersionedKey,
+  ParsedVersionedKey
+}
 import com.databricks.caching.util.Pipeline.InlinePipelineExecutor
 import com.google.protobuf.ByteString
 import com.databricks.caching.util.EtcdClient.WriteResponse.KeyState
@@ -152,11 +157,6 @@ import com.databricks.rpc.tls.{JetcdTLS, TLSOptions}
  * https://etcd.io/docs/v3.5/learning/data_model/.
  */
 final class EtcdClient private (jetcd: JetcdWrapper, val config: Config) {
-  import NewKeyVersionTxnBuilder.FailedTxnReadResponse
-  import com.databricks.caching.util.EtcdKeyValueMapper.{
-    ParsedGlobalLogVersionedKey,
-    ParsedVersionedKey
-  }
 
   private val logger = PrefixLogger.create(this.getClass, s"namespace: ${config.keyNamespace}")
 
@@ -1347,7 +1347,7 @@ object EtcdClient {
     }
   }
 
-  private object NewKeyVersionTxnBuilder {
+  private[util] object NewKeyVersionTxnBuilder {
 
     /**
      * The result of a [[Txn]] built by [[NewKeyVersionTxnBuilder]] where the guard

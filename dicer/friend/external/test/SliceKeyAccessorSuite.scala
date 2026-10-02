@@ -2,7 +2,7 @@ package com.databricks.dicer.friend.external
 
 import com.databricks.caching.util.TestUtils
 import com.google.protobuf.ByteString
-import com.databricks.dicer.common.TestSliceUtils
+import com.databricks.dicer.common.testing.SliceTestUtils
 import com.databricks.dicer.common.test.SliceKeyTestDataP
 import com.databricks.dicer.external.{HighSliceKey, SliceKey}
 import com.databricks.testing.DatabricksTest
@@ -18,7 +18,7 @@ class SliceKeyAccessorSuite extends DatabricksTest {
   /** Ordered HighSliceKey values from shared test data. */
   private lazy val ORDERED_SLICE_KEYS: Vector[HighSliceKey] =
     TEST_DATA.orderedHighSliceKeys.map { highSliceKey =>
-      TestSliceUtils.highSliceKeyFromProto(highSliceKey)
+      SliceTestUtils.highSliceKeyFromProto(highSliceKey)
     }.toVector
 
   test("fromRawBytes and toRawBytes") {

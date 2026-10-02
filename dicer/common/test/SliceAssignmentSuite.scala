@@ -1,7 +1,17 @@
 package com.databricks.dicer.common
 
 import scala.util.Random
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  GenerationIncarnationFluent,
+  LowInclusiveStringFluent,
+  createRandomSliceAssignment,
+  createRandomSliceWithSubslices,
+  createTestSquid,
+  parseSimpleSliceAssignment,
+  toSliceKey,
+  toSquid,
+  toSquidWithValue
+}
 import com.databricks.dicer.common.test.{SimpleDiffAssignmentP, SliceAssignmentTestDataP}
 import com.databricks.dicer.external.Slice
 import com.databricks.dicer.friend.Squid
