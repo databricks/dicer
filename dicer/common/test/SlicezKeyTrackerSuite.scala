@@ -5,7 +5,7 @@ import com.databricks.caching.util.AlertOwnerTeam
 import com.databricks.caching.util.TestUtils
 import com.databricks.caching.util.SequentialExecutionContext
 import com.databricks.dicer.common.SlicezKeyTracker.SlicezKeyTrackable
-import com.databricks.dicer.common.TestSliceUtils.{encryptedFp, fp, identityKey}
+import com.databricks.dicer.common.testing.SliceTestUtils.{encryptedFp, fp, identityKey}
 import org.apache.commons.lang3.StringUtils
 import com.databricks.testing.DatabricksTest
 import scalatags.Text.all._

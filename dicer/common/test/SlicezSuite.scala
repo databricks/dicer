@@ -1,5 +1,7 @@
 package com.databricks.dicer.common
 
+import com.databricks.dicer.common.testing.{InternalDicerTestEnvironment, TestAssigner}
+
 import scala.concurrent.duration.Duration
 
 import org.apache.commons.lang3.StringUtils
@@ -74,7 +76,7 @@ class SlicezSuite extends DatabricksTest {
     Clerk.create(clerkConf, target, sliceletHostName = "localhost", addr => addr)
     Clerk.create(clerkConf, target, sliceletHostName = "localhost", addr => addr)
 
-    // Wait for the Clerks to show up in the SubscriberManager on the Assigner side.
+    // Wait for the Clerks to show up in the SubscriberHandler on the Assigner side.
     AssertionWaiter("Clerks to show up").await {
       val slicezData: AssignerSlicezData =
         TestUtils.awaitResult(slicezTestAssigner.getSlicezData, Duration.Inf)

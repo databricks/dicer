@@ -130,34 +130,6 @@ scala_library(
 )
 
 scala_library(
-    name = "config_test_util",
-    srcs = ["test/ConfigTestUtil.scala"],
-    testonly = True,
-    deps = [
-        ":authorizer",
-        ":internal_target_config",
-        "//caching/util:config_test_util",
-        "//caching/util:metric_utils",
-        "//caching/util:prefix_logger",
-        "//caching/util:test_util",
-        "//dicer/assigner/config/proto:advanced_target_config_scala_lib",
-        "//dicer/common:target_helper",
-        "//dicer/external/proto",
-        "//dicer/external:conf",
-        "//wrappers/util:async_test_helpers",
-        "//wrappers/util:databricks-test",
-        "@com_google_protobuf_protobuf_java",
-        "@maven//:com_google_code_findbugs_jsr305",
-        "@maven//:com_google_guava_guava",
-        "@maven//:io_prometheus_simpleclient",
-        "@scala_proto_rules_grpc_api",
-        "@scala_proto_rules_grpc_netty",
-        "@scala_proto_rules_grpc_stub",
-        "@scala_proto_rules_scalapb_runtime",
-    ],
-)
-
-scala_library(
     name = "config_provider",
     srcs = [
         "src/DicerSafeConfigProvider.scala",
@@ -199,7 +171,7 @@ scala_test(
     ],
     deps = [
         ":config_provider",
-        ":config_test_util",
+        "//dicer/assigner/config/testing:config_test_utils",
         "//caching/util:alert_owner_team",
         "//caching/util:sequential_execution_context",
         "//caching/util:server_conf",
@@ -252,11 +224,11 @@ scala_test(
     deps = [
         ":authorizer",
         ":config_reader",
-        ":config_test_util",
         ":internal_target_config",
         "//caching/util:config_scope",
         "//caching/util:prefix_logger",
         "//caching/util:test_util",
+        "//dicer/assigner/config/testing:config_test_utils",
         "//dicer/external/proto",
         "//dicer/external:conf",
         "//wrappers/conf:dbconf",
@@ -272,17 +244,17 @@ scala_test(
     timeout = "short",
     deps = [
         ":authorizer",
-        ":config_test_util",
         ":internal_target_config",
         "//caching/util:test_util",
         "//caching/util:unix_time_version",
         "//dicer/assigner/config/proto:advanced_target_config_scala_lib",
         "//dicer/assigner/config/proto:internal_target_config_scala_lib",
+        "//dicer/assigner/config/testing:config_test_utils",
         "//dicer/common/proto:common_proto_scala_lib",
+        "//dicer/common/testing:test_common",
         "//dicer/common:assignment_core",
         "//dicer/common:generation",
         "//dicer/common:slice_key_sensitivity",
-        "//dicer/common:test_common",
         "//dicer/external:conf",
         "//dicer/external:external_common",
         "//dicer/friend:squid",

@@ -3,7 +3,27 @@ package com.databricks.dicer.common
 import scala.util.Random
 
 import com.databricks.dicer.common.SubsliceAnnotationsMap.SliceWithAnnotations
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.{SliceTestUtils}
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  GenerationIncarnationFluent,
+  LowInclusiveSliceKeyFluent,
+  LowInclusiveStringFluent,
+  SliceAssignmentFluet,
+  SliceAssignmentSliceFluent,
+  SubsliceAnnotationSliceFluent,
+  createAssignment,
+  createBiasedProposal,
+  createLooseGeneration,
+  createProposal,
+  createRandomProposal,
+  createTestSquid,
+  fp,
+  toProposedAssignmentEntry,
+  toSliceKey,
+  toSquid,
+  toSquidWithValue,
+  `∞`
+}
 import com.databricks.dicer.external.{Slice, SliceKey}
 import com.databricks.dicer.friend.{MutableSliceMap, SliceMap, Squid}
 import com.databricks.dicer.friend.SliceMap.{GapEntry, IntersectionEntry}
@@ -168,7 +188,7 @@ class SubsliceAnnotationsMapSuite extends DatabricksTest {
             )
 
         for (asn <- assignment.sliceMap.entries) {
-          if (asn.resources.contains(pod0)) {
+          if (asn.resourcesSet.contains(pod0)) {
             contGenOnPod0.merge(asn.slice, Some(asn.generation.number), mergeFn)
           } else {
             contGenOnPod0.merge(asn.slice, value = None, mergeFn)
@@ -239,7 +259,7 @@ class SubsliceAnnotationsMapSuite extends DatabricksTest {
           AssignmentConsistencyMode.Affinity,
           generation = 32
         )
-    assert(TestSliceUtils.hasStateTransfers(assignment2))
+    assert(SliceTestUtils.hasStateTransfers(assignment2))
 
     val resource1Map = SubsliceAnnotationsMap(assignment2, resource1)
     assert(

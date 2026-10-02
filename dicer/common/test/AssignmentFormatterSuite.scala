@@ -6,7 +6,20 @@ import scala.io.Source
 import scala.util.Random
 
 import com.databricks.testing.DatabricksTest
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  GenerationIncarnationFluent,
+  LowInclusiveStringFluent,
+  SliceAssignmentFluet,
+  SliceAssignmentSliceFluent,
+  createAssignment,
+  createLooseGeneration,
+  createRandomProposal,
+  createTestSquid,
+  toSliceKey,
+  toSquid,
+  toSquidWithValue,
+  `∞`
+}
 import com.databricks.caching.util.TestUtils.assertThrow
 import com.databricks.dicer.external.{Slice, SliceKey}
 import com.databricks.dicer.friend.{SliceMap, Squid}

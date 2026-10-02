@@ -64,8 +64,8 @@ object AssignmentStats {
         val current: SliceAssignment = intersectionEntry.rightEntry
         // Note: the following are the load carried by the `loadMap`, but spread out between
         // previous / current number of replicas.
-        val previousPerSliceReplicaLoad: Double = sliceTotalLoad / previous.resources.size
-        val currentPerSliceReplicaLoad: Double = sliceTotalLoad / current.resources.size
+        val previousPerSliceReplicaLoad: Double = sliceTotalLoad / previous.resourcesSet.size
+        val currentPerSliceReplicaLoad: Double = sliceTotalLoad / current.resourcesSet.size
 
         // Compute and classify churn for this slice.
         //
@@ -128,15 +128,15 @@ object AssignmentStats {
         // assignment.
         var sliceLoadNotMoved: Double = 0
 
-        for (previousResource: Squid <- previous.resources) {
+        for (previousResource: Squid <- previous.resourcesSet) {
           if (!currentAssignment.assignedResources.contains(previousResource)) {
             sliceLoadOnRemovedResources += previousPerSliceReplicaLoad
           }
         }
-        for (currentResource: Squid <- current.resources) {
+        for (currentResource: Squid <- current.resourcesSet) {
           if (!previousAssignment.assignedResources.contains(currentResource)) {
             sliceLoadOnAddedResources += currentPerSliceReplicaLoad
-          } else if (previous.resources.contains(currentResource)) {
+          } else if (previous.resourcesSet.contains(currentResource)) {
             // Note that even if a resource is assigned the Slice in both previous and current
             // assignments, only the common part of previous load and current load on the resource
             // is considered as "not moved".
@@ -168,7 +168,7 @@ object AssignmentStats {
         // Note: We need to explicitly check if there was a SliceMap change instead of checking if
         // churn > 0 because there could be a SliceMap changes for slices with no load, but we
         // should still consider this a meaningful assignment change.
-        isMeaningfulAssignmentChange ||= (previous.resources != current.resources)
+        isMeaningfulAssignmentChange ||= (previous.resourcesSet != current.resourcesSet)
       }
 
       // Avoid division by zero errors.
@@ -244,7 +244,7 @@ object AssignmentStats {
         val sliceLoad: Double = loadMap.getLoad(slice)
         loadBySliceBuilder += slice -> sliceLoad
 
-        val sliceResources: Set[Squid] = sliceAssignment.resources
+        val sliceResources: Set[Squid] = sliceAssignment.resourcesSet
         val loadPerReplica: Double = sliceLoad / sliceResources.size
         for (resource: Squid <- sliceResources) {
           val resourceIndex: Int = resourceIndices(resource)

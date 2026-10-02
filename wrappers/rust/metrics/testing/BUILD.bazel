@@ -1,0 +1,10 @@
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+rust_library(
+    name = "testing",
+    testonly = True,
+    srcs = ["src/lib.rs"],
+    crate_name = "universe_raf_metrics_testing",
+    visibility = ["//visibility:public"],
+    deps = ["//wrappers/rust/metrics"],
+)

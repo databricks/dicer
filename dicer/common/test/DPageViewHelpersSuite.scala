@@ -8,7 +8,10 @@ import scala.util.Try
 
 import com.databricks.api.proto.dicer.dpage.{AssignmentViewP, GenerationViewP, ResourceViewP}
 import com.databricks.caching.util.TestUtils.loadTestData
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  createTestSquid,
+  parseSimpleDiffAssignment
+}
 import com.databricks.dicer.common.test.DpageViewHelpersTestDataP
 import com.databricks.dicer.common.test.DpageViewHelpersTestDataP.{
   GenerationToViewProtoTestCaseP,

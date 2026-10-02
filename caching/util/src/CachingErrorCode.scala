@@ -192,6 +192,15 @@ object CachingErrorCode {
   }
 
   /**
+   * A Slicelet reported a per-key load distribution (CDF) that is internally incongruent, e.g.
+   * there is no room between the last sample's key and the Slice's high bound yet the load
+   * fraction between them is non-zero.
+   */
+  case object INCONGRUENT_LOAD_DISTRIBUTION extends CachingErrorCode {
+    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
+  }
+
+  /**
    * The preferred assigner store is unable to parse the preferred assigner value from etcd.
    * This is an error which requires immediate mitigation, and pager must go off.
    *

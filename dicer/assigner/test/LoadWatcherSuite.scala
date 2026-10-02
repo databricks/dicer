@@ -5,7 +5,10 @@ import scala.collection.mutable
 import scala.concurrent.duration._
 import scala.util.Random
 
-import com.databricks.caching.util.CachingErrorCode.TOP_KEYS_LOAD_EXCEEDS_SLICE_LOAD
+import com.databricks.caching.util.CachingErrorCode.{
+  INCONGRUENT_LOAD_DISTRIBUTION,
+  TOP_KEYS_LOAD_EXCEEDS_SLICE_LOAD
+}
 import com.databricks.caching.util.TestUtils.assertThrow
 import com.databricks.caching.util.{MetricUtils, Severity, TickerTime}
 import com.databricks.dicer.assigner.config.InternalTargetConfig.LoadWatcherTargetConfig
@@ -13,8 +16,24 @@ import com.databricks.dicer.assigner.algorithm.LoadMap
 import com.databricks.dicer.assigner.algorithm.LoadMap.{Entry, KeyLoadMap}
 import com.databricks.dicer.assigner.LoadWatcher.{LOAD_WEIGHT_DECAYING_HALFLIFE, Measurement}
 import com.databricks.dicer.common.SliceKeyHelper.RichSliceKey
+import com.databricks.dicer.common.SliceletData.LoadDistribution.CdfPoint
 import com.databricks.dicer.common.SliceletData.{KeyLoad, LoadDistribution}
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  GenerationIncarnationFluent,
+  LowInclusiveSliceKeyFluent,
+  LowInclusiveStringFluent,
+  SliceAssignmentFluet,
+  SliceAssignmentSliceFluent,
+  createAssignment,
+  createLooseGeneration,
+  createRandomSliceAssignment,
+  identityKey,
+  randomInRange,
+  toResourceAddress,
+  toSliceKey,
+  toSquid,
+  `∞`
+}
 import com.databricks.dicer.common.{AssignmentConsistencyMode, Assignment, SliceAssignment}
 import com.databricks.dicer.external.{
   HighSliceKey,
@@ -143,6 +162,15 @@ class LoadWatcherSuite extends DatabricksTest {
     )
   }
 
+  /** Returns the number of alerts filed because a Slice's load distribution was incongruent. */
+  private def getIncongruentLoadDistributionAlertCount(slice: Slice): Int = {
+    MetricUtils.getPrefixLoggerErrorCount(
+      Severity.DEGRADED,
+      INCONGRUENT_LOAD_DISTRIBUTION,
+      prefix = s"slice=$slice"
+    )
+  }
+
   /**
    * Generate a random finite duration between [lowInclusive, highExclusive). Note that this may be
    * prone to double rounding effects, thus should generally only be used when `lowInclusive` and
@@ -153,6 +181,103 @@ class LoadWatcherSuite extends DatabricksTest {
       highExclusive: FiniteDuration,
       random: Random): FiniteDuration = {
     randomInRange(lowInclusive.toNanos, highExclusive.toNanos, random).nanoseconds
+  }
+
+  /**
+   * Returns the immediate successor of a key: the smallest key strictly greater than `key`.
+   *
+   * @param key The key to get the successor of (can be of type [[SliceKey]] or [[String]]).
+   */
+  private def succ(key: SliceKey): SliceKey = key.successor()
+
+  /**
+   * A load-distribution apportioning test case for a Slice spanning the entire keyspace (["",
+   * +inf)): the reported CDF and top keys (the measurement inputs) and the full [[LoadMap]] the
+   * Slice's load should be apportioned into (the expected output).
+   *
+   * @param points          The reported CDF.
+   * @param topKeys         The reported top keys (if any) and their loads.
+   * @param fullSliceLoad   The total load distributed over the keyspace; the expected entry loads
+   *                        must sum to it.
+   * @param expectedLoadMap The full expected LoadMap, spelled out as [lower, upper): load entries.
+   * @throws IllegalArgumentException If the expected entry loads do not sum to `fullSliceLoad.
+   */
+  private case class ApportionCase(
+      points: IndexedSeq[CdfPoint],
+      topKeys: Seq[KeyLoad],
+      fullSliceLoad: Double,
+      expectedLoadMap: LoadMap) {
+    require(
+      // Allow for small floating point errors when summing the expected entry loads.
+      Math.abs(expectedLoadMap.sliceMap.entries.map((_: Entry).load).sum - fullSliceLoad) < 1e-10,
+      s"Expected LoadMap must sum to the full Slice load of $fullSliceLoad."
+    )
+  }
+
+  private object ApportionCase {
+
+    /**
+     * Builds an [[ApportionCase]] from string CDF keys.
+     * See [[ApportionCase]] for the full parameter documentation.
+     *
+     * @param cdf The reported CDF as (key, cumulativeLoadFraction) pairs, in ascending key order.
+     */
+    def create(
+        cdf: Seq[(String, Double)],
+        topKeys: Seq[KeyLoad] = Seq.empty,
+        fullSliceLoad: Double,
+        expected: Seq[Entry]): ApportionCase = {
+      val points: IndexedSeq[CdfPoint] = cdf.map {
+        case (key: String, fraction: Double) => CdfPoint(identityKey(key), fraction)
+      }.toIndexedSeq
+      ApportionCase(
+        points,
+        topKeys,
+        fullSliceLoad,
+        LoadMap.newBuilder().putLoad(expected: _*).build()
+      )
+    }
+  }
+
+  /**
+   * Runs an [[ApportionCase]] and asserts that the apportioned [[LoadMap]] matches the expected
+   * map.
+   */
+  private def runApportionCase(testCase: ApportionCase): Unit = {
+    val slice: Slice = "".andGreater
+    val watcher = new LoadWatcherWrapper(
+      LoadWatcherTargetConfig(
+        minDuration = 1.minute,
+        maxAge = 1.minute,
+        useTopKeys = true,
+        useLoadDistribution = true
+      ),
+      LoadWatcher.StaticConfig(allowTopKeys = true, allowLoadDistribution = true)
+    )
+    val assignment: Assignment = createAssignment(
+      12,
+      AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
+      (slice @@ 12 -> Seq("pod0")).clearPrimaryRateLoad()
+    )
+    val distribution = LoadDistribution(points = testCase.points, maxErrorFraction = 0.1)
+    val now: TickerTime = watcher.now
+    watcher.recordSliceletLoad(
+      Seq(
+        watcher.createMeasurement(
+          time = now - 1.second,
+          windowDuration = 1.minute,
+          slice = slice,
+          resource = "pod0",
+          numReplicas = 1,
+          load = testCase.fullSliceLoad,
+          topKeys = testCase.topKeys,
+          loadDistributionOpt = Some(distribution)
+        )
+      )
+    )
+    val actualLoadMap: LoadMap = watcher.getPrimaryRateLoadMap(assignment).get
+    assertEqualWithinTolerance(actualLoadMap, testCase.expectedLoadMap)
   }
 
   test("Measurement validation") {
@@ -227,7 +352,7 @@ class LoadWatcherSuite extends DatabricksTest {
     // Measurement field directly. Once it is consumed (incorporated into the LoadMap), verify the
     // gate behaviorally via `getPrimaryRateLoadMap`, matching the other Measurement fields.
     val distribution = LoadDistribution(
-      points = IndexedSeq(LoadDistribution.CdfPoint(identityKey("foo"), 1.0)),
+      points = IndexedSeq(CdfPoint(identityKey("foo"), 1.0)),
       maxErrorFraction = 0.1
     )
 
@@ -496,10 +621,14 @@ class LoadWatcherSuite extends DatabricksTest {
     )
   }
 
-  test("recordSliceletLoad preserves only latest value for a Slice replica") {
+  gridTest("recordSliceletLoad preserves only latest value for a Slice replica")(
+    Seq((1, 1), (1, 3), (3, 1), (3, 3))
+  ) { replicaCounts: (Int, Int) =>
     // Test plan: create a load watcher configured to aggregate primary-rate load from Slicelets.
-    // Provide multiple load reports for the same Slices. Verify that only the reports covering the
-    // most recent windows are preserved.
+    // Replace measurements with unchanged, increased, and decreased replica counts. Verify that
+    // only the newest reports contribute to the load and determine when the measurements expire.
+
+    val (existingNumReplicas, newNumReplicas): (Int, Int) = replicaCounts
 
     val watcher = new LoadWatcherWrapper(
       LoadWatcherTargetConfig(
@@ -527,7 +656,7 @@ class LoadWatcherSuite extends DatabricksTest {
           windowDuration = 1.minute,
           slice = "" -- "fili",
           resource = "pod0",
-          numReplicas = 1,
+          numReplicas = existingNumReplicas,
           load = 1,
           topKeys = Seq.empty
         ),
@@ -536,7 +665,7 @@ class LoadWatcherSuite extends DatabricksTest {
           windowDuration = 1.minute,
           slice = "fili".andGreater,
           resource = "pod0",
-          numReplicas = 1,
+          numReplicas = existingNumReplicas,
           load = 2,
           topKeys = Seq.empty
         )
@@ -549,7 +678,7 @@ class LoadWatcherSuite extends DatabricksTest {
           windowDuration = 1.minute,
           slice = "" -- "fili",
           resource = "pod0",
-          numReplicas = 1,
+          numReplicas = newNumReplicas,
           load = 3,
           topKeys = Seq.empty
         ),
@@ -558,7 +687,7 @@ class LoadWatcherSuite extends DatabricksTest {
           windowDuration = 1.minute,
           slice = "fili".andGreater,
           resource = "pod0",
-          numReplicas = 1,
+          numReplicas = newNumReplicas,
           load = 4,
           topKeys = Seq.empty
         )
@@ -570,11 +699,16 @@ class LoadWatcherSuite extends DatabricksTest {
       LoadMap
         .newBuilder()
         .putLoad(
-          Entry("" -- "fili", 3),
-          Entry("fili".andGreater, 2)
+          Entry("" -- "fili", 3 * newNumReplicas),
+          Entry("fili".andGreater, 2 * existingNumReplicas)
         )
         .build()
     )
+
+    watcher.now += 55.seconds
+    assert(watcher.size == 2)
+    watcher.now += 1.nanosecond
+    assert(watcher.size == 0)
   }
 
   test("Too short reports are excluded") {
@@ -1069,6 +1203,693 @@ class LoadWatcherSuite extends DatabricksTest {
     )
     watcher2.getPrimaryRateLoadMap(assignment)
     assert(getTopKeysAlertCount("" -- ∞) == newCount)
+  }
+
+  test("Single-key Slice conserves load when its lone key is a top key") {
+    // Test plan: Verify that for a single-key Slice whose lone key is a top key reported below the
+    // Slice's total load, the LoadWatcher conserves the full Slice load onto that key.
+    val watcher = new LoadWatcherWrapper(
+      LoadWatcherTargetConfig(
+        minDuration = 1.minute,
+        maxAge = 1.minute,
+        useTopKeys = true,
+        useLoadDistribution = false
+      ),
+      LoadWatcher.StaticConfig(allowTopKeys = true, allowLoadDistribution = false)
+    )
+    // Cover the full keyspace to form a valid assignment.
+    val hotKey: SliceKey = "d"
+    val singleKeySlice: Slice = Slice(hotKey, hotKey.successor())
+    val leftSlice: Slice = Slice(SliceKey.MIN, hotKey)
+    val rightSlice: Slice = Slice(hotKey.successor(), InfinitySliceKey)
+    val assignment: Assignment = createAssignment(
+      generation = 12,
+      AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
+      (leftSlice @@ 12 -> Seq("pod0")).clearPrimaryRateLoad(),
+      (singleKeySlice @@ 12 -> Seq("pod0")).clearPrimaryRateLoad(),
+      (rightSlice @@ 12 -> Seq("pod0")).clearPrimaryRateLoad()
+    )
+    for (flankingSlice: Slice <- Seq(leftSlice, rightSlice)) {
+      watcher.recordSliceletLoad(
+        Seq(
+          watcher.createMeasurement(
+            time = watcher.now - 1.second,
+            windowDuration = 1.minute,
+            slice = flankingSlice,
+            resource = "pod0",
+            numReplicas = 1,
+            load = 50.0,
+            topKeys = Seq.empty
+          )
+        )
+      )
+    }
+    // The single-key Slice's load (100) exceeds its top key's reported load (10).
+    watcher.recordSliceletLoad(
+      Seq(
+        watcher.createMeasurement(
+          time = watcher.now - 1.second,
+          windowDuration = 1.minute,
+          slice = singleKeySlice,
+          resource = "pod0",
+          numReplicas = 1,
+          load = 100.0,
+          topKeys = Seq(KeyLoad(hotKey, 10.0))
+        )
+      )
+    )
+    // The lone key carries the whole Slice load, so no load is dropped.
+    val loadMap: LoadMap = watcher.getPrimaryRateLoadMap(assignment).get
+    assert(loadMap.getLoad(singleKeySlice) == 100.0)
+  }
+
+  namedGridTest("Load distribution has no effect when absent, empty, or the Slice has no load")(
+    // Test plan: Verify that getPrimaryRateLoadMap (with load distribution enabled) leaves the
+    // Slice as one entry (identical to the distribution-disabled result) when a Measurement carries
+    // no distribution, an empty distribution, or zero Slice load.
+    // Each case is (loadDistributionOpt, sliceLoad): the distribution the Slicelet reports
+    // (or None) and the Slice's total load.
+    Seq(
+      // The flag is enabled but the Slicelet reported no distribution.
+      "no distribution reported" -> ((None, 100.0)),
+      // A defined distribution with no points in it is a no-op.
+      "empty distribution" ->
+      ((Some(LoadDistribution(points = IndexedSeq.empty, maxErrorFraction = 0.1)), 100.0)),
+      // A populated distribution over a Slice with no load has nothing to apportion.
+      "no Slice load" ->
+      (
+        (
+          Some(
+            LoadDistribution(
+              points = IndexedSeq(CdfPoint(identityKey("m"), 1.0)),
+              maxErrorFraction = 0.1
+            )
+          ),
+          0.0
+        )
+      )
+    )
+  ) { testCase =>
+    val (loadDistributionOpt, sliceLoad): (Option[LoadDistribution], Double) = testCase
+    // Setup: Create an Assignment for a slice covering the entire keyspace.
+    val slice: Slice = "".andGreater
+    val watcher = new LoadWatcherWrapper(
+      LoadWatcherTargetConfig(
+        minDuration = 1.minute,
+        maxAge = 1.minute,
+        useTopKeys = false,
+        useLoadDistribution = true
+      ),
+      LoadWatcher.StaticConfig(allowTopKeys = false, allowLoadDistribution = true)
+    )
+    val assignment: Assignment = createAssignment(
+      12,
+      AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
+      (slice @@ 12 -> Seq("pod0")).clearPrimaryRateLoad()
+    )
+    // Setup: Record a Measurement with the degenerate distribution and load.
+    val now: TickerTime = watcher.now
+    watcher.recordSliceletLoad(
+      Seq(
+        watcher.createMeasurement(
+          time = now - 1.second,
+          windowDuration = 1.minute,
+          slice = slice,
+          resource = "pod0",
+          numReplicas = 1,
+          load = sliceLoad,
+          topKeys = Seq.empty,
+          loadDistributionOpt = loadDistributionOpt
+        )
+      )
+    )
+    // Verify: The Slice is a single entry carrying its full load; no load is apportioned.
+    val expected: LoadMap = LoadMap
+      .newBuilder()
+      .putLoad(Entry(slice, sliceLoad))
+      .build()
+    val actual: LoadMap = watcher.getPrimaryRateLoadMap(assignment).get
+    assertEqualWithinTolerance(actual, expected)
+  }
+
+  namedGridTest("Load distribution apportions a Slice into CDF sub-entries")(
+    // Test plan: Verify that, given a Measurement carrying a load distribution but no top keys,
+    // getPrimaryRateLoadMap correctly apportions the Slice's load into fine-grained entries
+    // following the CDF. Test cases assume a total load of 100.0.
+    Seq(
+      // Case 1: Full-coverage CDF (last reported fraction is 1.0): sampled at quartiles ("d", "h",
+      // "m", "t"), so each interval carries 25 and there is no load above the last sample.
+      "reaches full coverage" -> ApportionCase.create(
+        cdf = Seq("d" -> 0.25, "h" -> 0.5, "m" -> 0.75, "t" -> 1.0),
+        fullSliceLoad = 100.0,
+        expected = Seq(
+          Entry("" -- succ("d"), 25.0),
+          Entry(succ("d") -- succ("h"), 25.0),
+          Entry(succ("h") -- succ("m"), 25.0),
+          Entry(succ("m") -- succ("t"), 25.0),
+          Entry(succ("t").andGreater, 0.0)
+        )
+      ),
+      // Case 2: Partial-coverage CDF (last reported fraction is 0.75): the same samples as Case 1
+      // but stopping at "m", a valid snapshot that does not reach full coverage. The remaining 25%
+      // of the load should be apportioned into a tail bucket from the last sample's successor to
+      // the Slice's high bound.
+      "tops out below full coverage" -> ApportionCase.create(
+        cdf = Seq("d" -> 0.25, "h" -> 0.5, "m" -> 0.75),
+        fullSliceLoad = 100.0,
+        expected = Seq(
+          Entry("" -- succ("d"), 25.0),
+          Entry(succ("d") -- succ("h"), 25.0),
+          Entry(succ("h") -- succ("m"), 25.0),
+          Entry(succ("m").andGreater, 25.0)
+        )
+      ),
+      // Case 3: Cold leading range (first reported fraction is 0.0 at "d", which is above the
+      // Slice's low bound): the first sample reports no load at or below "d", so keys in [low, "d"]
+      // form a 0-load bucket.
+      "leading range is cold" -> ApportionCase.create(
+        cdf = Seq("d" -> 0.0, "m" -> 0.5, "t" -> 1.0),
+        fullSliceLoad = 100.0,
+        expected = Seq(
+          Entry("" -- succ("d"), 0.0),
+          Entry(succ("d") -- succ("m"), 50.0),
+          Entry(succ("m") -- succ("t"), 50.0),
+          Entry(succ("t").andGreater, 0.0)
+        )
+      ),
+      // Case 4: Equal consecutive fractions produce a 0-load bucket between the equal samples,
+      // tested at a mid value ("d" and "m" both 0.5 -> empty interior bucket) and at 1.0 ("t" and
+      // "u" both 1.0 -> empty bucket after full coverage).
+      "equal consecutive fractions leave a range empty" -> ApportionCase.create(
+        cdf = Seq("d" -> 0.5, "m" -> 0.5, "t" -> 1.0, "u" -> 1.0),
+        fullSliceLoad = 100.0,
+        expected = Seq(
+          Entry("" -- succ("d"), 50.0),
+          Entry(succ("d") -- succ("m"), 0.0),
+          Entry(succ("m") -- succ("t"), 50.0),
+          Entry(succ("t") -- succ("u"), 0.0),
+          Entry(succ("u").andGreater, 0.0)
+        )
+      ),
+      // Case 5: Keys of varying lengths, including a key with its immediate successor as a sample.
+      // Constructs ApportionCase directly (not via `create`) because the last CDF sample is
+      // identityKey("aaa").successor(), which carries a NUL byte and can't be a string literal.
+      "keys of varying lengths including successor-adjacent samples" -> ApportionCase(
+        points = IndexedSeq(
+          CdfPoint(identityKey("a"), 0.25),
+          CdfPoint(identityKey("aa"), 0.5),
+          CdfPoint(identityKey("aaa"), 0.75),
+          CdfPoint(identityKey("aaa").successor(), 1.0)
+        ),
+        topKeys = Seq.empty,
+        fullSliceLoad = 100.0,
+        expectedLoadMap = LoadMap
+          .newBuilder()
+          .putLoad(
+            Entry("" -- succ("a"), 25.0),
+            Entry(succ("a") -- succ("aa"), 25.0),
+            Entry(succ("aa") -- succ("aaa"), 25.0),
+            Entry(succ("aaa") -- succ(succ("aaa")), 25.0),
+            Entry(succ(succ("aaa")).andGreater, 0.0)
+          )
+          .build()
+      ),
+      // Case 6: The first sample sits exactly on the Slice's low bound (""), so its bucket is the
+      // single low key.
+      "first sample is the Slice's low key" -> ApportionCase.create(
+        cdf = Seq("" -> 0.3, "m" -> 1.0),
+        fullSliceLoad = 100.0,
+        expected = Seq(
+          Entry("" -- succ(""), 30.0),
+          Entry(succ("") -- succ("m"), 70.0),
+          Entry(succ("m").andGreater, 0.0)
+        )
+      ),
+      // Case 7: A heavily skewed CDF (almost all load between "c" and "d"). Load should be
+      // apportioned proportionally.
+      "heavily skewed distribution" -> ApportionCase.create(
+        cdf = Seq("a" -> 0.0001, "b" -> 0.0002, "c" -> 0.0003, "d" -> 0.995),
+        fullSliceLoad = 100.0,
+        expected = Seq(
+          Entry("" -- succ("a"), 0.01),
+          Entry(succ("a") -- succ("b"), 0.01),
+          Entry(succ("b") -- succ("c"), 0.01),
+          Entry(succ("c") -- succ("d"), 99.47),
+          Entry(succ("d").andGreater, 0.5)
+        )
+      )
+    )
+  ) { testCase: ApportionCase =>
+    runApportionCase(testCase)
+  }
+
+  namedGridTest("Load distribution reserves top keys and drains overshoot across buckets")(
+    // Test plan: Verify that, given a Measurement carrying both a load distribution and top keys,
+    // each top key is isolated at its reported (reserved) load. The key's load should be
+    // carved out of its bucket's background load, and should not be capped. If it exceeds a
+    // bucket's allotted load then the remaining buckets should be rescaled accordingly to preserve
+    // the total load. Test cases assume a total load of 100.0.
+    Seq(
+      // Case 1: The hot key "p" (25) fits into the bucket between "m" and "t". No rescaling is
+      // needed.
+      "key fits its bucket" -> ApportionCase.create(
+        cdf = Seq("m" -> 0.4, "t" -> 1.0),
+        topKeys = Seq(KeyLoad("p", 25.0)),
+        fullSliceLoad = 100.0,
+        expected = Seq(
+          Entry("" -- succ("m"), 40.0),
+          Entry(succ("m") -- "p", 15.0),
+          Entry("p" -- succ("p"), 25.0),
+          Entry(succ("p") -- succ("t"), 20.0),
+          Entry(succ("t").andGreater, 0.0)
+        )
+      ),
+      // Case 2: The hot key "p" (80) exceeds its bucket between "m" and "t". Its load is preserved
+      // at 80, and the other buckets (background load) are scaled down to preserve the total.
+      "key exceeds its bucket, overshoot drains other buckets" -> ApportionCase.create(
+        cdf = Seq("m" -> 0.4, "t" -> 1.0),
+        topKeys = Seq(KeyLoad("p", 80.0)),
+        fullSliceLoad = 100.0,
+        expected = Seq(
+          Entry("" -- succ("m"), 20.0),
+          Entry(succ("m") -- "p", 0.0),
+          Entry("p" -- succ("p"), 80.0),
+          Entry(succ("p") -- succ("t"), 0.0),
+          Entry(succ("t").andGreater, 0.0)
+        )
+      ),
+      // Case 3: Two hot keys "p" (40) and "q" (40) each fit the bucket between "m" and "t" (60) on
+      // their own, but combined (80) they exceed it. Both loads are preserved and the background
+      // buckets are rescaled to preserve the total load.
+      // Reserving both keys leaves 100 - 80 = 20 for background, so the other bucket's load
+      // should be scaled from 40 to 20.
+      "two keys whose combined load exceeds their bucket" -> ApportionCase.create(
+        cdf = Seq("m" -> 0.4, "t" -> 1.0),
+        topKeys = Seq(KeyLoad("p", 40.0), KeyLoad("q", 40.0)),
+        fullSliceLoad = 100.0,
+        expected = Seq(
+          Entry("" -- succ("m"), 20.0),
+          Entry(succ("m") -- "p", 0.0),
+          Entry("p" -- succ("p"), 40.0),
+          Entry(succ("p") -- "q", 0.0),
+          Entry("q" -- succ("q"), 40.0),
+          Entry(succ("q") -- succ("t"), 0.0),
+          Entry(succ("t").andGreater, 0.0)
+        )
+      ),
+      // Case 4: The hot key "w" (30) sits above the last sample "t", in the empty tail range that
+      // carries no load. The hot key load is preserved and the other buckets are rescaled.
+      "key above the last sample is reserved in the tail bucket" -> ApportionCase.create(
+        cdf = Seq("m" -> 0.4, "t" -> 1.0),
+        topKeys = Seq(KeyLoad("w", 30.0)),
+        fullSliceLoad = 100.0,
+        expected = Seq(
+          Entry("" -- succ("m"), 28.0),
+          Entry(succ("m") -- succ("t"), 42.0),
+          Entry(succ("t") -- "w", 0.0),
+          Entry("w" -- succ("w"), 30.0),
+          Entry(succ("w").andGreater, 0.0)
+        )
+      ),
+      // Case 5: Two hot keys "e" (50, sitting below "m") and "p" (50, between "m" and "t") together
+      // claim the whole Slice load, so all background drains to 0 while both keys keep their load.
+      "keys claim the whole Slice, all background drains to 0" -> ApportionCase.create(
+        cdf = Seq("m" -> 0.4, "t" -> 1.0),
+        topKeys = Seq(KeyLoad("e", 50.0), KeyLoad("p", 50.0)),
+        fullSliceLoad = 100.0,
+        expected = Seq(
+          Entry("" -- "e", 0.0),
+          Entry("e" -- succ("e"), 50.0),
+          Entry(succ("e") -- succ("m"), 0.0),
+          Entry(succ("m") -- "p", 0.0),
+          Entry("p" -- succ("p"), 50.0),
+          Entry(succ("p") -- succ("t"), 0.0),
+          Entry(succ("t").andGreater, 0.0)
+        )
+      ),
+      // Case 6: The hot key "m" (20) sits exactly on sample "m", whose bucket covers keys at or
+      // below "m". Ensure the key lands in that bucket, not the next one.
+      "key exactly at a sample key falls in that sample's bucket" -> ApportionCase.create(
+        cdf = Seq("m" -> 0.4, "t" -> 1.0),
+        topKeys = Seq(KeyLoad("m", 20.0)),
+        fullSliceLoad = 100.0,
+        expected = Seq(
+          Entry("" -- "m", 20.0),
+          Entry("m" -- succ("m"), 20.0),
+          Entry(succ("m") -- succ("t"), 60.0),
+          Entry(succ("t").andGreater, 0.0)
+        )
+      ),
+      // Case 7: A top key sits alone in a single-key CDF bucket. That bucket's gross CDF load (30)
+      // exceeds the key's reported load (20), so the bucket's background is folded into the key.
+      "top key alone in a single-key bucket absorbs the bucket's background" -> ApportionCase(
+        points = IndexedSeq(
+          CdfPoint(identityKey("m"), 0.5),
+          CdfPoint(identityKey("m").successor(), 0.8)
+        ),
+        topKeys = Seq(KeyLoad(succ("m"), 20.0)),
+        fullSliceLoad = 100.0,
+        expectedLoadMap = LoadMap
+          .newBuilder()
+          .putLoad(
+            Entry("" -- succ("m"), 50.0),
+            Entry(succ("m") -- succ(succ("m")), 30.0),
+            Entry(succ(succ("m")).andGreater, 20.0)
+          )
+          .build()
+      ),
+      // Case 8: Two single-key buckets with hot keys whose load respectively overshoot and
+      // underhang their buckets. succ("d") overshoots its bucket (load 30 > gross 10) while
+      // succ("p") underhangs its bucket (load 10 < gross 30). The underhang's leftover background
+      // should be rescaled to account for the overshoot before being folded into succ("p") --
+      // ensuring that the total load is conserved at 100 (no over-report or lost load).
+      "opposing over- and under-hang single-key buckets stay conserved" -> ApportionCase(
+        points = IndexedSeq(
+          CdfPoint(identityKey("d"), 0.2),
+          CdfPoint(identityKey("d").successor(), 0.3),
+          CdfPoint(identityKey("p"), 0.5),
+          CdfPoint(identityKey("p").successor(), 0.8)
+        ),
+        topKeys = Seq(KeyLoad(succ("d"), 30.0), KeyLoad(succ("p"), 10.0)),
+        fullSliceLoad = 100.0,
+        expectedLoadMap = LoadMap
+          .newBuilder()
+          .putLoad(
+            Entry("" -- succ("d"), 15.0),
+            Entry(succ("d") -- succ(succ("d")), 30.0),
+            Entry(succ(succ("d")) -- succ("p"), 15.0),
+            Entry(succ("p") -- succ(succ("p")), 25.0),
+            Entry(succ(succ("p")).andGreater, 15.0)
+          )
+          .build()
+      )
+    )
+  ) { testCase: ApportionCase =>
+    runApportionCase(testCase)
+  }
+
+  test("Load distribution splitting uses the freshest Measurement's distribution") {
+    // Test plan: Verify that load is apportioned according to the freshest Measurement's
+    // distribution. Report two Measurements for the same Slice from different pods: a stale one
+    // with all load at or below "m", and a fresh one with all load at or below "t".
+
+    // Setup: Create an Assignment for a slice covering the entire keyspace, replicated on two pods.
+    val slice: Slice = "".andGreater
+    val watcher = new LoadWatcherWrapper(
+      LoadWatcherTargetConfig(
+        minDuration = 1.minute,
+        maxAge = 1.minute,
+        useTopKeys = false,
+        useLoadDistribution = true
+      ),
+      LoadWatcher.StaticConfig(allowTopKeys = false, allowLoadDistribution = true)
+    )
+    val assignment: Assignment = createAssignment(
+      12,
+      AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
+      (slice @@ 12 -> Seq("pod0", "pod1")).clearPrimaryRateLoad()
+    )
+    // Setup: Create two distributions - a stale one placing all load at or below "m", and a fresh
+    // one placing all load at or below "t".
+    val staleDistribution = LoadDistribution(
+      points = IndexedSeq(CdfPoint(identityKey("m"), 1.0)),
+      maxErrorFraction = 0.1
+    )
+    val freshDistribution = LoadDistribution(
+      points = IndexedSeq(CdfPoint(identityKey("t"), 1.0)),
+      maxErrorFraction = 0.1
+    )
+    // Setup: Record a stale Measurement (pod0) and a fresher one (pod1). Both pods report the same
+    // per-replica load and replica count, so the aggregated Slice load is exactly 100 regardless of
+    // the age weighting.
+    val now: TickerTime = watcher.now
+    watcher.recordSliceletLoad(
+      Seq(
+        watcher.createMeasurement(
+          time = now - 10.seconds,
+          windowDuration = 1.minute,
+          slice = slice,
+          resource = "pod0",
+          numReplicas = 2,
+          load = 50.0,
+          topKeys = Seq.empty,
+          loadDistributionOpt = Some(staleDistribution)
+        ),
+        watcher.createMeasurement(
+          time = now - 1.second,
+          windowDuration = 1.minute,
+          slice = slice,
+          resource = "pod1",
+          numReplicas = 2,
+          load = 50.0,
+          topKeys = Seq.empty,
+          loadDistributionOpt = Some(freshDistribution)
+        )
+      )
+    )
+    // Verify: The fresh distribution places all load at or below "t", so the whole load lands in
+    // [low, "t".successor()); the stale "m" distribution is not used.
+    val expected: LoadMap = LoadMap
+      .newBuilder()
+      .putLoad(Entry(Slice(slice.lowInclusive, identityKey("t").successor()), 100.0))
+      .build()
+    val actual: LoadMap = watcher.getPrimaryRateLoadMap(assignment).get
+    assertEqualWithinTolerance(actual, expected)
+  }
+
+  test("Load distribution incongruent with the Slice's high bound is tolerated and alerted") {
+    // Test plan: Verify that the assigner tolerates an incongruent load distribution, i.e. a
+    // distribution whose last sample leaves no space below the Slice's high bound ("m".successor())
+    // but tops out below 1.0, and that an INCONGRUENT_LOAD_DISTRIBUTION alert is fired. Top keys
+    // should still be isolated at their reported load, and the Slice's full load should remain
+    // accounted for (no load dropped).
+
+    // Setup: a finite-high Slice ["", "m".successor()). A second Slice ["m".successor(), Infinity)
+    // fills the remainder so the assignment covers the whole keyspace.
+    val slice: Slice = "" -- identityKey("m").successor()
+    val remainderSlice: Slice = identityKey("m").successor().andGreater
+    val fullSliceLoad = 100.0
+    val distribution = LoadDistribution(
+      points = IndexedSeq(CdfPoint(identityKey("m"), 0.5)),
+      maxErrorFraction = 0.1
+    )
+
+    // We test a few cases: each case supplies top keys and the expected background load.
+    val cases: Seq[(String, (Seq[KeyLoad], Double))] =
+      Seq(
+        // Case 1: No top keys. Ensure the entire Slice load is preserved as background load.
+        "no top keys" -> ((Seq.empty[KeyLoad], 100.0)),
+        // Case 2: A hot key with load less than the incongruent bucket's gross CDF load
+        // (30 <= 0.5 * 100 = 50). Ensure the load is preserved correctly and totals 100.
+        "top key claims a minority of the load" -> ((Seq(KeyLoad("m", 30.0)), 70.0)),
+        // Case 3: A hot key with load greater than the incongruent bucket's gross CDF load
+        // (70 >= 0.5 * 100 = 50). Ensure the load is preserved correctly and totals 100.
+        "top key claims a majority of the load" -> ((Seq(KeyLoad("m", 70.0)), 30.0))
+      )
+
+    for (testCase <- cases) {
+      val (name, inputs): (String, (Seq[KeyLoad], Double)) = testCase
+      val (topKeys, expectedBackground): (Seq[KeyLoad], Double) = inputs
+      withClue(s"$name: ") {
+        val watcher = new LoadWatcherWrapper(
+          LoadWatcherTargetConfig(
+            minDuration = 1.minute,
+            maxAge = 1.minute,
+            useTopKeys = true,
+            useLoadDistribution = true
+          ),
+          LoadWatcher.StaticConfig(allowTopKeys = true, allowLoadDistribution = true)
+        )
+        val assignment: Assignment = createAssignment(
+          12,
+          AssignmentConsistencyMode.Affinity,
+          assignerServiceInfoOpt = None,
+          (slice @@ 12 -> Seq("pod0")).clearPrimaryRateLoad(),
+          (remainderSlice @@ 12 -> Seq("pod1")).withPrimaryRateLoad(7.0)
+        )
+        val alertCountBefore: Int = getIncongruentLoadDistributionAlertCount(slice)
+        val now: TickerTime = watcher.now
+        watcher.recordSliceletLoad(
+          Seq(
+            watcher.createMeasurement(
+              time = now - 1.second,
+              windowDuration = 1.minute,
+              slice = slice,
+              resource = "pod0",
+              numReplicas = 1,
+              load = fullSliceLoad,
+              topKeys = topKeys,
+              loadDistributionOpt = Some(distribution)
+            )
+          )
+        )
+        // Verify: the incongruent Slice always accounts for its full 100 load, and that each top
+        // key is isolated at its true (input) load. The remainder Slice passes through its
+        // historical load unchanged.
+        val topKeyLoadMap: KeyLoadMap = KeyLoadMap.empty ++ topKeys.map { keyLoad: KeyLoad =>
+            keyLoad.key -> keyLoad.underestimatedPrimaryRateLoad
+          }
+        val expected: LoadMap = LoadMap
+          .newBuilder()
+          .putLoad(Entry(slice, expectedBackground), topKeyLoadMap)
+          .putLoad(Entry(remainderSlice, 7.0))
+          .build()
+        val actual: LoadMap = watcher.getPrimaryRateLoadMap(assignment).get
+        assertEqualWithinTolerance(actual, expected)
+        // Verify: the incongruent-distribution alert was fired once for this Slice.
+        assert(getIncongruentLoadDistributionAlertCount(slice) == alertCountBefore + 1)
+      }
+    }
+  }
+
+  test("Load distribution apportioning randomized") {
+    // Test plan: Verify that the apportioned LoadMap satisfies invariant properties across a range
+    // of random inputs. Feed randomized CDF points, top keys, Slice boundaries, and Slice loads
+    // into the LoadWatcher with load distribution enabled. getPrimaryRateLoadMap must not throw,
+    // the LoadWatcher's invariants must hold, each top key must be isolated, each assigned Slice's
+    // entries must sum to that Slice's reported load (no load created or dropped, even when top
+    // keys are rescaled or the distribution is incongruent), and no entry may carry negative load.
+
+    val seed: Long = Random.nextLong()
+    logger.info(s"Using seed $seed")
+    val random = new Random(seed)
+
+    // Builds a random CDF over the Slice spanning the Long range [lowSliceKeyLong,
+    // highSliceKeyLong): up to 10 ascending sample keys with ascending cumulative fractions. Each
+    // sample is 1.0 ~1% of the time (nextDouble() never returns 1.0, so full coverage is injected
+    // explicitly) and drawn from [0, 1) otherwise.
+    def randomCdfPoints(lowSliceKeyLong: Long, highSliceKeyLong: Long): IndexedSeq[CdfPoint] = {
+      val keys: Seq[SliceKey] = (0 until (1 + random.nextInt(10)))
+        .map { _: Int =>
+          randomInRange(lowSliceKeyLong, highSliceKeyLong, random)
+        }
+        .distinct
+        .sorted
+        .map(toSliceKey)
+      val fractions: Seq[Double] = keys.indices.map { _: Int =>
+        if (random.nextInt(100) == 0) 1.0 else random.nextDouble()
+      }.sorted
+      keys
+        .zip(fractions)
+        .map {
+          case (key: SliceKey, fraction: Double) => CdfPoint(key, fraction)
+        }
+        .toIndexedSeq
+    }
+
+    // Builds up to 10 random top keys within [lowSliceKeyLong, highSliceKeyLong), each with a load
+    // in [0, sliceLoad). With several keys their sum may exceed sliceLoad, exercising the
+    // rescale-before-apportion path.
+    def randomTopKeys(
+        lowSliceKeyLong: Long,
+        highSliceKeyLong: Long,
+        sliceLoad: Double): Seq[KeyLoad] = {
+      (0 until random.nextInt(11))
+        .map { _: Int =>
+          toSliceKey(randomInRange(lowSliceKeyLong, highSliceKeyLong, random))
+        }
+        .distinct
+        .map { key: SliceKey =>
+          KeyLoad(key, random.nextDouble() * sliceLoad)
+        }
+    }
+
+    for (_: Int <- 0 until 100) { // 100 trials.
+      val useTopKeys: Boolean = random.nextBoolean()
+      val watcher = new LoadWatcherWrapper(
+        LoadWatcherTargetConfig(
+          minDuration = 1.minute,
+          maxAge = 1.minute,
+          useTopKeys,
+          useLoadDistribution = true
+        ),
+        LoadWatcher.StaticConfig(allowTopKeys = true, allowLoadDistribution = true)
+      )
+
+      // Build 1-5 contiguous Slices covering the whole keyspace [MIN, Infinity), recording one
+      // Measurement (single replica) per Slice. Track each Slice's reported load to check per-Slice
+      // load conservation afterwards.
+      val numSlices: Int = 1 + random.nextInt(5)
+      val sliceAssignmentsBuilder = Vector.newBuilder[SliceAssignment]
+      val reportedLoadBySlice = mutable.Map[Slice, Double]()
+      // Start the key range at 1 so no generated key is the all-zero smallest key (toSliceKey(0) =
+      // 0x00..00), which is magnitude-equal to the first Slice's low bound SliceKey.MIN. We do this
+      // to avoid the all-zero key being used as a hot key and as a CDF bucket boundary, which can
+      // trigger a known load-conservation bug in which the background load between SliceKey.MIN and
+      // the all-zero key is dropped.
+      var lowSliceKeyLong: Long = 1
+
+      for (sliceIndex: Int <- 0 until numSlices) {
+        val highSliceKeyLong: Long =
+          randomInRange(lowSliceKeyLong + 1, lowSliceKeyLong + 1000, random)
+        val lowSliceKey: SliceKey =
+          if (sliceIndex == 0) SliceKey.MIN else toSliceKey(lowSliceKeyLong)
+        val highSliceKey: HighSliceKey =
+          if (sliceIndex == numSlices - 1) InfinitySliceKey else toSliceKey(highSliceKeyLong)
+        val slice: Slice = Slice(lowSliceKey, highSliceKey)
+
+        sliceAssignmentsBuilder += createRandomSliceAssignment(
+          slice,
+          subslices = Vector.empty,
+          generation = 2 ## 42,
+          random
+        )
+
+        // Random total load for the Slice within [1, 200), reported by a single replica.
+        val sliceLoad: Double = 1.0 + random.nextDouble() * 199.0
+        watcher.recordSliceletLoad(
+          Seq(
+            watcher.createMeasurement(
+              time = watcher.now - 1.second,
+              windowDuration = 1.minute,
+              slice = slice,
+              resource = "pod0",
+              numReplicas = 1,
+              load = sliceLoad,
+              topKeys = randomTopKeys(lowSliceKeyLong, highSliceKeyLong, sliceLoad),
+              loadDistributionOpt = Some(
+                LoadDistribution(
+                  points = randomCdfPoints(lowSliceKeyLong, highSliceKeyLong),
+                  maxErrorFraction = 0.1
+                )
+              )
+            )
+          )
+        )
+
+        reportedLoadBySlice(slice) = sliceLoad
+        lowSliceKeyLong = highSliceKeyLong
+      }
+
+      val assignment: Assignment = createAssignment(
+        generation = 2 ## 42,
+        AssignmentConsistencyMode.Affinity,
+        assignerServiceInfoOpt = None,
+        sliceAssignmentsBuilder.result()
+      )
+
+      // Generate the load map. `.get` is safe since every Slice has a Measurement. Via
+      // LoadWatcherWrapper, this call also checks the LoadWatcher's internal invariants and top-key
+      // isolation; per-Slice load conservation and non-negativity are asserted explicitly below.
+      val actual: LoadMap = watcher.getPrimaryRateLoadMap(assignment).get
+
+      // Verify: each assigned Slice's apportioned entries sum to its reported load.
+      for (sliceWithLoad <- reportedLoadBySlice) {
+        val (slice, reportedLoad): (Slice, Double) = sliceWithLoad
+        assert(
+          Math.abs(actual.getLoad(slice) - reportedLoad) < 1e-6,
+          s"Slice $slice apportioned to ${actual.getLoad(slice)}, expected $reportedLoad " +
+          s"(seed $seed)."
+        )
+      }
+      // Verify: no entry carries negative load.
+      for (entry: Entry <- actual.sliceMap.entries) {
+        assert(entry.load >= -1e-9, s"Entry carries negative load: $entry (seed $seed).")
+      }
+    }
   }
 
   test("Loads from each slicelet are scaled based on the number of replicas") {

@@ -12,6 +12,7 @@ import com.databricks.dicer.assigner.ConsistentHashingPreferredAssignerStateMach
   DriverAction,
   Event
 }
+import com.databricks.dicer.assigner.KubernetesMembershipChecker.ResourceVersion
 import com.databricks.dicer.common.{Generation, Incarnation}
 import com.databricks.testing.DatabricksTest
 

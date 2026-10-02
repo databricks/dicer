@@ -1,7 +1,6 @@
 package com.databricks.dicer.assigner
 
 import java.util.UUID
-import scala.util.Try
 
 /** Kubernetes watch target. We use appName and namespace to watch pods for given Dicer target. */
 case class KubernetesWatchTarget(appName: String, namespace: String)
@@ -42,7 +41,5 @@ object KubernetesTargetWatcher {
   /**
    * Returns a [[Factory]] for no-op [[KubernetesTargetWatcher]]s (functionality being removed).
    */
-  def newFactory(): Try[Factory] = Try {
-    NoOpFactory
-  }
+  def newFactory(apiClientFactory: KubernetesApiClientFactory): Factory = NoOpFactory
 }

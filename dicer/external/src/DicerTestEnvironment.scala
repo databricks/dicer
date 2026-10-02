@@ -11,13 +11,8 @@ import com.databricks.conf.Config
 import com.databricks.dicer.assigner.InterposingEtcdPreferredAssignerDriver
 import com.databricks.dicer.assigner.config.InternalTargetConfigMap
 import com.databricks.dicer.client.{Ports, TestClientUtils, TlsFilePaths}
-import com.databricks.dicer.common.{
-  Assignment,
-  Generation,
-  InternalDicerTestEnvironment,
-  ProposedSliceAssignment,
-  TestAssigner
-}
+import com.databricks.dicer.common.{Assignment, Generation, ProposedSliceAssignment}
+import com.databricks.dicer.common.testing.{InternalDicerTestEnvironment, TestAssigner}
 import com.databricks.dicer.external.DicerTestEnvironment.{
   AssignmentHandle,
   TestAssignment,
@@ -259,7 +254,8 @@ class DicerTestEnvironment private[dicer] (
   def getConnectionConfigForNewClerk(slicelet: Slicelet): Config = {
     TestClientUtils.createClerkConfig(
       slicelet.impl.forTest.sliceletPort,
-      clientTlsFilePathsOpt = clientTlsFilePathsOpt
+      clientTlsFilePathsOpt = clientTlsFilePathsOpt,
+      enableRateLimitingOverrideOpt = Some(false)
     )
   }
 
@@ -275,7 +271,9 @@ class DicerTestEnvironment private[dicer] (
       sliceletHost = internalTestEnv.sliceletHostNameOpt.getOrElse("localhost"),
       clientTlsFilePathsOpt = clientTlsFilePathsOpt,
       serverTlsFilePathsOpt = serverTlsFilePathsOpt,
-      watchFromDataPlane = false
+      watchFromDataPlane = false,
+      watchRpcTimeoutOpt = None,
+      enableRateLimitingOverrideOpt = Some(false)
     )
   }
 

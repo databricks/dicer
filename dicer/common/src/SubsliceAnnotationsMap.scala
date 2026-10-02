@@ -75,7 +75,7 @@ object SubsliceAnnotationsMap {
     // Go through all Slices in the assignment, and add any subslices that are compatible with
     // `resource` to `builder`.
     for (sliceAssignment: SliceAssignment <- assignment.sliceMap.entries) {
-      if (assignment.isResourceAssigned(sliceAssignment.resources, resource)) {
+      if (assignment.isResourceAssigned(sliceAssignment.resourcesSet, resource)) {
         // Go through the subslice annotations within this Slice, and add `SliceWithAnnotations` for
         // any subslice or gap to `builder`. Example showing the generation numbers within each
         // Slice:

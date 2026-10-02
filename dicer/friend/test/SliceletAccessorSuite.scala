@@ -7,17 +7,21 @@ import com.databricks.caching.util.AssertionWaiter
 import com.databricks.caching.util.TestUtils
 import com.databricks.caching.util.TestUtils.TestName
 import com.databricks.dicer.client.TestClientUtils.{waitForAssignment, waitForGenerationAtLeast}
-import com.databricks.dicer.common.TestSliceUtils._
-import com.databricks.dicer.common.{
-  Assignment,
-  InternalDicerTestEnvironment,
-  ProposedSliceAssignment,
-  SliceAssignment,
-  TestAssigner
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  LowInclusiveStringFluent,
+  SliceAssignmentSliceFluent,
+  createProposal,
+  createRandomProposal,
+  toProposedAssignmentEntry,
+  toSliceKey,
+  toSquid,
+  `∞`
 }
+import com.databricks.dicer.common.{Assignment, ProposedSliceAssignment, SliceAssignment}
 import com.databricks.dicer.external.{ResourceAddress, Slice, Slicelet, Target}
 import com.databricks.dicer.friend.SliceMap.{GapEntry, IntersectionEntry}
 import com.databricks.testing.DatabricksTest
+import com.databricks.dicer.common.testing.{InternalDicerTestEnvironment, TestAssigner}
 
 class SliceletAccessorSuite extends DatabricksTest with TestName {
 
@@ -130,10 +134,10 @@ class SliceletAccessorSuite extends DatabricksTest with TestName {
       for (entry <- intersectionEntries) {
         val previous: SliceAssignment = entry.leftEntry
         val next: SliceAssignment = entry.rightEntry
-        assert(previous.resources.size == 1)
-        assert(next.resources.size == 1)
-        if (previous.resources.head != next.resources.head) {
-          previousResourceMap.put(entry.slice, previous.resources.head)
+        assert(previous.resourcesSet.size == 1)
+        assert(next.resourcesSet.size == 1)
+        if (previous.resourcesSet.head != next.resourcesSet.head) {
+          previousResourceMap.put(entry.slice, previous.resourcesSet.head)
         }
       }
       previousAssignment = assignment
@@ -161,10 +165,10 @@ class SliceletAccessorSuite extends DatabricksTest with TestName {
       val expectedStateProvidersMap = new MutableSliceMap[ResourceAddress]
       for (entry <- intersectionEntries) {
         val currentAssignment: SliceAssignment = entry.leftEntry
-        assert(currentAssignment.resources.size == 1)
+        assert(currentAssignment.resourcesSet.size == 1)
         val previous: SliceWithResource = entry.rightEntry
         if (finalAssignment.isResourceAssignmentCompatible(
-            currentAssignment.resources.head,
+            currentAssignment.resourcesSet.head,
             slicelet.impl.squid
           )) {
           expectedStateProvidersMap.put(entry.slice, previous.resource.resourceAddress)

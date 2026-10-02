@@ -1,0 +1,20 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "metrics",
+    srcs = ["src/lib.rs"],
+    crate_name = "universe_raf_metrics",
+    visibility = ["//visibility:public"],
+    deps = ["@crates//:prometheus-client"],
+)
+
+rust_test(
+    name = "metrics_test",
+    testonly = True,
+    srcs = ["tests/metrics_test.rs"],
+    deps = [
+        ":metrics",
+        "//wrappers/rust/metrics/testing",
+        "@crates//:prometheus-client",
+    ],
+)

@@ -183,20 +183,53 @@ use_repo(maven, "contrib_rules_jvm_deps", "maven")
 # Rust Dependencies
 # ========================================
 
-bazel_dep(name = "rules_rust", version = "0.64.0")
+bazel_dep(name = "rules_rust", version = "0.70.0")
+
+RUSTC_VERSION = "1.97.1"
+RUSTFMT_VERSION = "nightly/2025-08-07"
+
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(
+    edition = "2024",
+    rust_analyzer_version = RUSTC_VERSION,
+    rustfmt_version = RUSTFMT_VERSION,
+    versions = [RUSTC_VERSION],
+)
 
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
 crate.spec(
-    package = "prometheus-client",
-    version = "=0.24.0",
+    package = "anyhow",
+    version = "=1.0.102",
 )
 crate.spec(
     package = "async-trait",
     version = "=0.1.89",
 )
 crate.spec(
+    features = ["derive"],
+    package = "clap",
+    version = "=4.5.20",
+)
+crate.spec(
+    default_features = False,
+    features = [
+        "debug",
+        "display",
+    ],
+    package = "derive_more",
+    version = "=1.0.0",
+)
+crate.spec(
+    package = "futures",
+    version = "=0.3.31",
+)
+crate.spec(
     package = "http",
     version = "=1.2.0",
+)
+crate.spec(
+    package = "prometheus-client",
+    version = "=0.24.0",
 )
 crate.spec(
     features = ["derive"],
@@ -223,10 +256,6 @@ crate.spec(
     version = "=1.52.3",
 )
 crate.spec(
-    package = "futures",
-    version = "=0.3.31",
-)
-crate.spec(
     features = ["rt"],
     package = "tokio-util",
     version = "=0.7.18",
@@ -235,18 +264,39 @@ crate.spec(
     package = "tracing",
     version = "=0.1.41",
 )
+
+# ---- buffa message-codegen crates ----
 crate.spec(
-    package = "anyhow",
-    version = "=1.0.102",
+    features = [
+        "fast-utf8",
+        "json",
+        "std",
+        "text",
+    ],
+    package = "buffa",
+    version = "=0.9.2",
 )
 crate.spec(
-    default_features = False,
+    package = "buffa-codegen",
+    version = "=0.9.2",
+)
+crate.spec(
     features = [
-        "debug",
-        "display",
+        "reflect",
+        "std",
+        "text",
+        "views",
     ],
-    package = "derive_more",
-    version = "=1.0.0",
+    package = "buffa-descriptor",
+    version = "=0.9.2",
+)
+crate.spec(
+    features = [
+        "json",
+        "std",
+    ],
+    package = "buffa-types",
+    version = "=0.9.2",
 )
 # Both lockfiles are required for reproducible (no-repin) builds: `lockfile` is crate_universe's own
 # lock, and `cargo_lockfile` is the Cargo.lock. Both are regenerated with `CARGO_BAZEL_REPIN=true`.

@@ -1,16 +1,16 @@
 package com.databricks.dicer.external
 
+import com.databricks.dicer.client.testing.{ClerkHarness}
+
 import scala.concurrent.duration.Duration
 
 import com.databricks.caching.util.{AssertionWaiter, TestUtils}
 import com.databricks.caching.util.MetricUtils.ChangeTracker
 import com.databricks.caching.util.TestUtils.TestName
-import com.databricks.dicer.common.{
-  ClientType,
-  Generation,
+import com.databricks.dicer.common.{ClientType, Generation, SubscriberHandler}
+import com.databricks.dicer.common.testing.{
   InternalDicerTestEnvironment,
-  SubscriberHandler,
-  SubscriberHandlerMetricUtils
+  SubscriberHandlerMetricTestUtils
 }
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.testing.DatabricksTest
@@ -220,7 +220,7 @@ abstract class SingletonSliceLookupSuiteBase extends DatabricksTest with TestNam
       // Scala and Rust Clerks report different `LATEST_VERSION` values, so the version label is
       // intentionally unspecified. This is safe because every Clerk in a given suite runs the same
       // client code version.
-      val numClerkSubscribers: Long = SubscriberHandlerMetricUtils
+      val numClerkSubscribers: Long = SubscriberHandlerMetricTestUtils
         .getNumClerksByHandler(SubscriberHandler.Location.Slicelet, target)
       assert(
         numClerkSubscribers == 1,

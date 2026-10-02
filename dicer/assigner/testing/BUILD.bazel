@@ -1,0 +1,98 @@
+load("@rules_scala//scala:scala.bzl", "scala_library")
+
+package(
+    default_visibility = ["//dicer:internal"],
+)
+
+scala_library(
+    name = "assigner_rpc_test_utils",
+    srcs = ["src/AssignerRpcTestUtils.scala"],
+    testonly = True,
+    deps = [
+        "//wrappers/rpc:client",
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_code_findbugs_jsr305",
+        "@maven//:com_google_guava_guava",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
+    ],
+)
+
+scala_library(
+    name = "preferred_assigner_test_utils",
+    srcs = ["src/PreferredAssignerTestUtils.scala"],
+    testonly = True,
+    deps = [
+        "//caching/util:alert_owner_team",
+        "//caching/util:fake_typed_clock",
+        "//caching/util:metric_utils",
+        "//caching/util:sequential_execution_context",
+        "//caching/util:server_conf",
+        "//caching/util:test_util",
+        "//caching/util:watch_cell",
+        "//dicer/assigner:assigner_conf",
+        "//dicer/assigner:assigner_slicez",
+        "//dicer/assigner:etcd_preferred_assigner_driver",
+        "//dicer/assigner:kubernetes_membership_checker",
+        "//dicer/assigner:migration_mode",
+        "//dicer/assigner:preferred_assigner_driver",
+        "//dicer/assigner:preferred_assigner_metrics",
+        "//dicer/assigner:preferred_assigner_value",
+        "//dicer/assigner:target_migrator",
+        "//dicer/client:clerk_impl",
+        "//dicer/client:slicelet_impl",
+        "//dicer/common/proto:common_proto_scala_lib",
+        "//dicer/common/testing:test_common",
+        "//dicer/common/testing:test_environment",
+        "//dicer/common:assignment_core",
+        "//dicer/common:client_request",
+        "//dicer/common:generation",
+        "//dicer/common:watch_server_helper",
+        "//dicer/external:clerk",
+        "//dicer/external:slicelet",
+        "//dicer/friend:squid",
+        "//wrappers/conf:core",
+        "//wrappers/conf:project",
+        "//wrappers/conf:project-conf",
+        "//wrappers/rpc:rich_scalapb",
+        "//wrappers/rpc:rpc_context",
+        "//wrappers/rpc:rpc_testing",
+        "//wrappers/util:async_test_helpers",
+        "//wrappers/util:databricks-test",
+        "@maven//:com_typesafe_config",
+        "@maven//:io_grpc_grpc_api",
+        "@maven//:io_prometheus_simpleclient",
+    ],
+)
+
+scala_library(
+    name = "fake_kubernetes_server",
+    testonly = True,
+    srcs = ["src/FakeKubernetesServer.scala"],
+    deps = [
+        "//caching/util:sequential_execution_context",
+        "//caching/util:watch_cell",
+        "@maven//:com_google_code_findbugs_jsr305",
+        "@maven//:io_grpc_grpc_api",
+        "@maven//:io_kubernetes_client_java_api",
+    ],
+    visibility = ["//dicer:internal"],
+)
+
+
+scala_library(
+    name = "kubernetes_test_utils",
+    srcs = ["src/KubernetesTestUtils.scala"],
+    testonly = True,
+    deps = [
+        ":fake_kubernetes_server",
+        "//caching/util:alert_owner_team",
+        "//caching/util:sequential_execution_context",
+        "//dicer/assigner:kubernetes_membership_checker",
+        "@maven//:com_squareup_okhttp3_okhttp",
+        "@maven//:io_kubernetes_client_java",
+        "@maven//:io_kubernetes_client_java_api",
+    ],
+)

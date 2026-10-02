@@ -72,8 +72,9 @@ object EtcdWrapper {
    * for other non-retryable failures. Blocks until etcd is ready, or at most `readyTimeout`.
    */
   private def tryStartEtcd(dataDir: Path, readyTimeout: FiniteDuration): Option[EtcdWrapper] = {
-    // Pick random ephemeral port between 32768 and 65535.
-    val port: Int = 32768 + scala.util.Random.nextInt(32768)
+    // Pick random ephemeral port between 32768 and 65534 - so peer port is at most 65535, the
+    // maximum possible port number.
+    val port: Int = 32768 + scala.util.Random.nextInt(32767)
     val peerPort: Int = port + 1
     // Listen for client traffic on this port.
     val clientURL: String = s"http://127.0.0.1:$port"

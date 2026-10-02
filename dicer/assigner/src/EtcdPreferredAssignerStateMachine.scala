@@ -31,8 +31,6 @@ import scala.concurrent.Promise
 import scala.util.{Failure, Success, Try}
 
 /**
- * REQUIRES: `storeIncarnation` is non-loose, see [[Incarnation.isNonLoose]].
- *
  * The preferred assigner state machine, used to help make assignment generation highly available.
  * For full details, see <internal link>.
  *
@@ -91,7 +89,6 @@ class EtcdPreferredAssignerStateMachine(
     storeIncarnation: Incarnation,
     config: EtcdPreferredAssignerDriver.Config)
     extends StateMachine[Event, DriverAction] {
-  require(storeIncarnation.isNonLoose, "Store incarnation must be non-loose")
 
   private val logger = PrefixLogger.create(this.getClass, "dicer-preferred-assigner")
 

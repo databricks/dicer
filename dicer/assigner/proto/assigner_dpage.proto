@@ -48,11 +48,12 @@ message PreferredAssignerStateViewP {
 // (-- Next ID: 6. --)
 message ConsistentHashingStateViewP {
   // State of the Kubernetes API connection as tracked by the membership checker's
-  // hysteresis monitor. Nested and unprefixed per <internal link> since it is used only here.
+  // connection-health monitor. Nested and unprefixed per <internal link> since it is used only
+  // here.
   enum K8sConnectionHealthP {
     // Default value; used when the connection-health state is unset or unknown.
     K8S_CONNECTION_HEALTH_P_UNSPECIFIED = 0;
-    // Membership checker has not yet observed a poll result; the hysteresis monitor's
+    // Membership checker has not yet observed a poll result; the connection-health monitor's
     // initial state.
     INIT = 1;
     // The membership checker currently considers the Kubernetes API connection healthy.
@@ -70,7 +71,7 @@ message ConsistentHashingStateViewP {
   // assigner is currently elected.
   optional AssignerInfoViewP preferred_assigner = 2;
   // Whether the Kubernetes API connection is currently considered healthy by the
-  // membership checker's hysteresis monitor.
+  // membership checker's connection-health monitor.
   optional K8sConnectionHealthP k8s_connection_health = 4;
   // The healthy assigner pods currently considered eligible for election.
   repeated AssignerInfoViewP eligible_pods = 5;

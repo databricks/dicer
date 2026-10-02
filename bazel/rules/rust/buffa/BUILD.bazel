@@ -1,0 +1,14 @@
+load("//bazel/rules/rust:rules_rust.bzl", "rust_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+rust_binary(
+    name = "buffa_codegen",
+    srcs = ["buffa_codegen.rs"],
+    deps = [
+        "@crates//:anyhow",
+        "@crates//:buffa",
+        "@crates//:buffa-codegen",
+        "@crates//:clap",
+    ],
+)

@@ -14,7 +14,8 @@ import com.databricks.api.proto.dicer.external.LoadBalancingMetricConfigP.{
 }
 import com.databricks.caching.util.TestUtils.ParameterizedTestNameDecorator
 import com.databricks.dicer.assigner.AssignmentStats.{AssignmentChangeStats, AssignmentLoadStats}
-import com.databricks.dicer.assigner.config.{ChurnConfig, ConfigTestUtil, InternalTargetConfig}
+import com.databricks.dicer.assigner.config.{ChurnConfig, InternalTargetConfig}
+import com.databricks.dicer.assigner.config.testing.{ConfigTestUtils}
 import com.databricks.dicer.assigner.config.InternalTargetConfig.{
   KeyReplicationConfig,
   LoadBalancingConfig
@@ -29,7 +30,22 @@ import com.databricks.dicer.common.{
   SliceKeyHelper,
   SliceMapHelper
 }
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  LowInclusiveLongFluent,
+  LowInclusiveStringFluent,
+  SliceAssignmentFluet,
+  SliceAssignmentSliceFluent,
+  assertDesirableAssignmentProperties,
+  calculateNumSliceReplicas,
+  createAssignment,
+  createRandomLoadMap,
+  createRandomProposal,
+  createResources,
+  createTestSquid,
+  toSliceKey,
+  toSquid,
+  `∞`
+}
 import com.databricks.dicer.external.{Slice, Target}
 import com.databricks.dicer.friend.{SliceMap, Squid}
 import com.databricks.testing.DatabricksTest
@@ -232,7 +248,7 @@ class ParameterizedAlgorithmSuite(keyReplicationConfig: KeyReplicationConfig)
 
   test("Initial assignments have the desired properties") {
     // Test plan: Verify that initial assignments have the common desired properties for assignments
-    // as described in [[TestSliceUtils.assertDesirableAssignmentProperties]], and in addition, do
+    // as described in [[SliceTestUtils.assertDesirableAssignmentProperties]], and in addition, do
     // not have any record of previous load (since it is not known). Verify this for various number
     // of resources and key replication configurations.
     for (numResources: Int <- Seq(1, 2, 10, 20)) {
@@ -288,12 +304,12 @@ class ParameterizedAlgorithmSuite(keyReplicationConfig: KeyReplicationConfig)
     val homomorphicResourceToSlices: mutable.Map[Squid, Set[Slice]] =
       mutable.Map.empty.withDefaultValue(Set.empty)
     for (sliceAssignment: SliceAssignment <- predecessorEntries) {
-      for (resource: Squid <- sliceAssignment.resources) {
+      for (resource: Squid <- sliceAssignment.resourcesSet) {
         predecessorResourceToSlices(resource) += sliceAssignment.slice
       }
     }
     for (sliceAssignment: SliceAssignment <- homomorphicAssignmentEntries) {
-      for (resource: Squid <- sliceAssignment.resources) {
+      for (resource: Squid <- sliceAssignment.resourcesSet) {
         homomorphicResourceToSlices(resource) += sliceAssignment.slice
       }
     }
@@ -353,7 +369,7 @@ class ParameterizedAlgorithmSuite(keyReplicationConfig: KeyReplicationConfig)
         val entry: SliceAssignment = asn.sliceMap.lookUp(key)
         val slice: Slice = entry.slice
         hitsPerSlice(slice) += 1
-        for (resource: Squid <- entry.resources) {
+        for (resource: Squid <- entry.resourcesSet) {
           hitsPerResource(resource) += 1
         }
       }
@@ -404,7 +420,7 @@ class ParameterizedAlgorithmSuite(keyReplicationConfig: KeyReplicationConfig)
     for (tuple <- asn1.sliceAssignments.zip(asn2.sliceAssignments)) {
       val (element1, element2): (SliceAssignment, SliceAssignment) = tuple
       assert(element1.slice == element2.slice)
-      assert(element1.resources == element2.resources)
+      assert(element1.resourcesSet == element2.resourcesSet)
       assert(element1.primaryRateLoadOpt.isEmpty)
       assert(element2.primaryRateLoadOpt.contains(loadMap.getLoad(element1.slice)))
     }
@@ -513,10 +529,10 @@ class ParameterizedAlgorithmSuite(keyReplicationConfig: KeyReplicationConfig)
       val (sliceAssignment, i): (SliceAssignment, Int) = tuple
       val slice: Slice = sliceAssignment.slice
       val load: Double = i match {
-        case 10 => expectedSplitThreshold * sliceAssignment.resources.size * 1.1
-        case 20 => expectedSplitThreshold * sliceAssignment.resources.size * 2.0
-        case 30 => expectedSplitThreshold * sliceAssignment.resources.size * 3.0
-        case _ => expectedSplitThreshold * sliceAssignment.resources.size / 10.0
+        case 10 => expectedSplitThreshold * sliceAssignment.resourcesSet.size * 1.1
+        case 20 => expectedSplitThreshold * sliceAssignment.resourcesSet.size * 2.0
+        case 30 => expectedSplitThreshold * sliceAssignment.resourcesSet.size * 3.0
+        case _ => expectedSplitThreshold * sliceAssignment.resourcesSet.size / 10.0
       }
       loadMapBuilder.putLoad(LoadMap.Entry(slice, load))
     }
@@ -531,7 +547,7 @@ class ParameterizedAlgorithmSuite(keyReplicationConfig: KeyReplicationConfig)
     for (sliceAssignment: SliceAssignment <- assignment.sliceMap.entries) {
       val slice: Slice = sliceAssignment.slice
       val sliceReplicaLoad
-          : Double = sliceAssignment.primaryRateLoadOpt.get / sliceAssignment.resources.size
+          : Double = sliceAssignment.primaryRateLoadOpt.get / sliceAssignment.resourcesSet.size
       assert(
         sliceReplicaLoad <= expectedSplitThreshold,
         s"unexpected sliceReplicaLoad for Slice $slice: $sliceReplicaLoad " +
@@ -713,7 +729,7 @@ class ParameterizedAlgorithmSuite(keyReplicationConfig: KeyReplicationConfig)
     // The new assignment will contain multiple `sliceAssignments` to satisfy
     // MIN_AVG_SLICE_REPLICAS. Ensure each of them is assigned to `healthyResources`.
     for (sliceAssignments: SliceAssignment <- newAssignment.sliceMap.entries) {
-      assert(sliceAssignments.resources == healthyResources.availableResources)
+      assert(sliceAssignments.resourcesSet == healthyResources.availableResources)
     }
   }
 
@@ -836,7 +852,7 @@ class ParameterizedAlgorithmSuite(keyReplicationConfig: KeyReplicationConfig)
         sliceAssignment: SliceAssignment =>
           ProposedSliceAssignment(
             sliceAssignment.slice,
-            sliceAssignment.resources,
+            sliceAssignment.resourcesSet,
             Some(loadMap.getLoad(sliceAssignment.slice))
           )
       }
@@ -957,7 +973,7 @@ class ParameterizedAlgorithmSuite(keyReplicationConfig: KeyReplicationConfig)
       val targetConfig: InternalTargetConfig = createConfigForLoadBalancing(
         // Disable churn penalty so that the algorithm can be more aggressive in load balancing to
         // new resources.
-        ConfigTestUtil.ZERO_PENALTY_CHURN_CONFIG,
+        ConfigTestUtils.ZERO_PENALTY_CHURN_CONFIG,
         maxLoadHint,
         uniformLoadReservationHint = testCase.reservationHint
       )
@@ -1065,7 +1081,7 @@ class ParameterizedAlgorithmSuite(keyReplicationConfig: KeyReplicationConfig)
         val initialLoadMapBuilder = LoadMap.newBuilder()
         for (sliceAssignment: SliceAssignment <- initialAssignment.sliceMap.entries) {
           var sliceLoad: Double = 0
-          for (resource: Squid <- sliceAssignment.resources) {
+          for (resource: Squid <- sliceAssignment.resourcesSet) {
             val sliceReplicaLoad: Double =
               if (resourcesWithNonZeroLoad.size < numResources - 1
                 && resourcesWithNonZeroLoad.add(resource)) {

@@ -1,7 +1,7 @@
 package com.databricks.dicer.assigner.algorithm
 
 import com.databricks.testing.DatabricksTest
-import com.databricks.dicer.common.TestSliceUtils.createTestSquid
+import com.databricks.dicer.common.testing.SliceTestUtils.createTestSquid
 import com.databricks.dicer.friend.Squid
 
 class ResourcesSuite extends DatabricksTest {

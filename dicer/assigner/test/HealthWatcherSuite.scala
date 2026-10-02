@@ -1,12 +1,26 @@
 package com.databricks.dicer.assigner
 
-import com.databricks.caching.util._
-import com.databricks.dicer.assigner.HealthWatcher._
+import com.databricks.caching.util.{
+  CachingErrorCode,
+  MetricUtils,
+  Severity,
+  TestUtils,
+  StateMachineOutput,
+  TickerTime
+}
+import com.databricks.dicer.assigner.HealthWatcher.{DefaultFactory, DriverAction, Event}
 import com.databricks.dicer.assigner.config.InternalTargetConfig.HealthWatcherTargetConfig
 import com.databricks.dicer.assigner.TargetMetrics.AssignmentDistributionSource
 import com.databricks.dicer.common.TargetHelper.TargetOps
-import com.databricks.dicer.common.TestSliceUtils.{createRandomProposal, createTestSquid}
-import com.databricks.dicer.common._
+import com.databricks.dicer.common.testing.SliceTestUtils.{createRandomProposal, createTestSquid}
+import com.databricks.dicer.common.{
+  Assignment,
+  AssignmentConsistencyMode,
+  Generation,
+  Incarnation,
+  ProposedAssignment,
+  SliceletState
+}
 import com.databricks.dicer.external.Target
 import com.databricks.dicer.friend.Squid
 import com.databricks.testing.DatabricksTest
@@ -20,15 +34,12 @@ import scala.util.Random
  * Test suite for the HealthWatcher.
  *
  * @param observeSliceletReadiness if true, the HealthWatcher faithfully reports the
- *                                 Slicelet-reported health status for a pod. If false, masks the
- *                                 health status so that NotReady is masked to Running.
- * @param permitRunningToNotReady if true, the HealthWatcher allows resources in the Running state
- *                                to transition to the NotReady state. If false, the HealthWatcher
- *                                ignores NOT_READY reports for resources in the Running state.
+ *                                 Slicelet-reported health status for a pod, transitioning a
+ *                                 resource in the Running state to NotReady when it reports
+ *                                 NOT_READY. If false, masks the health status so that NotReady is
+ *                                 masked to Running.
  */
-private abstract class HealthWatcherSuite(
-    observeSliceletReadiness: Boolean,
-    permitRunningToNotReady: Boolean)
+private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
     extends DatabricksTest
     with TestUtils.ParameterizedTestNameDecorator {
 
@@ -50,12 +61,11 @@ private abstract class HealthWatcherSuite(
   private val healthWatcherTargetConfig: HealthWatcherTargetConfig =
     HealthWatcherTargetConfig(
       observeSliceletReadiness = observeSliceletReadiness,
-      permitRunningToNotReady = permitRunningToNotReady
+      permitRunningToNotReady = false
     )
 
   override def paramsForDebug: Map[String, Any] = Map(
-    "observeSliceletReadiness" -> observeSliceletReadiness,
-    "permitRunningToNotReady" -> permitRunningToNotReady
+    "observeSliceletReadiness" -> observeSliceletReadiness
   )
 
   /** Creates an [[Event.SliceletStateFromSlicelet]] event. */
@@ -304,11 +314,11 @@ private abstract class HealthWatcherSuite(
     // sends repeated Running heartbeats and pod2 sends repeated NotReady heartbeats at t=31 and
     // t=45; both reset their expiry past t=61 so no expiry fires there. pod1 sends no further
     // heartbeats after t=5 and is expelled at t=35. pod3 transitions Running→NotReady at t=5 and
-    // then expires at t=35; when permitRunningToNotReady=true it is NOT counted as crashed (removed
-    // from the healthy set on transition), and when permitRunningToNotReady=false it IS counted as
-    // crashed (transition suppressed, stays Running). Also verifies that pod2 (whose last known
-    // heartbeat was NOT_READY when permitRunningToNotReady=true) is not counted as crashed when it
-    // expires at t=75, since it was already removed from the healthy set on transition.
+    // then expires at t=35; when observeSliceletReadiness=true it is NOT counted as crashed
+    // (removed from the healthy set on transition), and when observeSliceletReadiness=false it IS
+    // counted as crashed (NOT_READY masked to Running). Also verifies that pod2 (whose last known
+    // heartbeat was NOT_READY when observeSliceletReadiness=true) is not counted as crashed when
+    // it expires at t=75, since it was already removed from the healthy set on transition.
     val harness =
       new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
     // Advance the watcher to initialize its start time and enter the starting state.
@@ -341,8 +351,8 @@ private abstract class HealthWatcherSuite(
       30.seconds
     )
     // pod3 immediately transitions Running→NotReady at t=5, resetting its expiry to t=5+30=35.
-    // When permitRunningToNotReady=true, pod3 is removed from the healthy set; when false, the
-    // transition is suppressed and pod3 stays Running. Still in startup → no output.
+    // When observeSliceletReadiness=true, pod3 is removed from the healthy set; when false, the
+    // NOT_READY report is masked and pod3 stays Running. Still in startup → no output.
     harness.event(
       5.seconds,
       createSliceletStateFromSliceletEvent(pod3, SliceletState.NotReady),
@@ -351,11 +361,11 @@ private abstract class HealthWatcherSuite(
     )
 
     // Initial health report at t=30. pod0, pod1, pod2, and pod3 all expire at t=5+30=35.
-    // pod3 is omitted from healthy when permitRunningToNotReady=true (it is NotReady).
+    // pod3 is omitted from healthy when observeSliceletReadiness=true (it is NotReady).
     harness.advance(
       30.seconds,
       createHealthReportOutput(
-        if (permitRunningToNotReady) Set(pod0, pod1, pod2) else Set(pod0, pod1, pod2, pod3)
+        if (observeSliceletReadiness) Set(pod0, pod1, pod2) else Set(pod0, pod1, pod2, pod3)
       ),
       35.seconds
     )
@@ -370,10 +380,10 @@ private abstract class HealthWatcherSuite(
     )
 
     // pod2 sends a NotReady heartbeat at t=31, resetting its expiry from t=35 to t=31+30=61.
-    // When permitRunningToNotReady=true, pod2 transitions Running→NotReady and a health report
+    // When observeSliceletReadiness=true, pod2 transitions Running→NotReady and a health report
     // is emitted. pod3 is already NotReady (since t=5) so it is not in healthy.
     val pod2FirstHeartbeatOutput: Seq[DriverAction] =
-      if (permitRunningToNotReady)
+      if (observeSliceletReadiness)
         createHealthReportOutput(Set(pod0, pod1))
       else Seq.empty
     harness.event(
@@ -384,18 +394,18 @@ private abstract class HealthWatcherSuite(
     )
 
     // At t=35, pod1 and pod3 expire. pod0 and pod2 survive with expiries at t=61.
-    // pod2's membership in healthy depends on permitRunningToNotReady:
-    // - false: pod2 stays Running (transition suppressed) → pod2 IS in healthy
+    // pod2's membership in healthy depends on observeSliceletReadiness:
+    // - false: pod2's NOT_READY is masked to Running → pod2 IS in healthy
     // - true: pod2 is NotReady → pod2 NOT in healthy
-    // pod3's membership in crashed depends on permitRunningToNotReady:
+    // pod3's membership in crashed depends on observeSliceletReadiness:
     // - false: pod3 was Running/masked when it expired → pod3 IS in crashed
     // - true: pod3 was NotReady (removed from healthy at t=5) → pod3 NOT in crashed
-    val pod2InHealthy: Boolean = !permitRunningToNotReady
+    val pod2InHealthy: Boolean = !observeSliceletReadiness
     harness.advance(
       35.seconds,
       createHealthReportOutput(
         healthy = if (pod2InHealthy) Set(pod0, pod2) else Set(pod0),
-        newlyCrashedCount = if (!permitRunningToNotReady) 2 else 1
+        newlyCrashedCount = if (!observeSliceletReadiness) 2 else 1
       ),
       61.seconds
     )
@@ -419,7 +429,7 @@ private abstract class HealthWatcherSuite(
     )
 
     // pod2 sends a second NotReady heartbeat at t=45, resetting its expiry from t=61 to t=75.
-    // No status change (pod2 is already NotReady or Running per permitRunningToNotReady). The next
+    // No status change (pod2 is already NotReady or Running per observeSliceletReadiness). The next
     // callback is pod1's expiry at t=35+30=65, which is earlier than pod0's and pod2's t=75.
     harness.event(
       45.seconds,
@@ -437,22 +447,22 @@ private abstract class HealthWatcherSuite(
     harness.advance(
       65.seconds,
       createHealthReportOutput(
-        healthy = if (!permitRunningToNotReady) Set(pod0, pod2) else Set(pod0),
+        healthy = if (!observeSliceletReadiness) Set(pod0, pod2) else Set(pod0),
         newlyCrashedCount = 1
       ),
       75.seconds
     )
 
     // pod0 and pod2 both expire at t=45+30=75. pod0 was Running → crashed.
-    // pod2 was NotReady (when permitRunningToNotReady=true), so it was already removed from
+    // pod2 was NotReady (when observeSliceletReadiness=true), so it was already removed from
     // previouslyHealthy when it first transitioned to NotReady. By the time it expires it is no
     // longer eligible and is not counted as crashed.
-    // pod2 was Running/masked (when permitRunningToNotReady=false), so it IS counted as crashed.
+    // pod2 was Running/masked (when observeSliceletReadiness=false), so it IS counted as crashed.
     harness.advance(
       75.seconds,
       createHealthReportOutput(
         healthy = Set.empty,
-        newlyCrashedCount = if (!permitRunningToNotReady) 2 else 1
+        newlyCrashedCount = if (!observeSliceletReadiness) 2 else 1
       ),
       Duration.Inf
     )
@@ -984,12 +994,13 @@ private abstract class HealthWatcherSuite(
   }
 
   test("RUNNING to NOT_READY to RUNNING transition with flapping protection") {
-    // Test plan: Verify that when permitRunningToNotReady is enabled, a Running pod that receives
+    // Test plan: Verify that when observeSliceletReadiness is enabled, a Running pod that receives
     // a NOT_READY heartbeat transitions to NotReady with flapping protection set to expire at
     // 31s + 10s = 41s. Verify that a RUNNING heartbeat within the protection window (35s < 41s)
     // does not transition back to Running. Verify that a RUNNING heartbeat after the window elapses
-    // (60s > 41s) does transition back to Running. When permitRunningToNotReady is disabled,
-    // verify that NOT_READY heartbeats for Running pods are ignored throughout.
+    // (60s > 41s) does transition back to Running. When observeSliceletReadiness is disabled,
+    // verify that NOT_READY heartbeats are masked to Running so Running pods stay Running
+    // throughout.
     val harness =
       new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
     // Setup: advance the watcher to initialize its start time, then put pod0 in Running state.
@@ -1008,10 +1019,10 @@ private abstract class HealthWatcherSuite(
       35.seconds
     )
 
-    // Verify: NOT_READY heartbeat. When permitRunningToNotReady is enabled, pod0 transitions to
+    // Verify: NOT_READY heartbeat. When observeSliceletReadiness is enabled, pod0 transitions to
     // NotReady (not in healthy). When disabled, pod0 stays Running and no report is issued.
     val notReadyOutput: Seq[DriverAction] =
-      if (permitRunningToNotReady) {
+      if (observeSliceletReadiness) {
         createHealthReportOutput(Set.empty)
       } else {
         Seq.empty
@@ -1023,8 +1034,9 @@ private abstract class HealthWatcherSuite(
       61.seconds
     )
 
-    // Verify: RUNNING heartbeat within the flapping protection window. When permitRunningToNotReady
-    // is enabled, pod0 stays NotReady (35s < 31s + 10s). Otherwise pod0 was already Running.
+    // Verify: RUNNING heartbeat within the flapping protection window. When
+    // observeSliceletReadiness is enabled, pod0 stays NotReady (35s < 31s + 10s). Otherwise pod0
+    // was already Running.
     harness.event(
       35.seconds,
       createSliceletStateFromSliceletEvent(pod0, SliceletState.Running),
@@ -1033,10 +1045,10 @@ private abstract class HealthWatcherSuite(
     )
 
     // Verify: RUNNING heartbeat after the flapping protection window has elapsed (60s > 31s + 10s).
-    // When permitRunningToNotReady is enabled, pod0 transitions back to Running. Otherwise pod0
+    // When observeSliceletReadiness is enabled, pod0 transitions back to Running. Otherwise pod0
     // was already Running, no change.
     val backToRunningOutput: Seq[DriverAction] =
-      if (permitRunningToNotReady) {
+      if (observeSliceletReadiness) {
         createHealthReportOutput(Set(pod0))
       } else {
         Seq.empty
@@ -1053,7 +1065,7 @@ private abstract class HealthWatcherSuite(
     // Test plan: Verify that a resource in NotReady (with active flapping protection) transitions
     // immediately to Terminating upon a TERMINATING heartbeat, regardless of whether the protection
     // window has elapsed. Do this by putting pod0 in Running, triggering a NOT_READY heartbeat to
-    // enter NotReady (when permitRunningToNotReady is enabled), then sending a TERMINATING
+    // enter NotReady (when observeSliceletReadiness is enabled), then sending a TERMINATING
     // heartbeat within the protection window and verifying pod0 becomes Terminating.
     val harness = new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
     harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
@@ -1067,10 +1079,10 @@ private abstract class HealthWatcherSuite(
     )
     harness.advance(30.seconds, createHealthReportOutput(Set(pod0)), 35.seconds)
 
-    // Setup: NOT_READY at t=31. When permitRunningToNotReady, pod0 enters NotReady (not in
+    // Setup: NOT_READY at t=31. When observeSliceletReadiness, pod0 enters NotReady (not in
     // healthy). Otherwise pod0 stays Running and no report is issued.
     val setupNotReadyOutput: Seq[DriverAction] =
-      if (permitRunningToNotReady) {
+      if (observeSliceletReadiness) {
         createHealthReportOutput(Set.empty)
       } else {
         Seq.empty
@@ -1894,7 +1906,7 @@ private abstract class HealthWatcherSuite(
     // Use a unique target name to isolate metrics from other tests.
     val pod4: Squid = createTestSquid("http://pod4")
     val target: Target =
-      Target(s"expiration-stats-$observeSliceletReadiness-$permitRunningToNotReady")
+      Target(s"expiration-stats-$observeSliceletReadiness")
     val harness =
       new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
 
@@ -2109,12 +2121,13 @@ private abstract class HealthWatcherSuite(
     //   - The computed-differs-from-reported counter is incremented once for pod1, whose
     //     reported status (NotReady) diverges from its computed status (Starting or Running).
     // At t=31, heartbeats are sent for pod0, pod1, and pod3 to push their expiry past pod2's.
-    // At t=32, pod3 receives a NOT_READY heartbeat (expiry=62), exercising the Running→NotReady
-    // ignored case when !permitRunningToNotReady. After t=61 (pod0, pod1 expire), verify the
-    // diff("NotReady", "Running") counter reflects pod3's ignored NotReady. At t=62 pod3 expires,
-    // and at t=65 pod2 expires. Verify that Terminating resets to 0 after pod2 expires.
+    // At t=32, pod3 receives a NOT_READY heartbeat (expiry=62). When observeSliceletReadiness=false
+    // the report is masked to Running, exercising the diff("NotReady", "Running") case. After t=61
+    // (pod0, pod1 expire), verify the diff("NotReady", "Running") counter reflects pod3's masked
+    // NotReady. At t=62 pod3 expires, and at t=65 pod2 expires. Verify that Terminating resets to 0
+    // after pod2 expires.
     val metricsTarget: Target =
-      Target(s"podset-metrics-$observeSliceletReadiness-$permitRunningToNotReady")
+      Target(s"podset-metrics-$observeSliceletReadiness")
     val harness: TestHarness =
       new TestHarness(DefaultFactory.create(metricsTarget, config, healthWatcherTargetConfig))
     harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
@@ -2206,12 +2219,11 @@ private abstract class HealthWatcherSuite(
     )
 
     // Send pod3 NOT_READY at t=32, extending its expiry to t=62 (past pod0/pod1's t=61).
-    // For permitRunningToNotReady=true: pod3 transitions to NotReady, dirty=true → report emitted.
-    // For !permitRunningToNotReady: pod3's computed status stays Running (ignored), expiry extends.
+    // For observeSliceletReadiness=true: pod3 transitions to NotReady, dirty=true → report emitted.
     // For !observeSliceletReadiness: pod3's NotReady is masked to Running (no change),
     // expiry extends.
     val pod3NotReadyOutput: Seq[DriverAction] =
-      if (permitRunningToNotReady)
+      if (observeSliceletReadiness)
         // pod3 just became NotReady; pod0 still Running; pod1 still Starting; pod3 still tracked
         // so not in crashed.
         createHealthReportOutput(healthy = Set(pod0))
@@ -2228,39 +2240,38 @@ private abstract class HealthWatcherSuite(
     harness.advance(35.seconds, Seq.empty, 61.seconds)
 
     // At t=61, pod0 and pod1 expire. pod2 (Terminating) and pod3 (expiry=62) still alive.
-    // pod3 is Running (computed) for !permitRunningToNotReady, NotReady for
-    // permitRunningToNotReady.
+    // pod3 is Running (computed, masked) for !observeSliceletReadiness, NotReady for
+    // observeSliceletReadiness.
     harness.advance(
       61.seconds,
       createHealthReportOutput(
-        healthy = if (permitRunningToNotReady) Set.empty else Set(pod3),
+        healthy = if (observeSliceletReadiness) Set.empty else Set(pod3),
         newlyCrashedCount = if (observeSliceletReadiness) 1 else 2
       ),
       62.seconds // pod3 expires next
     )
 
-    // Verify the Running→NotReady ignored diff case. Pod3's last heartbeat was NOT_READY but its
-    // computed status is Running (ignored) when !permitRunningToNotReady, so the report at t=61
-    // counts it as diff(reportedStatus=NotReady, computedStatus=Running).
-    // For !observeSliceletReadiness,
-    // pod3's NOT_READY was masked to Running at t=32 (same diff path), adding to pod1's count
-    // from t=30. For permitRunningToNotReady=true, pod3 is NotReady/NotReady so no diff.
+    // Verify the Running→NotReady masked diff case. When !observeSliceletReadiness, pod3's
+    // NOT_READY was masked to Running at t=32, so the report counts it as
+    // diff(reportedStatus=NotReady, computedStatus=Running), adding to pod1's count from t=30
+    // for a total of 2. When observeSliceletReadiness, pod3 is NotReady/NotReady so no diff and
+    // the count stays 0.
     assert(
       TargetMetricsUtils.getComputedStatusDiffers(metricsTarget, "NotReady", "Running") ==
-      (if (!observeSliceletReadiness) 2 else if (!permitRunningToNotReady) 1 else 0)
+      (if (!observeSliceletReadiness) 2 else 0)
     )
 
     // ResourceIncarnationTerminating is still 1 while pod2 is alive.
     assert(TargetMetricsUtils.getPodSetSize(metricsTarget, "ResourceIncarnationTerminating") == 1)
 
-    // At t=62, pod3 expires. For permitRunningToNotReady=true, pod3 was NotReady and not in
-    // previouslyHealthy (removed at t=32 intermediate report) → not in crashed. For other
-    // configs, pod3 was Running and in previouslyHealthy → crashed.
+    // At t=62, pod3 expires. For observeSliceletReadiness=true, pod3 was NotReady and not in
+    // previouslyHealthy (removed at t=32 intermediate report) → not in crashed. For
+    // !observeSliceletReadiness, pod3 was Running (masked) and in previouslyHealthy → crashed.
     harness.advance(
       62.seconds,
       createHealthReportOutput(
         healthy = Set.empty,
-        newlyCrashedCount = if (permitRunningToNotReady) 0 else 1
+        newlyCrashedCount = if (observeSliceletReadiness) 0 else 1
       ),
       65.seconds // pod2 (Terminating) expires next
     )
@@ -2273,16 +2284,8 @@ private abstract class HealthWatcherSuite(
   }
 }
 
-// Note: (observeSliceletReadiness = false, permitRunningToNotReady = true) is not a meaningful
-// configuration to test. When observeSliceletReadiness is false, all NotReady outcomes are masked
-// to Running, so the Running -> NotReady transition can never occur and permitRunningToNotReady is
-// a no-op. Its behavior is identical to (observeSliceletReadiness = false,
-// permitRunningToNotReady = false).
 private class HealthWatcherWithStatusMaskingSuite
-    extends HealthWatcherSuite(observeSliceletReadiness = false, permitRunningToNotReady = false)
+    extends HealthWatcherSuite(observeSliceletReadiness = false)
 
 private class HealthWatcherWithoutStatusMaskingSuite
-    extends HealthWatcherSuite(observeSliceletReadiness = true, permitRunningToNotReady = false)
-
-private class HealthWatcherPermitRunningToNotReadySuite
-    extends HealthWatcherSuite(observeSliceletReadiness = true, permitRunningToNotReady = true)
+    extends HealthWatcherSuite(observeSliceletReadiness = true)

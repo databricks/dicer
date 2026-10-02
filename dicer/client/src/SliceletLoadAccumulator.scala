@@ -417,7 +417,7 @@ private[client] object SliceletLoadAccumulator {
           // [60, 70) in the example above).
           val nextSliceAssignment: SliceAssignment = nextSliceAssignmentOrGap.get
           val nextSlice: Slice = nextSliceAssignment.slice
-          val nextNumReplicas: Int = nextSliceAssignment.resources.size
+          val nextNumReplicas: Int = nextSliceAssignment.resourcesSet.size
           if (previousAccumulatorOrGap.isDefined &&
             previousAccumulatorOrGap.get.slice == nextSlice &&
             previousAccumulatorOrGap.get.numReplicas == nextNumReplicas) {

@@ -1,9 +1,9 @@
 package com.databricks.dicer.external.javaapi;
 
-import static com.databricks.dicer.external.javaapi.TestSliceUtils.highSliceKeyFromProto;
-import static com.databricks.dicer.external.javaapi.TestSliceUtils.identity;
-import static com.databricks.dicer.external.javaapi.TestSliceUtils.sliceKeyFromProto;
-import static com.databricks.dicer.external.javaapi.TestSliceUtils.successor;
+import static com.databricks.dicer.external.javaapi.SliceTestUtils.highSliceKeyFromProto;
+import static com.databricks.dicer.external.javaapi.SliceTestUtils.identity;
+import static com.databricks.dicer.external.javaapi.SliceTestUtils.sliceKeyFromProto;
+import static com.databricks.dicer.external.javaapi.SliceTestUtils.successor;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 

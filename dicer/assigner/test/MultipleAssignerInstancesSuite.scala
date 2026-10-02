@@ -1,5 +1,7 @@
 package com.databricks.dicer.assigner
 
+import com.databricks.dicer.assigner.testing.{PreferredAssignerTestUtils}
+
 import java.net.URI
 import javax.annotation.concurrent.NotThreadSafe
 
@@ -32,8 +34,9 @@ import com.databricks.dicer.assigner.config.{
 }
 import com.databricks.dicer.assigner.config.TargetConfigProvider.DEFAULT_INITIAL_POLL_TIMEOUT
 import com.databricks.dicer.client.TestClientUtils
-import com.databricks.dicer.common.InternalDicerTestEnvironment.InternalTargetConfigMapWithDefault
-import com.databricks.dicer.common.{Assignment, TestAssigner}
+import com.databricks.dicer.common.testing.InternalDicerTestEnvironment.InternalTargetConfigMapWithDefault
+import com.databricks.dicer.common.{Assignment}
+import com.databricks.dicer.common.testing.{TestAssigner}
 import com.databricks.dicer.external.{Clerk, ClerkConf, ResourceAddress, Slicelet, Target}
 import com.databricks.testing.DatabricksTest
 
@@ -122,9 +125,9 @@ private class MultipleAssignerInstancesSuite extends DatabricksTest with TestNam
       assignerInstance2.createSlicelet(target).start(getNextSliceletPortNumber, listenerOpt = None)
 
       val preferredAssigner1: TestAssigner =
-        PreferredAssignerTestHelper.getConvergedPreferredAssigner(assignerInstance1.testAssigners)
+        PreferredAssignerTestUtils.getConvergedPreferredAssigner(assignerInstance1.testAssigners)
       val preferredAssigner2: TestAssigner =
-        PreferredAssignerTestHelper.getConvergedPreferredAssigner(assignerInstance2.testAssigners)
+        PreferredAssignerTestUtils.getConvergedPreferredAssigner(assignerInstance2.testAssigners)
 
       // Verify: Assignments for `target` in assigner instance 2 have two resources (Slicelets).
       AssertionWaiter("Wait for both Slicelets to be assigned in instance 2").await {
@@ -152,7 +155,7 @@ private class MultipleAssignerInstancesSuite extends DatabricksTest with TestNam
     // Test plan: Verify that preferred assigners for separate assigner instances are correctly
     // chosen when the instance share an underlying etcd instance. Verify this by creating multiple
     // assigner instances and then verifying the preferred assigner functionality in each instance
-    // using the `PreferredAssignerTestHelper.verifyPreferredAssignerFunctionality` test helper.
+    // using the `PreferredAssignerTestUtils.verifyPreferredAssignerFunctionality` test helper.
 
     // Setup: Create and set up two assigner instances that share an underlying etcd instance.
     val (assignerInstance1, assignerInstance2) = createAndSetUpAssignerInstances()
@@ -359,8 +362,7 @@ private object MultipleAssignerInstancesSuite {
           testAssignerConfig.preferredAssignerDriverConfig,
           Some(dockerizedEtcd)
         ),
-        ASSIGNER_CLUSTER_URI,
-        assignerServiceInfoOpt = None
+        ASSIGNER_CLUSTER_URI
       )
     }
 
@@ -376,7 +378,7 @@ private object MultipleAssignerInstancesSuite {
 
   /**
    * Verifies that preferred assigner functionality works as expected at startup. See
-   * [[PreferredAssignerTestHelper.verifyPreferredAssignerFunctionality]] for more details.
+   * [[PreferredAssignerTestUtils.verifyPreferredAssignerFunctionality]] for more details.
    *
    * @param instance the assigner instance to test
    * @param getNextSliceletPortNumber function that generates unique slicelet port numbers
@@ -384,7 +386,7 @@ private object MultipleAssignerInstancesSuite {
   def verifyAssignerFunctionality(
       instance: AssignerInstance,
       getNextSliceletPortNumber: () => Int): Unit = {
-    PreferredAssignerTestHelper.verifyPreferredAssignerFunctionality(
+    PreferredAssignerTestUtils.verifyPreferredAssignerFunctionality(
       driverConfig = DRIVER_CONFIG,
       testAssigners = instance.testAssigners,
       createDirectClerk = instance.createDirectClerk,

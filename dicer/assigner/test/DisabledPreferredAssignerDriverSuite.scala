@@ -1,5 +1,7 @@
 package com.databricks.dicer.assigner
 
+import com.databricks.dicer.assigner.testing.{PreferredAssignerTestUtils}
+
 import com.databricks.caching.util.AlertOwnerTeam
 import com.databricks.caching.util.{
   Cancellable,
@@ -11,12 +13,8 @@ import com.databricks.dicer.common.{Generation, Incarnation}
 import com.databricks.testing.DatabricksTest
 
 import scala.concurrent.duration.Duration
-import com.databricks.caching.util.TestUtils
 
 class DisabledPreferredAssignerDriverSuite extends DatabricksTest {
-
-  private val LOOSE_STORE_INCARNATION: Incarnation = Incarnation(3L)
-  private val NON_LOOSE_STORE_INCARNATION: Incarnation = Incarnation(4L)
 
   private val ASSIGNER_INFO = AssignerInfo(
     uuid = java.util.UUID.randomUUID(),
@@ -29,22 +27,11 @@ class DisabledPreferredAssignerDriverSuite extends DatabricksTest {
     alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
   )
 
-  test("Cannot create DisabledPreferredAssignerDriver with non-loose store incarnation") {
-    // Test plan: verify that creating a DisabledPreferredAssignerDriver with a non-loose store
-    // incarnation will throw an IllegalArgumentException.
-    assertThrows[IllegalArgumentException] {
-      new DisabledPreferredAssignerDriver(NON_LOOSE_STORE_INCARNATION)
-    }
-
-    // The driver can be created with a loose store incarnation.
-    new DisabledPreferredAssignerDriver(LOOSE_STORE_INCARNATION)
-  }
-
   test("DisabledPreferredAssignerDriver exposes no consistent-hashing state") {
     // Test plan: Verify the disabled driver reports no consistent-hashing snapshot, so the Assigner
     // debug page shows the consistent-hashing section as inactive for the non-CH driver.
     val driver: PreferredAssignerDriver =
-      new DisabledPreferredAssignerDriver(LOOSE_STORE_INCARNATION)
+      new DisabledPreferredAssignerDriver
     val stateOpt: Option[ConsistentHashingState] =
       TestUtils.awaitResult(driver.consistentHashingStateView, Duration.Inf)
     assertResult(None)(stateOpt)
@@ -56,14 +43,14 @@ class DisabledPreferredAssignerDriverSuite extends DatabricksTest {
     // assigner value.
     // Additionally, verify that it sets the assigner role gauge to PREFERRED_BECAUSE_PA_DISABLED.
     val driver: PreferredAssignerDriver =
-      new DisabledPreferredAssignerDriver(LOOSE_STORE_INCARNATION)
+      new DisabledPreferredAssignerDriver
 
     driver.start(ASSIGNER_INFO, AssignerProtoLogger.createNoop(sec))
 
     val expectedPreferredAssignerValue: PreferredAssignerValue.ModeDisabled =
-      PreferredAssignerValue.ModeDisabled(Generation(LOOSE_STORE_INCARNATION, 0L))
+      PreferredAssignerValue.ModeDisabled(Generation.EMPTY)
 
-    PreferredAssignerTestHelper.assertAssignerRoleGaugeMatches(
+    PreferredAssignerTestUtils.assertAssignerRoleGaugeMatches(
       PreferredAssignerMetrics.MonitoredAssignerRole.PREFERRED_BECAUSE_PA_DISABLED
     )
 
@@ -72,7 +59,7 @@ class DisabledPreferredAssignerDriverSuite extends DatabricksTest {
       val (opId, incarnation): (Long, Long) = tuple
       // Check the initial preferred assigner.
       assert(
-        PreferredAssignerTestHelper
+        PreferredAssignerTestUtils
           .getLatestKnownPreferredAssignerBlocking(driver, sec) == expectedPreferredAssignerValue
       )
 
@@ -98,7 +85,7 @@ class DisabledPreferredAssignerDriverSuite extends DatabricksTest {
 
       // Check the preferred assigner after the heartbeat request.
       assert(
-        PreferredAssignerTestHelper
+        PreferredAssignerTestUtils
           .getLatestKnownPreferredAssignerBlocking(driver, sec) == expectedPreferredAssignerValue
       )
 
@@ -110,7 +97,7 @@ class DisabledPreferredAssignerDriverSuite extends DatabricksTest {
 
       // Check the preferred assigner after the watch.
       assert(
-        PreferredAssignerTestHelper
+        PreferredAssignerTestUtils
           .getLatestKnownPreferredAssignerBlocking(driver, sec) == expectedPreferredAssignerValue
       )
       // Cancel the callbacks and check the preferred assigner.
@@ -119,7 +106,7 @@ class DisabledPreferredAssignerDriverSuite extends DatabricksTest {
 
       // Check the preferred assigner after the cancellations.
       assert(
-        PreferredAssignerTestHelper
+        PreferredAssignerTestUtils
           .getLatestKnownPreferredAssignerBlocking(driver, sec) == expectedPreferredAssignerValue
       )
 
@@ -127,10 +114,10 @@ class DisabledPreferredAssignerDriverSuite extends DatabricksTest {
       driver.sendTerminationNotice()
       // Check the preferred assigner after the termination notice.
       assert(
-        PreferredAssignerTestHelper
+        PreferredAssignerTestUtils
           .getLatestKnownPreferredAssignerBlocking(driver, sec) == expectedPreferredAssignerValue
       )
-      PreferredAssignerTestHelper.assertAssignerRoleGaugeMatches(
+      PreferredAssignerTestUtils.assertAssignerRoleGaugeMatches(
         PreferredAssignerMetrics.MonitoredAssignerRole.PREFERRED_BECAUSE_PA_DISABLED
       )
     }

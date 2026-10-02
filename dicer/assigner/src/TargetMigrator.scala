@@ -21,6 +21,7 @@ import com.databricks.caching.util.{
   ValueStreamCallback,
   WatchValueCell
 }
+import com.databricks.dicer.assigner.KubernetesMembershipChecker.VersionedResourceSet
 import com.databricks.dicer.assigner.TargetMigrator.RemoteClusterEndpointWatcher
 import com.databricks.dicer.assigner.TargetMigratorStateMachine.{
   AssignerEndpointSetLocation,

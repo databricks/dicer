@@ -10,21 +10,26 @@ import com.google.protobuf.ByteString
 
 import com.databricks.caching.util.{AssertionWaiter, MetricUtils, TestUtils}
 import com.databricks.caching.util.TestUtils.TestName
-import com.databricks.dicer.common.{InternalDicerTestEnvironment, ProposedSliceAssignment}
+import com.databricks.dicer.common.{ProposedSliceAssignment}
+import com.databricks.dicer.common.testing.{InternalDicerTestEnvironment}
 import com.databricks.dicer.common.TargetHelper.TargetOps
-import com.databricks.dicer.common.TestSliceUtils._
-import com.databricks.dicer.external.{
-  Clerk,
-  ClerkHarness,
-  ResourceAddress,
-  ScalaClerkHarness,
-  SliceKey,
-  Target
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  LowInclusiveSliceKeyFluent,
+  LowInclusiveStringFluent,
+  SliceAssignmentSliceFluent,
+  createProposal,
+  fp,
+  toProposedAssignmentEntry,
+  toSquid,
+  toSquidIterable,
+  `∞`
 }
+import com.databricks.dicer.external.{Clerk, ResourceAddress, SliceKey, Target}
 import com.databricks.dicer.friend.SliceMap
 import com.databricks.dicer.friend.external.TwoLevelShardingClerkAccessorGoldenData.EXPECTED_OWNERS
 import com.databricks.testing.DatabricksTest
 import io.prometheus.client.CollectorRegistry
+import com.databricks.dicer.client.testing.{ClerkHarness, ScalaClerkHarness}
 
 /**
  * Shared tests for the two-level sharding Clerk accessor, run against both the Scala and Rust
@@ -179,36 +184,51 @@ abstract class TwoLevelShardingClerkAccessorSuiteBase extends DatabricksTest wit
   }
 
   test("Two-level getStubForKey routes different primary keys to different pod sets") {
-    // Test plan: Configure an assignment with two primary ranges, each owned by a disjoint pod
-    // set. For a fixed secondary key, look up two primary keys, one in each range, and verify
-    // distinct pods are returned.
-    val separator: SliceKey = sliceKeyFromLong(100)
-    val primaryInLowRange: SliceKey = sliceKeyFromLong(50)
-    val primaryInHighRange: SliceKey = sliceKeyFromLong(150)
+    // Test plan: Verify that primary keys route to their assigned pod sets across single- and
+    // multi-replica slice boundaries. Place a multi-replica slice between two single-replica slices
+    // and vary secondary keys, checking routing immediately below and at both boundaries. Primary
+    // keys in the same slice must select the same pod for a given secondary key. Check routing
+    // metadata invariants and call metrics on this mixed assignment.
+    val lowerBoundary: SliceKey = sliceKeyFromLong(value = 100)
+    val upperBoundary: SliceKey = sliceKeyFromLong(value = 200)
+    val beforeLowerBoundary: SliceKey = sliceKeyFromLong(value = 99)
+    val beforeUpperBoundary: SliceKey = sliceKeyFromLong(value = 199)
 
-    val target = Target(getSafeName)
+    val target: Target = Target(getSafeName)
     val proposal: SliceMap[ProposedSliceAssignment] = createProposal(
-      ("" -- separator) -> Seq("PodA"),
-      (separator -- ∞) -> Seq("PodB")
+      ("" -- lowerBoundary) -> Seq("Pod0"),
+      (lowerBoundary -- upperBoundary) -> Seq("Pod1", "Pod2"),
+      (upperBoundary -- ∞) -> Seq("Pod3")
     )
     testEnv.setAndFreezeAssignment(target, proposal)
 
     val clerk: ClerkHarness = createClerk(target)
-    TestUtils.awaitResult(clerk.ready, Duration.Inf)
-    clerk.checkInvariants()
+    try {
+      TestUtils.awaitResult(clerk.ready, Duration.Inf)
+      clerk.checkInvariants()
 
-    val secondaryKey: SliceKey = fp("secondary_A")
-    val ownerInLowRange: Option[ResourceAddress] =
-      clerk.getStubForKey(primaryInLowRange, secondaryKey)
-    val ownerInHighRange: Option[ResourceAddress] =
-      clerk.getStubForKey(primaryInHighRange, secondaryKey)
-
-    assert(ownerInLowRange.isDefined && ownerInHighRange.isDefined)
-    assert(ownerInLowRange.get == ResourceAddress(URI.create("PodA")))
-    assert(ownerInHighRange.get == ResourceAddress(URI.create("PodB")))
-    assertResult(2)(getStubForKeyCallCount(target, secondaryKeyProvided = true))
-
-    clerk.stop()
+      val lowOwner: ResourceAddress = ResourceAddress(URI.create("Pod0"))
+      val replicatedOwners: Set[ResourceAddress] = Set(
+        ResourceAddress(URI.create("Pod1")),
+        ResourceAddress(URI.create("Pod2"))
+      )
+      val highOwner: ResourceAddress = ResourceAddress(URI.create("Pod3"))
+      for (i: Int <- 0 until 20) {
+        val secondaryKey: SliceKey = fp(s"secondary_$i")
+        assertResult(Some(lowOwner))(clerk.getStubForKey(beforeLowerBoundary, secondaryKey))
+        val replicatedOwnerOpt: Option[ResourceAddress] =
+          clerk.getStubForKey(lowerBoundary, secondaryKey)
+        assert(
+          replicatedOwnerOpt.exists(replicatedOwners.contains),
+          s"Expected an assigned replica at the lower boundary, got $replicatedOwnerOpt"
+        )
+        assertResult(replicatedOwnerOpt)(clerk.getStubForKey(beforeUpperBoundary, secondaryKey))
+        assertResult(Some(highOwner))(clerk.getStubForKey(upperBoundary, secondaryKey))
+        assertResult(4 * (i + 1))(getStubForKeyCallCount(target, secondaryKeyProvided = true))
+      }
+    } finally {
+      clerk.stop()
+    }
   }
 
   test("Two-level getStubForKey respects assignment changes") {

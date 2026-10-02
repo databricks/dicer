@@ -5,10 +5,7 @@ import scala.collection.mutable
 import scala.util.control.NonFatal
 import io.grpc.Status
 import com.databricks.caching.util.CachingErrorCode.UNCAUGHT_STATE_MACHINE_ERROR
-import com.databricks.caching.util.StateMachineDriver.{ConcurrencyDomain, sequentialDomain}
 import com.google.common.base.Throwables
-
-import scala.concurrent.duration.FiniteDuration
 
 /**
  * A driver that collaborates with a [[StateMachine]] to manage a combination of state and
@@ -30,20 +27,18 @@ import scala.concurrent.duration.FiniteDuration
  * CONCURRENCY DISCIPLINE
  *
  * In contrast with most thread-safe components in the Caching team code base, the driver requires
- * that all public methods are called from within the configured concurrency domain (usually an
- * SEC) rather than scheduling itself to run asynchronously within the domain. This is because our
- * intention is for the driver object to be owned by some higher-level component (`class FooDriver`
- * in the example above) whose state is in the same concurrency domain as the driver instance.
+ * that all public methods are called from within the configured `SequentialExecutionContext` rather
+ * than scheduling itself to run asynchronously within the `SequentialExecutionContext`. This is
+ * because our intention is for the driver object to be owned by some higher-level component
+ * (`class FooDriver` in the example above) whose state is in the same `SequentialExecutionContext`
+ * as the driver instance.
  *
- * A consequence of this unopinionated concurrency discipline is that performance sensitive
- * code can use a StateMachineDriver with a [[HybridConcurrencyDomain]] and call into the driver
- * synchronously, enabling calls into the state machine without the overhead of transferring
- * control to another thread.
- *
- * @param domain the concurrency domain within which the driver runs and protects all driver state.
+ * @param sec the `SequentialExecutionContext` within which the driver runs and protects all driver
+ *            state.
  * @param stateMachine the passive state machine implementation.
  * @param performAction the handler function responsible for initiating actions requested by the
- *                      state machine. Called in `domain`.
+ *                      state machine. Called in `sec`.
+ * @param alertOwnerTeam the team's registered alert-routing name.
  * @tparam EventT the type of event handled by the state machine, typically a sealed trait so that
  *                possible event types can be exhaustively handled in a `match` block.
  * @tparam ActionT the type of action performed by the driver, typically a sealed trait so that
@@ -58,30 +53,22 @@ sealed class StateMachineDriver[
     ActionT,
     MachineT <: StateMachine[EventT, ActionT]
 ] private (
-    domain: ConcurrencyDomain,
+    sec: SequentialExecutionContext,
     stateMachine: MachineT,
     performAction: ActionT => Unit,
     alertOwnerTeam: AlertOwnerTeam) {
 
-  /**
-   * Creates a new [[StateMachineDriver]] in the sequential domain defined by `sec`.
-   *
-   * @param alertOwnerTeam the team's registered alert routing name, e.g.
-   *                       [[AlertOwnerTeam.CACHING_TEAM_NAME]] for Caching-owned state machines,
-   *                       or "eng-my-team" for state machines owned by other teams. For alert
-   *                       routing to work correctly, this must be used as the `owner_team_name`
-   *                       for some Dicer target config.
-   */
+  /** Creates a driver whose state is protected by `sec`. */
   def this(
       sec: SequentialExecutionContext,
       stateMachine: MachineT,
       performAction: ActionT => Unit,
       alertOwnerTeam: String) = {
     this(
-      sequentialDomain(sec),
+      sec,
       stateMachine,
       performAction,
-      alertOwnerTeam = AlertOwnerTeam.createFromString(alertOwnerTeam)
+      AlertOwnerTeam.createFromString(alertOwnerTeam)
     )
   }
 
@@ -95,17 +82,17 @@ sealed class StateMachineDriver[
   private var pendingAdvanceCall: Option[AdvanceCall] = None
 
   /**
-   * REQUIRES: called in `domain`
+   * REQUIRES: called in `sec`
    *
    * Kicks off the state machine by supplying it with an `advance` event.
    */
   def start(): Unit = {
-    domain.assertInDomain()
-    handleAdvance(domain.getClock.tickerTime())
+    sec.assertCurrentContext()
+    handleAdvance(sec.getClock.tickerTime())
   }
 
   /**
-   * REQUIRES: called in `domain`
+   * REQUIRES: called in `sec`
    *
    * Supplies the given event to the state machine and handles the output of the state machine:
    *
@@ -114,12 +101,12 @@ sealed class StateMachineDriver[
    *    machine when a callback is requested.
    */
   def handleEvent(event: EventT): Unit = {
-    domain.assertInDomain()
+    sec.assertCurrentContext()
     try {
       handleOutput(
         stateMachine.onEventInternal(
-          tickerTime = domain.getClock.tickerTime(),
-          instant = domain.getClock.instant(),
+          tickerTime = sec.getClock.tickerTime(),
+          instant = sec.getClock.instant(),
           event
         )
       )
@@ -134,7 +121,7 @@ sealed class StateMachineDriver[
   }
 
   /**
-   * REQUIRES: called in `domain`
+   * REQUIRES: called in `sec`
    *
    * Supplies the state machine with an `advance` event, adding appropriate logging/alerting if any
    * unexpected exception occurs.
@@ -142,7 +129,7 @@ sealed class StateMachineDriver[
   private def handleAdvance(tickerTime: TickerTime): Unit = {
     try {
       handleOutput(
-        stateMachine.onAdvanceInternal(tickerTime, instant = domain.getClock.instant())
+        stateMachine.onAdvanceInternal(tickerTime, instant = sec.getClock.instant())
       )
     } catch {
       case NonFatal(e: Throwable) =>
@@ -186,25 +173,25 @@ sealed class StateMachineDriver[
   }
 
   /**
-   * State associated with an `onAdvance` call scheduled in the `domain`. The reader should treat
+   * State associated with an `onAdvance` call scheduled in the `sec`. The reader should treat
    * this class as an implementation detail of `handleOutput`.
    *
    * @param nextTickerTime the time at which
    */
   private class AdvanceCall(val nextTickerTime: TickerTime) extends Runnable {
-    domain.assertInDomain()
+    sec.assertCurrentContext()
 
-    // Schedule this advance call in the `domain` and remember the cancellation handle.
+    // Schedule this advance call in the `sec` and remember the cancellation handle.
     var handle: Cancellable =
-      domain.schedule("advance", delay = nextTickerTime - domain.getClock.tickerTime(), this)
+      sec.schedule("advance", delay = nextTickerTime - sec.getClock.tickerTime(), this)
 
     /**
-     * Callback that we (expect) the `domain` to run at approximately `nextTickerTime`. If this
+     * Callback that we (expect) the `sec` to run at approximately `nextTickerTime`. If this
      * [[AdvanceCall]] instance is still "the" pending advance call for the driver and if
      * `nextTickerTime` is up, calls `onAdvance` on the state machine.
      */
     override def run(): Unit = {
-      domain.assertInDomain()
+      sec.assertCurrentContext()
 
       // Figure out if this is "the" pending advance call for the driver.
       val isPendingAdvanceCall = StateMachineDriver.this.pendingAdvanceCall.exists {
@@ -213,20 +200,20 @@ sealed class StateMachineDriver[
       }
       if (!isPendingAdvanceCall) {
         // If we're not the pending advance call, don't run! Due to best-effort cancellation, we may
-        // be executed by the `domain` even after being cancelled and/or being replaced with a
+        // be executed by the `sec` even after being cancelled and/or being replaced with a
         // different advance call.
         return
       }
       // Figure out what needs to be done.
-      val tickerTime: TickerTime = domain.getClock.tickerTime()
+      val tickerTime: TickerTime = sec.getClock.tickerTime()
       if (tickerTime >= nextTickerTime) {
         // This advance call is no longer pending (it's running!)
         StateMachineDriver.this.pendingAdvanceCall = None
         handleAdvance(tickerTime)
       } else {
-        // We've been woken too early (as the `domain` is permitted to do). Schedule ourselves again
+        // We've been woken too early (as the `sec` is permitted to do). Schedule ourselves again
         // with the remaining delay.
-        this.handle = domain.schedule("advance-adjust", delay = nextTickerTime - tickerTime, this)
+        this.handle = sec.schedule("advance-adjust", delay = nextTickerTime - tickerTime, this)
       }
     }
   }
@@ -234,117 +221,24 @@ sealed class StateMachineDriver[
   object forTest {
 
     /**
-     * REQUIRES: must be called on `domain`.
+     * REQUIRES: must be called on `sec`.
      *
      * Gets the underlying state machine for tests.
      */
     def getStateMachine: MachineT = {
-      domain.assertInDomain()
+      sec.assertCurrentContext()
       stateMachine
     }
 
     /**
-     * REQUIRES: must be called in `domain` and there must be a pending advance call.
+     * REQUIRES: must be called in `sec` and there must be a pending advance call.
      *
      * Runs the pending advance call now. Allows tests to manually trigger [[AdvanceCall.run]]
-     * before it would normally run on the `domain`.
+     * before it would normally run on the `sec`.
      */
     private[util] def runPendingAdvanceCall(): Unit = {
-      domain.assertInDomain()
+      sec.assertCurrentContext()
       pendingAdvanceCall.get.run()
-    }
-  }
-}
-
-object StateMachineDriver {
-  object Metrics {}
-
-  /**
-   * Creates a new [[StateMachineDriver]] to be used in a hybrid concurrency domain.
-   *
-   * @param alertOwnerTeam the team's registered alert routing name, e.g.
-   *                       [[AlertOwnerTeam.CACHING_TEAM_NAME]] for Caching-owned state machines,
-   *                       or "eng-my-team" for state machines owned by other teams. For alert
-   *                       routing to work correctly, this must be used as the `owner_team_name`
-   *                       for some Dicer target config.
-   */
-  // Note: even though this method is public, visibility is limited in practice at the bazel level
-  // by limiting visibility of `HybridConcurrencyDomain`.
-  def inHybridDomain[EventT, ActionT, MachineT <: StateMachine[EventT, ActionT]](
-      hybrid: HybridConcurrencyDomain,
-      stateMachine: MachineT,
-      performAction: ActionT => Unit,
-      alertOwnerTeam: String
-  ): StateMachineDriver[EventT, ActionT, MachineT] = {
-    new StateMachineDriver(
-      domain = hybridDomain(hybrid),
-      stateMachine = stateMachine,
-      performAction = performAction,
-      alertOwnerTeam = AlertOwnerTeam.createFromString(alertOwnerTeam)
-    )
-  }
-
-  /**
-   * [[StateMachineDriver]]-internal trait that allows the internals to abstract over
-   * both sequential and hybrid concurrency domains. Visibility is only `private[util]` for
-   * [[StateMachineDriverSuite]].
-   */
-  private[util] sealed trait ConcurrencyDomain {
-
-    /** Throws if the current thread of execution is not within this domain. */
-    def assertInDomain(): Unit
-
-    /**
-     * Schedules `runnable` to execute after the given `delay`. `name` is provided just for
-     * debugging. Returns a handle that can be used to best-effort cancel the scheduled command.
-     * `runnable` is allowed to execute before (or after) the specified delay; it's up to the
-     * caller to handle early waking.
-     */
-    def schedule(name: String, delay: FiniteDuration, runnable: Runnable): Cancellable
-
-    /** Returns the clock used to evaluate delays for scheduled commands. */
-    def getClock: TypedClock
-  }
-
-  /** Returns a new sequential [[ConcurrencyDomain]] backed by `sec`. */
-  private def sequentialDomain(sec: SequentialExecutionContext): ConcurrencyDomain = {
-    new ConcurrencyDomain {
-      override def assertInDomain(): Unit = sec.assertCurrentContext()
-
-      override def schedule(
-          name: String,
-          delay: FiniteDuration,
-          runnable: Runnable): Cancellable = {
-        sec.schedule(name, delay, runnable)
-      }
-
-      override def getClock: TypedClock = sec.getClock
-    }
-  }
-
-  /** Returns a new hybrid [[ConcurrencyDomain]] backed by `hybrid`. */
-  private def hybridDomain(hybrid: HybridConcurrencyDomain): ConcurrencyDomain = {
-    new ConcurrencyDomain {
-      override def assertInDomain(): Unit = hybrid.assertInDomain()
-
-      override def schedule(
-          name: String,
-          delay: FiniteDuration,
-          runnable: Runnable): Cancellable = {
-        hybrid.schedule(name, delay, runnable)
-      }
-
-      override def getClock: TypedClock = hybrid.getClock
-    }
-  }
-
-  private[util] object forTestStatic {
-    def sequentialDomain(sec: SequentialExecutionContext): ConcurrencyDomain = {
-      StateMachineDriver.sequentialDomain(sec)
-    }
-
-    def hybridDomain(hybrid: HybridConcurrencyDomain): ConcurrencyDomain = {
-      StateMachineDriver.hybridDomain(hybrid)
     }
   }
 }

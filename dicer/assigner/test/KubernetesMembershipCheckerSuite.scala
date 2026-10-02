@@ -1,5 +1,8 @@
 package com.databricks.dicer.assigner
 
+import com.databricks.dicer.assigner.KubernetesMembershipChecker.VersionedResourceSet
+import com.databricks.dicer.assigner.testing.{FakeKubernetesServer, KubernetesTestUtils}
+
 import java.net.URI
 import java.time.OffsetDateTime
 import java.util.UUID
@@ -29,6 +32,7 @@ import com.databricks.caching.util.{
 }
 import com.databricks.caching.util.MetricUtils.{ChangeTracker, SampleExtensions}
 import com.databricks.caching.util.TestUtils.TestName
+import com.databricks.dicer.assigner.KubernetesMembershipChecker.PollOutcome
 import com.databricks.testing.DatabricksTest
 
 /** Tests for [[KubernetesMembershipChecker]]. */
@@ -113,7 +117,7 @@ class KubernetesMembershipCheckerSuite extends DatabricksTest with TestName {
 
   /** Builds a [[CoreV1Api]] backed by [[fakeServer]]. */
   private def buildCoreV1Api(): CoreV1Api =
-    FakeKubernetesTestSupport.buildCoreV1Api(fakeServer)
+    KubernetesTestUtils.buildCoreV1Api(fakeServer)
 
   /**
    * Returns the sum of response counts across all podCount labels for the given namespace,
@@ -177,7 +181,8 @@ class KubernetesMembershipCheckerSuite extends DatabricksTest with TestName {
       namespace: String,
       appName: String,
       statusCode: String,
-      kubeContext: String): Int = {
+      kubeContext: String,
+      outcome: PollOutcome): Int = {
     MetricUtils.getHistogramCount(
       registry,
       "dicer_assigner_k8s_list_pods_latency_millis",
@@ -185,7 +190,8 @@ class KubernetesMembershipCheckerSuite extends DatabricksTest with TestName {
         "namespace" -> namespace,
         "appName" -> appName,
         "statusCode" -> statusCode,
-        "kubeContext" -> kubeContext
+        "kubeContext" -> kubeContext,
+        "outcome" -> outcome.toString
       )
     )
   }
@@ -246,7 +252,7 @@ class KubernetesMembershipCheckerSuite extends DatabricksTest with TestName {
 
   test("Construction fails with invalid arguments") {
     // Test plan: Verify that constructing a KubernetesMembershipChecker with an empty namespace,
-    // empty appName, or non-positive pollingInterval each throw IllegalArgumentException.
+    // empty appName or non-positive pollingInterval each throw IllegalArgumentException.
     // Uses a plain CoreV1Api since the constructor's require() checks never make HTTP calls.
     val coreV1Api: CoreV1Api = new CoreV1Api(new ApiClient())
 
@@ -541,7 +547,14 @@ class KubernetesMembershipCheckerSuite extends DatabricksTest with TestName {
     val assignerUuid: UUID = createAssignerUuid()
 
     val successLatencyCount: ChangeTracker[Int] = ChangeTracker[Int](
-      () => getLatencyHistogramCount(namespace, appName, statusCode = "200", "")
+      () =>
+        getLatencyHistogramCount(
+          namespace,
+          appName,
+          statusCode = "200",
+          kubeContext = "",
+          outcome = PollOutcome.Success
+        )
     )
     val totalPolls: ChangeTracker[Int] = ChangeTracker[Int](
       () => getTotalLatencyCount(namespace, appName, "")
@@ -676,8 +689,15 @@ class KubernetesMembershipCheckerSuite extends DatabricksTest with TestName {
     )
     // With the real HTTP stack, the K8s client reports the actual HTTP status code (e.g. "503")
     // rather than the synthetic "0" that the old FakeCoreV1Api used.
-    val failureCount: ChangeTracker[Int] = ChangeTracker[Int](
-      () => getLatencyHistogramCount(namespace, appName, statusCode = "503", "")
+    val failedPollCount: ChangeTracker[Int] = ChangeTracker[Int](
+      () =>
+        getLatencyHistogramCount(
+          namespace,
+          appName,
+          statusCode = "503",
+          kubeContext = "",
+          outcome = PollOutcome.Failure
+        )
     )
 
     // Start with a successful poll that sets self-present to 1.0.
@@ -713,7 +733,7 @@ class KubernetesMembershipCheckerSuite extends DatabricksTest with TestName {
       totalPolls,
       expectedChange = 2
     )
-    assert(failureCount.totalChange() == 1)
+    assert(failedPollCount.totalChange() == 1)
     assert(getSelfPresentGauge(namespace, appName, "") == 0.0)
 
     // Second poll also fails -- verify polling continues despite errors.
@@ -723,7 +743,7 @@ class KubernetesMembershipCheckerSuite extends DatabricksTest with TestName {
       totalPolls,
       expectedChange = 3
     )
-    assert(failureCount.totalChange() == 2)
+    assert(failedPollCount.totalChange() == 2)
 
     // Switch back to success mode -- metrics should recover.
     fakeServer.setPods(namespace, appName, Some(buildPods(assignerUuid.toString)))
@@ -737,6 +757,43 @@ class KubernetesMembershipCheckerSuite extends DatabricksTest with TestName {
     assert(getSelfPresentGauge(namespace, appName, "") == 1.0)
     // Counter is 2: one from the initial success poll and one from this recovery poll.
     assert(responseCount.totalChange() == 2.0)
+  }
+
+  test("Timed out poll records timeout outcome") {
+    // Test plan: Configure the fake server to leave a real HTTP response pending, then verify that
+    // the K8s client's read timeout reaches the checker callback and records a timeout outcome.
+    val namespace: String = "ns-" + getSafeName
+    val appName: String = "app-" + getSafeName
+    val totalPolls: ChangeTracker[Int] = ChangeTracker[Int](
+      () => getTotalLatencyCount(namespace, appName, "")
+    )
+    val timeoutPolls: ChangeTracker[Int] = ChangeTracker[Int](
+      () =>
+        getLatencyHistogramCount(
+          namespace,
+          appName,
+          statusCode = "0",
+          kubeContext = "",
+          outcome = PollOutcome.Timeout
+        )
+    )
+
+    fakeServer.setNoResponse(namespace, appName)
+    val checker: KubernetesMembershipChecker = new KubernetesMembershipChecker(
+      sec,
+      KubernetesTestUtils.buildCoreV1Api(fakeServer, readTimeout = 100.millis),
+      createAssignerUuid(),
+      namespace = namespace,
+      appName = appName,
+      pollingInterval = pollingInterval,
+      rpcPort = rpcPort,
+      kubeContextLabelOpt = None
+    )
+    checker.start(noopProtoLogger)
+
+    sec.advanceBySync(pollingInterval)
+    awaitPollComplete("timed out poll", totalPolls, expectedChange = 1)
+    assertResult(1)(timeoutPolls.totalChange())
   }
 
   test("Error response from K8s API continues polling") {
@@ -968,11 +1025,10 @@ class KubernetesMembershipCheckerSuite extends DatabricksTest with TestName {
     checker.stopAsync()
   }
 
-  test("Recovery after failure restores health; resources delivered while still unhealthy") {
+  test("First successful poll after failure restores health and delivers resources") {
     // Test plan: Drive the connection unhealthy with 3 consecutive error responses, then switch
-    // to returning pods. Verify that resources are delivered on the very first successful poll
-    // (while still unhealthy), and that after 3 consecutive successes the connection health
-    // transitions back to true.
+    // to returning pods. Verify that the first successful poll both delivers resources and
+    // transitions the connection health back to true.
     val namespace: String = "ns-" + getSafeName
     val appName: String = "app-" + getSafeName
 
@@ -1014,22 +1070,14 @@ class KubernetesMembershipCheckerSuite extends DatabricksTest with TestName {
     val podUid: UUID = UUID.randomUUID()
     fakeServer.setPods(namespace, appName, Some(List(buildPodWithUri(podUid, "10.0.0.3"))))
 
-    // First successful poll delivers resources even though connection is still unhealthy.
+    // The first successful poll delivers resources and restores connection health.
     sec.advanceBySync(pollingInterval)
-    awaitPollComplete("first success while unhealthy", totalPolls, expectedChange = 4)
+    awaitPollComplete("first recovery poll", totalPolls, expectedChange = 4)
 
-    AssertionWaiter("resources delivered while unhealthy", ecOpt = Some(sec)).await {
+    AssertionWaiter("resources delivered on recovery", ecOpt = Some(sec)).await {
       assert(resourcesCb.values.nonEmpty)
     }
-    // Health has not yet recovered (need 3 consecutive successes, only 1 so far).
-    assert(healthCb.values.last == false)
-
-    // Two more successes to complete recovery.
-    for (i: Int <- 5 to 6) {
-      sec.advanceBySync(pollingInterval)
-      awaitPollComplete(s"recovery poll $i", totalPolls, expectedChange = i)
-    }
-
+    assertResult(Set(podUid))(resourcesCb.values.last.resources.keySet)
     AssertionWaiter("connection recovers", ecOpt = Some(sec)).await {
       assert(healthCb.values.last == true)
     }
@@ -1038,13 +1086,12 @@ class KubernetesMembershipCheckerSuite extends DatabricksTest with TestName {
     checker.stopAsync()
   }
 
-  test("Connection-healthy gauge mirrors hysteresis state across transitions") {
+  test("Connection-healthy gauge mirrors health state across transitions") {
     // Test plan: Verify that the connection-healthy gauge and unhealthy counter follow the
-    // hysteresis monitor's state across two full healthy→unhealthy→healthy cycles. The gauge
+    // connection-health monitor's state across two full healthy→unhealthy→healthy cycles. The gauge
     // must be 1.0 after the first (successful) poll resolves the verdict to healthy, 0.0 after
-    // three consecutive failures, 1.0 after three consecutive successes, then 0.0 again after
-    // another three failures, and 1.0 once more after another three successes. The unhealthy
-    // counter must increment by 1 on each transition to unhealthy (total 2 across both cycles).
+    // three consecutive failures, and 1.0 after the next success. Repeat the cycle and verify the
+    // unhealthy counter increments by 1 on each transition to unhealthy.
     val namespace: String = "ns-" + getSafeName
     val appName: String = "app-" + getSafeName
     val podUid: UUID = UUID.randomUUID()
@@ -1087,12 +1134,10 @@ class KubernetesMembershipCheckerSuite extends DatabricksTest with TestName {
     }
     assert(getConnectionUnhealthyCount(namespace, appName) == 1.0)
 
-    // Three consecutive successes recover the connection and the gauge follows.
+    // The next success recovers the connection and the gauge follows.
     fakeServer.setPods(namespace, appName, Some(List(buildPodWithUri(podUid, "10.0.0.5"))))
-    for (i: Int <- 5 to 7) {
-      sec.advanceBySync(pollingInterval)
-      awaitPollComplete(s"recovery poll $i", totalPolls, expectedChange = i)
-    }
+    sec.advanceBySync(pollingInterval)
+    awaitPollComplete("recovery poll", totalPolls, expectedChange = 5)
     AssertionWaiter("gauge reflects recovered state", ecOpt = Some(sec)).await {
       assert(getConnectionHealthyGauge(namespace, appName) == 1.0)
     }
@@ -1100,7 +1145,7 @@ class KubernetesMembershipCheckerSuite extends DatabricksTest with TestName {
 
     // Second cycle: three more consecutive failures transition to unhealthy again.
     fakeServer.setErrorResponse(namespace, appName, statusCode = 500)
-    for (i: Int <- 8 to 10) {
+    for (i: Int <- 6 to 8) {
       sec.advanceBySync(pollingInterval)
       awaitPollComplete(s"second failure poll $i", totalPolls, expectedChange = i)
     }
@@ -1109,12 +1154,10 @@ class KubernetesMembershipCheckerSuite extends DatabricksTest with TestName {
     }
     assert(getConnectionUnhealthyCount(namespace, appName) == 2.0)
 
-    // Three more consecutive successes recover the connection a second time.
+    // The next success recovers the connection a second time.
     fakeServer.setPods(namespace, appName, Some(List(buildPodWithUri(podUid, "10.0.0.5"))))
-    for (i: Int <- 11 to 13) {
-      sec.advanceBySync(pollingInterval)
-      awaitPollComplete(s"second recovery poll $i", totalPolls, expectedChange = i)
-    }
+    sec.advanceBySync(pollingInterval)
+    awaitPollComplete("second recovery poll", totalPolls, expectedChange = 9)
     AssertionWaiter("gauge reflects second recovered state", ecOpt = Some(sec)).await {
       assert(getConnectionHealthyGauge(namespace, appName) == 1.0)
     }
@@ -1214,122 +1257,6 @@ class KubernetesMembershipCheckerSuite extends DatabricksTest with TestName {
     // Never transitioned to unhealthy.
     assert(healthCb.values.forall(_ == true))
     assert(getConnectionUnhealthyCount(namespace, appName) == 0.0)
-
-    checker.stopAsync()
-  }
-
-  test("Partial recovery does not restore health") {
-    // Test plan: Drive the connection unhealthy with 3 consecutive failures, then send 2
-    // consecutive successes (one fewer than the recovery threshold of 3). Verify the health
-    // callback's last value is still false.
-    val namespace: String = "ns-" + getSafeName
-    val appName: String = "app-" + getSafeName
-    val podUid: UUID = UUID.randomUUID()
-
-    val totalPolls: ChangeTracker[Int] = ChangeTracker[Int](
-      () => getTotalLatencyCount(namespace, appName, "")
-    )
-
-    fakeServer.setErrorResponse(namespace, appName, statusCode = 500)
-
-    val checker: KubernetesMembershipChecker = new KubernetesMembershipChecker(
-      sec,
-      buildCoreV1Api(),
-      createAssignerUuid(),
-      namespace = namespace,
-      appName = appName,
-      pollingInterval = pollingInterval,
-      rpcPort = rpcPort,
-      kubeContextLabelOpt = None
-    )
-    val healthCb: CollectingCallback[Boolean] = new CollectingCallback(sec)
-    checker.connectionHealthCell.watch(healthCb)
-    checker.start(noopProtoLogger)
-
-    // Three consecutive failures to transition to unhealthy.
-    for (i: Int <- 1 to 3) {
-      sec.advanceBySync(pollingInterval)
-      awaitPollComplete(s"failure poll $i", totalPolls, expectedChange = i)
-    }
-
-    AssertionWaiter("connection becomes unhealthy", ecOpt = Some(sec)).await {
-      assert(healthCb.values.contains(false))
-    }
-
-    // Two successes — one below the recovery threshold of 3.
-    fakeServer.setPods(namespace, appName, Some(List(buildPodWithUri(podUid, "10.0.0.1"))))
-    for (i: Int <- 4 to 5) {
-      sec.advanceBySync(pollingInterval)
-      awaitPollComplete(s"recovery poll $i", totalPolls, expectedChange = i)
-    }
-
-    // Still unhealthy — last health transition was to false.
-    assert(healthCb.values.last == false)
-    assert(getConnectionUnhealthyCount(namespace, appName) == 1.0)
-
-    checker.stopAsync()
-  }
-
-  test("Failure while unhealthy resets recovery counter") {
-    // Test plan: Drive the connection unhealthy with 3 consecutive failures, begin recovery
-    // with 2 consecutive successes, then interrupt with a failure to reset the recovery counter.
-    // Send 2 more successes (below threshold again). Verify health remains false.
-    val namespace: String = "ns-" + getSafeName
-    val appName: String = "app-" + getSafeName
-    val podUid: UUID = UUID.randomUUID()
-
-    val totalPolls: ChangeTracker[Int] = ChangeTracker[Int](
-      () => getTotalLatencyCount(namespace, appName, "")
-    )
-
-    fakeServer.setErrorResponse(namespace, appName, statusCode = 500)
-
-    val checker: KubernetesMembershipChecker = new KubernetesMembershipChecker(
-      sec,
-      buildCoreV1Api(),
-      createAssignerUuid(),
-      namespace = namespace,
-      appName = appName,
-      pollingInterval = pollingInterval,
-      rpcPort = rpcPort,
-      kubeContextLabelOpt = None
-    )
-    val healthCb: CollectingCallback[Boolean] = new CollectingCallback(sec)
-    checker.connectionHealthCell.watch(healthCb)
-    checker.start(noopProtoLogger)
-
-    // Three consecutive failures to transition to unhealthy.
-    for (i: Int <- 1 to 3) {
-      sec.advanceBySync(pollingInterval)
-      awaitPollComplete(s"failure poll $i", totalPolls, expectedChange = i)
-    }
-
-    AssertionWaiter("connection becomes unhealthy", ecOpt = Some(sec)).await {
-      assert(healthCb.values.contains(false))
-    }
-
-    // Two successes toward recovery.
-    fakeServer.setPods(namespace, appName, Some(List(buildPodWithUri(podUid, "10.0.0.1"))))
-    for (i: Int <- 4 to 5) {
-      sec.advanceBySync(pollingInterval)
-      awaitPollComplete(s"recovery poll $i", totalPolls, expectedChange = i)
-    }
-
-    // One failure resets the recovery counter.
-    fakeServer.setErrorResponse(namespace, appName, statusCode = 500)
-    sec.advanceBySync(pollingInterval)
-    awaitPollComplete("interrupting failure", totalPolls, expectedChange = 6)
-
-    // Two more successes — still below threshold since counter was reset.
-    fakeServer.setPods(namespace, appName, Some(List(buildPodWithUri(podUid, "10.0.0.1"))))
-    for (i: Int <- 7 to 8) {
-      sec.advanceBySync(pollingInterval)
-      awaitPollComplete(s"recovery poll $i", totalPolls, expectedChange = i)
-    }
-
-    // Still unhealthy — recovery counter was reset by the interleaved failure.
-    assert(healthCb.values.last == false)
-    assert(getConnectionUnhealthyCount(namespace, appName) == 1.0)
 
     checker.stopAsync()
   }

@@ -1,5 +1,7 @@
 package com.databricks.dicer.assigner
 
+import com.databricks.dicer.assigner.testing.KubernetesTestUtils
+
 import java.net.URI
 import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 import java.util.UUID
@@ -41,7 +43,8 @@ import com.databricks.dicer.assigner.config.InternalTargetConfig.{
   LoadBalancingConfig,
   LoadBalancingMetricConfig
 }
-import com.databricks.dicer.common.TestSliceUtils.sampleProposal
+import com.databricks.dicer.common.testing.SliceTestUtils
+import com.databricks.dicer.common.testing.SliceTestUtils.sampleProposal
 import com.databricks.dicer.common.Version.LATEST_VERSION
 import com.databricks.dicer.common.{
   Assignment,
@@ -50,15 +53,17 @@ import com.databricks.dicer.common.{
   ClientRequest,
   ClientResponse,
   Generation,
-  InternalDicerTestEnvironment,
   ProposedSliceAssignment,
   SliceletData,
   SliceletState,
   SubscriberHandler,
-  SubscriberHandlerMetricUtils,
-  SyncAssignmentState,
+  SyncAssignmentState
+}
+import com.databricks.dicer.common.testing.{
+  InternalDicerTestEnvironment,
+  SubscriberHandlerMetricTestUtils,
   TestAssigner,
-  TestSliceUtils
+  SliceTestUtils
 }
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.external.{AppTarget, Clerk, ResourceAddress, Slicelet, Target}
@@ -345,11 +350,11 @@ class AssignerSuite extends DatabricksTest with TestName {
     log.info("Assignment received on second call")
 
     assert(
-      SubscriberHandlerMetricUtils
+      SubscriberHandlerMetricTestUtils
         .getNumSliceletsByHandler(SubscriberHandler.Location.Assigner, target, LATEST_VERSION) == 0
     )
     assert(
-      SubscriberHandlerMetricUtils
+      SubscriberHandlerMetricTestUtils
         .getNumClerksByHandler(SubscriberHandler.Location.Assigner, target, LATEST_VERSION) == 2
     )
   }
@@ -491,7 +496,7 @@ class AssignerSuite extends DatabricksTest with TestName {
 
     // The Assigner requires a checker to start; this one never polls (see the factory).
     val checkerFactory: KubernetesMembershipChecker.Factory =
-      FakeKubernetesTestSupport.inertMembershipCheckerFactory
+      KubernetesTestUtils.inertMembershipCheckerFactory
     val assigner = Assigner.createAndStart(
       assignerConf,
       dynamicConfigProvider,
@@ -748,7 +753,7 @@ class AssignerSuite extends DatabricksTest with TestName {
       // tracked by the Slicelet.
       val numWatches: MetricUtils.ChangeTracker[Long] = MetricUtils.ChangeTracker[Long](
         () =>
-          SubscriberHandlerMetricUtils.getNumWatchRequests(
+          SubscriberHandlerMetricTestUtils.getNumWatchRequests(
             // By setting the handlerTarget and requestTarget to the same underlying target, we
             // filter the metric for observations where the SubscriberHandler at the Slicelet
             // considers the target in the request to match its target.
@@ -853,7 +858,7 @@ class AssignerSuite extends DatabricksTest with TestName {
       "test-slicelet",
       timeout = 1.second,
       SliceletData(
-        TestSliceUtils.createTestSquid("test"),
+        SliceTestUtils.createTestSquid("test"),
         SliceletState.Running,
         "localhostNamespace",
         attributedLoads = Vector.empty,
@@ -1084,7 +1089,7 @@ class AssignerSuite extends DatabricksTest with TestName {
     val assignerServiceInfo: AssignerServiceInfo =
       AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val localTestEnv: InternalDicerTestEnvironment = InternalDicerTestEnvironment.create(
-      assignerServiceInfoOpt = Some(assignerServiceInfo)
+      TestAssigner.Config.create(assignerServiceInfoOpt = Some(assignerServiceInfo))
     )
     val target = Target(getSafeName)
 
@@ -1416,7 +1421,7 @@ class AssignerSuite extends DatabricksTest with TestName {
         "reported-alternative-target-test",
         WATCH_RPC_TIMEOUT,
         SliceletData(
-          TestSliceUtils.createTestSquid("reported-alternative-target-test"),
+          SliceTestUtils.createTestSquid("reported-alternative-target-test"),
           SliceletState.Running,
           "localhostNamespace",
           attributedLoads = Vector.empty,

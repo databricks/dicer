@@ -1,5 +1,7 @@
 package com.databricks.dicer.common
 
+import com.databricks.dicer.common.testing.{InternalDicerTestEnvironment, TestAssigner}
+
 import com.databricks.caching.util.TestUtils
 import com.databricks.caching.util.TestUtils.TestName
 import com.databricks.caching.util.{

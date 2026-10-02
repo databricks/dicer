@@ -1228,7 +1228,7 @@ object TargetMetrics {
     // for each bucket.
     val replicaCounts = mutable.SortedMap[Int, Int](
       assignment.sliceAssignments
-        .groupBy((_: SliceAssignment).resources.size)
+        .groupBy((_: SliceAssignment).resourcesSet.size)
         .mapValues((_: Iterable[SliceAssignment]).size)
         .toSeq: _*
     )

@@ -40,8 +40,8 @@ import com.databricks.dicer.assigner.config.InternalTargetConfig.{
 /**
  * Stores the config for the given `target`.
  *
- * NOTE: [[TargetConfigValidator.validateEquivalentConfigScopesHaveMatchingConfig]] relies on the
- * value equality (i.e. `.equals`) of the entire [[InternalTargetConfig]] instance. As a result,
+ * NOTE: [[TargetConfigValidator.validateEquivalentClusterConfigScopesHaveMatchingConfig]] relies on
+ * the value equality (i.e. `.equals`) of the entire [[InternalTargetConfig]] instance. As a result,
  * it also transitively relies on value equality of the entire [[Authorizer]] instance.
  *
  * @param loadWatcherConfig      The configuration for the load watcher.

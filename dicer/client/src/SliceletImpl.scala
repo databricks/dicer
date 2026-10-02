@@ -33,6 +33,8 @@ import com.databricks.caching.util.{
 }
 import com.databricks.common.util.ShutdownHookManager
 import com.databricks.dicer.client.SliceletImpl.SLICELET_LOAD_ACCUMULATOR_UPDATE_METRICS_INTERVAL
+import com.databricks.dicer.client.featurerollouts.DicerClientFeatureRolloutFlag
+import com.databricks.dicer.common.WatchServerHelper.WATCH_RPC_TIMEOUT
 import com.databricks.dicer.common.{
   AppIdentifier,
   Assignment,
@@ -427,8 +429,15 @@ private[dicer] object SliceletImpl {
       SliceLookupConfig.DEFAULT_WATCH_STUB_CACHE_TIME,
       sliceletConf.watchFromDataPlane,
       alternativeTargetOpt,
-      // TODO(<internal bug>): Use client side feature flag to gradually rollout rate limiting.
-      enableRateLimiting = false,
+      watchRpcTimeout = sliceletConf.watchRpcTimeoutOverrideOpt.getOrElse(WATCH_RPC_TIMEOUT),
+      // The conf override, when set, takes precedence over the rollout flag, so that a service can
+      // force rate limiting on or off regardless of the rollout.
+      enableRateLimiting = sliceletConf.enableRateLimitingOverrideOpt.getOrElse(
+        sliceletConf.isFeatureRolloutFlagEnabled(
+          DicerClientFeatureRolloutFlag.SLICELET_WATCH_RATE_LIMITING_FLAG_NAME,
+          target
+        )
+      ),
       sourceIpOpt = None
     )
     val config: InternalClientConfig =

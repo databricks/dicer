@@ -1,7 +1,6 @@
 package com.databricks.dicer.client
 
 import java.net.URI
-import java.time.Instant
 import java.util.{Random, UUID}
 
 import com.databricks.conf.Config
@@ -28,17 +27,16 @@ import com.databricks.caching.util.{
 }
 import com.databricks.caching.util.MetricUtils.ChangeTracker
 import com.databricks.dicer.common.TargetHelper.TargetOps
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.SliceTestUtils.sampleProposal
 import com.databricks.dicer.common.{
   AssignerServiceInfo,
   Assignment,
   AssignmentMetricsSource,
   ClientRequest,
   ClientType,
-  Generation,
-  InternalDicerTestEnvironment,
   ProposedSliceAssignment
 }
+import com.databricks.dicer.common.testing.{InternalDicerTestEnvironment}
 import com.databricks.dicer.external.{Clerk, ClerkConf, ResourceAddress, SliceKey, Slicelet, Target}
 import com.databricks.dicer.friend.SliceMap
 import com.databricks.testing.DatabricksTest
@@ -321,60 +319,6 @@ class ClerkImplSuite extends DatabricksTest with TestName {
       verifyEventuallyNoWatchRequestsReceivedAfterStop(target)
       assert(!clerk.impl.forTest.getLatestAssignmentOpt.contains(newAssignment))
     }
-  }
-
-  test("Clerk removes gauges for a target after assigner service info change") {
-    // Test plan: Verify that the Clerk removes gauges for a target after the assigner service info
-    // changes. Verify this by recording metrics for one target under an initial assigner service
-    // info, injecting a newer assignment stamped with a different assigner service info, and
-    // checking that the stale metrics are removed.
-    val target = Target(getSafeName)
-    val initialServiceInfo =
-      AssignerServiceInfo(name = "test-assigner-1", instanceId = "instance-1")
-    val changedServiceInfo =
-      AssignerServiceInfo(name = "test-assigner-2", instanceId = "instance-2")
-
-    // Setup: Create a test environment with the initial assigner service info. Then create a
-    // Clerk that receives its first assignment from the test environment.
-    val env: InternalDicerTestEnvironment =
-      InternalDicerTestEnvironment.create(assignerServiceInfoOpt = Some(initialServiceInfo))
-    val initialAssignment: Assignment =
-      TestUtils.awaitResult(env.setAndFreezeAssignment(target, sampleProposal()), Duration.Inf)
-    val clerk: Clerk[ResourceAddress] =
-      env.createDirectClerk(target, initialAssignerIndex = 0)
-
-    // Verify: After the clerk receives its first assignment, it records assignment metrics with the
-    // initial assigner service info.
-    AssertionWaiter("Wait for metrics to be recorded").await {
-      assert(getLatestGenerationNumberOpt(target, Some(initialServiceInfo)).isDefined)
-      assert(getLatestStoreIncarnationOpt(target, Some(initialServiceInfo)).isDefined)
-    }
-
-    // Setup: Simulate a restarted assigner with a different service info by injecting a newer
-    // assignment with a different service info.
-    val assignmentWithChangedServiceInfo: Assignment = initialAssignment.copy(
-      generation = Generation.createForCurrentTime(
-        incarnation = initialAssignment.generation.incarnation,
-        now = Instant.now(),
-        lowerBoundExclusive = initialAssignment.generation
-      ),
-      assignerServiceInfoOpt = Some(changedServiceInfo)
-    )
-    clerk.impl.forTest.injectAssignment(assignmentWithChangedServiceInfo)
-
-    // Verify: After the clerk receives the updated assignment, it records assignment metrics and
-    // clears the stale metrics. The difference in assigner service infos should trigger the Clerk
-    // to clear the gauge with the initial assigner service info.
-    AssertionWaiter("Wait for new metrics to be recorded and stale metrics to be removed").await {
-      assert(getLatestGenerationNumberOpt(target, Some(changedServiceInfo)).isDefined)
-      assert(getLatestStoreIncarnationOpt(target, Some(changedServiceInfo)).isDefined)
-      assert(getLatestGenerationNumberOpt(target, Some(initialServiceInfo)).isEmpty)
-      assert(getLatestStoreIncarnationOpt(target, Some(initialServiceInfo)).isEmpty)
-    }
-
-    // Cleanup: Stop the Clerk and the test environment created by this test.
-    clerk.impl.stop()
-    env.stop()
   }
 
   import ClientMetrics.ClientUuidStatus

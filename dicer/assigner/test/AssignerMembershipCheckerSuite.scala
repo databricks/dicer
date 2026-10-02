@@ -1,5 +1,7 @@
 package com.databricks.dicer.assigner
 
+import com.databricks.dicer.assigner.testing.{FakeKubernetesServer, KubernetesTestUtils}
+
 import java.net.URI
 import java.util.UUID
 import java.util.Random
@@ -79,7 +81,7 @@ class AssignerMembershipCheckerSuite extends DatabricksTest with TestName {
             name = "membership-checker",
             alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
           )
-        val coreV1Api: CoreV1Api = FakeKubernetesTestSupport.buildCoreV1Api(fakeServer)
+        val coreV1Api: CoreV1Api = KubernetesTestUtils.buildCoreV1Api(fakeServer)
         new KubernetesMembershipChecker(
           checkerSec,
           coreV1Api,

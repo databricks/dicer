@@ -3,7 +3,23 @@ package com.databricks.dicer.common
 import scala.util.Random
 
 import com.databricks.caching.util.TestUtils.assertThrow
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  GenerationIncarnationFluent,
+  LowInclusiveStringFluent,
+  SliceAssignmentFluet,
+  SliceAssignmentSliceFluent,
+  createAssignment,
+  createBiasedProposal,
+  createLooseGeneration,
+  createProposal,
+  createRandomProposal,
+  createTestSquid,
+  toProposedAssignmentEntry,
+  toSliceKey,
+  toSquid,
+  toSquidWithValue,
+  `∞`
+}
 import com.databricks.dicer.external.Slice
 import com.databricks.dicer.friend.{MutableSliceMap, SliceMap, Squid}
 import com.databricks.dicer.friend.SliceMap.{IntersectionEntry, GapEntry}
@@ -164,175 +180,156 @@ class ProposedAssignmentSuite extends DatabricksTest {
     //    changes exhaustive"),
     // 4. has the same subslice annotations (in particular, subslice annotations can change even
     //    when all of the above holds when state transfer is disabled and needs to clear any
-    //    existing state transfer subslice annotations),
-    // 5. is in a non-loose assignment incarnation.
+    //    existing state transfer subslice annotations).
+    // Test for various incarnations (loose- and non-loose). No difference in behavior is expected.
 
-    testAsn(
-      "previous generation preserved",
-      proposal = ProposedAssignment(
-        predecessorOpt = Some(
-          createAssignment(
-            2 ## 42,
-            AssignmentConsistencyMode.Affinity,
-            assignerServiceInfoOpt = None,
-            ("" -- "Balin") @@ (2 ## 42) -> Seq("Pod0", "Pod1"),
-            ("Balin" -- ∞) @@ (2 ## 42) -> Seq("Pod2") | Map(
-              "Pod2" -> Seq(
-                SubsliceAnnotation("Fili" -- "Kili", 30, stateTransferOpt = None)
+    for (incarnation <- Seq[Long](
+        0, // loose
+        1, // loose
+        2, // non-loose
+        128 // non-loose
+      )) {
+      testAsn(
+        "previous generation preserved",
+        proposal = ProposedAssignment(
+          predecessorOpt = Some(
+            createAssignment(
+              incarnation ## 42,
+              AssignmentConsistencyMode.Affinity,
+              assignerServiceInfoOpt = None,
+              ("" -- "Balin") @@ (incarnation ## 42) -> Seq("Pod0", "Pod1"),
+              ("Balin" -- ∞) @@ (incarnation ## 42) -> Seq("Pod2") | Map(
+                "Pod2" -> Seq(
+                  SubsliceAnnotation("Fili" -- "Kili", 30, stateTransferOpt = None)
+                )
+              )
+            )
+          ),
+          sliceMap = createProposal(
+            ("" -- "Balin") -> Seq("Pod0", "Pod1"),
+            ("Balin" -- ∞) -> Seq("Pod2")
+          ),
+          assignerServiceInfoOpt = None
+        ),
+        generation = incarnation ## 47,
+        expected = createAssignment(
+          incarnation ## 47,
+          AssignmentConsistencyMode.Affinity,
+          assignerServiceInfoOpt = None,
+          // All the conditions for carrying forward Slice Assignment are satisfied. Slice
+          // Assignments should not change.
+          ("" -- "Balin") @@ (incarnation ## 42) -> Seq("Pod0", "Pod1"),
+          ("Balin" -- ∞) @@ (incarnation ## 42) -> Seq("Pod2") | Map(
+            // Subslice Annotation is also carried forward.
+            "Pod2" -> Seq(
+              SubsliceAnnotation("Fili" -- "Kili", 30, stateTransferOpt = None)
+            )
+          )
+        )
+      )
+
+      testAsn(
+        "Slice generation advances when Slice boundaries change",
+        proposal = ProposedAssignment(
+          predecessorOpt = Some(
+            createAssignment(
+              incarnation ## 42,
+              AssignmentConsistencyMode.Affinity,
+              assignerServiceInfoOpt = None,
+              ("" -- "Fili") @@ (incarnation ## 42) -> Seq("Pod0", "Pod1"),
+              ("Fili" -- ∞) @@ (incarnation ## 42) -> Seq("Pod1")
+            )
+          ),
+          sliceMap = createProposal(
+            // The high boundary of the first Slice changed from Fili to Kili.
+            ("" -- "Kili") -> Seq("Pod0", "Pod1"),
+            ("Kili" -- ∞) -> Seq("Pod1")
+          ),
+          assignerServiceInfoOpt = None
+        ),
+        generation = incarnation ## 47,
+        expected = createAssignment(
+          incarnation ## 47,
+          // Both Slice Assignments should have new generation.
+          AssignmentConsistencyMode.Affinity,
+          assignerServiceInfoOpt = None,
+          (("" -- "Kili") @@ (incarnation ## 47) -> Seq("Pod0", "Pod1")) | Map(
+            "Pod0" -> Seq(
+              SubsliceAnnotation("" -- "Fili", 42, stateTransferOpt = None),
+              SubsliceAnnotation(
+                "Fili" -- "Kili",
+                47,
+                Some(Transfer(id = 0, fromResource = "Pod1"))
+              )
+            ),
+            // Note Pod1 is continuously assigned on both ["", Fili) and [Fili, Kili).
+            "Pod1" -> Seq(
+              SubsliceAnnotation("" -- "Kili", 42, stateTransferOpt = None)
+            )
+          ),
+          (("Kili" -- ∞) @@ (incarnation ## 47) -> Seq("Pod1")) | Map(
+            "Pod1" -> Seq(
+              SubsliceAnnotation("Kili" -- ∞, 42, stateTransferOpt = None)
+            )
+          )
+        )
+      )
+
+      testAsn(
+        "Slice generation advanced when assigned resources change",
+        proposal = ProposedAssignment(
+          predecessorOpt = Some(
+            createAssignment(
+              incarnation ## 42,
+              AssignmentConsistencyMode.Affinity,
+              assignerServiceInfoOpt = None,
+              ("" -- "Fili") @@ (incarnation ## 42) -> Seq("Pod1", "Pod2"),
+              ("Fili" -- "Kili") @@ (incarnation ## 42) -> Seq("Pod2"),
+              ("Kili" -- ∞) @@ (incarnation ## 42) -> Seq("Pod2")
+            )
+          ),
+          sliceMap = createProposal(
+            ("" -- "Fili") -> Seq("Pod1"), // Pod2 removed.
+            ("Fili" -- "Kili") -> Seq("Pod2", "Pod3"), // Pod3 added.
+            ("Kili" -- ∞) -> Seq("Pod3") // Changed from Pod2 to Pod3.
+          ),
+          assignerServiceInfoOpt = None
+        ),
+        generation = incarnation ## 47,
+        expected = createAssignment(
+          incarnation ## 47,
+          AssignmentConsistencyMode.Affinity,
+          assignerServiceInfoOpt = None,
+          // All Slice generations are advanced.
+          ("" -- "Fili") @@ (incarnation ## 47) -> Seq("Pod1") | Map(
+            "Pod1" -> Seq(
+              SubsliceAnnotation("" -- "Fili", 42, stateTransferOpt = None)
+            )
+          ),
+          ("Fili" -- "Kili") @@ (incarnation ## 47) -> Seq("Pod2", "Pod3") | Map(
+            "Pod2" -> Seq(
+              SubsliceAnnotation("Fili" -- "Kili", 42, stateTransferOpt = None)
+            ),
+            "Pod3" -> Seq(
+              SubsliceAnnotation(
+                "Fili" -- "Kili",
+                47,
+                Some(Transfer(id = 0, fromResource = "Pod2"))
+              )
+            )
+          ),
+          ("Kili" -- ∞) @@ (incarnation ## 47) -> Seq("Pod3") | Map(
+            "Pod3" -> Seq(
+              SubsliceAnnotation(
+                "Kili" -- ∞,
+                47,
+                Some(Transfer(id = 1, fromResource = "Pod2"))
               )
             )
           )
-        ),
-        sliceMap = createProposal(
-          ("" -- "Balin") -> Seq("Pod0", "Pod1"),
-          ("Balin" -- ∞) -> Seq("Pod2")
-        ),
-        assignerServiceInfoOpt = None
-      ),
-      generation = 2 ## 47,
-      expected = createAssignment(
-        2 ## 47,
-        AssignmentConsistencyMode.Affinity,
-        assignerServiceInfoOpt = None,
-        // All the conditions for carrying forward Slice Assignment are satisfied. Slice Assignments
-        // should not change.
-        ("" -- "Balin") @@ (2 ## 42) -> Seq("Pod0", "Pod1"),
-        ("Balin" -- ∞) @@ (2 ## 42) -> Seq("Pod2") | Map(
-          // Subslice Annotation is also carried forward.
-          "Pod2" -> Seq(
-            SubsliceAnnotation("Fili" -- "Kili", 30, stateTransferOpt = None)
-          )
         )
       )
-    )
-
-    testAsn(
-      "Slice generation advances when Slice boundaries change",
-      proposal = ProposedAssignment(
-        predecessorOpt = Some(
-          createAssignment(
-            2 ## 42,
-            AssignmentConsistencyMode.Affinity,
-            assignerServiceInfoOpt = None,
-            ("" -- "Fili") @@ (2 ## 42) -> Seq("Pod0", "Pod1"),
-            ("Fili" -- ∞) @@ (2 ## 42) -> Seq("Pod1")
-          )
-        ),
-        sliceMap = createProposal(
-          // The high boundary of the first Slice changed from Fili to Kili.
-          ("" -- "Kili") -> Seq("Pod0", "Pod1"),
-          ("Kili" -- ∞) -> Seq("Pod1")
-        ),
-        assignerServiceInfoOpt = None
-      ),
-      generation = 2 ## 47,
-      expected = createAssignment(
-        2 ## 47,
-        // Both Slice Assignments should have new generation.
-        AssignmentConsistencyMode.Affinity,
-        assignerServiceInfoOpt = None,
-        (("" -- "Kili") @@ (2 ## 47) -> Seq("Pod0", "Pod1")) | Map(
-          "Pod0" -> Seq(
-            SubsliceAnnotation("" -- "Fili", 42, stateTransferOpt = None),
-            SubsliceAnnotation("Fili" -- "Kili", 47, Some(Transfer(id = 0, fromResource = "Pod1")))
-          ),
-          // Note Pod1 is continuously assigned on both ["", Fili) and [Fili, Kili).
-          "Pod1" -> Seq(
-            SubsliceAnnotation("" -- "Kili", 42, stateTransferOpt = None)
-          )
-        ),
-        (("Kili" -- ∞) @@ (2 ## 47) -> Seq("Pod1")) | Map(
-          "Pod1" -> Seq(
-            SubsliceAnnotation("Kili" -- ∞, 42, stateTransferOpt = None)
-          )
-        )
-      )
-    )
-
-    testAsn(
-      "Slice generation advanced when assigned resources change",
-      proposal = ProposedAssignment(
-        predecessorOpt = Some(
-          createAssignment(
-            2 ## 42,
-            AssignmentConsistencyMode.Affinity,
-            assignerServiceInfoOpt = None,
-            ("" -- "Fili") @@ (2 ## 42) -> Seq("Pod1", "Pod2"),
-            ("Fili" -- "Kili") @@ (2 ## 42) -> Seq("Pod2"),
-            ("Kili" -- ∞) @@ (2 ## 42) -> Seq("Pod2")
-          )
-        ),
-        sliceMap = createProposal(
-          ("" -- "Fili") -> Seq("Pod1"), // Pod2 removed.
-          ("Fili" -- "Kili") -> Seq("Pod2", "Pod3"), // Pod3 added.
-          ("Kili" -- ∞) -> Seq("Pod3") // Changed from Pod2 to Pod3.
-        ),
-        assignerServiceInfoOpt = None
-      ),
-      generation = 2 ## 47,
-      expected = createAssignment(
-        2 ## 47,
-        AssignmentConsistencyMode.Affinity,
-        assignerServiceInfoOpt = None,
-        // All Slice generations are advanced.
-        ("" -- "Fili") @@ (2 ## 47) -> Seq("Pod1") | Map(
-          "Pod1" -> Seq(
-            SubsliceAnnotation("" -- "Fili", 42, stateTransferOpt = None)
-          )
-        ),
-        ("Fili" -- "Kili") @@ (2 ## 47) -> Seq("Pod2", "Pod3") | Map(
-          "Pod2" -> Seq(
-            SubsliceAnnotation("Fili" -- "Kili", 42, stateTransferOpt = None)
-          ),
-          "Pod3" -> Seq(
-            SubsliceAnnotation("Fili" -- "Kili", 47, Some(Transfer(id = 0, fromResource = "Pod2")))
-          )
-        ),
-        ("Kili" -- ∞) @@ (2 ## 47) -> Seq("Pod3") | Map(
-          "Pod3" -> Seq(
-            SubsliceAnnotation("Kili" -- ∞, 47, Some(Transfer(id = 1, fromResource = "Pod2")))
-          )
-        )
-      )
-    )
-
-    testAsn(
-      "Slice generation advances for loose incarnation",
-      proposal = ProposedAssignment(
-        predecessorOpt = Some(
-          createAssignment(
-            42,
-            AssignmentConsistencyMode.Affinity,
-            assignerServiceInfoOpt = None,
-            ("" -- "Balin") @@ 42 -> Seq("Pod0"),
-            ("Balin" -- ∞) @@ 42 -> Seq("Pod1")
-          )
-        ),
-        // Assigned exactly as before.
-        sliceMap = createProposal(
-          ("" -- "Balin") -> Seq("Pod0"),
-          ("Balin" -- ∞) -> Seq("Pod1")
-        ),
-        assignerServiceInfoOpt = None
-      ),
-      generation = 47,
-      expected = createAssignment(
-        47,
-        AssignmentConsistencyMode.Affinity,
-        assignerServiceInfoOpt = None,
-        // Slice generation updated.
-        ("" -- "Balin") @@ 47 -> Seq("Pod0") | Map(
-          "Pod0" -> Seq(
-            SubsliceAnnotation("" -- "Balin", 42, stateTransferOpt = None)
-          )
-        ),
-        ("Balin" -- ∞) @@ 47 -> Seq("Pod1") | Map(
-          "Pod1" -> Seq(
-            SubsliceAnnotation("Balin" -- ∞, 42, stateTransferOpt = None)
-          )
-        )
-      )
-    )
+    }
   }
 
   test("ProposedAssignment commit generation advanced by load changes exhaustive") {
@@ -343,25 +340,13 @@ class ProposedAssignmentSuite extends DatabricksTest {
     // is used. When the Slice is new, the generation should increase but the subsliceAnnotations
     // should indicate continuity of the assignment.
     //
-    // The behavior is different in the "loose" incarnation, where the generation is always updated
-    // when there is any change in the primary rate load. We automatically adjust the declared test
-    // cases for the loose incarnation variants to reflect this behavior.
+    // Test for various incarnations (loose- and non-loose). No difference in behavior is expected.
 
     case class TestCase(
         previousLoadOpt: Option[Double],
         proposedLoadOpt: Option[Double],
         threshold: Double,
-        expectUpdate: Boolean) {
-      def toLooseIncarnationTestCase: TestCase = {
-        // In the loose incarnation, the diffGeneration is always incremented.
-        TestCase(
-          previousLoadOpt,
-          proposedLoadOpt,
-          threshold,
-          expectUpdate = true
-        )
-      }
-    }
+        expectUpdate: Boolean)
     val testCases = Seq(
       TestCase(None, None, 0.1, expectUpdate = false),
       TestCase(None, Some(0.0), 0.1, expectUpdate = true),
@@ -382,14 +367,7 @@ class ProposedAssignmentSuite extends DatabricksTest {
         2, // non-loose
         128 // non-loose
       )) {
-      val adjustedTestCases = if (Incarnation(incarnation).isLoose) {
-        testCases.map { testCase =>
-          testCase.toLooseIncarnationTestCase
-        }
-      } else {
-        testCases
-      }
-      for (testCase: TestCase <- adjustedTestCases) {
+      for (testCase: TestCase <- testCases) {
         // Create an predecessor assignment and a proposed assignment with a stably assigned Slice
         // including the previous load and proposed load, respectively.
         val predecessorAssignment: Assignment = createAssignment(
@@ -491,7 +469,7 @@ class ProposedAssignmentSuite extends DatabricksTest {
           SliceAssignment
       ) = tuple
       assert(committed.slice == proposed.slice)
-      assert(committed.resources == proposed.resources)
+      assert(committed.resourcesSet == proposed.resources)
       assert(committed.generation == newGeneration)
       assert(
         committed.subsliceAnnotationsByResource.values.forall((_: Seq[SubsliceAnnotation]).isEmpty)
@@ -776,7 +754,7 @@ class ProposedAssignmentSuite extends DatabricksTest {
         for (asn: SliceAssignment <- assignment.sliceMap.entries;
           entry <- expectedContGenBySliceReplica) {
           val (resource, mutableSliceMap): (Squid, MutableSliceMap[Option[UnixTimeVersion]]) = entry
-          if (asn.resources.contains(resource)) {
+          if (asn.resourcesSet.contains(resource)) {
             mutableSliceMap.merge(asn.slice, value = Some(asn.generation.number), mergeFn)
           } else {
             mutableSliceMap.merge(asn.slice, value = None, mergeFn)
@@ -799,7 +777,7 @@ class ProposedAssignmentSuite extends DatabricksTest {
           resource -> mutableSliceMap
         }.toMap
       for (asn: SliceAssignment <- finalAssignment.sliceAssignments;
-        resource: Squid <- asn.resources) {
+        resource: Squid <- asn.resourcesSet) {
         actualContGenBySliceReplica(resource).put(asn.slice, Some(asn.generation.number))
         for (subsliceAnnotation: SubsliceAnnotation <- asn.subsliceAnnotationsByResource.getOrElse(
             resource,
@@ -858,9 +836,7 @@ class ProposedAssignmentSuite extends DatabricksTest {
         generation = 20,
         AssignmentConsistencyMode.Affinity,
         assignerServiceInfoOpt = None,
-        ("" -- "Balin") @@ 20 -> Seq("pod0") | Map(
-          "pod0" -> Seq(SubsliceAnnotation("" -- "Balin", 10, stateTransferOpt = None))
-        ),
+        ("" -- "Balin") @@ 10 -> Seq("pod0"),
         ("Balin" -- "Bofur") @@ 20 -> Seq("pod0") | Map(
           "pod0" -> Seq(
             SubsliceAnnotation("Balin" -- "Bofur", 20, stateTransferOpt = Some(Transfer(0, "pod1")))
@@ -871,9 +847,7 @@ class ProposedAssignmentSuite extends DatabricksTest {
             SubsliceAnnotation("Bofur" -- "Fili", 20, stateTransferOpt = Some(Transfer(1, "pod2")))
           )
         ),
-        ("Fili" -- "Kili") @@ 20 -> Seq("pod3") | Map(
-          "pod3" -> Seq(SubsliceAnnotation("Fili" -- "Kili", 10, stateTransferOpt = None))
-        ),
+        ("Fili" -- "Kili") @@ 10 -> Seq("pod3"),
         ("Kili" -- ∞) @@ 20 -> Seq("pod2") | Map(
           "pod2" -> Seq(
             SubsliceAnnotation("Kili" -- ∞, 20, stateTransferOpt = Some(Transfer(2, "pod4")))
@@ -928,7 +902,7 @@ class ProposedAssignmentSuite extends DatabricksTest {
             SubsliceAnnotation("Fili" -- "Kili", 10, stateTransferOpt = None)
           )
         ),
-        ("Kili" -- ∞) @@ 30 -> Seq("pod2") | Map(
+        ("Kili" -- ∞) @@ 20 -> Seq("pod2") | Map(
           // Transfer id is preserved, it's unique within the transfer generation.
           "pod2" -> Seq(
             SubsliceAnnotation("Kili" -- ∞, 20, stateTransferOpt = Some(Transfer(2, "pod4")))
@@ -1090,10 +1064,11 @@ class ProposedAssignmentSuite extends DatabricksTest {
         // state acquirers using round-robin. But the test implementation is slightly tweaked from
         // the production code to make the test more convincing.
 
-        val newlyAssignedResources: Set[Squid] = next.resources -- previous.resources
-        val commonlyAssignedResources: Set[Squid] = next.resources.intersect(previous.resources)
+        val newlyAssignedResources: Set[Squid] = next.resourcesSet -- previous.resourcesSet
+        val commonlyAssignedResources: Set[Squid] =
+          next.resourcesSet.intersect(previous.resourcesSet)
 
-        val sortedPreviousResources: Vector[Squid] = previous.resources.toVector.sorted
+        val sortedPreviousResources: Vector[Squid] = previous.resourcesSet.toVector.sorted
         val sortedNewlyAssignedResources: Vector[Squid] = newlyAssignedResources.toVector.sorted
         var sortedPreviousResourceIterator: Iterator[Squid] = sortedPreviousResources.iterator
 
@@ -1125,7 +1100,7 @@ class ProposedAssignmentSuite extends DatabricksTest {
           resource -> new MutableSliceMap[Squid]
       }.toMap
       for (asn: SliceAssignment <- assignment.sliceMap.entries) {
-        for (assignedResource: Squid <- asn.resources) {
+        for (assignedResource: Squid <- asn.resourcesSet) {
           for (annotation: SubsliceAnnotation <- asn.subsliceAnnotationsByResource.getOrElse(
               assignedResource,
               Seq.empty

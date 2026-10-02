@@ -3,7 +3,13 @@ package com.databricks.dicer.common
 import scala.util.Random
 import com.databricks.api.proto.dicer.common.DiffAssignmentP
 import com.databricks.api.proto.dicer.common.DiffAssignmentP.AssignerServiceInfoP
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  createCompleteSlices,
+  createRandomSliceAssignment,
+  createTestSquid,
+  parseSimpleDiffAssignment,
+  randomInRange
+}
 import com.databricks.dicer.external.Slice
 import com.databricks.caching.util.MetricUtils
 import com.databricks.caching.util.MetricUtils.ChangeTracker

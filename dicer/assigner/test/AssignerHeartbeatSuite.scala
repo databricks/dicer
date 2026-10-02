@@ -1,13 +1,11 @@
 package com.databricks.dicer.assigner
 
+import com.databricks.dicer.assigner.testing.{PreferredAssignerTestUtils}
+
 import com.databricks.api.proto.dicer.assigner.HeartbeatResponseP
 import com.databricks.caching.util.AssertionWaiter
-import com.databricks.dicer.common.{
-  Generation,
-  Incarnation,
-  InternalDicerTestEnvironment,
-  TestAssigner
-}
+import com.databricks.dicer.common.{Generation, Incarnation}
+import com.databricks.dicer.common.testing.{InternalDicerTestEnvironment, TestAssigner}
 import com.databricks.rpc.testing.TestTLSOptions
 import com.databricks.testing.DatabricksTest
 import com.databricks.api.proto.dicer.assigner.PreferredAssignerServiceGrpc.PreferredAssignerServiceStub
@@ -27,19 +25,14 @@ import com.databricks.caching.util.TestUtils
  */
 class AssignerHeartbeatSuite extends DatabricksTest {
 
-  /** Incarnations used in the suite. */
-  private val NON_LOOSE_INCARNATION = Incarnation(40)
-  private val HIGHER_NON_LOOSE_INCARNATION = Incarnation(NON_LOOSE_INCARNATION.value + 2)
-  private val LOWER_NON_LOOSE_INCARNATION = Incarnation(NON_LOOSE_INCARNATION.value - 2)
-  private val LOOSE_INCARNATION = Incarnation(NON_LOOSE_INCARNATION.value - 1)
-  private val HIGHER_LOOSE_INCARNATION = Incarnation(LOOSE_INCARNATION.value + 2)
-  private val LOWER_LOOSE_INCARNATION = Incarnation(LOOSE_INCARNATION.value - 2)
+  /** An arbitrary store incarnation for the disabled test assigner. */
+  private val STORE_INCARNATION = Incarnation(40)
 
   /** A test environment where the preferred assigner mode is disabled. */
   private val preferredAssignerDisabledTestEnv = InternalDicerTestEnvironment.create(
-    PreferredAssignerTestHelper.createAssignerConfig(
+    PreferredAssignerTestUtils.createAssignerConfig(
       preferredAssignerEnabled = false,
-      preferredAssignerStoreIncarnation = LOOSE_INCARNATION
+      preferredAssignerStoreIncarnation = STORE_INCARNATION
     )
   )
 
@@ -75,8 +68,8 @@ class AssignerHeartbeatSuite extends DatabricksTest {
 
   test("Disabled preferred assigner always returns PreferredAssignerValue.ModeDisabled") {
     // Test plan: verify that an assigner with the preferred assigner feature disabled always
-    // responds with the `PreferredAssignerValue.ModeDisabled` and its incarnation, regardless of
-    // the preferred assigner value in the heartbeat request.
+    // responds with the `PreferredAssignerValue.ModeDisabled` carrying the empty generation,
+    // regardless of the preferred assigner value in the heartbeat request.
     val arbitraryGenerationNumber = 4L // An arbitrary number to use in Generations.
 
     // The single assigner in the test environment is in PA mode disabled.
@@ -84,21 +77,21 @@ class AssignerHeartbeatSuite extends DatabricksTest {
 
     // The expected response value for the PA mode disabled.
     val expectedResponseValue =
-      PreferredAssignerValue.ModeDisabled(Generation(LOOSE_INCARNATION, 0))
+      PreferredAssignerValue.ModeDisabled(Generation.EMPTY)
 
     val arbitraryAssigner = AssignerInfo(
       UUID.fromString("00000000-1234-5678-abcd-68454e98b111"),
       new URI("http://assigner-1:1234")
     )
 
-    // For all possible incarnation type and arbitrary generation numbers:
+    // For arbitrary incarnations and arbitrary generation numbers:
     for (incarnation: Incarnation <- Seq(
-        LOWER_LOOSE_INCARNATION,
-        LOWER_NON_LOOSE_INCARNATION,
-        LOOSE_INCARNATION,
-        NON_LOOSE_INCARNATION,
-        HIGHER_LOOSE_INCARNATION,
-        HIGHER_NON_LOOSE_INCARNATION
+        Incarnation(STORE_INCARNATION.value - 3),
+        Incarnation(STORE_INCARNATION.value - 2),
+        Incarnation(STORE_INCARNATION.value - 1),
+        STORE_INCARNATION,
+        Incarnation(STORE_INCARNATION.value + 1),
+        Incarnation(STORE_INCARNATION.value + 2)
       )) {
       for (number: Long <- Seq(
           arbitraryGenerationNumber,

@@ -188,12 +188,27 @@ class PrefixLogger private (className: String, prefix: String, clock: TypedClock
     if (every == Duration.Zero) return true
 
     val now: TickerTime = clock.tickerTime()
+    val fileLine = FileLine(file, line)
+    // Returns whether the statement should be printed based on the `lastCallTime` and given
+    // `every` duration. `lastCallTime` is a value retrieved from a `ConcurrentHashMap`, so it can
+    // be `null` when there is no existing entry in the map.
+    def isDue(lastCallTime: LogTime): Boolean = {
+      // Print if it is the first time or last log time was too old.
+      lastCallTime == null || now - lastCallTime.time >= every
+    }
+
+    // A throttled statement sits on a hot path, so it reaches here at that path's rate and almost
+    // always decides not to print. `compute` makes each of those calls allocate and invoke a
+    // remapping closure and lock the bin to rewrite an unchanged timestamp; `get` does none of it.
+    if (!isDue(lastLog.get(fileLine))) {
+      return false
+    }
+
     var toPrint = false
     lastLog.compute(
-      FileLine(file, line),
+      fileLine,
       (_, lastCallTime: LogTime) => {
-        // Print if it is the first time or last log time was too old.
-        if (lastCallTime == null || (now - lastCallTime.time >= every)) {
+        if (isDue(lastCallTime)) {
           toPrint = true
           LogTime(now)
         } else {

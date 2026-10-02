@@ -1,8 +1,7 @@
 package com.databricks.caching.util
 
 /**
- * Teams responsible for handling errors from client services. These values must match the
- * team names in eng-team-info.json, which is used to automatically route alerts.
+ * Teams responsible for handling errors from client services.
  */
 sealed trait AlertOwnerTeam
 

@@ -1,5 +1,9 @@
 package com.databricks.dicer.external
 
+import com.databricks.dicer.client.testing.{ScalaClerkHarness}
+
+import com.databricks.dicer.client.testing.{ClerkHarness}
+
 import java.net.URI
 
 import scala.collection.mutable
@@ -28,7 +32,11 @@ private class ScalaSingletonSliceLookupSuite extends SingletonSliceLookupSuiteBa
     val clerkConf: ClerkConf = clerkConfMap.getOrElseUpdate(
       sliceletPort, {
         val rawConf: Config = TestClientUtils
-          .createClerkConfig(sliceletPort = sliceletPort, clientTlsFilePathsOpt = None)
+          .createClerkConfig(
+            sliceletPort = sliceletPort,
+            clientTlsFilePathsOpt = None,
+            enableRateLimitingOverrideOpt = Some(false)
+          )
           .merge(
             Configs.parseMap(
               InternalClientConf.allowMultipleClerksShareLookupPerTargetPropertyName -> true

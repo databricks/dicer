@@ -98,11 +98,6 @@ object SequentialExecutionContextPool {
    *  - Interrupts the thread on which the handler is created in an attempt to make the failures
    *    more evident, if that thread is still alive. This is primarily useful in tests, as the main
    *    test thread will be interrupted which in turn causes the test to fail.
-   *    COPYBARA:REMOVE:START
-   *    In production, the pool is typically created on the main thread which is shortlived for
-   *    Databricks servers (work is performed on other non-daemon threads), so metrics and logs are
-   *    the only reliable indication of a problem.
-   *    COPYBARA:REMOVE:END
    *
    * Uncaught exceptions may be intercepted from multiple locations, enumerated in
    * [[UncaughtExceptionSource]].

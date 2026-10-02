@@ -1,6 +1,6 @@
 package com.databricks.dicer.external.javaapi;
 
-import static com.databricks.dicer.external.javaapi.TestSliceUtils.fp;
+import static com.databricks.dicer.external.javaapi.SliceTestUtils.fp;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.databricks.backend.common.util.CurrentProject;

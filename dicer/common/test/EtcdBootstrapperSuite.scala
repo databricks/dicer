@@ -16,7 +16,7 @@ class EtcdBootstrapperSuite extends DatabricksTest {
 
   private[this] val NAMESPACE = EtcdClient.KeyNamespace("test-namespace")
   private[this] val NON_LOOSE_INCARNATION: Incarnation = Incarnation(2)
-  private[this] val LOOSE_INCARNATION: Incarnation = Incarnation.MIN
+  private[this] val LOOSE_INCARNATION: Incarnation = Incarnation(1)
 
   private[this] val KNOWN_WATERMARK_INCARNATION_GAUGE_NAME =
     "dicer_etcd_bootstrapper_known_watermark_incarnation"

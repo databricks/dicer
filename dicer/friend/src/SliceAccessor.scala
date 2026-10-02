@@ -3,7 +3,7 @@ package com.databricks.dicer.friend
 import com.databricks.api.proto.dicer.friend.SliceP
 import com.google.protobuf.ByteString
 import com.databricks.dicer.common.SliceHelper
-import com.databricks.dicer.common.SliceHelper._
+import com.databricks.dicer.common.SliceHelper.RichSlice
 import com.databricks.dicer.external.{Slice, SliceKey}
 
 /*

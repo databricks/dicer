@@ -3,7 +3,7 @@ package com.databricks.dicer.assigner.algorithm
 import scala.collection.immutable.SortedMap
 import scala.collection.mutable
 
-import com.databricks.caching.util.AssertMacros.iassert
+import com.databricks.dicer.assigner.SliceKeyMath
 import com.databricks.dicer.assigner.algorithm.LoadMap.{
   ENTRY_SLICE_ACCESSOR,
   Entry,
@@ -13,7 +13,7 @@ import com.databricks.dicer.assigner.algorithm.LoadMap.{
 import com.databricks.dicer.common.SliceHelper.RichSlice
 import com.databricks.dicer.common.SliceKeyHelper.RichSliceKey
 import com.databricks.dicer.common.{LoadMeasurement, SliceKeyHelper}
-import com.databricks.dicer.external.{HighSliceKey, InfinitySliceKey, Slice, SliceKey}
+import com.databricks.dicer.external.{HighSliceKey, Slice, SliceKey}
 import com.databricks.dicer.friend.SliceMap
 import com.databricks.dicer.friend.SliceMap.GapEntry
 
@@ -465,7 +465,7 @@ object LoadMap {
               // though 1 would be a fine choice as well.
               0
             } else {
-              getProperRatio(intersectionSize, sliceSize)
+              SliceKeyMath.getProperRatio(intersectionSize, sliceSize)
             }
           Some(Entry(intersection, intersectionRatio * load))
       }
@@ -500,7 +500,7 @@ object LoadMap {
       val (low, high): (BigInt, BigInt) = toBigIntRange(slice, length)
 
       // Synthesize a split key that is estimated to include `desiredRatio` of `load` in the prefix.
-      val split: BigInt = low + multiplyByProperRatio(high - low, desiredRatio)
+      val split: BigInt = low + SliceKeyMath.multiplyByProperRatio(high - low, desiredRatio)
       if (split == low || split == high) {
         // For several reasons, it may not be possible or necessary to split the current Slice to
         // achieve the desired ratio:
@@ -531,7 +531,7 @@ object LoadMap {
       // Due to the limited precision afforded by `length`, the actual ratio of load apportioned to
       // the prefix may be different from `desiredRatio`. Compute the actual ratio and then the
       // actual apportioned load based on the chosen split key.
-      val prefixRatio: Double = getProperRatio(split - low, high - low)
+      val prefixRatio: Double = SliceKeyMath.getProperRatio(split - low, high - low)
       val prefixApportionedLoad: Double = load * prefixRatio
       Split(splitKey, prefixApportionedLoad)
     }
@@ -648,78 +648,11 @@ object LoadMap {
   def newBuilder(): Builder = new Builder
 
   /**
-   * REQUIRES: non-negative lhs
-   * REQUIRES: positive rhs
-   * REQUIRES: lhs <= rhs
-   *
-   * Returns lhs/rhs as a Double value. Accounts for possible overflow in conversion to Double.
-   */
-  private def getProperRatio(lhs: BigInt, rhs: BigInt): Double = {
-    iassert(lhs.signum >= 0)
-    iassert(rhs.signum > 0)
-    iassert(lhs <= rhs)
-
-    // The maximum exponent for a Double is 1023, so we must scale the arguments to avoid overflow
-    // in the conversion. While this scaling may discard the least significant bits in our function
-    // parameters, we wouldn't benefit from those bits anyway, as the Double mantissa has only 52
-    // bits. When the magnitude of `rhs` greatly exceeds `lhs` (by a factor of 10^300 or more in
-    // practice) we may end up discarding all bits in `lhs` and returning 0 from this function.
-    val scale: Int = (rhs.bitLength - java.lang.Double.MAX_EXPONENT).max(0)
-    val scaledLhs: BigInt = lhs >> scale
-    val scaledRhs: BigInt = rhs >> scale
-    scaledLhs.toDouble / scaledRhs.toDouble
-  }
-
-  /**
-   * REQUIRES: non-negative `multiplicand`
-   * REQUIRES: `ratio` is in the unit interval [0, 1] (i.e., represents a proper fraction)
-   *
-   * Returns multiplicand*ratio as a BigInt value. Accounts for possible overflow in the conversion
-   * from BigInt to Double for the multiplicand. Also special cases 0 and 1 ratios.
-   */
-  private def multiplyByProperRatio(multiplicand: BigInt, ratio: Double): BigInt = {
-    require(multiplicand.signum >= 0)
-    require(ratio >= 0)
-    require(ratio <= 1)
-
-    if (ratio == 1) {
-      return multiplicand // avoid losing least significant bits in the toDouble conversion below
-    }
-    // Only the 52 most significant bits will be used in the Double calculation, so we can safely
-    // scale the multiplicand so that its bit length is 53. This preserves enough bits to exploit
-    // Double's maximum precision, and eliminates the possibility of overflow when converting to
-    // Double and then back to BigInt via Long.
-    val scale: Int = (multiplicand.bitLength - 53).max(0)
-    val scaledMultiplicand: BigInt = multiplicand >> scale
-    val scaledFactor: Double = scaledMultiplicand.toDouble * ratio
-    val result = BigInt(Math.round(scaledFactor)) << scale
-
-    // Clamp the result to [0, multiplicand] in case of unanticipated floating point errors.
-    result.max(0).min(multiplicand)
-  }
-
-  /**
-   * REQUIRES: length >= key.length
-   *
-   * Converts the given key to its numeric value, with zero padding such that it has the given
-   * length.
-   *
-   * Examples:
-   *
-   *     toBigInt(0x0403, 3) => 0x040300
-   *     toBigInt(0x040300, 2) => undefined (violates requirements)
-   */
-  private def toBigInt(key: SliceKey, length: Int): BigInt = {
-    key.toBigInt << ((length - key.bytes.size) * 8)
-  }
-
-  /**
    * REQUIRES: length >= slice.lowInclusive.length
    * REQUIRES: slice.highExclusive is infinity or slice.highExclusive length is less than `length`
    *
-   * Converts the given Slice bounds to their numeric values, as described in [[toBigInt]]. For
-   * infinity slices, a number greater than the largest number representable within `length` is
-   * returned for the upper bound.
+   * Converts the given Slice bounds to their numeric values (see
+   * [[SliceKeyMath.toBigIntWithLength]]).
    *
    * Examples:
    *
@@ -727,12 +660,10 @@ object LoadMap {
    *     toBigIntRange([0x040300 .. ∞), 4) => (0x04030000, 0x0100000000)
    */
   private def toBigIntRange(slice: Slice, length: Int): (BigInt, BigInt) = {
-    val low: BigInt = toBigInt(slice.lowInclusive, length)
-    val high: BigInt = slice.highExclusive match {
-      case InfinitySliceKey => BigInt(1) << (length * 8)
-      case highExclusive: SliceKey => toBigInt(highExclusive, length)
-    }
-    (low, high)
+    (
+      SliceKeyMath.toBigIntWithLength(slice.lowInclusive, length),
+      SliceKeyMath.toBigIntWithLength(slice.highExclusive, length)
+    )
   }
 
   /**
@@ -740,11 +671,8 @@ object LoadMap {
    * (comparable) numbers.
    */
   private def getMaxLengthOfSliceBounds(slice: Slice): Int = {
-    val lowLength: Int = slice.lowInclusive.bytes.size
-    val highLength: Int = slice.highExclusive match {
-      case InfinitySliceKey => 0
-      case highExclusive: SliceKey => highExclusive.bytes.size
-    }
+    val lowLength = SliceKeyMath.byteLength(slice.lowInclusive)
+    val highLength = SliceKeyMath.byteLength(slice.highExclusive)
     lowLength.max(highLength)
   }
 }

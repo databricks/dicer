@@ -71,6 +71,18 @@ trait SliceletConf extends DicerClientConf with WatchServerConf {
       "databricks.dicer.internal.cachingteamonly.readinessProviderPollIntervalMillis",
       1000
     ).millis
+
+  /**
+   * Overrides the deadline the Slicelet sends on its own watch RPCs and, in turn, suggests to the
+   * Clerks watching it. If not defined, the default value in the client implementation is used.
+   *
+   * **IMPORTANT**: DO NOT SET THIS MANUALLY for production code.
+   */
+  private[dicer] final val watchRpcTimeoutOverrideOpt: Option[FiniteDuration] =
+    configure[Option[Long]](
+      "databricks.dicer.internal.cachingteamonly.watchRpcTimeoutMillis",
+      None
+    ).map((millis: Long) => millis.millis)
 }
 
 /**
@@ -112,6 +124,16 @@ trait DicerClientConf
    */
   private[dicer] final val clientUuidOpt: Option[String] =
     configure("databricks.dicer.internal.cachingteamonly.clientUuid", envVars.get("POD_UID"))
+
+  /**
+   * Overrides the client's watch-request rate-limiting policy. `Some(true)` forces rate limiting
+   * on; `Some(false)` forces it off. `None` does not override the rate-limiting policy.
+   */
+  private[dicer] final val enableRateLimitingOverrideOpt: Option[Boolean] =
+    configure[Option[Boolean]](
+      "databricks.dicer.internal.cachingteamonly.enableRateLimitingOverride",
+      None
+    )
 
   /**
    * Returns whether the rollout flag named `flagName` is enabled for `target` per the rollout
