@@ -139,7 +139,7 @@ case class DiffAssignment(
         sliceMap.entries.flatMap { entry: GapEntry[SliceAssignment] =>
           entry match {
             case GapEntry.Some(sliceAssignment: SliceAssignment) =>
-              sliceAssignment.resources
+              sliceAssignment.resourcesSet
             case GapEntry.Gap(_) => Vector.empty
           }
         }.toSet
@@ -147,7 +147,7 @@ case class DiffAssignment(
           sliceMap: SliceMap[SliceAssignment]
           ) =>
         sliceMap.entries.flatMap { sliceAssignment: SliceAssignment =>
-          sliceAssignment.resources
+          sliceAssignment.resourcesSet
         }.toSet
     }
   }

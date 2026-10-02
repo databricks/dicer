@@ -51,6 +51,7 @@ import com.databricks.dicer.common.{
   Incarnation,
   Redirect,
   SliceletSubscriberSlicezData,
+  SubscriberHandler,
   TargetUnmarshaller,
   WatchServerHelper
 }
@@ -123,21 +124,14 @@ class Assigner private (
     localClusterMembershipChecker: KubernetesMembershipChecker,
     assignerServiceInfoOpt: Option[AssignerServiceInfo])
     extends AssignerSlicezDataExporter {
-  import Assigner.AssignmentGeneratorHandle
 
-  /** The abstraction that manages all subscriber connections and messages. */
+  /**
+   * All active [[TargetManagers]] in this assigner. A manager must be stopped before being removed
+   * (it would otherwise leak resources), which we maintain by funneling removals through
+   * [[removeManager]].
+   */
   @GuardedBy("sec")
-  private[this] val subscriberManager: SubscriberManager =
-    new SubscriberManager(
-      assignerSecPool,
-      getSuggestedClerkRpcTimeoutFn = () => conf.getAssignerSuggestedClerkWatchTimeout,
-      suggestedSliceletRpcTimeout = conf.watchServerSuggestedRpcTimeout,
-      maxSubscribersPromptedForAssignmentRecovery = conf.maxClientsPromptedForAssignmentRecovery
-    )
-
-  /** A map that keeps track of all generators. */
-  @GuardedBy("sec")
-  private val generatorMap = new mutable.HashMap[Target, AssignmentGeneratorHandle]
+  private val activeTargetManagers = new mutable.HashMap[Target, TargetManager]
 
   /**
    * The rpc server for the assigner.
@@ -372,10 +366,9 @@ class Assigner private (
   override def getSlicezData: Future[AssignerSlicezData] = sec.flatCall {
     // Collect the data for all generators and all subscribers.
     val targetSlicezDataSeq: Seq[Future[AssignerTargetSlicezData]] =
-      (for (entry <- generatorMap) yield {
-        val (target, generatorHandle): (Target, AssignmentGeneratorHandle) = entry
-        getTargetSlicezData(target, generatorHandle.getGeneratorDriver)
-      }).toSeq
+      activeTargetManagers.values
+        .flatMap((manager: TargetManager) => manager.getTargetSlicezData())
+        .toSeq
 
     val aggregatedTargetSlicezData: Future[Seq[AssignerTargetSlicezData]] =
       Future.sequence(targetSlicezDataSeq)(implicitly, sec)
@@ -436,11 +429,11 @@ class Assigner private (
       s"Configs: ${configProvider.getLatestTargetConfigMap}"
     )
 
-    // Start the periodic inactive generator cleanup scan.
+    // Start the periodic inactive target cleanup scan.
     sec.scheduleRepeating(
       name = "generator-inactivity-check",
       interval = conf.generatorInactivityScanInterval,
-      () => cleanupInactiveGenerators()
+      () => cleanupInactiveTargets()
     )
 
     // Add a shutdown hook to terminate the preferred Assigner driver. Note that we do not use a
@@ -603,15 +596,11 @@ class Assigner private (
     newConfig.role match {
       case AssignerRole.Preferred => // Do nothing.
       case AssignerRole.Standby =>
-        // Shut down all generators, since a standby Assigner does not generate assignments. Collect
-        // the entries first to avoid mutating `generatorMap` while iterating it.
-        for (entry <- generatorMap.toSeq) {
-          val (target, generatorHandle): (Target, AssignmentGeneratorHandle) = entry
-          shutdownGenerator(
-            target,
-            generatorHandle,
-            GeneratorShutdownReason.PREFERRED_ASSIGNER_CHANGE
-          )
+        // Shut down all targets, since a standby Assigner does not generate assignments. Collect
+        // the entries first to avoid mutating `activeTargetManagers` while iterating it.
+        val targets: Seq[Target] = activeTargetManagers.keys.toSeq
+        for (target: Target <- targets) {
+          removeManager(target, GeneratorShutdownReason.PREFERRED_ASSIGNER_CHANGE)
         }
     }
     logger.info(s"[$assignerInfo] updated config from $preferredAssignerConfig to $newConfig")
@@ -639,14 +628,14 @@ class Assigner private (
     // skips resolver updates that only change the peer Assigner endpoint or as the result of a
     // kubernetes resource version bump.
     if (newResolver.configVersion > previousConfigVersion) {
-      // Collect the entries first to avoid mutating `generatorMap` while iterating it. We use
-      // `wouldReroute` rather than `getRoutingVerdict` because this is off the request path: it
+      // Collect the entries first to avoid mutating `activeTargetManagers` while iterating it. We
+      // use `wouldReroute` rather than `getRoutingVerdict` because this is off the request path: it
       // must not record request-path metrics and must not fail.
-      val reroutedEntries: Vector[(Target, AssignmentGeneratorHandle)] =
-        generatorMap.filterKeys(newResolver.wouldReroute).toVector
+      val reroutedEntries: Vector[(Target, TargetManager)] =
+        activeTargetManagers.filterKeys(newResolver.wouldReroute).toVector
       val firstFewReroutedTargets: Vector[Target] = reroutedEntries.take(5).map {
-        entry: (Target, AssignmentGeneratorHandle) =>
-          val (target, _): (Target, AssignmentGeneratorHandle) = entry
+        entry: (Target, TargetManager) =>
+          val (target, _): (Target, TargetManager) = entry
           target
       }
       logger.info(
@@ -655,28 +644,24 @@ class Assigner private (
         s"${firstFewReroutedTargets.mkString(", ")}"
       )
       for (entry <- reroutedEntries) {
-        val (target, generatorHandle): (Target, AssignmentGeneratorHandle) = entry
-        shutdownGenerator(target, generatorHandle, GeneratorShutdownReason.TARGET_MIGRATION_REROUTE)
+        val (target, _): (Target, _) = entry
+        removeManager(target, GeneratorShutdownReason.TARGET_MIGRATION_REROUTE)
       }
     }
   }
 
   /**
-   * Shuts down `target`'s generator, removes it from [[generatorMap]], and records `reason`.
+   * Stops and removes the [[TargetManager]] from [[activeTargetManagers]] for the given `target` if
+   * one exists.
    *
-   * PRECONDITION: `target` is present in [[generatorMap]] with `generatorHandle`.
-   * PRECONDITION: Must be called on [[sec]].
+   * DANGER: Do not call this while there's an outstanding iterator over [[activeTargetManagers]],
+   * as it will be invalidated!
    */
-  private[this] def shutdownGenerator(
-      target: Target,
-      generatorHandle: AssignmentGeneratorHandle,
-      reason: GeneratorShutdownReason): Unit = {
+  private[this] def removeManager(target: Target, reason: GeneratorShutdownReason): Unit = {
     sec.assertCurrentContext()
-    iassert(generatorMap.get(target).contains(generatorHandle), "target must be in generatorMap")
-    TargetMetrics.incrementGeneratorsRemoved(target, reason)
-    TargetMetrics.updateTargetsWithActiveGenerators(target, 0)
-    generatorHandle.getGeneratorDriver.shutdown()
-    generatorMap.remove(target)
+    for (manager: TargetManager <- activeTargetManagers.remove(target)) {
+      manager.stop(reason)
+    }
   }
 
   /**
@@ -686,18 +671,30 @@ class Assigner private (
   private[this] def startWatchingConfig(): Unit = {
     val configUpdatedCallback: ValueStreamCallback[InternalTargetConfigMap] = {
       new ValueStreamCallback[InternalTargetConfigMap](sec) {
-        override def onSuccess(configMap: InternalTargetConfigMap): Unit = {
+        override def onSuccess(ignored: InternalTargetConfigMap): Unit = {
           sec.assertCurrentContext()
-          for (entry <- configMap.iterator) {
+          // Invalidate and fetch: just use the callback invocation as a signal to re-fetch the
+          // latest target config map. This won't really make a difference in practice as config
+          // updates are relatively rare.
+          val latestConfigMap: InternalTargetConfigMap = configProvider.getLatestTargetConfigMap
+          for (entry <- latestConfigMap.iterator) {
             val (targetName, config): (TargetName, InternalTargetConfig) = entry
-            updateTargetConfig(targetName, config)
+            // Multiple targets may match the same target name, so we need to update the config for
+            // all targets that match the target name.
+            val matchingEntries: Seq[(Target, TargetManager)] =
+              activeTargetManagers.filterKeys(targetName.matches).toSeq
+
+            for (entry <- matchingEntries) {
+              val (_, manager): (Target, TargetManager) = entry
+              manager.informLatestTargetConfig(config)
+            }
             // Update the metrics with the new config value.
             InternalTargetConfigMetrics.exportAssignerConfigStats(targetName, config)
           }
           // Forward the update to the rate limiting strategy if enabled. The strategy schedules
           // the update on its own SEC, so this does not block the Assigner's SEC.
           for (strategy: WatchRequestRateLimitingStrategy <- rateLimitingStrategyOpt) {
-            strategy.updateTargetConfigMapAsync(configMap)
+            strategy.updateTargetConfigMapAsync(latestConfigMap)
           }
         }
       }
@@ -737,22 +734,9 @@ class Assigner private (
       "current assigner must be preferred"
     )
     validateTarget(request.target, rpcContext, request.getClientType)
-    lookupGenerator(request.target) match {
-      case Some(generatorHandle: AssignmentGeneratorHandle) =>
-        val generator: AssignmentGeneratorDriver = generatorHandle.getGeneratorDriver
-        generator.onWatchRequest(request)
-
-        // Track the last activity time for the target.
-        val currentTime: TickerTime = sec.getClock.tickerTime()
-        generatorHandle.updateLastWatchTime(currentTime)
-
-        subscriberManager.handleWatchRequest(
-          rpcContext,
-          request,
-          generator.getGeneratorCell,
-          outboundRedirect,
-          currentTime
-        )
+    getTargetManager(request.target) match {
+      case Some(manager: TargetManager) =>
+        manager.handleWatch(rpcContext, request, outboundRedirect)
       case None =>
         logger.warn(
           s"Received watch request for unknown target: ${request.target}",
@@ -867,26 +851,24 @@ class Assigner private (
   }
 
   /**
-   * Returns the Assignment generator corresponding to the `target`, creating one if necessary based
-   * on the target config. If no config exists and `allowDefaultTargetConfigForExperimentalTargets`
-   * is enabled, then will create a generator using
-   * [[InternalTargetConfig.DEFAULT_FOR_EXPERIMENTAL_TARGETS]]. If none of the above conditions are
-   * met, returns `None`.
+   * Returns the [[TargetManager]] corresponding to the `target`, creating one if necessary based on
+   * the target config. If no config exists and `allowDefaultTargetConfigForExperimentalTargets` is
+   * enabled, then will create one using [[InternalTargetConfig.DEFAULT_FOR_EXPERIMENTAL_TARGETS]].
+   * If none of the above conditions are met, returns `None`.
    *
-   * Note: Stale generators are removed from the `generatorMap` via the inactivity callback, so if
-   * a generator is present in the map, it is considered active and reusable.
+   * Note: Stale target managers are removed from the `activeTargetManagers` via the inactivity
+   * callback, so if a target state is present in the map, it is considered active and reusable.
    *
    * PRECONDITION: Must be called on [[sec]].
    */
-  private[this] def lookupGenerator(target: Target): Option[AssignmentGeneratorHandle] = {
+  private[this] def getTargetManager(target: Target): Option[TargetManager] = {
     sec.assertCurrentContext()
-    // If a generator already exists in the generator map, it is returned directly. Otherwise, if a
+    // If a target state already exists in the map, it is returned directly. Otherwise, if a
     // config exists (or if a config doesn't exist but
-    // `allowDefaultTargetConfigForExperimentalTargets` is enabled), a new generator is created,
+    // `allowDefaultTargetConfigForExperimentalTargets` is enabled), a new target state is created,
     // cached, and returned.
-    val existingGeneratorHandleOpt: Option[AssignmentGeneratorHandle] = generatorMap.get(target)
-    existingGeneratorHandleOpt match {
-      case Some(_: AssignmentGeneratorHandle) => existingGeneratorHandleOpt
+    activeTargetManagers.get(target) match {
+      case existingManagerOpt: Some[TargetManager] => existingManagerOpt
       case None =>
         val targetName: TargetName = TargetName.forTarget(target)
         val targetConfigOpt: Option[InternalTargetConfig] =
@@ -902,172 +884,11 @@ class Assigner private (
             }
           }
         targetConfigOpt.map { targetConfig: InternalTargetConfig =>
-          logger.info(s"New generator being created for $target: $targetConfig")
-
-          // Update the active generator count only on new generator creation.
-          TargetMetrics.updateTargetsWithActiveGenerators(target, 1)
-          val generator: AssignmentGeneratorDriver = createGenerator(target, targetConfig)
-          val generatorHandle: AssignmentGeneratorHandle =
-            new AssignmentGeneratorHandle(generator, sec.getClock.tickerTime())
-          generatorMap.put(target, generatorHandle)
-          generatorHandle
+          val manager = new TargetManager(target, targetConfig)
+          activeTargetManagers.put(target, manager)
+          manager
         }
     }
-  }
-
-  /**
-   * Creates a new assignment generator driver for the given `target`.
-   *
-   * @param target The target for which to create an assignment generator.
-   * @param targetConfig The configuration for the target.
-   * @return A new [[AssignmentGeneratorDriver]] instance.
-   */
-  private def createGenerator(
-      target: Target,
-      targetConfig: InternalTargetConfig): AssignmentGeneratorDriver = {
-    val targetName = TargetName.forTarget(target)
-    InternalTargetConfigMetrics.exportAssignerConfigStats(targetName, targetConfig)
-    AssignmentGeneratorDriver.create(
-      assignerSecPool.createExecutionContext(s"generation-$target"),
-      conf: LoadWatcherConf,
-      target,
-      targetConfig,
-      storeFactory.getStore(),
-      kubernetesTargetWatcherFactory,
-      healthWatcher = healthWatcherFactory.create(
-        target,
-        HealthWatcher.StaticConfig.fromConf(conf: HealthConf),
-        targetConfig.healthWatcherConfig
-      ),
-      // TODO(<internal bug>): While we do not expose the specific `crashRecordRetention`
-      // and `heuristicThreshold` configurations to the user currently, future
-      // configuration options for the key of death detector should be incorporated here,
-      // such as whether or not key of death protection is enabled.
-      keyOfDeathDetector = new KeyOfDeathDetector(
-        target,
-        KeyOfDeathDetector.Config.defaultConfig()
-      ),
-      assignerClusterUri,
-      minAssignmentGenerationInterval,
-      dicerTeeEventEmitter,
-      dicerSimulatorEventLogEmitter,
-      assignerProtoLogger,
-      assignerServiceInfoOpt
-    )
-  }
-
-  /**
-   * Update the config for the `target` in `updatedConfig` if the config has changed, such
-   * that subsequent assignments will be generated using the updated configuration.
-   *
-   * PRECONDITION: Must be called on [[sec]].
-   */
-  private[this] def updateTargetConfig(
-      targetName: TargetName,
-      updatedConfig: InternalTargetConfig): Unit = {
-    sec.assertCurrentContext()
-    // Multiple targets may match the same target name, so we need to update the config for all
-    // targets that match the target name.
-    // Collect entries first to avoid ConcurrentModificationException during iteration.
-    val matchingEntries: Seq[(Target, AssignmentGeneratorHandle)] =
-      generatorMap.filterKeys(targetName.matches).toSeq
-
-    for (entry <- matchingEntries) {
-      val (target, generatorHandle): (Target, AssignmentGeneratorHandle) = entry
-      val generator: AssignmentGeneratorDriver = generatorHandle.getGeneratorDriver
-      // When a generator with a different configuration for target is running, shut it down and
-      // remove it from the generator map to ensure the creation of an updated generator the next
-      // time an event arrives for the target.
-      if (generator.targetConfig != updatedConfig) {
-        logger.info(
-          s"Config for $target is updated from ${generator.targetConfig} to $updatedConfig"
-        )
-        generator.shutdown()
-        generatorMap.remove(target)
-
-        // Track generator removal due to config change
-        TargetMetrics.incrementGeneratorsRemoved(
-          target,
-          GeneratorShutdownReason.TARGET_CONFIG_CHANGE
-        )
-        TargetMetrics.updateTargetsWithActiveGenerators(target, 0)
-        // Note there is no need to explicitly recreate the generator here because a new generator
-        // will be created the next time an event arrives for the target. (Kubernetes termination
-        // signals are also delivered via watch requests from the Slicelet so it is not necessary
-        // for the driver to immediately watch the Kubernetes signals.)
-      }
-    }
-  }
-
-  /**
-   * Asynchronously collects debugging and monitoring slicez data for a specific target.
-   *
-   * This method aggregates various information related to the target, including:
-   * - Assignment generation.
-   * - Subscriber information.
-   * - Target config details.
-   *
-   * PRECONDITION: Must be called on [[sec]].
-   */
-  private[this] def getTargetSlicezData(
-      target: Target,
-      generator: AssignmentGeneratorDriver): Future[AssignerTargetSlicezData] = {
-    sec.assertCurrentContext()
-    val assignmentOpt: Option[Assignment] =
-      generator.getGeneratorCell.getLatestValueOpt
-    // Get the generator target slicez data.
-    val generatorTargetSlicezData: Future[GeneratorTargetSlicezData] =
-      generator.getGeneratorTargetSlicezData
-    // Get the subscriber data for this particular target.
-    val subscriberSlicezData
-        : Future[(Seq[SliceletSubscriberSlicezData], Seq[ClerkSubscriberSlicezData])] =
-      subscriberManager.getSlicezData(target)
-
-    // Check in which way the target is configured:
-    // - If the target is not in the latest config map, it is considered default configured for
-    //   experimental targets. Dynamic config may add targets to this map; removals take effect
-    //   only after restart, or when dynamic config is disabled.
-    // - Else if dynamic config is enabled, it is considered dynamically configured.
-    // - Otherwise, it is considered statically configured.
-    val targetConfig: InternalTargetConfig = generator.targetConfig
-    val targetConfigSlicezData: AssignerTargetSlicezData.TargetConfigData =
-      if (!configProvider.getLatestTargetConfigMap.targetNames.contains(
-          TargetName.forTarget(target)
-        )) {
-        AssignerTargetSlicezData.TargetConfigData(
-          targetConfig,
-          AssignerTargetSlicezData.TargetConfigMethod.DefaultForExperimentalTargets
-        )
-      } else if (configProvider.isDynamicConfigEnabled) {
-        AssignerTargetSlicezData.TargetConfigData(
-          targetConfig,
-          AssignerTargetSlicezData.TargetConfigMethod.Dynamic
-        )
-      } else {
-        AssignerTargetSlicezData.TargetConfigData(
-          targetConfig,
-          AssignerTargetSlicezData.TargetConfigMethod.Static
-        )
-      }
-
-    // Combine both futures into a single future containing AssignerTargetSlicezData
-    generatorTargetSlicezData.flatMap { generatorTargetSlicezData: GeneratorTargetSlicezData =>
-      subscriberSlicezData.map {
-        subscriberSlicezData: (Seq[SliceletSubscriberSlicezData], Seq[ClerkSubscriberSlicezData]) =>
-          val (sliceletData, clerkData): (
-              Seq[SliceletSubscriberSlicezData],
-              Seq[ClerkSubscriberSlicezData]) = subscriberSlicezData
-
-          AssignerTargetSlicezData(
-            target,
-            sliceletData,
-            clerkData,
-            assignmentOpt,
-            generatorTargetSlicezData,
-            targetConfigSlicezData
-          )
-      }(sec)
-    }(sec)
   }
 
   /**
@@ -1119,56 +940,33 @@ class Assigner private (
   }
 
   /**
-   * Checks all the generators for inactivity and cleans up any that have not received any watch
-   * requests for longer than `conf.generatorInactivityDuration`.
+   * Checks all the targets for inactivity and shuts down any that have not received any watch
+   * requests for longer than `conf.generatorInactivityDeadline`.
    *
    * PRECONDITION: Must be called on [[sec]].
    */
-  private[this] def cleanupInactiveGenerators(): Unit = {
+  private[this] def cleanupInactiveTargets(): Unit = {
     sec.assertCurrentContext()
     val currentTime: TickerTime = sec.getClock.tickerTime()
 
     // Collect inactive targets first to avoid ConcurrentModificationException during iteration.
-    val inactiveEntries: Seq[(Target, AssignmentGeneratorHandle)] =
-      generatorMap.filter { entry =>
-        val (target, generatorHandle): (Target, AssignmentGeneratorHandle) = entry
-        val inactivityDuration: FiniteDuration = currentTime - generatorHandle.getLastWatchTime
+    val inactiveEntries: Seq[(Target, TargetManager)] =
+      activeTargetManagers.filter { entry =>
+        val (_, manager): (Target, TargetManager) = entry
+        val inactivityDuration: FiniteDuration = currentTime - manager.getLastWatchTime
         inactivityDuration >= conf.generatorInactivityDeadline
       }.toSeq
 
-    // Now safely remove and shutdown the inactive generators.
+    // Now safely shut down the inactive targets. In-flight watch RPCs still complete, at the latest
+    // when their timeout fires.
     for (entry <- inactiveEntries) {
-      val (target, generatorHandle): (Target, AssignmentGeneratorHandle) = entry
-      val generator: AssignmentGeneratorDriver = generatorHandle.getGeneratorDriver
-      val inactivityDuration: FiniteDuration = currentTime - generatorHandle.getLastWatchTime
+      val (target, manager): (Target, TargetManager) = entry
+      val inactivityDuration: FiniteDuration = currentTime - manager.getLastWatchTime
       logger.info(
-        s"Shutting down inactive generator for target $target after " +
-        s"$inactivityDuration of inactivity."
+        s"Shutting down inactive target $target after $inactivityDuration of inactivity."
       )
-      generator.shutdown()
-      generatorMap.remove(target)
-
-      TargetMetrics.incrementGeneratorsRemoved(
-        target,
-        GeneratorShutdownReason.GENERATOR_INACTIVITY
-      )
-      TargetMetrics.updateTargetsWithActiveGenerators(target, 0)
+      removeManager(target, GeneratorShutdownReason.GENERATOR_INACTIVITY)
     }
-
-    // Clean up subscriber handlers that have not received watch requests within the inactivity
-    // threshold. These handlers' subscribers have drained and can be safely removed.
-    //
-    // Ordering invariant: generators are shut down first (above), but this is safe because
-    // in-flight watch RPCs are Promise-based and will complete either via the cell's watch
-    // callback or the scheduled timeout. cancel() on the subscriber handler only stops metrics
-    // export and background tasks — it does not cancel in-flight RPCs.
-    // The subscriber inactivity threshold reuses the generator inactivity deadline because
-    // subscriber handlers are logically tied to generators: once a generator is eligible for
-    // cleanup due to inactivity, its corresponding subscriber handler should be too.
-    subscriberManager.removeInactiveHandlers(
-      currentTime,
-      inactivityThreshold = conf.generatorInactivityDeadline
-    )
   }
 
   object forTest {
@@ -1178,23 +976,8 @@ class Assigner private (
      * doesn't exist. This is useful for testing.
      */
     def getGeneratorFromMap(target: Target): Future[Option[AssignmentGeneratorDriver]] = sec.call {
-      generatorMap.get(target).map((_: AssignmentGeneratorHandle).getGeneratorDriver)
+      activeTargetManagers.get(target).flatMap((_: TargetManager).forTest.getGeneratorOpt())
     }
-
-    /**
-     * Returns the generator for the given target from the map, if it exists. Otherwise, creates a
-     * new generator and returns it, after storing it in `generatorMap`. This is useful for testing.
-     *
-     * Note: This method has side effects (it may modify `generatorMap`), so it should only be used
-     * in test cases that require Assigner introspection without Slicelet connection (e.g., verify
-     * that a standby Assigner can read assignments from store). Prefer using
-     * [[getGeneratorFromMap]] in almost all cases.
-     */
-    /** See [[Assigner.lookupGenerator()]]. */
-    def lookupOrCreateGenerator(target: Target): Future[Option[AssignmentGeneratorDriver]] =
-      sec.call {
-        Assigner.this.lookupGenerator(target).map((_: AssignmentGeneratorHandle).getGeneratorDriver)
-      }
 
     /** Stops the assigner watch server asynchronously. */
     def stopAsync(): Future[Unit] = sec.flatCall {
@@ -1207,6 +990,246 @@ class Assigner private (
     /** Returns this Assigner's current view of the preferred assigner. */
     def getPreferredAssignerConfig: Future[PreferredAssignerConfig] = sec.call {
       preferredAssignerConfig
+    }
+  }
+
+  /**
+   * Handles assignment generation and distribution to watchers for `target`.
+   *
+   * [[stop]] must be called explicitly to release the resources held by a manager.
+   *
+   * All public methods must be invoked on [[sec]].
+   */
+  private class TargetManager(target: Target, initialTargetConfig: InternalTargetConfig) {
+
+    /** The current active generator for the target, if any. */
+    private var generatorOpt: Option[AssignmentGeneratorDriver] = None
+
+    /** The subscriber handler for the target. */
+    private val subscriberHandler: SubscriberHandler = {
+      val subscriberHandlerSec: SequentialExecutionContext =
+        assignerSecPool.createExecutionContext(s"subscriber-handler-$target")
+      new SubscriberHandler(
+        subscriberHandlerSec,
+        target,
+        getSuggestedClerkRpcTimeoutFn = () => conf.getAssignerSuggestedClerkWatchTimeout,
+        suggestedSliceletRpcTimeout = conf.watchServerSuggestedRpcTimeout,
+        SubscriberHandler.Location.Assigner,
+        maxSubscribersPromptedForAssignmentRecovery = conf.maxClientsPromptedForAssignmentRecovery
+      )
+    }
+
+    /** The last time [[handleWatch]] was called. */
+    private var lastWatchTime: TickerTime = TickerTime.MIN
+
+    /** The current target config for the target. */
+    private var targetConfig: InternalTargetConfig = initialTargetConfig
+
+    /**
+     * Handles a watch request for the target, returning a future that completes either when a new
+     * assignment is available relative to the client or when a timeout triggers.
+     */
+    def handleWatch(
+        rpcContext: RPCContext,
+        request: ClientRequest,
+        outboundRedirect: Redirect): Future[ClientResponseP] = {
+      sec.assertCurrentContext()
+      val now: TickerTime = sec.getClock.tickerTime()
+      if (now > lastWatchTime) {
+        lastWatchTime = now
+      }
+
+      val generator: AssignmentGeneratorDriver = getGenerator()
+      generator.onWatchRequest(request)
+      // The handler waits on the cell passed with each watch. `subscriberHandler` outlives the
+      // generator whose cell is passed here: if the generator is later stopped (e.g. on a config
+      // change), watches already waiting on its cell are left watching a cell with no producer, and
+      // only complete when they time out.
+      subscriberHandler.handleWatch(
+        rpcContext,
+        request,
+        generator.getGeneratorCell,
+        outboundRedirect
+      )
+    }
+
+    /**
+     * Informs the manager of a new target config, shutting down the generator if the new config is
+     * different than the one currently in use.
+     */
+    def informLatestTargetConfig(newConfig: InternalTargetConfig): Unit = {
+      sec.assertCurrentContext()
+      // When a generator with a different configuration for a target is running, shut it down so
+      // that the next watch request recreates the generator with the latest config.
+      if (targetConfig != newConfig) {
+        logger.info(s"Config for $target is updated from $targetConfig to $newConfig")
+        targetConfig = newConfig
+
+        // No-op if the generator is not running.
+        stopGenerator(GeneratorShutdownReason.TARGET_CONFIG_CHANGE)
+      }
+    }
+
+    /**
+     * Stops this manager, making it eligible to be garbage collected.
+     *
+     * Using a manager after it's been stopped is undefined behavior.
+     */
+    def stop(reason: GeneratorShutdownReason): Unit = {
+      sec.assertCurrentContext()
+      stopGenerator(reason)
+      subscriberHandler.cancel()
+    }
+
+    /** The last time [[handleWatch]] was called. */
+    def getLastWatchTime: TickerTime = {
+      sec.assertCurrentContext()
+      lastWatchTime
+    }
+
+    /**
+     * Returns a Future which will complete with debugging information about the target if it has
+     * a running generator, or None otherwise.
+     *
+     * This method aggregates various information related to the target, including:
+     * - Assignment generation.
+     * - Subscriber information.
+     * - Target config details.
+     *
+     * PRECONDITION: Must be called on [[sec]].
+     */
+    // TODO(<internal bug>): While rare, we should return something even if the generator is not running!
+    def getTargetSlicezData(): Option[Future[AssignerTargetSlicezData]] = {
+      sec.assertCurrentContext()
+      generatorOpt.map { generator: AssignmentGeneratorDriver =>
+        val assignmentOpt: Option[Assignment] =
+          generator.getGeneratorCell.getLatestValueOpt
+        // Get the generator target slicez data.
+        val generatorTargetSlicezData: Future[GeneratorTargetSlicezData] =
+          generator.getGeneratorTargetSlicezData
+        // Get the subscriber data for this particular target.
+        val subscriberSlicezData
+            : Future[(Seq[SliceletSubscriberSlicezData], Seq[ClerkSubscriberSlicezData])] =
+          subscriberHandler.getSlicezData
+
+        // Check in which way the target is configured:
+        // - If the target is not in the latest config map, it is considered default configured for
+        //   experimental targets. Dynamic config may add targets to this map; removals take effect
+        //   only after restart, or when dynamic config is disabled.
+        // - Else if dynamic config is enabled, it is considered dynamically configured.
+        // - Otherwise, it is considered statically configured.
+        val targetConfig: InternalTargetConfig = generator.targetConfig
+        val targetConfigSlicezData: AssignerTargetSlicezData.TargetConfigData =
+          if (!configProvider.getLatestTargetConfigMap.targetNames.contains(
+              TargetName.forTarget(target)
+            )) {
+            AssignerTargetSlicezData.TargetConfigData(
+              targetConfig,
+              AssignerTargetSlicezData.TargetConfigMethod.DefaultForExperimentalTargets
+            )
+          } else if (configProvider.isDynamicConfigEnabled) {
+            AssignerTargetSlicezData.TargetConfigData(
+              targetConfig,
+              AssignerTargetSlicezData.TargetConfigMethod.Dynamic
+            )
+          } else {
+            AssignerTargetSlicezData.TargetConfigData(
+              targetConfig,
+              AssignerTargetSlicezData.TargetConfigMethod.Static
+            )
+          }
+
+        // Combine both futures into a single future containing AssignerTargetSlicezData
+        generatorTargetSlicezData.flatMap { generatorTargetSlicezData: GeneratorTargetSlicezData =>
+          subscriberSlicezData.map {
+            subscriberSlicezData: (
+                Seq[SliceletSubscriberSlicezData],
+                Seq[ClerkSubscriberSlicezData]) =>
+              val (sliceletData, clerkData): (
+                  Seq[SliceletSubscriberSlicezData],
+                  Seq[ClerkSubscriberSlicezData]) = subscriberSlicezData
+
+              AssignerTargetSlicezData(
+                target,
+                sliceletData,
+                clerkData,
+                assignmentOpt,
+                generatorTargetSlicezData,
+                targetConfigSlicezData
+              )
+          }(sec)
+        }(sec)
+      }
+    }
+
+    /**
+     * Stops the active generator and clears the internal state so that the next watch request for
+     * the target will create a new generator.
+     */
+    private def stopGenerator(reason: GeneratorShutdownReason): Unit = {
+      sec.assertCurrentContext()
+      for (generator: AssignmentGeneratorDriver <- generatorOpt) {
+        TargetMetrics.incrementGeneratorsRemoved(target, reason)
+        TargetMetrics.updateTargetsWithActiveGenerators(target, 0)
+        generator.shutdown()
+      }
+      generatorOpt = None
+    }
+
+    /**
+     * Returns the current active generator for the target, or creates a new one if none exists.
+     */
+    private def getGenerator(): AssignmentGeneratorDriver = {
+      sec.assertCurrentContext()
+      generatorOpt match {
+        case Some(generator: AssignmentGeneratorDriver) =>
+          generator
+
+        case None =>
+          // Create and store a new generator.
+          logger.info(s"New generator being created for $target: $targetConfig")
+          TargetMetrics.updateTargetsWithActiveGenerators(target, 1)
+          val targetName = TargetName.forTarget(target)
+          InternalTargetConfigMetrics.exportAssignerConfigStats(targetName, targetConfig)
+          val generator = AssignmentGeneratorDriver.create(
+            assignerSecPool.createExecutionContext(s"generation-$target"),
+            conf: LoadWatcherConf,
+            target,
+            targetConfig,
+            storeFactory.getStore(),
+            kubernetesTargetWatcherFactory,
+            healthWatcher = healthWatcherFactory.create(
+              target,
+              HealthWatcher.StaticConfig.fromConf(conf: HealthConf),
+              targetConfig.healthWatcherConfig
+            ),
+            // TODO(<internal bug>): While we do not expose the specific `crashRecordRetention`
+            // and `heuristicThreshold` configurations to the user currently, future
+            // configuration options for the key of death detector should be incorporated here,
+            // such as whether or not key of death protection is enabled.
+            keyOfDeathDetector = new KeyOfDeathDetector(
+              target,
+              KeyOfDeathDetector.Config.defaultConfig()
+            ),
+            assignerClusterUri,
+            minAssignmentGenerationInterval,
+            dicerTeeEventEmitter,
+            dicerSimulatorEventLogEmitter,
+            assignerProtoLogger,
+            assignerServiceInfoOpt
+          )
+
+          generatorOpt = Some(generator)
+          generator
+      }
+    }
+
+    object forTest {
+
+      /**
+       * Returns the generator for the target if it is running, or None otherwise.
+       */
+      def getGeneratorOpt(): Option[AssignmentGeneratorDriver] = generatorOpt
     }
   }
 }
@@ -1224,30 +1247,6 @@ object Assigner {
   }
 
   private val logger = PrefixLogger.create(this.getClass, "")
-
-  /**
-   * A wrapper class that contains both the generator driver and the last time the generator
-   * received a watch request.
-   *
-   * @param generatorDriver The assignment generator driver for a target.
-   * @param lastWatchTime The last time the generator received a watch request, used for tracking
-   *                      generator activity for inactivity cleanup purposes.
-   */
-  private[assigner] class AssignmentGeneratorHandle(
-      generatorDriver: AssignmentGeneratorDriver,
-      private var lastWatchTime: TickerTime) {
-
-    /** Returns the wrapped [[AssignmentGeneratorDriver]]. */
-    def getGeneratorDriver: AssignmentGeneratorDriver = generatorDriver
-
-    /** Updates the last watch time for this generator. */
-    def updateLastWatchTime(time: TickerTime): Unit = {
-      lastWatchTime = time
-    }
-
-    /** Returns the last watch time for this generator. */
-    def getLastWatchTime: TickerTime = lastWatchTime
-  }
 
   /** The [[EtcdClient]] namespace suffix in which preferred Assigner records are written. */
   private[dicer] val PREFERRED_ASSIGNER_ETCD_NAMESPACE_SUFFIX = "preferred-assigner"
@@ -1404,7 +1403,6 @@ object Assigner {
   /**
    * REQUIRES: `conf.preferredAssignerEnabled` is true.
    * REQUIRES: `conf.preferredAssignerEtcdEndpoints` is non-empty.
-   * REQUIRES: `conf.preferredAssignerStoreIncarnation` is not loose.
    *
    * Returns a new preferred assigner store, or throws [[IllegalArgumentException]] if the `conf`
    * isn't valid for creating a preferred assigner store. See [[EtcdPreferredAssignerStore.create]]
@@ -1477,12 +1475,8 @@ object Assigner {
         newDriver = chDriver
       )
     } else {
-      val preferredAssignerStoreIncarnation = Incarnation(conf.preferredAssignerStoreIncarnation)
-      logger.info(
-        "Creating DisabledPreferredAssignerDriver with store incarnation " +
-        s"$preferredAssignerStoreIncarnation."
-      )
-      new DisabledPreferredAssignerDriver(preferredAssignerStoreIncarnation)
+      logger.info("Creating DisabledPreferredAssignerDriver.")
+      new DisabledPreferredAssignerDriver
     }
   }
 

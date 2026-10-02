@@ -1,5 +1,7 @@
 package com.databricks.dicer.assigner
 
+import java.net.URI
+
 import scala.concurrent.duration._
 import com.databricks.caching.util.{
   AssertionWaiter,
@@ -10,7 +12,8 @@ import com.databricks.caching.util.{
 import com.databricks.caching.util.TestUtils
 import com.databricks.caching.util.TestUtils.TestName
 import com.databricks.dicer.assigner.InterposingEtcdPreferredAssignerDriver.ShutdownOption
-import com.databricks.dicer.assigner.PreferredAssignerTestHelper.{
+import com.databricks.dicer.assigner.testing.PreferredAssignerTestUtils
+import com.databricks.dicer.assigner.testing.PreferredAssignerTestUtils.{
   advanceClockBySync,
   assertAssignerGeneratesAssignment,
   assertAssignerGeneratesAssignmentByDirectWatchRequest,
@@ -20,17 +23,16 @@ import com.databricks.dicer.assigner.PreferredAssignerTestHelper.{
   createSliceletClientRequest
 }
 import com.databricks.dicer.common.SyncAssignmentState.{KnownAssignment, KnownGeneration}
-import com.databricks.dicer.common.TestSliceUtils.createTestSquid
+import com.databricks.dicer.common.testing.SliceTestUtils.createTestSquid
 import com.databricks.dicer.common.{
   Assignment,
   ClientRequest,
   ClientResponse,
   Generation,
   Incarnation,
-  InternalDicerTestEnvironment,
-  Redirect,
-  TestAssigner
+  Redirect
 }
+import com.databricks.dicer.common.testing.{InternalDicerTestEnvironment, TestAssigner}
 import com.databricks.dicer.external.Target
 import com.databricks.testing.DatabricksTest
 import com.databricks.rpc.RPCContext
@@ -62,14 +64,14 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
   /** The number of assigners used in the suite. */
   private val NUM_ASSIGNERS: Int = 3
 
-  /** The default non-loose preferred assigner store incarnation. */
-  private val DEFAULT_NON_LOOSE_INCARNATION: Incarnation = Incarnation(40)
+  /** The default preferred assigner store incarnation. */
+  private val DEFAULT_INCARNATION: Incarnation = Incarnation(40)
 
   private val driverConfig = EtcdPreferredAssignerDriver.Config()
 
   /** The default test assigner config where the preferred assigner mode is enabled. */
   private val DEFAULT_PA_ENABLED_CONF: TestAssigner.Config =
-    createAssignerConfig(preferredAssignerStoreIncarnation = DEFAULT_NON_LOOSE_INCARNATION)
+    createAssignerConfig(preferredAssignerStoreIncarnation = DEFAULT_INCARNATION)
 
   private val testEnv = InternalDicerTestEnvironment.create(
     config = DEFAULT_PA_ENABLED_CONF,
@@ -102,7 +104,7 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
 
   /** Initializes a set of Assigners. */
   private def initializeAssigners(numAssigners: Int, config: TestAssigner.Config): Unit = {
-    for (_ <- 1 to numAssigners) {
+    for (_: Int <- 1 to numAssigners) {
       testEnv.addAssigner(config)
     }
 
@@ -132,7 +134,7 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
       testEnv.testAssigners
     ) // Trigger PA writes.
 
-    PreferredAssignerTestHelper.verifyPreferredAssignerFunctionality(
+    PreferredAssignerTestUtils.verifyPreferredAssignerFunctionality(
       driverConfig = driverConfig,
       testAssigners = testEnv.testAssigners,
       createDirectClerk = testEnv.createDirectClerk,
@@ -156,7 +158,7 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
       testEnv.testAssigners
     ) // Trigger PA writes.
     val initialPreferredAssigner: TestAssigner =
-      PreferredAssignerTestHelper.getConvergedPreferredAssigner(testEnv.testAssigners)
+      PreferredAssignerTestUtils.getConvergedPreferredAssigner(testEnv.testAssigners)
 
     val standBys: Seq[TestAssigner] = testEnv.testAssigners.filter { assigner: TestAssigner =>
       assigner.getAssignerInfoBlocking() != initialPreferredAssigner.getAssignerInfoBlocking()
@@ -168,7 +170,7 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
     // Verify: a new preferred assigner is selected from the standbys, and it generates assignments.
     val newPreferredAssigner: TestAssigner = AssertionWaiter("wait for new PA").await {
       val newCandidate: TestAssigner =
-        PreferredAssignerTestHelper.getConvergedPreferredAssigner(standBys)
+        PreferredAssignerTestUtils.getConvergedPreferredAssigner(standBys)
       assert(
         newCandidate.getAssignerInfoBlocking() != initialPreferredAssigner.getAssignerInfoBlocking()
       )
@@ -228,7 +230,7 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
       testEnv.testAssigners
     ) // Trigger PA writes.
     val initialPreferredAssigner: TestAssigner =
-      PreferredAssignerTestHelper.getConvergedPreferredAssigner(testEnv.testAssigners)
+      PreferredAssignerTestUtils.getConvergedPreferredAssigner(testEnv.testAssigners)
     val initialStandbys: Seq[TestAssigner] = testEnv.testAssigners.filter {
       assigner: TestAssigner =>
         assigner.getAssignerInfoBlocking() != initialPreferredAssigner.getAssignerInfoBlocking()
@@ -249,14 +251,14 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
     initialPreferredAssigner.stop(ShutdownOption.ABRUPT)
 
     // Advance the clock so that the standby assigner's heartbeat failure threshold is reached.
-    for (_ <- 1 to driverConfig.heartbeatFailureThreshold + 1) {
+    for (_: Int <- 1 to driverConfig.heartbeatFailureThreshold + 1) {
       advanceClockBySync(fakeClock, driverConfig.heartbeatInterval, testEnv.testAssigners)
     }
 
     // Verify: a new preferred assigner is selected, and it generates assignments.
     val newPreferredAssigner1: TestAssigner = AssertionWaiter("wait for new PA").await {
       val newCandidate: TestAssigner =
-        PreferredAssignerTestHelper.getConvergedPreferredAssigner(initialStandbys)
+        PreferredAssignerTestUtils.getConvergedPreferredAssigner(initialStandbys)
       assert(
         newCandidate.getAssignerInfoBlocking() != initialPreferredAssigner.getAssignerInfoBlocking()
       )
@@ -308,7 +310,7 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
     newPreferredAssigner1.stop(ShutdownOption.ABRUPT)
 
     // Advance the clock so that the standby assigner's heartbeat failure threshold is reached.
-    for (_ <- 1 to driverConfig.heartbeatFailureThreshold + 1) {
+    for (_: Int <- 1 to driverConfig.heartbeatFailureThreshold + 1) {
       advanceClockBySync(fakeClock, driverConfig.heartbeatInterval, testEnv.testAssigners)
     }
 
@@ -359,9 +361,8 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
     //    assignership.
     // 4. Verify that the preferred assigner (A) generates update-to-date assignments, and the
     //    standby assigner (B) redirects watch requests to the preferred assigner (A).
-    assert(DEFAULT_NON_LOOSE_INCARNATION.isNonLoose)
     val oldIncarnationConf: TestAssigner.Config =
-      createAssignerConfig(DEFAULT_NON_LOOSE_INCARNATION)
+      createAssignerConfig(DEFAULT_INCARNATION)
 
     initializeAssigners(numAssigners = 2, oldIncarnationConf)
     val assignersWithOldIncarnation: Seq[TestAssigner] = testEnv.testAssigners
@@ -372,7 +373,7 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
       testEnv.testAssigners
     ) // Trigger PA writes.
     val assignerA: TestAssigner =
-      PreferredAssignerTestHelper.getConvergedPreferredAssigner(testEnv.testAssigners)
+      PreferredAssignerTestUtils.getConvergedPreferredAssigner(testEnv.testAssigners)
     // Wait for the preferred assigner to generate an assignment.
     val target = Target(getSafeName)
     val portNum: Int = getNextSliceletPortNumber
@@ -382,14 +383,14 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
     assignerA.pauseHeartbeatResponse()
 
     // Advance the clock so that the standby assigner's heartbeat failure threshold is reached.
-    for (_ <- 1 to driverConfig.heartbeatFailureThreshold + 1) {
+    for (_: Int <- 1 to driverConfig.heartbeatFailureThreshold + 1) {
       advanceClockBySync(fakeClock, driverConfig.heartbeatInterval, assignersWithOldIncarnation)
     }
 
     // Verify: another assigner (B) takes over as the preferred assigner.
     val assignerB: TestAssigner = AssertionWaiter("wait for new PA").await {
       val newCandidate: TestAssigner =
-        PreferredAssignerTestHelper.getConvergedPreferredAssigner(testEnv.testAssigners)
+        PreferredAssignerTestUtils.getConvergedPreferredAssigner(testEnv.testAssigners)
       assert(newCandidate.getAssignerInfoBlocking() != assignerA.getAssignerInfoBlocking())
       newCandidate
     }
@@ -415,14 +416,14 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
     assignerB.pauseHeartbeatResponse()
 
     // Advance the clock so that the standby assigner's heartbeat failure threshold is reached.
-    for (_ <- 1 to driverConfig.heartbeatFailureThreshold + 1) {
+    for (_: Int <- 1 to driverConfig.heartbeatFailureThreshold + 1) {
       advanceClockBySync(fakeClock, driverConfig.heartbeatInterval, assignersWithOldIncarnation)
     }
 
     // Verify: the original preferred assigner (A) reassumes the preferred assignership.
     AssertionWaiter("wait for new PA").await {
       assert(
-        PreferredAssignerTestHelper
+        PreferredAssignerTestUtils
           .getConvergedPreferredAssigner(testEnv.testAssigners)
           .getAssignerInfoBlocking() == assignerA.getAssignerInfoBlocking()
       )
@@ -447,16 +448,15 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
     // Test plan: Verify that the new assigner will generate assignments when going from PA mode
     // disabled in one incarnation to another. It doesn't matter if the latter PA's incarnation
     // is higher or lower than the former PA's incarnation.
-    // 1. Start with one loose incarnation (39) assigner with PA mode disabled.
+    // 1. Start with one assigner (incarnation 39) with PA mode disabled.
     // 2. Verify that the assigner generates assignments.
-    // 3. Start a new assigner with a higher loose incarnation (41) and PA mode disabled.
+    // 3. Start a new assigner with a higher incarnation (41) and PA mode disabled.
     // 4. Verify that the new assigner (41) generates assignments.
-    // 5. Start a new assigner with a lower loose incarnation (37) and PA mode disabled.
+    // 5. Start a new assigner with a lower incarnation (37) and PA mode disabled.
     // 6. Verify that the new assigner (37) generates assignments.
-    val priorLooseIncarnation = Incarnation(39)
-    assert(priorLooseIncarnation.isLoose)
+    val priorIncarnation = Incarnation(39)
     val paDisabledConf: TestAssigner.Config =
-      createAssignerConfig(priorLooseIncarnation, preferredAssignerEnabled = false)
+      createAssignerConfig(priorIncarnation, preferredAssignerEnabled = false)
     initializeAssigners(numAssigners = 1, paDisabledConf)
 
     val target = Target(getSafeName)
@@ -466,11 +466,10 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
     val expectedRedirect1 = Redirect.EMPTY // Assigner with PA disabled should redirect to random.
     assertAssignerGeneratesAssignmentByDirectWatchRequest(assigner1, target, expectedRedirect1)
 
-    // Start a new assigner with a higher loose incarnation (41) and PA mode disabled.
-    val looseIncarnation = Incarnation(41)
-    assert(looseIncarnation.isLoose)
+    // Start a new assigner with a higher incarnation (41) and PA mode disabled.
+    val higherIncarnation = Incarnation(41)
     val paDisabledConf2: TestAssigner.Config =
-      createAssignerConfig(looseIncarnation, preferredAssignerEnabled = false)
+      createAssignerConfig(higherIncarnation, preferredAssignerEnabled = false)
     initializeAssigners(numAssigners = 1, paDisabledConf2)
     // Stop the old assigner.
     assigner1.stop(ShutdownOption.ABRUPT)
@@ -480,11 +479,10 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
     val expectedRedirect2 = Redirect.EMPTY // Assigner with PA disabled should redirect to random.
     assertAssignerGeneratesAssignmentByDirectWatchRequest(assigner2, target, expectedRedirect2)
 
-    // Start a new assigner with a lower loose incarnation (37) and PA mode disabled.
-    val newLooseIncarnation = Incarnation(37)
-    assert(newLooseIncarnation.isLoose)
+    // Start a new assigner with a lower incarnation (37) and PA mode disabled.
+    val lowerIncarnation = Incarnation(37)
     val paDisabledConf3: TestAssigner.Config =
-      createAssignerConfig(looseIncarnation, preferredAssignerEnabled = false)
+      createAssignerConfig(lowerIncarnation, preferredAssignerEnabled = false)
     initializeAssigners(numAssigners = 1, paDisabledConf3)
     // Stop the old assigner.
     assigner2.stop(ShutdownOption.ABRUPT)
@@ -498,13 +496,13 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
   test("Going from PA disabled to enabled with a higher incarnation") {
     // Test plan: Verify that a preferred assigner is chosen when we go from preferred assigner
     // mode disabled to enabled where the latter has a higher incarnation, specifically
-    //  - Start with one assigner with a lower loose incarnation and PA disabled.
+    //  - Start with one assigner with a lower incarnation and PA disabled.
     //  - Wait for a slicelet to receive the assignment generated by the assigner.
-    //  - Add three assigners with PA enabled and higher non-loose incarnations
+    //  - Add three assigners with PA enabled and higher incarnations
     //  - Verify that one of them is chosen as PA and generates new assignments.
-    val priorLooseIncarnation = Incarnation(DEFAULT_NON_LOOSE_INCARNATION.value - 1)
+    val priorIncarnation = Incarnation(DEFAULT_INCARNATION.value - 1)
     val paDisabledConf: TestAssigner.Config =
-      createAssignerConfig(priorLooseIncarnation, preferredAssignerEnabled = false)
+      createAssignerConfig(priorIncarnation, preferredAssignerEnabled = false)
     initializeAssigners(numAssigners = 1, paDisabledConf)
     // Wait for the assigner (PA disabled) to generate an assignment.
     val target = Target(getSafeName)
@@ -513,9 +511,9 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
     val disabledPaAssigner: TestAssigner = testEnv.testAssigners.head
     assertAssignerGeneratesAssignment(testEnv, disabledPaAssigner, target, portNum)
 
-    // Add three assigners with PA enabled and higher non-loose incarnations.
+    // Add three assigners with PA enabled and higher incarnations.
     val paEnabledConf: TestAssigner.Config =
-      createAssignerConfig(DEFAULT_NON_LOOSE_INCARNATION)
+      createAssignerConfig(DEFAULT_INCARNATION)
     initializeAssigners(numAssigners = 3, paEnabledConf)
 
     assert(testEnv.testAssigners.size == 4)
@@ -528,7 +526,7 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
       driverConfig.initialPreferredAssignerTimeout,
       testEnv.testAssigners
     )
-    val preferredAssigner: TestAssigner = PreferredAssignerTestHelper.getConvergedPreferredAssigner(
+    val preferredAssigner: TestAssigner = PreferredAssignerTestUtils.getConvergedPreferredAssigner(
       enabledPaAssigners
     )
 
@@ -546,19 +544,19 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
   test("Going from PA disabled to enabled with a lower incarnation") {
     // Test plan: Verify that a preferred assigner is chosen when we go from preferred assigner
     // mode disabled to enabled where the latter has a lower preferred assigner store incarnation.
-    // In this case, split brain will occur, because the the preferred assigner value with PA
+    // In this case, split brain will occur, because the preferred assigner value with PA
     // disabled is not persisted in the store, and it keeps generating assignments. The assigner
     // with PA disabled will have a PA selected and generates assignments. In production, this
     // scenario should not happen, and even if it does, the assigner with PA disabled should be
     // stopped by Kubernetes, so that the split brain scenario does not persist. Additionally,
-    // It is better to be split brained than no brained, and also that if disabled and preferred
+    // it is better to be split brained than no brained, and also that if disabled and preferred
     // assigners co-exist then all slicelets will tend to eventually land up speaking to the
-    // preferred assigner clique because they will be redirect to a random assigner on their next
-    // request if they talk to the disabled PA assigner, wheareas with an enable PA assigner they
-    // will always be redirect to the preferred assigner in the PA clique.
-    val looseIncarnation = Incarnation(17)
+    // preferred assigner clique because they will be redirected to a random assigner on their next
+    // request if they talk to the disabled PA assigner, whereas with an enabled PA assigner they
+    // will always be redirected to the preferred assigner in the PA clique.
+    val incarnation = Incarnation(17)
     val paDisabledConf: TestAssigner.Config =
-      createAssignerConfig(looseIncarnation, preferredAssignerEnabled = false)
+      createAssignerConfig(incarnation, preferredAssignerEnabled = false)
     initializeAssigners(numAssigners = 1, paDisabledConf)
     // Wait for the assigner (PA disabled) to generate an assignment.
     val target = Target(getSafeName)
@@ -567,11 +565,10 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
     val disabledPaAssigner: TestAssigner = testEnv.testAssigners.head
     assertAssignerGeneratesAssignment(testEnv, disabledPaAssigner, target, portNum)
 
-    // Add three assigners with PA enabled and lower non-loose incarnations.
-    val lowerNonLooseIncarnation = Incarnation(looseIncarnation.value - 1)
-    assert(lowerNonLooseIncarnation.isNonLoose)
+    // Add three assigners with PA enabled and lower incarnations.
+    val lowerIncarnation = Incarnation(incarnation.value - 1)
     val paEnabledConf: TestAssigner.Config =
-      createAssignerConfig(lowerNonLooseIncarnation)
+      createAssignerConfig(lowerIncarnation)
     initializeAssigners(numAssigners = 3, paEnabledConf)
 
     assert(testEnv.testAssigners.size == 4)
@@ -586,7 +583,7 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
     )
 
     val preferredAssigner: TestAssigner =
-      PreferredAssignerTestHelper.getConvergedPreferredAssigner(enabledPaAssigners)
+      PreferredAssignerTestUtils.getConvergedPreferredAssigner(enabledPaAssigners)
 
     // Verify: the new preferred assigner generates assignments.
     val expectedPreferredAssignerUri = preferredAssigner.getAssignerInfoBlocking().uri
@@ -597,16 +594,15 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
     )
   }
 
-  test("bump store incarnation up from one non-loose incarnation to another") {
-    // Test plan: start with three assigners with an old non-loose incarnation, and later start
-    // three assigners with a higher non-loose incarnation. Verify that, after shutting down the
+  test("bump store incarnation up from one incarnation to another") {
+    // Test plan: start with three assigners with an old incarnation, and later start
+    // three assigners with a higher incarnation. Verify that, after shutting down the
     // the old assigners, all new assigners agree on the same preferred assigner with the new
     // incarnation. Additionally, verify that the new preferred assigner generates assignments,
     // and all other assigners redirect watch requests to the new preferred assigner.
-    val oldNonLooseIncarnation: Incarnation = Incarnation(20)
-    assert(oldNonLooseIncarnation.isNonLoose)
+    val oldIncarnation: Incarnation = Incarnation(20)
     val oldIncarnationConf: TestAssigner.Config =
-      createAssignerConfig(oldNonLooseIncarnation)
+      createAssignerConfig(oldIncarnation)
 
     initializeAssigners(NUM_ASSIGNERS, oldIncarnationConf)
     val assignersWithOldIncarnation: Seq[TestAssigner] = testEnv.testAssigners
@@ -617,22 +613,22 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
       testEnv.testAssigners
     ) // Trigger PA writes.
     val initialPreferredAssigner: TestAssigner =
-      PreferredAssignerTestHelper.getConvergedPreferredAssigner(assignersWithOldIncarnation)
+      PreferredAssignerTestUtils.getConvergedPreferredAssigner(assignersWithOldIncarnation)
     // Wait for the preferred assigner to generate an assignment.
     val target = Target(getSafeName)
     val portNum: Int = getNextSliceletPortNumber
     assertAssignerGeneratesAssignment(testEnv, initialPreferredAssigner, target, portNum)
 
-    // Add three assigners with a higher non-loose incarnation.
-    val newIncarnation: Incarnation = oldNonLooseIncarnation.getNextNonLooseIncarnation
-    assert(newIncarnation > oldNonLooseIncarnation)
+    // Add three assigners with a higher incarnation.
+    val newIncarnation: Incarnation = Incarnation(oldIncarnation.value + 1)
+    assert(newIncarnation > oldIncarnation)
     val newIncarnationConf: TestAssigner.Config =
       createAssignerConfig(newIncarnation)
 
     // Before initializing the new assigners, track the changes in the number of preferred assigner
     // write exceptions.
     val paWriteExceptionsChangeTracker = MetricUtils.ChangeTracker[Long] { () =>
-      PreferredAssignerTestHelper.getNumPreferredAssignerWriteExceptions
+      PreferredAssignerTestUtils.getNumPreferredAssignerWriteExceptions
     }
     initializeAssigners(NUM_ASSIGNERS, newIncarnationConf)
     assert(testEnv.testAssigners.size == NUM_ASSIGNERS * 2)
@@ -658,12 +654,12 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
         advanceClockBySync(fakeClock, driverConfig.writeRetryInterval, testEnv.testAssigners)
         hasClockAdvanced = true
       }
-      assert(PreferredAssignerTestHelper.getLatestPreferredAssignerIncarnation == newIncarnation)
+      assert(PreferredAssignerTestUtils.getLatestPreferredAssignerIncarnation == newIncarnation)
     }
 
     // Verify: an assigner is selected from the new incarnation and it generates assignments.
     val newPreferredAssigner: TestAssigner =
-      PreferredAssignerTestHelper.getConvergedPreferredAssigner(assignersWithNewIncarnation)
+      PreferredAssignerTestUtils.getConvergedPreferredAssigner(assignersWithNewIncarnation)
     val preferredAssignerUri = newPreferredAssigner.getAssignerInfoBlocking().uri
     assertAssignerGeneratesAssignmentByDirectWatchRequest(
       newPreferredAssigner,
@@ -674,15 +670,14 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
 
   // The test below is a test which should be avoided in production, but it's good to have it here
   // to ensure that the system behaves as desired.
-  test("lower store incarnation down from one non-loose incarnation to another") {
-    // Test plan: start with three assigners with a lower non-loose incarnation, and later start
-    // three assigners with a lower non-loose incarnation. Verify that, after shutting down the
+  test("lower store incarnation down from one incarnation to another") {
+    // Test plan: start with three assigners with a higher incarnation, and later start
+    // three assigners with a lower incarnation. Verify that, after shutting down the
     // the old assigners, the assigners with new incarnation cannot be selected as the preferred
     // assigner.
-    val oldHighNonLooseIncarnation: Incarnation = Incarnation(20)
-    assert(oldHighNonLooseIncarnation.isNonLoose)
+    val oldHigherIncarnation: Incarnation = Incarnation(20)
     val oldIncarnationConf: TestAssigner.Config =
-      createAssignerConfig(oldHighNonLooseIncarnation)
+      createAssignerConfig(oldHigherIncarnation)
 
     initializeAssigners(NUM_ASSIGNERS, oldIncarnationConf)
     val assignersWithOldIncarnation: Seq[TestAssigner] = testEnv.testAssigners
@@ -693,17 +688,16 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
       testEnv.testAssigners
     ) // Trigger PA writes.
     val initialPreferredAssigner: TestAssigner =
-      PreferredAssignerTestHelper.getConvergedPreferredAssigner(assignersWithOldIncarnation)
+      PreferredAssignerTestUtils.getConvergedPreferredAssigner(assignersWithOldIncarnation)
 
     // Wait for the preferred assigner to generate an assignment.
     val target = Target(getSafeName)
     val portNum: Int = getNextSliceletPortNumber
     assertAssignerGeneratesAssignment(testEnv, initialPreferredAssigner, target, portNum)
 
-    // Add three assigners with a lower non-loose incarnation.
-    val newIncarnation: Incarnation =
-      oldHighNonLooseIncarnation.copy(oldHighNonLooseIncarnation.value - 2)
-    assert(newIncarnation < oldHighNonLooseIncarnation)
+    // Add three assigners with a lower incarnation.
+    val newIncarnation: Incarnation = Incarnation(oldHigherIncarnation.value - 1)
+    assert(newIncarnation < oldHigherIncarnation)
     val newIncarnationConf: TestAssigner.Config =
       createAssignerConfig(newIncarnation)
     initializeAssigners(NUM_ASSIGNERS, newIncarnationConf)
@@ -718,7 +712,7 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
     }
 
     // Advance the clock so that the standby assigner's heartbeat failure threshold is reached.
-    for (_ <- 1 to driverConfig.heartbeatFailureThreshold + 1) {
+    for (_: Int <- 1 to driverConfig.heartbeatFailureThreshold + 1) {
       advanceClockBySync(fakeClock, driverConfig.heartbeatInterval, testEnv.testAssigners)
     }
 
@@ -743,12 +737,11 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
   test("Going from PA enabled to PA disabled with lower incarnation") {
     // Test plan: Verify that when we go from preferred assigner mode enabled to disabled where the
     // latter has a lower incarnation, and that the new PA disabled assigner generates assignments.
-    // This simulates the case of rolling back the PA feature. In production, this should not
-    // happen, because if we would like to disable the PA feature, we should bump the store
-    // incarnation to a higher loose value and disable the preferred assigner mode. But it's good
-    // to verify that it behaves as expected.
+    // This simulates the case of rolling back the PA feature. In production, this should not matter
+    // because a PA disabled assigner does not read the store incarnation. But it's good to
+    // verify that it behaves as expected.
     val oldIncarnationConf: TestAssigner.Config =
-      createAssignerConfig(DEFAULT_NON_LOOSE_INCARNATION)
+      createAssignerConfig(DEFAULT_INCARNATION)
 
     initializeAssigners(NUM_ASSIGNERS, oldIncarnationConf)
     val assignersWithOldIncarnation: Seq[TestAssigner] = testEnv.testAssigners
@@ -759,18 +752,18 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
       testEnv.testAssigners
     ) // Trigger PA writes.
     val initialPreferredAssigner: TestAssigner =
-      PreferredAssignerTestHelper.getConvergedPreferredAssigner(testEnv.testAssigners)
+      PreferredAssignerTestUtils.getConvergedPreferredAssigner(testEnv.testAssigners)
 
     // Wait for the preferred assigner to generate an assignment.
     val target = Target(getSafeName)
     val portNum: Int = getNextSliceletPortNumber
     assertAssignerGeneratesAssignment(testEnv, initialPreferredAssigner, target, portNum)
 
-    val newLooseIncarnation = Incarnation(DEFAULT_NON_LOOSE_INCARNATION.value - 1)
-    assert(newLooseIncarnation < DEFAULT_NON_LOOSE_INCARNATION)
-    // Start a new assigner with a lower non-loose incarnation and PA disabled.
+    val newIncarnation = Incarnation(DEFAULT_INCARNATION.value - 1)
+    assert(newIncarnation < DEFAULT_INCARNATION)
+    // Start a new assigner with a lower incarnation and PA disabled.
     val newIncarnationConf: TestAssigner.Config =
-      createAssignerConfig(newLooseIncarnation, preferredAssignerEnabled = false)
+      createAssignerConfig(newIncarnation, preferredAssignerEnabled = false)
     initializeAssigners(numAssigners = 1, newIncarnationConf)
     assert(testEnv.testAssigners.size == 4)
     val newAssigner: TestAssigner = testEnv.testAssigners.last
@@ -789,7 +782,7 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
     // latter has a higher incarnation, then the new PA disabled assigner generates assignments.
     // This simulates the case of disabling the PA feature and bumping the store incarnation.
     val oldIncarnationConf: TestAssigner.Config =
-      createAssignerConfig(DEFAULT_NON_LOOSE_INCARNATION)
+      createAssignerConfig(DEFAULT_INCARNATION)
 
     initializeAssigners(NUM_ASSIGNERS, oldIncarnationConf)
     val assignersWithOldIncarnation: Seq[TestAssigner] = testEnv.testAssigners
@@ -800,18 +793,18 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
       testEnv.testAssigners
     ) // Trigger PA writes.
     val initialPreferredAssigner: TestAssigner =
-      PreferredAssignerTestHelper.getConvergedPreferredAssigner(testEnv.testAssigners)
+      PreferredAssignerTestUtils.getConvergedPreferredAssigner(testEnv.testAssigners)
 
     // Wait for the preferred assigner to generate an assignment.
     val target = Target(getSafeName)
     val portNum: Int = getNextSliceletPortNumber
     assertAssignerGeneratesAssignment(testEnv, initialPreferredAssigner, target, portNum)
 
-    val newLooseIncarnation = DEFAULT_NON_LOOSE_INCARNATION.getNextLooseIncarnation
-    assert(newLooseIncarnation > DEFAULT_NON_LOOSE_INCARNATION)
-    // Start a new assigner with a higher non-loose incarnation and PA disabled.
+    val newIncarnation = Incarnation(DEFAULT_INCARNATION.value + 1)
+    assert(newIncarnation > DEFAULT_INCARNATION)
+    // Start a new assigner with a higher incarnation and PA disabled.
     val newIncarnationConf: TestAssigner.Config =
-      createAssignerConfig(newLooseIncarnation, preferredAssignerEnabled = false)
+      createAssignerConfig(newIncarnation, preferredAssignerEnabled = false)
     initializeAssigners(numAssigners = 1, newIncarnationConf)
     assert(testEnv.testAssigners.size == 4)
     val newAssigner: TestAssigner = testEnv.testAssigners.last
@@ -825,13 +818,13 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
     assertAssignerGeneratesAssignmentByDirectWatchRequest(newAssigner, target, expectedRedirect)
   }
 
-  test("PA disabled to PA enabled to PA disabled to PA enabled") {
+  test("PA disabled to PA enabled to PA disabled to PA enabled with incarnation bumps") {
     // Test plan: Simulate the case of toggling the PA feature on and off multiple times where
     // each toggle has a higher incarnation than the previous one. Verify that the new preferred
     // assigner generates assignments.
-    val firstLooseIncarnation = Incarnation(17)
+    val firstIncarnation = Incarnation(17)
     val paDisabledConf: TestAssigner.Config =
-      createAssignerConfig(firstLooseIncarnation, preferredAssignerEnabled = false)
+      createAssignerConfig(firstIncarnation, preferredAssignerEnabled = false)
     initializeAssigners(numAssigners = 1, paDisabledConf)
     // Wait for the assigner (PA disabled) to generate an assignment.
     val target = Target(getSafeName)
@@ -840,10 +833,10 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
     val disabledPaAssigner: TestAssigner = testEnv.testAssigners.head
     assertAssignerGeneratesAssignment(testEnv, disabledPaAssigner, target, portNum)
 
-    // Add three assigners with PA enabled and higher non-loose incarnations.
-    val higherNonLooseIncarnation = firstLooseIncarnation.getNextNonLooseIncarnation
+    // Add three assigners with PA enabled and higher incarnations.
+    val secondIncarnation = Incarnation(firstIncarnation.value + 1)
     val paEnabledConf: TestAssigner.Config =
-      createAssignerConfig(higherNonLooseIncarnation)
+      createAssignerConfig(secondIncarnation)
     initializeAssigners(numAssigners = 3, paEnabledConf)
 
     assert(testEnv.testAssigners.size == 4)
@@ -858,7 +851,7 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
       testEnv.testAssigners
     ) // Trigger PA writes.
     val preferredAssigner: TestAssigner =
-      PreferredAssignerTestHelper.getConvergedPreferredAssigner(enabledPaAssigners)
+      PreferredAssignerTestUtils.getConvergedPreferredAssigner(enabledPaAssigners)
 
     // Verify: the new preferred assigner generates assignments.
     val expectedPreferredAssignerUri = preferredAssigner.getAssignerInfoBlocking().uri
@@ -868,16 +861,16 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
       expectedRedirect = Redirect(Some(expectedPreferredAssignerUri), redirectTokenOpt = None)
     )
 
-    // Start a new assigner with a higher loose incarnation and PA disabled.
-    val looseIncarnation2 = higherNonLooseIncarnation.getNextLooseIncarnation
-    assert(looseIncarnation2 > higherNonLooseIncarnation)
+    // Start a new assigner with a higher incarnation and PA disabled.
+    val thirdIncarnation = Incarnation(secondIncarnation.value + 1)
+    assert(thirdIncarnation > secondIncarnation)
     val paDisabledConf2: TestAssigner.Config =
-      createAssignerConfig(looseIncarnation2, preferredAssignerEnabled = false)
+      createAssignerConfig(thirdIncarnation, preferredAssignerEnabled = false)
 
     // Before initializing the new assigners, track the changes in the number of preferred assigner
     // write exceptions.
     val paWriteExceptionsChangeTracker = MetricUtils.ChangeTracker[Long] { () =>
-      PreferredAssignerTestHelper.getNumPreferredAssignerWriteExceptions
+      PreferredAssignerTestUtils.getNumPreferredAssignerWriteExceptions
     }
     initializeAssigners(numAssigners = 1, paDisabledConf2)
 
@@ -896,11 +889,11 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
       assigner.stop(ShutdownOption.ABRUPT)
     }
 
-    // Start a set of assigners with the highest non-loose incarnation and PA enabled.
-    val highestNonLooseIncarnation = looseIncarnation2.getNextNonLooseIncarnation
-    assert(highestNonLooseIncarnation > looseIncarnation2)
+    // Start a set of assigners with the highest incarnation and PA enabled.
+    val fourthIncarnation = Incarnation(thirdIncarnation.value + 1)
+    assert(fourthIncarnation > thirdIncarnation)
     val paEnabledConf2: TestAssigner.Config =
-      createAssignerConfig(highestNonLooseIncarnation)
+      createAssignerConfig(fourthIncarnation)
     initializeAssigners(numAssigners = 3, paEnabledConf2)
     assert(testEnv.testAssigners.size == 8)
 
@@ -920,12 +913,12 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
         hasClockAdvanced = true
       }
       assert(
-        PreferredAssignerTestHelper.getLatestPreferredAssignerIncarnation ==
-        highestNonLooseIncarnation
+        PreferredAssignerTestUtils.getLatestPreferredAssignerIncarnation ==
+        fourthIncarnation
       )
     }
     val newPreferredAssigner: TestAssigner =
-      PreferredAssignerTestHelper.getConvergedPreferredAssigner(enabledPaAssigners2)
+      PreferredAssignerTestUtils.getConvergedPreferredAssigner(enabledPaAssigners2)
 
     // Verify: the new preferred assigner generates assignments.
     val expectedPreferredAssignerUri2 = newPreferredAssigner.getAssignerInfoBlocking().uri
@@ -938,4 +931,102 @@ class EtcdPreferredAssignerIntegrationSuite extends DatabricksTest with TestName
     )
   }
 
+  test("PA disabled to PA enabled to PA disabled to PA enabled with same store incarnation") {
+    // Test plan: Simulate the case of toggling the PA feature on and off multiple times where
+    // each toggle has the same store incarnation. We have two cycles of disabling and enabling
+    // PA to test how later PA enabled assigners handle seeing a valid PA value in etcd. Verify
+    // that the new preferred assigner generates assignments.
+    val incarnation = Incarnation(17)
+    val paDisabledConf: TestAssigner.Config =
+      createAssignerConfig(incarnation, preferredAssignerEnabled = false)
+    initializeAssigners(numAssigners = 1, paDisabledConf)
+    // Wait for the assigner (PA disabled) to generate an assignment.
+    val target = Target(getSafeName)
+    val portNum: Int = getNextSliceletPortNumber
+    assert(testEnv.testAssigners.size == 1, "only one assigner should be running")
+    val disabledPaAssigner: TestAssigner = testEnv.testAssigners.head
+    assertAssignerGeneratesAssignment(testEnv, disabledPaAssigner, target, portNum)
+
+    // Add three assigners with PA enabled with the same incarnation.
+    val paEnabledConf: TestAssigner.Config =
+      createAssignerConfig(incarnation)
+    initializeAssigners(numAssigners = 3, paEnabledConf)
+
+    assert(testEnv.testAssigners.size == 4)
+    disabledPaAssigner.stop(ShutdownOption.ABRUPT)
+
+    // Trigger PA write and get the new preferred assigner.
+    advanceClockBySync(
+      fakeClock,
+      driverConfig.initialPreferredAssignerTimeout,
+      testEnv.testAssigners
+    )
+    val enabledPaAssigners: Seq[TestAssigner] = testEnv.testAssigners.slice(1, 4)
+    val preferredAssigner: TestAssigner =
+      PreferredAssignerTestUtils.getConvergedPreferredAssigner(enabledPaAssigners)
+
+    // Verify: the new preferred assigner generates assignments.
+    val expectedPreferredAssignerUri: URI = preferredAssigner.getAssignerInfoBlocking().uri
+    assertAssignerGeneratesAssignmentByDirectWatchRequest(
+      preferredAssigner,
+      target,
+      expectedRedirect = Redirect(Some(expectedPreferredAssignerUri), redirectTokenOpt = None)
+    )
+
+    // Start a new assigner with the same incarnation and PA disabled.
+    val paDisabledConf2: TestAssigner.Config =
+      createAssignerConfig(incarnation, preferredAssignerEnabled = false)
+    initializeAssigners(numAssigners = 1, paDisabledConf2)
+    assert(testEnv.testAssigners.size == 5)
+
+    // Verify that the new PA disabled assigner generates assignments.
+    val disabledPaAssigner2: TestAssigner = testEnv.testAssigners.last
+    assertAssignerGeneratesAssignmentByDirectWatchRequest(
+      disabledPaAssigner2,
+      target,
+      Redirect.EMPTY
+    )
+
+    // Shut down the PA enabled assigners abruptly so they do not abdicate the PA value in etcd.
+    for (assigner: TestAssigner <- enabledPaAssigners) {
+      assigner.stop(ShutdownOption.ABRUPT)
+    }
+
+    // Start a set of assigners with the same incarnation and PA enabled.
+    val paEnabledConf2: TestAssigner.Config =
+      createAssignerConfig(incarnation)
+    initializeAssigners(numAssigners = 3, paEnabledConf2)
+    assert(testEnv.testAssigners.size == 8)
+
+    // The store still holds the preferred assigner value written by the previous preferred
+    // assigner with the same store incarnation because it was not abdicated during shutdown.
+    // Due to the same store incarnation, there is no eager takeover and the new assigners
+    // must heartbeat to detect the dead preferred assigner.
+    //
+    // We ensure the that the new assigners successfully redirect watch requests to the
+    // previous preferred assigner. This indicates the assigners have incorporated the old
+    // preferred assigner value from etcd and have begun sending heartbeats.
+    val enabledPaAssigners2: Seq[TestAssigner] = testEnv.testAssigners.slice(5, 8)
+    for (assigner: TestAssigner <- enabledPaAssigners2) {
+      assertStandbyRedirectsToPreferredAssigner(assigner, expectedPreferredAssignerUri, target)
+    }
+
+    // We advance the clock by the heartbeat interval until the heartbeat failure threshold is
+    // reached to trigger a new preferred assigner election.
+    for (_: Int <- 0 to driverConfig.heartbeatFailureThreshold) {
+      advanceClockBySync(fakeClock, driverConfig.heartbeatInterval, testEnv.testAssigners)
+    }
+    val newPreferredAssigner: TestAssigner =
+      PreferredAssignerTestUtils.getConvergedPreferredAssigner(enabledPaAssigners2)
+
+    // Verify: the new preferred assigner generates assignments.
+    val expectedPreferredAssignerUri2: URI = newPreferredAssigner.getAssignerInfoBlocking().uri
+    assertAssignerGeneratesAssignmentByDirectWatchRequest(
+      testEnv.testAssigners
+        .find(_.getAssignerInfoBlocking() == newPreferredAssigner.getAssignerInfoBlocking())
+        .get,
+      target,
+      expectedRedirect = Redirect(Some(expectedPreferredAssignerUri2), redirectTokenOpt = None)
+    )
+  }
 }

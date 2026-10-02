@@ -3,7 +3,7 @@ package com.databricks.dicer.client
 import java.net.URI
 
 import scala.concurrent.Future
-import scala.concurrent.duration._
+import scala.concurrent.duration.{Duration, DurationInt}
 
 import org.apache.commons.text.StringEscapeUtils
 
@@ -12,8 +12,12 @@ import com.databricks.caching.util.AssertionWaiter
 import com.databricks.caching.util.SequentialExecutionContext
 import com.databricks.caching.util.TestUtils
 import com.databricks.caching.util.TestUtils.TestName
-import com.databricks.dicer.client.ClientSlicezTestHelper._
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.client.testing.ClientSlicezTestUtils
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  LowInclusiveStringFluent,
+  toSliceKey,
+  `∞`
+}
 import com.databricks.dicer.common.{Assignment, ClerkData, ClientType}
 import com.databricks.dicer.external.{Slice, Target}
 import com.databricks.testing.DatabricksTest
@@ -29,7 +33,7 @@ class ClientSlicezSuite extends DatabricksTest with TestName {
   test("Check ClientTargetSlicezData data table HTML contents") {
     // Test plan: Directly create ClientTargetSlicezData and use golden snippets to verify
     // elements are correctly rendered.
-    val assignment: Assignment = ClientSlicezTestHelper.createAssignment
+    val assignment: Assignment = ClientSlicezTestUtils.createAssignment
     val unattributedLoadBySliceOpt: Option[Map[Slice, Double]] = Some(
       Map(
         ("" -- "Kili", 0.5),
@@ -37,13 +41,14 @@ class ClientSlicezSuite extends DatabricksTest with TestName {
       )
     )
 
-    val clientTargetSlicezData1: ClientTargetSlicezData = createClientTargetSlicezData(TARGET)
+    val clientTargetSlicezData1: ClientTargetSlicezData =
+      ClientSlicezTestUtils.createClientTargetSlicezData(ClientSlicezTestUtils.TARGET)
 
     val clientTargetSlicezData2: ClientTargetSlicezData =
-      createClientTargetSlicezData(
-        TARGET,
+      ClientSlicezTestUtils.createClientTargetSlicezData(
+        ClientSlicezTestUtils.TARGET,
         clientClusterOpt = None,
-        subscriberDebugName = SUBSCRIBER_DEBUG_NAMES(1),
+        subscriberDebugName = ClientSlicezTestUtils.SUBSCRIBER_DEBUG_NAMES(1),
         assignmentOpt = Option(assignment),
         unattributedLoadBySliceOpt = unattributedLoadBySliceOpt
       )
@@ -98,7 +103,7 @@ class ClientSlicezSuite extends DatabricksTest with TestName {
     val nonsenseNameEscaped = StringEscapeUtils.escapeHtml4(nonsenseName)
 
     val clientTargetSlicezData: ClientTargetSlicezData =
-      createClientTargetSlicezData(
+      ClientSlicezTestUtils.createClientTargetSlicezData(
         Target("target-with-nonsense-debug-name"),
         subscriberDebugName = nonsenseName
       )
@@ -119,7 +124,9 @@ class ClientSlicezSuite extends DatabricksTest with TestName {
     // Setup: Create a test implementation that always returns a dummy ClientTargetSlicezData.
     class TestExporter extends ClientTargetSlicezDataExporter {
       override def getSlicezData: Future[ClientTargetSlicezData] =
-        Future.successful(createClientTargetSlicezData(TARGET))
+        Future.successful(
+          ClientSlicezTestUtils.createClientTargetSlicezData(ClientSlicezTestUtils.TARGET)
+        )
     }
 
     // Setup: Create two distinct instances with identical data, and one alias to the first
@@ -164,7 +171,10 @@ class ClientSlicezSuite extends DatabricksTest with TestName {
     val cluster: URI = URI.create("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01")
     val target: Target = Target.createKubernetesTarget(cluster, "softstore-storelet")
     val renderedHtml: String =
-      createClientTargetSlicezData(target, clientClusterOpt = Some(cluster.toString)).getHtml.render
+      ClientSlicezTestUtils
+        .createClientTargetSlicezData(target, clientClusterOpt = Some(cluster.toString))
+        .getHtml
+        .render
 
     assert(renderedHtml.contains(s"<td>${target.toParseableDescription}</td>"))
     assert(!renderedHtml.contains("[Cross-cluster]"))
@@ -181,7 +191,10 @@ class ClientSlicezSuite extends DatabricksTest with TestName {
     val clientCluster: String = "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/02"
     val target: Target = Target.createKubernetesTarget(targetCluster, "softstore-storelet")
     val renderedHtml: String =
-      createClientTargetSlicezData(target, clientClusterOpt = Some(clientCluster)).getHtml.render
+      ClientSlicezTestUtils
+        .createClientTargetSlicezData(target, clientClusterOpt = Some(clientCluster))
+        .getHtml
+        .render
 
     assert(
       renderedHtml
@@ -199,7 +212,10 @@ class ClientSlicezSuite extends DatabricksTest with TestName {
     val clientCluster: String = "kubernetes-cluster:test-env/cloud1/public/region8/clustertype2/01"
     val target: Target = Target.createKubernetesTarget(targetCluster, "softstore-storelet")
     val renderedHtml: String =
-      createClientTargetSlicezData(target, clientClusterOpt = Some(clientCluster)).getHtml.render
+      ClientSlicezTestUtils
+        .createClientTargetSlicezData(target, clientClusterOpt = Some(clientCluster))
+        .getHtml
+        .render
 
     assert(
       renderedHtml
@@ -215,7 +231,10 @@ class ClientSlicezSuite extends DatabricksTest with TestName {
     val target: Target = Target("softstore-storelet")
     val clientCluster: String = "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01"
     val renderedHtml: String =
-      createClientTargetSlicezData(target, clientClusterOpt = Some(clientCluster)).getHtml.render
+      ClientSlicezTestUtils
+        .createClientTargetSlicezData(target, clientClusterOpt = Some(clientCluster))
+        .getHtml
+        .render
 
     assert(renderedHtml.contains(s"<td>${target.toParseableDescription}</td>"))
     assert(!renderedHtml.contains("[Cross-cluster]"))
@@ -229,7 +248,10 @@ class ClientSlicezSuite extends DatabricksTest with TestName {
     val targetCluster: URI = URI.create("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01")
     val target: Target = Target.createKubernetesTarget(targetCluster, "softstore-storelet")
     val renderedHtml: String =
-      createClientTargetSlicezData(target, clientClusterOpt = None).getHtml.render
+      ClientSlicezTestUtils
+        .createClientTargetSlicezData(target, clientClusterOpt = None)
+        .getHtml
+        .render
 
     assert(renderedHtml.contains(s"<td>${target.toParseableDescription}</td>"))
     assert(!renderedHtml.contains("[Cross-cluster]"))
@@ -249,9 +271,9 @@ class ClientSlicezSuite extends DatabricksTest with TestName {
       InternalClientConfig(
         SliceLookupConfig(
           ClientType.Clerk,
-          watchAddress = WATCH_ADDRESS,
+          watchAddress = ClientSlicezTestUtils.WATCH_ADDRESS,
           tlsOptionsOpt = None,
-          TARGET,
+          ClientSlicezTestUtils.TARGET,
           clientIdOpt = Some(TEST_CLIENT_UUID),
           watchStubCacheTime = 20.seconds,
           watchFromDataPlane = false,

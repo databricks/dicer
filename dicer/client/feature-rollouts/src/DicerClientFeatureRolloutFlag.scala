@@ -30,3 +30,14 @@ trait DicerClientFeatureRolloutFlag {
    */
   def isEnabled(flagName: String, target: Target): Boolean
 }
+
+object DicerClientFeatureRolloutFlag {
+
+  /** Name of the flag gating client-side rate limiting of Clerk watch requests. */
+  private[dicer] final val CLERK_WATCH_RATE_LIMITING_FLAG_NAME: String =
+    "clerk-watch-rate-limiting"
+
+  /** Name of the flag gating client-side rate limiting of Slicelet watch requests. */
+  private[dicer] final val SLICELET_WATCH_RATE_LIMITING_FLAG_NAME: String =
+    "slicelet-watch-rate-limiting"
+}

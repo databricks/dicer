@@ -6,11 +6,11 @@ import com.databricks.conf.Configs
 import com.databricks.dicer.assigner.{
   Assigner,
   DisabledPreferredAssignerDriver,
-  FakeKubernetesTestSupport,
   KubernetesMembershipChecker,
   MigrationMode,
   MigrationPreferredAssignerDriver
 }
+import com.databricks.dicer.assigner.testing.KubernetesTestUtils
 import com.databricks.dicer.common.Incarnation
 import com.databricks.rpc.DatabricksObjectMapper
 import com.databricks.testing.DatabricksTest
@@ -22,8 +22,7 @@ class PreferredAssignerStoreConfSuite extends DatabricksTest {
     "http://dicer-etcd-service.test-env-test.svc.cluster.local:2379"
   )
 
-  private val NON_LOOSE_INCARNATION: Incarnation = Incarnation(4)
-  private val LOOSE_INCARNATION: Incarnation = Incarnation(3)
+  private val STORE_INCARNATION: Incarnation = Incarnation(4)
 
   private def generateConfigMap(
       preferredAssignerEnabled: Boolean,
@@ -55,7 +54,7 @@ class PreferredAssignerStoreConfSuite extends DatabricksTest {
     assertThrows[IllegalArgumentException] {
       val confMap: Map[String, Any] = generateConfigMap(
         preferredAssignerEnabled = false,
-        preferredAssignerStoreIncarnation = NON_LOOSE_INCARNATION,
+        preferredAssignerStoreIncarnation = STORE_INCARNATION,
         etcdEndpoints = ETCD_ENDPOINTS
       )
       val assignerConf = new DicerAssignerConf(Configs.parseMap(confMap))
@@ -69,21 +68,7 @@ class PreferredAssignerStoreConfSuite extends DatabricksTest {
     assertThrows[IllegalArgumentException] {
       val configMap: Map[String, Any] = generateConfigMap(
         preferredAssignerEnabled = true,
-        preferredAssignerStoreIncarnation = NON_LOOSE_INCARNATION,
-        etcdEndpoints = Seq.empty
-      )
-      val assignerConf = new DicerAssignerConf(Configs.parseMap(configMap))
-      Assigner.createPreferredAssignerStore(assignerConf)
-    }
-  }
-
-  test("Cannot create a PA store when store incarnation is loose") {
-    // Test plan: verify the preferred assigner store throws an exception when the preferred
-    // assigner mode is enabled, etcd endpoints are non-empty, but store incarnation is loose.
-    assertThrows[IllegalArgumentException] {
-      val configMap: Map[String, Any] = generateConfigMap(
-        preferredAssignerEnabled = true,
-        preferredAssignerStoreIncarnation = LOOSE_INCARNATION,
+        preferredAssignerStoreIncarnation = STORE_INCARNATION,
         etcdEndpoints = Seq.empty
       )
       val assignerConf = new DicerAssignerConf(Configs.parseMap(configMap))
@@ -92,12 +77,11 @@ class PreferredAssignerStoreConfSuite extends DatabricksTest {
   }
 
   test("Initialize PA store when PA mode is enabled") {
-    // Test plan: verify that when the preferred assigner mode is enabled, etcd endpoints are
-    // non-empty, and the store incarnation is non-loose, an `EtcdPreferredAssignerStore` instance
-    // can be created successfully.
+    // Test plan: verify that when the preferred assigner mode is enabled and etcd endpoints are
+    // non-empty, an `EtcdPreferredAssignerStore` instance can be created successfully.
     val confString: Map[String, Any] = generateConfigMap(
       preferredAssignerEnabled = true,
-      preferredAssignerStoreIncarnation = NON_LOOSE_INCARNATION,
+      preferredAssignerStoreIncarnation = STORE_INCARNATION,
       etcdEndpoints = ETCD_ENDPOINTS
     )
     val assignerConf = new DicerAssignerConf(Configs.parseMap(confString))
@@ -109,13 +93,13 @@ class PreferredAssignerStoreConfSuite extends DatabricksTest {
     // when the preferred assigner mode is enabled, and a DisabledPreferredAssignerDriver when it is
     // disabled. Supply an inert membership checker (the driver requires one but never polls it).
     val checker: KubernetesMembershipChecker =
-      FakeKubernetesTestSupport.inertMembershipCheckerFactory.create(UUID.randomUUID())
+      KubernetesTestUtils.inertMembershipCheckerFactory.create(UUID.randomUUID())
 
     val enabledConf = new DicerAssignerConf(
       Configs.parseMap(
         generateConfigMap(
           preferredAssignerEnabled = true,
-          preferredAssignerStoreIncarnation = NON_LOOSE_INCARNATION,
+          preferredAssignerStoreIncarnation = STORE_INCARNATION,
           etcdEndpoints = ETCD_ENDPOINTS
         )
       )
@@ -129,7 +113,7 @@ class PreferredAssignerStoreConfSuite extends DatabricksTest {
       Configs.parseMap(
         generateConfigMap(
           preferredAssignerEnabled = false,
-          preferredAssignerStoreIncarnation = LOOSE_INCARNATION,
+          preferredAssignerStoreIncarnation = STORE_INCARNATION,
           etcdEndpoints = ETCD_ENDPOINTS
         )
       )

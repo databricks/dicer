@@ -13,19 +13,19 @@ trait JsonSerializableConfig {
  * A trait providing SAFE configs, including:
  *  - The config targets for dev, staging, and prod.
  *  - The default config for dev, staging, and prod.
- *  - A map of [[ConfigScope]]s to their corresponding overrides for dev, staging, and prod.
+ *  - A map of [[ClusterConfigScope]]s to their corresponding overrides for dev, staging, and prod.
  *  - The canary config for each canary scope and namespace in production.
  *
  * - Only `DeploymentModes.Development`, `DeploymentModes.Staging` and `DeploymentModes.Production`
  * are considered to be valid modes.
  *
- * @note In the proto, one override can correspond to one or more [[ConfigScope]]s. However, in the
- *       SAFE config tool provider, we do not preserve this property. Instead, we require each
- *       override to correspond to only one [[ConfigScope]], thereby duplicates are removed.
- *       A downside of this approach is that specifying one override with multiple [[ConfigScope]]s
- *       in the proto results in it being broken down into multiple overrides. This leads to a
- *       longer SAFE Jsonnet file content. We prefer this approach since duplications might result
- *       in misconfiguration.
+ * @note In the proto, one override can correspond to one or more [[ClusterConfigScope]]s.
+ *       However, in the SAFE config tool provider, we do not preserve this property. Instead, we
+ *       require each override to correspond to only one [[ClusterConfigScope]], thereby
+ *       duplicates are removed. A downside of this approach is that specifying one override with
+ *       multiple [[ClusterConfigScope]]s in the proto results in it being broken down into
+ *       multiple overrides. This leads to a longer SAFE Jsonnet file content. We prefer this
+ *       approach since duplications might result in misconfiguration.
  */
 trait SafeConfigProvider[Config <: JsonSerializableConfig] {
 
@@ -39,24 +39,24 @@ trait SafeConfigProvider[Config <: JsonSerializableConfig] {
   def getDefaultConfig(mode: DeploymentModes.Value, configTarget: String): Config
 
   /**
-   * Gets the map from [[ConfigScope]]s to their corresponding overridden configs for the given
-   * mode.
+   * Gets the map from [[ClusterConfigScope]]s to their corresponding overridden configs for the
+   * given mode.
    */
   @throws[NoSuchElementException]("if `mode` is not a valid mode")
   @throws[IllegalArgumentException]("if `configTarget` does not exist under `mode`")
   def getScopedOverrides(
       mode: DeploymentModes.Value,
-      configTarget: String): Map[ConfigScope, Config]
+      configTarget: String): Map[ClusterConfigScope, Config]
 
   /**
    * Gets the configs from the targets to their corresponding configs which will be used to canary
    * production config changes.
    */
   @throws[NoSuchElementException]("if `canaryScope` is not a valid canary scope")
-  def getProductionCanaryConfigs(canaryScope: ConfigScope): Map[String, Config]
+  def getProductionCanaryConfigs(canaryScope: ClusterConfigScope): Map[String, Config]
 
   /** Returns the canary config scopes. */
-  def canaryConfigScopes: Set[ConfigScope]
+  def canaryConfigScopes: Set[ClusterConfigScope]
 
 }
 
@@ -93,7 +93,7 @@ object SafeConfigProvider {
       configProvider.canaryConfigScopes.size < 2,
       s"Multiple canary config scopes are not supported yet"
     )
-    for (canaryScope: ConfigScope <- configProvider.canaryConfigScopes) {
+    for (canaryScope: ClusterConfigScope <- configProvider.canaryConfigScopes) {
       require(
         configProvider.getProductionCanaryConfigs(canaryScope).keySet ==
         configProvider.configTargets(DeploymentModes.Production),

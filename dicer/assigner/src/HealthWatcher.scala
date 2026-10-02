@@ -390,10 +390,9 @@ object HealthWatcher {
    * @param resource                 A SQUID or UUID identifying the resource.
    * @param observeSliceletReadiness whether to use the Slicelet's reported readiness state to set
    *                                 its status in health reports, or mask its reported state to
-   *                                 Running from the NOT_READY state.
-   * @param permitRunningToNotReady  whether to allow the Running -> NotReady transition when the
-   *                                 Slicelet reports NOT_READY. When false, NOT_READY reports from
-   *                                 Running resources are ignored.
+   *                                 Running from the NOT_READY state. When true, a Running resource
+   *                                 that reports NOT_READY moves to NotReady; when false it stays
+   *                                 Running (masked).
    * @param config                   static configuration for the HealthWatcher.
    * @param logger                   logger used to record notable lifecycle events for the
    *                                 resource.
@@ -401,7 +400,6 @@ object HealthWatcher {
   private class ResourceHealth(
       private var resource: Either[Squid, UUID],
       observeSliceletReadiness: Boolean,
-      permitRunningToNotReady: Boolean,
       config: StaticConfig,
       logger: PrefixLogger)
       extends IntrusiveMinHeapElement[TickerTime] {
@@ -605,8 +603,8 @@ object HealthWatcher {
               new HealthStatus.NotReady(now)
             case (notReadyStatus: HealthStatus.NotReady, SliceletState.Running) =>
               // Only allow transition to Running if the NotReady flapping protection period has
-              // elapsed. This prevents rapid Running <-> NotReady flapping when
-              // permitRunningToNotReady is enabled.
+              // elapsed. This prevents rapid Running <-> NotReady flapping when the Slicelet's
+              // readiness is observed.
               if (now >= notReadyStatus.lastReportTime + config.notReadyTimeoutPeriod) {
                 HealthStatus.Running
               } else {
@@ -616,14 +614,9 @@ object HealthWatcher {
               HealthStatus.ResourceIncarnationTerminating
 
             case (HealthStatus.Running, SliceletState.NotReady) =>
-              // Allow transition to NotReady only when `permitRunningToNotReady` is enabled.
-              // When disabled, treat NOT_READY reports as RUNNING reports and extend the Running
-              // state.
-              if (permitRunningToNotReady) {
-                new HealthStatus.NotReady(now)
-              } else {
-                HealthStatus.Running
-              }
+              // Transition to NotReady in response to a NOT_READY report. When the Slicelet's
+              // readiness is not observed, this outcome is masked back to Running below.
+              new HealthStatus.NotReady(now)
             case (HealthStatus.Running, SliceletState.Running) => HealthStatus.Running
             case (HealthStatus.Running, SliceletState.Terminating) =>
               HealthStatus.ResourceIncarnationTerminating
@@ -682,9 +675,6 @@ class HealthWatcher(
 
   private val observeSliceletReadiness: Boolean =
     healthWatcherTargetConfig.observeSliceletReadiness
-
-  private val permitRunningToNotReady: Boolean =
-    healthWatcherTargetConfig.permitRunningToNotReady
 
   /** The health status of each resource, keyed by resource. */
   private val healthByUuid = new mutable.HashMap[UUID, ResourceHealth]
@@ -826,7 +816,6 @@ class HealthWatcher(
                     new ResourceHealth(
                       Left(squid),
                       observeSliceletReadiness,
-                      permitRunningToNotReady,
                       config,
                       logger
                     )
@@ -1036,7 +1025,6 @@ class HealthWatcher(
           new ResourceHealth(
             resource,
             observeSliceletReadiness,
-            permitRunningToNotReady,
             config,
             logger
           )

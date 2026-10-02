@@ -2,14 +2,22 @@ package com.databricks.dicer.assigner.config
 
 import java.io.File
 
-import com.databricks.caching.util.{ConfigScope, SafeConfigProvider, SafeConfigUtil}
+import com.databricks.caching.util.{
+  ClusterConfigScope,
+  ConfigScope,
+  InstanceConfigScope,
+  SafeConfigProvider,
+  SafeConfigUtil
+}
 import com.databricks.conf.trusted.DeploymentModes
 import com.databricks.dicer.assigner.config.TargetConfigReader.TargetDefaultAndOverride
 import com.databricks.dicer.common.TargetName
 
 /**
- * A SAFE config tool provider defined for Dicer. It gathers config information in a way that is
- * compatible with the [[ConfigUpdater]].
+ * Supplies static configs to Dicer's SAFE update and diff tools.
+ *
+ * Rejects instance-scoped overrides when generating SAFE configs. This provider runs in tooling,
+ * not in the assigner service; the runtime provider is created by [[TargetConfigProviderFactory]].
  *
  * @param defaultConfigsAndOverrides the mapping of deployment modes to the calculated
  *                                   [[TargetDefaultAndOverride]]s for all target names within each
@@ -23,7 +31,7 @@ class DicerSafeConfigProvider private (
       DeploymentModes.Value,
       Map[TargetName, TargetDefaultAndOverride]],
     productionCanaryConfigs: Map[TargetName, InternalTargetConfig],
-    canaryScope: ConfigScope)
+    canaryScope: ClusterConfigScope)
     extends SafeConfigProvider[NamedInternalTargetConfig] {
 
   override def configTargets(mode: DeploymentModes.Value): Set[String] = {
@@ -40,21 +48,30 @@ class DicerSafeConfigProvider private (
     NamedInternalTargetConfig(targetName, config)
   }
 
+  @throws[IllegalArgumentException]("if the target has instance-scoped overrides")
   override def getScopedOverrides(
       mode: DeploymentModes.Value,
-      configTarget: String): Map[ConfigScope, NamedInternalTargetConfig] = {
+      configTarget: String): Map[ClusterConfigScope, NamedInternalTargetConfig] = {
     val targetName = TargetName(configTarget)
     val configs: Map[ConfigScope, InternalTargetConfig] =
       getDefaultAndOverride(mode, targetName).overrides
     configs.map {
       case (scope: ConfigScope, config: InternalTargetConfig) =>
-        scope -> NamedInternalTargetConfig(targetName, config)
+        scope match {
+          case clusterScope: ClusterConfigScope =>
+            clusterScope -> NamedInternalTargetConfig(targetName, config)
+          case instanceScope: InstanceConfigScope =>
+            throw new IllegalArgumentException(
+              s"Instance-scoped config overrides are not yet supported for Dicer " +
+              s"target $targetName: $instanceScope"
+            )
+        }
     }
   }
 
   // TODO(<internal bug>): Support multiple canary config clusters.
   override def getProductionCanaryConfigs(
-      canaryConfigScope: ConfigScope): Map[String, NamedInternalTargetConfig] = {
+      canaryConfigScope: ClusterConfigScope): Map[String, NamedInternalTargetConfig] = {
     if (canaryConfigScope == canaryScope) {
       productionCanaryConfigs.map {
         case (targetName: TargetName, config: InternalTargetConfig) =>
@@ -65,7 +82,7 @@ class DicerSafeConfigProvider private (
     }
   }
 
-  override def canaryConfigScopes: Set[ConfigScope] = Set(canaryScope)
+  override def canaryConfigScopes: Set[ClusterConfigScope] = Set(canaryScope)
 
   /** Gets the default and override config for the given mode and target. */
   private def getDefaultAndOverride(
@@ -84,7 +101,7 @@ class DicerSafeConfigProvider private (
 object DicerSafeConfigProvider {
   def create(
       configDirectoryPrefixes: Seq[(File, File)],
-      canaryConfigScope: ConfigScope): DicerSafeConfigProvider = {
+      canaryConfigScope: ClusterConfigScope): DicerSafeConfigProvider = {
 
     // Gets the default configs with overrides for all deployment modes.
     val defaultConfigsAndOverrides
@@ -154,7 +171,7 @@ object DicerSafeConfigProvider {
           DeploymentModes.Value,
           Map[TargetName, TargetDefaultAndOverride]],
         productionCanaryConfigs: Map[TargetName, InternalTargetConfig],
-        canaryScope: ConfigScope): DicerSafeConfigProvider = {
+        canaryScope: ClusterConfigScope): DicerSafeConfigProvider = {
       val provider: DicerSafeConfigProvider = new DicerSafeConfigProvider(
         defaultConfigsAndOverrides,
         productionCanaryConfigs,

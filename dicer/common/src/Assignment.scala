@@ -136,7 +136,7 @@ case class Assignment(
    */
   def isAssignedKey(key: SliceKey, resource: Squid): Boolean = {
     val sliceAssignment: SliceAssignment = sliceMap.lookUp(key)
-    isResourceAssigned(sliceAssignment.resources, resource)
+    isResourceAssigned(sliceAssignment.resourcesSet, resource)
   }
 
   /**
@@ -146,7 +146,7 @@ case class Assignment(
    */
   def getAssignedSliceAssignments(resource: Squid): Vector[SliceAssignment] = {
     sliceMap.entries.filter { sliceAssignment: SliceAssignment =>
-      isResourceAssigned(sliceAssignment.resources, resource)
+      isResourceAssigned(sliceAssignment.resourcesSet, resource)
     }
   }
 
@@ -160,7 +160,7 @@ case class Assignment(
   def getSliceSetForResource(resource: Squid): SliceSetImpl = {
     val builder = SliceSetImpl.newBuilder
     for (sliceAssignment: SliceAssignment <- sliceMap.entries) {
-      if (isResourceAssigned(sliceAssignment.resources, resource)) {
+      if (isResourceAssigned(sliceAssignment.resourcesSet, resource)) {
         builder.add(sliceAssignment.slice)
       }
     }
@@ -170,7 +170,7 @@ case class Assignment(
   /** All resources that are assigned to some slice. */
   lazy val assignedResources: Set[Squid] = {
     sliceMap.entries.flatMap { sliceAssignment: SliceAssignment =>
-      sliceAssignment.resources
+      sliceAssignment.resourcesSet
     }.toSet
   }
 

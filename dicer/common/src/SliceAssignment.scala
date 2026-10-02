@@ -34,22 +34,12 @@ import com.databricks.dicer.friend.Squid
  * of the Slice assignment -- Slice boundaries, set of assigned resources, and load measurements --
  * have been unchanged between assignment generations 2##42 and 2##47, inclusive.
  *
- * For assignments with a generation in [[Incarnation.isLoose]], [[generation]] is always the same
- * as the assignment generation, since Dicer is not guaranteed to be aware of all assignments that
- * have been distributed for loose incarnations. Note that we still track best-guess subslice
- * annotation information in [[subsliceAnnotationsByResource]], but the [[generation]] value is
- * strict. This strictness is important because the [[generation]] value is used to determine which
- * Slices need to be included in [[DiffAssignment]], used to synchronize assignments
- * between Clerks, Slicelets and Assigners that may have observed divergent assignment histories.
- *
- * WARNING: [[generation]] was subtly redefined in September 2023. Assignments written before that
- * time may include Slice generations that do not satisfy the definition given above. In particular,
- * they may reflect the best-guess continuous assignment interpretation rather than the strict
- * interpretation of "unchanged". When producing diffs for the assignment sync protocol,
- * [[Assignment.toDiff]] always emits full assignments for loose-incarnation
- * assignments, so this was not a problem in practice until the definition of
- * [[Incarnation.isLoose]] was updated to support additional loose incarnations (see
- * <internal link>).
+ * For assignments with a generation in [[Incarnation.isLoose]], [[generation]] is a best-guess
+ * value: because Dicer is not guaranteed to be aware of every assignment distributed within a loose
+ * incarnation, the generating Assigner may be unaware of an intervening change on a divergent
+ * history, so a loose [[generation]] only *probably* reflects how long the Slice has been
+ * unchanged. For this reason [[Assignment.toDiff]] emits full assignments for loose-incarnation
+ * assignments rather than relying on these best-guess generations to filter out unchanged Slices.
  *
  * [[subsliceAnnotationsByResource]]:
  *
@@ -136,14 +126,14 @@ case class SliceAssignment(
   /** The Slice being assigned. */
   def slice: Slice = sliceWithResources.slice
 
-  /** A Set of resources where the [[slice]] is being assigned to. */
-  def resources: Set[Squid] = sliceWithResources.resources
+  /** A Set of resources to which the [[slice]] is assigned. */
+  def resourcesSet: Set[Squid] = sliceWithResources.resources
 
   /**
    * A Vector of assigned resources where the [[slice]] is being assigned to. Useful when the caller
    * needs to efficiently pick one assigned resource.
    */
-  val indexedResources: Vector[Squid] = resources.toVector
+  val resources: Vector[Squid] = resourcesSet.toVector
 
   /**
    * REQUIRES: `generation` must be less than or equal to `assignmentGeneration` and must be in the
@@ -172,7 +162,7 @@ case class SliceAssignment(
   def toProto(resourceBuilder: Assignment.ResourceProtoBuilder): SliceAssignmentP = {
     // Convert the resources in this slice assignment to indices in the proto based on the map
     // that the encapsulating Assignment is using.
-    val resourceIndices: Seq[Int] = resources.map(resourceBuilder.getIndex).toSeq
+    val resourceIndices: Seq[Int] = resourcesSet.map(resourceBuilder.getIndex).toSeq
     val subsliceAnnotationProtos = Seq.newBuilder[SubsliceAnnotationP]
     // Iterate over resources in `subsliceAnnotationsByResource` in order when constructing proto
     // messages, so there will be only one possible proto representation of each
@@ -210,9 +200,9 @@ case class SliceAssignment(
       val (resource, subsliceAnnotations): (Squid, Vector[SubsliceAnnotation]) =
         resourceWithAnnotations
       require(
-        resources.contains(resource),
+        resourcesSet.contains(resource),
         "Subslice annotations must be to one of the resources that own the slice: " +
-        s"expected $resources, got $resource"
+        s"expected $resourcesSet, got $resource"
       )
       require(
         subsliceAnnotations.nonEmpty,

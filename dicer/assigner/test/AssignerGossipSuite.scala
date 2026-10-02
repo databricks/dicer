@@ -6,7 +6,7 @@ import com.databricks.api.proto.dicer.assigner.{AssignerInfoP, GossipResponseP}
 import com.databricks.api.proto.dicer.assigner.GossipServiceGrpc.GossipServiceStub
 import com.databricks.caching.util.{AssertionWaiter, TestUtils}
 import com.databricks.dicer.assigner.config.{TargetMigrationConfig, TargetMigrationType}
-import com.databricks.dicer.common.{InternalDicerTestEnvironment, TestAssigner}
+import com.databricks.dicer.common.testing.{InternalDicerTestEnvironment, TestAssigner}
 import com.databricks.rpc.testing.TestTLSOptions
 import com.databricks.testing.DatabricksTest
 

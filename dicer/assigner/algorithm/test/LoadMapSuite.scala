@@ -7,7 +7,15 @@ import com.databricks.caching.util.TestUtils.{assertThrow, assertApproxEqual}
 import com.databricks.dicer.assigner.algorithm.LoadMap.{Entry, KeyLoadMap}
 import com.databricks.dicer.common.SliceKeyHelper
 import com.databricks.dicer.common.SliceKeyHelper.RichSliceKey
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  LowInclusiveLongFluent,
+  LowInclusiveSliceKeyFluent,
+  LowInclusiveStringFluent,
+  fp,
+  identityKey,
+  toSliceKey,
+  `∞`
+}
 import com.databricks.dicer.external.{HighSliceKey, Slice, SliceKey}
 import com.databricks.testing.DatabricksTest
 

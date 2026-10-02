@@ -13,8 +13,24 @@ import io.grpc.Status.Code
 
 import com.databricks.api.proto.dicer.common.ClientRequestP.SliceletDataP
 import com.databricks.api.proto.dicer.external.LoadBalancingMetricConfigP.ImbalanceToleranceHintP
+import com.databricks.caching.util.{
+  AssertionWaiter,
+  CachingErrorCode,
+  Cancellable,
+  FakeSequentialExecutionContext,
+  FakeTypedClock,
+  HyperLogLog,
+  LoggingStreamCallback,
+  MetricUtils,
+  SequentialExecutionContext,
+  RealtimeTypedClock,
+  Severity,
+  StatusOr,
+  TestUtils,
+  TickerTime,
+  TypedClock
+}
 import com.databricks.caching.util.TestUtils.{ParameterizedTestNameDecorator, TestName}
-import com.databricks.caching.util._
 import com.google.protobuf
 import com.google.protobuf.ByteString
 import com.databricks.conf.Configs
@@ -22,11 +38,22 @@ import com.databricks.dicer.assigner.AssignmentGenerator.AssignmentGenerationDec
   GenerateReason,
   SkipReason
 }
+import com.databricks.dicer.assigner.AssignmentGenerator.{
+  AssignmentGenerationContext,
+  DriverAction,
+  Event,
+  GeneratorTargetSlicezData,
+  Output
+}
 import com.databricks.dicer.assigner.AssignmentGenerator.DriverAction.StartKubernetesTargetWatcher
-import com.databricks.dicer.assigner.AssignmentGenerator._
 import com.databricks.dicer.assigner.AssignmentStats.AssignmentChangeStats
 import com.databricks.dicer.assigner.config.{ChurnConfig, InternalTargetConfig}
-import com.databricks.dicer.assigner.config.InternalTargetConfig._
+import com.databricks.dicer.assigner.config.InternalTargetConfig.{
+  HealthWatcherTargetConfig,
+  KeyReplicationConfig,
+  LoadBalancingConfig,
+  LoadBalancingMetricConfig
+}
 import com.databricks.dicer.assigner.algorithm.{Algorithm, LoadMap, Resources}
 import com.databricks.dicer.assigner.algorithm.LoadMap.Entry
 import com.databricks.dicer.assigner.Store.WriteAssignmentResult
@@ -38,44 +65,65 @@ import com.databricks.dicer.assigner.TargetMetrics.{
 }
 import com.databricks.dicer.assigner.conf.{DicerAssignerConf, LoadWatcherConf}
 import com.databricks.dicer.common.Assignment.{AssignmentValueCellConsumer, DiffUnused}
-import com.databricks.dicer.common.AssignerServiceInfo
+import com.databricks.dicer.common.{
+  AssignerServiceInfo,
+  Assignment,
+  AssignmentConsistencyMode,
+  ClientRequest,
+  ClerkData,
+  Generation,
+  Incarnation,
+  ProposedAssignment,
+  SliceAssignment,
+  SliceletData,
+  SliceMapHelper,
+  SliceWithResources,
+  SyncAssignmentState
+}
+import com.databricks.dicer.common.testing.{SliceTestUtils}
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  LowInclusiveLongFluent,
+  LowInclusiveSliceKeyFluent,
+  LowInclusiveStringFluent,
+  SliceAssignmentSliceFluent,
+  assertDesirableAssignmentProperties,
+  createAssignment,
+  createProposal,
+  createRandomProposal,
+  createTestSquid,
+  toProposedAssignmentEntry,
+  toSliceKey,
+  toSquid,
+  `∞`
+}
 import com.databricks.dicer.common.SliceletData.SliceLoad
 import com.databricks.dicer.common.SliceletState
 import com.databricks.dicer.common.TargetHelper.TargetOps
-import com.databricks.dicer.common.TestSliceUtils._
 import com.databricks.dicer.common.WatchServerHelper.WATCH_RPC_TIMEOUT
-import com.databricks.dicer.common._
 
 import com.databricks.dicer.external.{InfinitySliceKey, Slice, SliceKey, Target}
 import com.databricks.dicer.friend.{SliceMap, Squid}
 import com.databricks.testing.DatabricksTest
 import com.google.common.primitives.Longs
 import io.prometheus.client.CollectorRegistry
+import com.databricks.dicer.common.testing.{InterceptableStore}
 
 /**
  * The suite containing setup and tests specific to the AssignmentGenerator.
  *
  * @param observeSliceletReadiness if true, the HealthWatcher faithfully reports the
- *                                 Slicelet-reported health status for a pod. If false, masks the
- *                                 health status so that NotReady is masked to Running.
- * @param permitRunningToNotReady  if true, a pod that reports NotReady while Running is
- *                                 transitioned to NotReady by the HealthWatcher. Only valid when
- *                                 observeSliceletReadiness is also true.
- *
- * @note (observeSliceletReadiness = false, permitRunningToNotReady = true) is not a valid
- *       configuration. See [[InternalTargetConfig.HealthWatcherTargetConfig]] for details.
+ *                                 Slicelet-reported health status for a pod, transitioning a
+ *                                 Running pod to NotReady when it reports NOT_READY; false masks
+ *                                 the health status so that NotReady is masked to Running.
  */
-abstract class AssignmentGeneratorSuiteBase(
-    observeSliceletReadiness: Boolean,
-    permitRunningToNotReady: Boolean)
+abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
     extends DatabricksTest
     with TestName
     with ParameterizedTestNameDecorator {
   import AssignmentGeneratorSuiteBase.{getAssignedResources, resource}
 
   override def paramsForDebug: Map[String, Any] = Map(
-    "observeSliceletReadiness" -> observeSliceletReadiness,
-    "permitRunningToNotReady" -> permitRunningToNotReady
+    "observeSliceletReadiness" -> observeSliceletReadiness
   )
 
   /** Returns a loose [[Incarnation]] larger than `lowerBound`. */
@@ -493,7 +541,7 @@ abstract class AssignmentGeneratorSuiteBase(
     InternalTargetConfig.forTest.DEFAULT.copy(
       healthWatcherConfig = HealthWatcherTargetConfig(
         observeSliceletReadiness = observeSliceletReadiness,
-        permitRunningToNotReady = permitRunningToNotReady
+        permitRunningToNotReady = false
       )
     )
   }
@@ -792,12 +840,12 @@ abstract class AssignmentGeneratorSuiteBase(
     val (windowLowInclusive, windowHighExclusive): (Instant, Instant) = window
 
     assignment.sliceAssignments
-      .filter((p: SliceAssignment) => p.resources.contains(squid))
+      .filter((p: SliceAssignment) => p.resourcesSet.contains(squid))
       .map(
         entry =>
           SliceletData.SliceLoad(
             slice = entry.slice,
-            primaryRateLoad = loadMap.getLoad(entry.slice) / entry.resources.size,
+            primaryRateLoad = loadMap.getLoad(entry.slice) / entry.resourcesSet.size,
             windowLowInclusive = windowLowInclusive,
             windowHighExclusive = windowHighExclusive,
             topKeys = Seq.empty,
@@ -940,7 +988,7 @@ abstract class AssignmentGeneratorSuiteBase(
 
   private def convertToSliceMap(assignment: Assignment): SliceMap[SliceWithResources] = {
     assignment.sliceMap.map((_: SliceWithResources).slice) { sliceAssignment: SliceAssignment =>
-      SliceWithResources(sliceAssignment.slice, sliceAssignment.resources)
+      SliceWithResources(sliceAssignment.slice, sliceAssignment.resourcesSet)
     }
   }
 
@@ -1064,15 +1112,15 @@ abstract class AssignmentGeneratorSuiteBase(
 
   test("Slicelet flapping between NOT_READY and RUNNING") {
     // Test plan: verify that a Slicelet whose health reports flap between NOT_READY and RUNNING
-    // handles each transition correctly. When permitRunningToNotReady=false (the default), the
-    // NOT_READY reports while Running are ignored and the Slicelet stays in the assignment
-    // throughout. When permitRunningToNotReady=true, the Slicelet is de-assigned when it reports
-    // NOT_READY and re-assigned when it reports RUNNING again (after the flapping protection
-    // window elapses). With loadBalancingInterval=25s and notReadyTimeoutPeriod=10s, the
-    // protection expires before each RUNNING iteration so the transitions are always clean.
-    // resource(1) always reports RUNNING to ensure availableResources is never empty.
-    // AssignmentGenerator skips generating an assignment when there are no available resources,
-    // so we'd never see resource(0) get removed without resource(1) in the RUNNING state.
+    // handles each transition correctly. When observeSliceletReadiness=false (status masking), the
+    // NOT_READY reports are masked to RUNNING and the Slicelet stays in the assignment throughout.
+    // When observeSliceletReadiness=true, the Slicelet is de-assigned when it reports NOT_READY and
+    // re-assigned when it reports RUNNING again (after the flapping protection window elapses).
+    // With loadBalancingInterval=25s and notReadyTimeoutPeriod=10s, the protection expires before
+    // each RUNNING iteration so the transitions are always clean. resource(1) always reports
+    // RUNNING to ensure availableResources is never empty. AssignmentGenerator skips generating an
+    // assignment when there are no available resources, so we'd never see resource(0) get removed
+    // without resource(1) in the RUNNING state.
 
     // Set the load balancing interval to less than the unhealthy timeout period so we don't have to
     // do extra heartbeats to keep the Slicelet alive between assignment generation attempts.
@@ -1110,11 +1158,10 @@ abstract class AssignmentGeneratorSuiteBase(
       waitForWriteToComplete(driver, "waiting for write to complete")
       val assignment: Assignment = awaitNewerAssignment(driver, lastGeneration)
 
-      // When permitRunningToNotReady=true and observeSliceletReadiness=true, resource(0) is
-      // de-assigned when it reports NOT_READY, leaving only resource(1). Otherwise both stay.
+      // When observeSliceletReadiness=true, resource(0) is de-assigned when it reports NOT_READY,
+      // leaving only resource(1). Otherwise both stay.
       val expectedResources: Resources =
-        if (permitRunningToNotReady && observeSliceletReadiness &&
-          reportedState == SliceletDataP.State.NOT_READY) {
+        if (observeSliceletReadiness && reportedState == SliceletDataP.State.NOT_READY) {
           Resources.create(Seq(resource(1)))
         } else {
           Resources.create(Seq(resource(0), resource(1)))
@@ -1891,10 +1938,10 @@ abstract class AssignmentGeneratorSuiteBase(
         // Construct load report for the Slicelet based on its assigned Slices.
         val attributedLoads: Vector[SliceLoad] = latestAssignment.sliceAssignments.flatMap {
           sliceAssignment: SliceAssignment =>
-            if (sliceAssignment.resources.contains(sliceletData.squid)) {
+            if (sliceAssignment.resourcesSet.contains(sliceletData.squid)) {
               val slice: Slice = sliceAssignment.slice
               val primaryRateLoad: Double = LoadMap.UNIFORM_LOAD_MAP.getLoad(slice) * totalLoad /
-                sliceAssignment.resources.size
+                sliceAssignment.resourcesSet.size
               Some(
                 SliceLoad(
                   primaryRateLoad,
@@ -3592,7 +3639,7 @@ abstract class AssignmentGeneratorSuiteBase(
     // Wait for the new assignment.
     val assignment2: Assignment = awaitNewerAssignment(driver, assignment1.generation)
 
-    assert(TestSliceUtils.hasStateTransfers(assignment2))
+    assert(SliceTestUtils.hasStateTransfers(assignment2))
   }
 
   test("Metrics with isMeaningfulAssignmentChange are set correctly") {
@@ -5598,7 +5645,7 @@ abstract class AssignmentGeneratorSuiteBase(
         "test-slicelet",
         timeout = 1.second,
         SliceletData(
-          TestSliceUtils.createTestSquid("test"),
+          SliceTestUtils.createTestSquid("test"),
           SliceletState.Running,
           "localhostNamespace",
           attributedLoads = Vector.empty,

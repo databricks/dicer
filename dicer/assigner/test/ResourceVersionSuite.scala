@@ -1,6 +1,7 @@
 package com.databricks.dicer.assigner
 
 import com.databricks.caching.util.TestUtils.checkComparisons
+import com.databricks.dicer.assigner.KubernetesMembershipChecker.ResourceVersion
 import com.databricks.testing.DatabricksTest
 
 /** Unit tests for the ordering properties of [[ResourceVersion]]. */

@@ -30,6 +30,7 @@ scala_library(
         "src/DicerClientFeatureRolloutRuleOverride.scala",
         "src/DicerClientFeatureRolloutScope.scala",
     ],
+    resources = [":feature_rollout_configs"],
     visibility = ["//dicer:internal"],
     deps = [
         "//caching/util:caching_error_code",
@@ -82,10 +83,7 @@ scala_test(
 scala_test(
     name = "dicer_client_feature_rollout_flag_test",
     srcs = ["test/DicerClientFeatureRolloutFlagImplSuite.scala"],
-    data = [
-        ":feature_rollout_configs",
-        ":test_feature_rollout_configs",
-    ],
+    resources = [":test_feature_rollout_configs"],
     timeout = "short",
     deps = [
         ":dicer_client_feature_rollout_config",

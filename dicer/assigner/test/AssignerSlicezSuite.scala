@@ -33,7 +33,11 @@ import com.databricks.dicer.assigner.config.InternalTargetConfig.{
   LoadWatcherTargetConfig
 }
 import com.databricks.dicer.assigner.algorithm.{LoadMap, Resources}
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  createRandomLoadMap,
+  createRandomProposal,
+  createResources
+}
 import com.databricks.dicer.common.{
   Assignment,
   AssignmentConsistencyMode,
@@ -41,9 +45,9 @@ import com.databricks.dicer.common.{
   Generation,
   ProposedAssignment,
   SliceAssignment,
-  SliceletSubscriberSlicezData,
-  TestSliceUtils
+  SliceletSubscriberSlicezData
 }
+import com.databricks.dicer.common.testing.{SliceTestUtils}
 import com.databricks.dicer.external.{Slice, SliceKey, Target}
 import com.databricks.dicer.friend.Squid
 import com.databricks.testing.DatabricksTest
@@ -58,7 +62,7 @@ class AssignerSlicezSuite extends DatabricksTest {
     AssignerInfo(UUID.randomUUID(), new java.net.URI("http://localhost:12345"))
 
   /** An arbitrary generation. */
-  private val GENERATION: Generation = TestSliceUtils.createLooseGeneration(42)
+  private val GENERATION: Generation = SliceTestUtils.createLooseGeneration(42)
 
   /** Create random assignments for tests. */
   private def createRandomAssignment: Assignment = {
@@ -73,7 +77,7 @@ class AssignerSlicezSuite extends DatabricksTest {
       ),
       assignerServiceInfoOpt = None
     )
-    val generation: Generation = TestSliceUtils.createLooseGeneration(42)
+    val generation: Generation = SliceTestUtils.createLooseGeneration(42)
     proposedAsn1.commit(
       isFrozen = false,
       AssignmentConsistencyMode.Affinity,

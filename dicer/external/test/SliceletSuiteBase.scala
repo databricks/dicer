@@ -1,5 +1,9 @@
 package com.databricks.dicer.external
 
+import com.databricks.dicer.client.testing.{ScalaSliceletHarness}
+
+import com.databricks.dicer.client.testing.{SliceletHarness}
+
 import com.databricks.dicer.friend.SliceMap
 
 import java.net.URI
@@ -42,23 +46,40 @@ import com.databricks.conf.trusted.LocationConf
 import com.databricks.conf.trusted.LocationConfTestUtils
 import com.databricks.dicer.client.{ClerkImpl, SliceletImpl, TestClientUtils, WatchAddressHelper}
 import com.databricks.dicer.client.TestClientUtils.FakeBlockingReadinessProvider
+import com.databricks.dicer.client.featurerollouts.DicerClientFeatureRolloutFlag
 import com.databricks.dicer.common.TargetHelper.TargetOps
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  LowInclusiveLongFluent,
+  LowInclusiveSliceKeyFluent,
+  LowInclusiveStringFluent,
+  SliceAssignmentSliceFluent,
+  assertWatchRequestRateBounded,
+  createProposal,
+  fp,
+  identityKey,
+  toProposedAssignmentEntry,
+  toSliceKey,
+  toSquid,
+  withImmediateWatchResponses,
+  `∞`
+}
 import com.databricks.dicer.common.{
-  AppIdentifierTestUtils,
   AssignerServiceInfo,
   Assignment,
   AssignmentMetricsSource,
   ClientRequest,
   Generation,
   Incarnation,
-  InternalDicerTestEnvironment,
   ProposedSliceAssignment,
   SliceSetImpl,
   SliceletData,
-  SliceletState,
+  SliceletState
+}
+import com.databricks.dicer.common.testing.{
+  AppIdentifierTestUtils,
+  InternalDicerTestEnvironment,
   TestAssigner,
-  TestSliceUtils
+  SliceTestUtils
 }
 import com.databricks.caching.util.Lock.withLock
 import com.databricks.common.status.{ProbeStatus, ProbeStatusSource, ProbeStatuses}
@@ -113,15 +134,15 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
         // transitions don't have to wait for the default 10s timeout.
         "databricks.dicer.assigner.notReadyTimeoutPeriodSeconds" -> 1
       )
-    )
+    ),
+    assignerServiceInfoOpt = Some(SliceletSuite.TEST_ASSIGNER_SERVICE_INFO)
   )
 
   /** The test environment used for all the tests. */
   protected val testEnv: InternalDicerTestEnvironment =
     InternalDicerTestEnvironment.create(
       config = sharedSliceletTestAssignerConfig,
-      assignerClusterUri = ASSIGNER_CLUSTER_URI,
-      assignerServiceInfoOpt = Some(SliceletSuite.TEST_ASSIGNER_SERVICE_INFO)
+      assignerClusterUri = ASSIGNER_CLUSTER_URI
     )
 
   /** The number of Slicelets that have been created in the current test case. */
@@ -143,7 +164,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
    * The configured identifier is not restored afterwards, so it stays visible to every test case
    * that runs later in this process.
    */
-  // TODO(SAFE<internal bug>): AppConf only exposes a process-global test seam, which creates a
+  // TODO(<internal bug>): AppConf only exposes a process-global test seam, which creates a
   // structural mismatch with how app identifiers are used in production. In production a Slicelet's
   // app instance corresponds to its target, but this seam sets a single app instance for the whole
   // process, while each test case deliberately uses a unique target to isolate target-specific
@@ -181,6 +202,13 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
   /**
    * Creates and returns a Slicelet in the given `internalTestEnv` with the given configuration
    * parameters.
+   *
+   * @param enableRateLimitingOverrideOpt Whether to force the Slicelet's watch requests to be
+   *                                      rate-limited. Leave it [[None]] to have the Slicelet fall
+   *                                      back to the default policy in its implementation.
+   * @param enableRateLimitingFeatureRollout Whether the Slicelet's watch rate-limiting rollout flag
+   *                                         resolves as enabled for its target. When false, the
+   *                                         Slicelet resolves the process-wide flag.
    */
   // The test environment is in a separate parameter list so that default values in the second
   // list (e.g. extraDbConfFlags) can reference it. Scala does not allow default expressions of
@@ -195,7 +223,9 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
         "databricks.dicer.assigner.rpc.port" -> internalTestEnv.getAssignerPort
       ),
       extraEnvVars: Map[String, String] = defaultExtraEnvVars,
-      useFakeReadinessProvider: Boolean = false): SliceletHarness
+      useFakeReadinessProvider: Boolean = false,
+      enableRateLimitingOverrideOpt: Option[Boolean] = Some(false),
+      enableRateLimitingFeatureRollout: Boolean = false): SliceletHarness
 
   /** Generates a unique hostname to use for a Slicelet. */
   private def generateSliceletHostname(): String = {
@@ -207,7 +237,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
 
   /** Returns the expected resource address for the given port. */
   protected def createTestSquid(selfPort: Int): Squid = {
-    TestSliceUtils.createTestSquid(s"https://localhost:$selfPort")
+    SliceTestUtils.createTestSquid(s"https://localhost:$selfPort")
   }
 
   /** Returns whether `slicelet` believes `key` is currently assigned to it. */
@@ -300,6 +330,40 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
    * Returns zero if the metric has never been recorded with this set of label values.
    */
   protected def readPrometheusMetric(metricName: String, labels: Vector[(String, String)]): Double
+
+  /**
+   * Returns the latest assignment generation number for the given target and assigner service
+   * info.
+   *
+   * @param targetIdentifier The target who the assignment was generated for.
+   * @param assignerServiceInfo The service info of the Assigner that generated the assignment.
+   */
+  private def getLatestGenerationNumber(assignerServiceInfo: AssignerServiceInfo): Double = {
+    readPrometheusMetric(
+      "dicer_assignment_latest_generation_number",
+      targetAndSourceMetricLabels ++ Vector(
+        "assignerName" -> assignerServiceInfo.name,
+        "assignerInstanceId" -> assignerServiceInfo.instanceId
+      )
+    )
+  }
+
+  /**
+   * Returns the latest assignment store incarnation for the given target and assigner service
+   * info.
+   *
+   * @param targetIdentifier The target whose assignment metrics should be read.
+   * @param assignerServiceInfo The service info of the Assigner that generated the assignment.
+   */
+  private def getLatestIncarnationNumber(assignerServiceInfo: AssignerServiceInfo): Double = {
+    readPrometheusMetric(
+      "dicer_assignment_latest_store_incarnation",
+      targetAndSourceMetricLabels ++ Vector(
+        "assignerName" -> assignerServiceInfo.name,
+        "assignerInstanceId" -> assignerServiceInfo.instanceId
+      )
+    )
+  }
 
   /** Reads the value of the `dicer_slicelet_slicekeyhandles_created_total` metric for `target`. */
   def getSliceKeyHandlesCreatedMetric: Double = {
@@ -679,6 +743,66 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     slicelet2.stop()
   }
 
+  test("Slicelet removes gauges for a target after assigner service info change") {
+    // Test plan: Verify that the Slicelet removes gauges for a target after the assigner service
+    // info changes. Verify this by recording metrics for one target under an initial assigner
+    // service info, restarting the Assigner with a different assigner service info, and checking
+    // that the stale metrics are removed.
+
+    // Setup: Initialize an assigner with the initial service info and create a slicelet.
+    val initialServiceInfo =
+      AssignerServiceInfo(name = "test-assigner-1", instanceId = "test-instance-1")
+    val changedServiceInfo =
+      AssignerServiceInfo(name = "test-assigner-2", instanceId = "test-instance-2")
+    var localTestEnvOpt: Option[InternalDicerTestEnvironment] = None
+    var sliceletOpt: Option[SliceletHarness] = None
+
+    try {
+      val localTestEnv = InternalDicerTestEnvironment.create(
+        TestAssigner.Config.create(
+          assignerConf = new DicerAssignerConf(
+            Configs.parseMap("databricks.dicer.assigner.storeIncarnation" -> 1L)
+          ),
+          assignerServiceInfoOpt = Some(initialServiceInfo)
+        ),
+        assignerClusterUri = ASSIGNER_CLUSTER_URI
+      )
+      localTestEnvOpt = Some(localTestEnv)
+      val slicelet: SliceletHarness = createSlicelet(localTestEnv)()
+      sliceletOpt = Some(slicelet)
+      slicelet.start(selfPort = 1234, listenerOpt = None)
+
+      AssertionWaiter("Slicelet records initial Assigner metrics").await {
+        assert(getLatestGenerationNumber(initialServiceInfo) > 0)
+        assert(getLatestIncarnationNumber(initialServiceInfo) == 1)
+      }
+
+      // Setup: Restart the assigner with a different assigner service info.
+
+      localTestEnv.restartAssigner(
+        index = 0,
+        TestAssigner.Config.create(
+          assignerConf = new DicerAssignerConf(
+            Configs.parseMap("databricks.dicer.assigner.storeIncarnation" -> 1L)
+          ),
+          designatedDicerAssignerRpcPort = Some(localTestEnv.getAssignerPort),
+          assignerServiceInfoOpt = Some(changedServiceInfo)
+        )
+      )
+
+      AssertionWaiter("Slicelet records new metrics and removes old gauges").await {
+        assert(getLatestGenerationNumber(changedServiceInfo) > 0)
+        assert(getLatestIncarnationNumber(changedServiceInfo) == 1)
+        assert(getLatestGenerationNumber(initialServiceInfo) == 0)
+        assert(getLatestIncarnationNumber(initialServiceInfo) == 0)
+      }
+    } finally {
+      // Cleanup: Stop the slicelet and test environment.
+      sliceletOpt.foreach((_: SliceletHarness).stop())
+      localTestEnvOpt.foreach((_: InternalDicerTestEnvironment).stop())
+    }
+  }
+
   test("Slicelet tracks generation and incarnation") {
     // Test plan: Verify that the slicelet tracks latest generation and incarnation correctly, and
     // that the assigner service info is correctly propagated to the metrics. Verify this by
@@ -703,21 +827,13 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     AssertionWaiter("Slicelet has recorded generation of initial assignment").await {
       assert(
         Incarnation(
-          readPrometheusMetric(
-            "dicer_assignment_latest_store_incarnation",
-            assignmentMetricLabels
-          ).toLong
-        ) ==
-        initialAssignment.generation.incarnation
+          getLatestIncarnationNumber(SliceletSuite.TEST_ASSIGNER_SERVICE_INFO).toLong
+        ) == initialAssignment.generation.incarnation
       )
       assert(
         UnixTimeVersion(
-          readPrometheusMetric(
-            "dicer_assignment_latest_generation_number",
-            assignmentMetricLabels
-          ).toLong
-        ) ==
-        initialAssignment.generation.number
+          getLatestGenerationNumber(SliceletSuite.TEST_ASSIGNER_SERVICE_INFO).toLong
+        ) == initialAssignment.generation.number
       )
       assert(
         readPrometheusMetric(
@@ -744,12 +860,8 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     AssertionWaiter("Slicelet has recorded generation of new assignment").await {
       assert(
         UnixTimeVersion(
-          readPrometheusMetric(
-            "dicer_assignment_latest_generation_number",
-            assignmentMetricLabels
-          ).toLong
-        ) ==
-        waitForAssignment.generation.number
+          getLatestGenerationNumber(SliceletSuite.TEST_ASSIGNER_SERVICE_INFO).toLong
+        ) == waitForAssignment.generation.number
       )
       assert(
         readPrometheusMetric(
@@ -1827,11 +1939,11 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     "Assigner handles multiple Slicelets with different readiness states " +
     "(observeSliceletReadiness=true)"
   ) {
-    // Test plan: Same as previous test, but with observeSliceletReadiness=true. Since the Assigner
-    // respects the NOT_READY -> RUNNING transition, verify that only the RUNNING Slicelet is
-    // assigned at first. Then, swap the readiness states and verify that both Slicelets are
-    // assigned.
-
+    // Test plan: With observeSliceletReadiness=true, the Assigner respects both the
+    // NOT_READY -> RUNNING and RUNNING -> NOT_READY transitions. Verify that only the RUNNING
+    // Slicelet is assigned at first. Then swap the readiness states and verify that only the
+    // newly-RUNNING Slicelet is assigned: the formerly-RUNNING Slicelet is de-assigned upon
+    // transitioning to NOT_READY.
     val testEnvObserveSliceletReadiness = InternalDicerTestEnvironment.create(
       config = sharedSliceletTestAssignerConfig,
       targetConfigMap = InternalTargetConfigMap.create(
@@ -1853,18 +1965,16 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     try {
       val slicelet1: SliceletHarness =
         createSlicelet(testEnvObserveSliceletReadiness)(useFakeReadinessProvider = true)
-      val port1: Int = 1111
+      val port1: Int = 1113
       slicelet1.start(selfPort = port1, listenerOpt = None)
       val slicelet2: SliceletHarness =
         createSlicelet(testEnvObserveSliceletReadiness)(useFakeReadinessProvider = true)
       slicelet2.setReadinessStatus(true)
-      val port2: Int = 1112
+      val port2: Int = 1114
       slicelet2.start(selfPort = port2, listenerOpt = None)
 
-      // Get Squid for Slicelet that should be assigned.
+      // Get Squid for the RUNNING Slicelet.
       val squid2: Squid = waitForSquidWithPort(testEnvObserveSliceletReadiness, port2)
-
-      awaitSliceletReported(testEnvObserveSliceletReadiness, squid2, SliceletState.Running)
 
       // Check assignment contains only slicelet2.
       assertAndWaitForSliceletsToBeAssigned(testEnvObserveSliceletReadiness, squids = Set(squid2))
@@ -1878,16 +1988,9 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
         getSquidWithPort(testEnvObserveSliceletReadiness, port1)
       }
 
-      // Wait for state changes to be reported.
-      awaitSliceletReported(testEnvObserveSliceletReadiness, squid1, SliceletState.Running)
-      awaitSliceletReported(testEnvObserveSliceletReadiness, squid2, SliceletState.NotReady)
-
-      // Even when observing readiness, both Slicelets should still be assigned, since the Assigner
-      // only respects the NOT_READY -> RUNNING transition.
-      assertAndWaitForSliceletsToBeAssigned(
-        testEnvObserveSliceletReadiness,
-        squids = Set(squid1, squid2)
-      )
+      // With observeSliceletReadiness=true, slicelet2 (now NOT_READY) should be de-assigned.
+      // Only slicelet1 (now RUNNING) should remain assigned.
+      assertAndWaitForSliceletsToBeAssigned(testEnvObserveSliceletReadiness, squids = Set(squid1))
 
       slicelet1.stop()
       slicelet2.stop()
@@ -1897,74 +2000,10 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
   }
 
   test(
-    "Assigner handles multiple Slicelets with different readiness states " +
-    "(observeSliceletReadiness=true, permitRunningToNotReady=true)"
-  ) {
-    // Test plan: Same as the observeSliceletReadiness=true test, but with
-    // permitRunningToNotReady=true. Since the Assigner now respects both the NOT_READY -> RUNNING
-    // and RUNNING -> NOT_READY transitions, verify that only the RUNNING Slicelet is assigned at
-    // first. Then swap the readiness states and verify that only the newly-RUNNING Slicelet is
-    // assigned: the formerly-RUNNING Slicelet is de-assigned upon transitioning to NOT_READY.
-    val testEnvPermitRunningToNotReady = InternalDicerTestEnvironment.create(
-      config = sharedSliceletTestAssignerConfig,
-      targetConfigMap = InternalTargetConfigMap.create(
-        configScopeOpt = None,
-        targetConfigMap = Map(
-          TargetName(expectedAssignerCanonicalizedTargetIdentifier.name) ->
-          InternalTargetConfig.forTest.DEFAULT
-            .copy(
-              healthWatcherConfig = HealthWatcherTargetConfig(
-                observeSliceletReadiness = true,
-                permitRunningToNotReady = true
-              )
-            )
-        )
-      ),
-      assignerClusterUri = ASSIGNER_CLUSTER_URI
-    )
-
-    try {
-      val slicelet1: SliceletHarness =
-        createSlicelet(testEnvPermitRunningToNotReady)(useFakeReadinessProvider = true)
-      val port1: Int = 1113
-      slicelet1.start(selfPort = port1, listenerOpt = None)
-      val slicelet2: SliceletHarness =
-        createSlicelet(testEnvPermitRunningToNotReady)(useFakeReadinessProvider = true)
-      slicelet2.setReadinessStatus(true)
-      val port2: Int = 1114
-      slicelet2.start(selfPort = port2, listenerOpt = None)
-
-      // Get Squid for the RUNNING Slicelet.
-      val squid2: Squid = waitForSquidWithPort(testEnvPermitRunningToNotReady, port2)
-
-      // Check assignment contains only slicelet2.
-      assertAndWaitForSliceletsToBeAssigned(testEnvPermitRunningToNotReady, squids = Set(squid2))
-
-      // Now swap the readiness states: slicelet1 becomes RUNNING, slicelet2 becomes NOT_READY.
-      slicelet1.setReadinessStatus(true)
-      slicelet2.setReadinessStatus(false)
-
-      // Now we can get squid1 because the Slicelet is RUNNING.
-      val squid1: Squid = AssertionWaiter("Wait for slicelet1 to be part of Assignment").await {
-        getSquidWithPort(testEnvPermitRunningToNotReady, port1)
-      }
-
-      // When permitRunningToNotReady=true, slicelet2 (now NOT_READY) should be de-assigned.
-      // Only slicelet1 (now RUNNING) should remain assigned.
-      assertAndWaitForSliceletsToBeAssigned(testEnvPermitRunningToNotReady, squids = Set(squid1))
-
-      slicelet1.stop()
-      slicelet2.stop()
-    } finally {
-      testEnvPermitRunningToNotReady.stop()
-    }
-  }
-
-  test(
     "Assigner de-assigns and re-assigns a Slicelet that transitions" +
-    " NOT_READY then back to RUNNING (observeSliceletReadiness=true, permitRunningToNotReady=true)"
+    " NOT_READY then back to RUNNING (observeSliceletReadiness=true)"
   ) {
-    // Test plan: Verify that with permitRunningToNotReady=true, the Assigner de-assigns a Slicelet
+    // Test plan: Verify that with observeSliceletReadiness=true, the Assigner de-assigns a Slicelet
     // that transitions from RUNNING to NOT_READY and re-assigns it when it returns to RUNNING.
     // Schedule:
     // 1. Both slicelets start RUNNING — both assigned.
@@ -1980,7 +2019,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
             .copy(
               healthWatcherConfig = HealthWatcherTargetConfig(
                 observeSliceletReadiness = true,
-                permitRunningToNotReady = true
+                permitRunningToNotReady = false
               )
             )
         )
@@ -2005,7 +2044,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
       val squid2: Squid = waitForSquidWithPort(testEnv, port2)
       assertAndWaitForSliceletsToBeAssigned(testEnv, squids = Set(squid1, squid2))
 
-      // Step 2: set slicelet1 NOT_READY. With permitRunningToNotReady=true, slicelet1 should be
+      // Step 2: set slicelet1 NOT_READY. With observeSliceletReadiness=true, slicelet1 should be
       // de-assigned. Only slicelet2 (still RUNNING) should remain assigned.
       slicelet1.setReadinessStatus(false)
       assertAndWaitForSliceletsToBeAssigned(testEnv, squids = Set(squid2))
@@ -2018,6 +2057,47 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
       slicelet2.stop()
     } finally {
       testEnv.stop()
+    }
+  }
+
+  test("Slicelet populates alternativeTarget on watch requests") {
+    // Test plan: Verify that a Slicelet populates the alternativeTarget on its watch requests from
+    // its target's name and the app instance of its App Identifier. Do this by starting a Slicelet
+    // whose App Identifier source is configured to return a known app instance, then confirming the
+    // watch request the Assigner received carries that name and app instance as its
+    // alternativeTarget.
+
+    // Setup: Configure the App Identifier source for the Slicelet. These values are unrelated to
+    // this test's target; see the note on `configureAppIdentifierForTest`.
+    val appIdentifierName: String = "test-app"
+    val appIdentifierInstanceId: String = "test-instance"
+    configureAppIdentifierForTest(appIdentifierName, appIdentifierInstanceId)
+    // The app name must differ from the target's name, so that the assertion below shows the
+    // alternative target takes its name from the target rather than from the App Identifier.
+    assert(
+      defaultTarget.name != appIdentifierName,
+      s"Expected the target name to differ from the app name, but both were $appIdentifierName"
+    )
+
+    // Setup: Start a Slicelet.
+    val slicelet: SliceletHarness = createSlicelet(testEnv)()
+    slicelet.start(selfPort = 0, listenerOpt = None)
+    try {
+      waitForAnySquid(testEnv)
+      val request: ClientRequest =
+        getLatestSliceletWatchRequest(testEnv).getOrElse(
+          fail("Expected the Slicelet to have sent a watch request")
+        )
+      // Verify: alternativeTarget is populated from the target's name and the configured app
+      // instance.
+      assert(
+        request.alternativeTargetOpt
+          .contains(Target.createAppTarget(defaultTarget.name, appIdentifierInstanceId)),
+        s"Expected alternativeTargetOpt to be populated from the target name and the configured " +
+        s"app instance, got: $request"
+      )
+    } finally {
+      slicelet.stop()
     }
   }
 
@@ -2049,6 +2129,68 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
       )
     } finally {
       slicelet.stop()
+    }
+  }
+
+  test("use_alternative_target on: the Assigner canonicalizes a Slicelet watch to its AppTarget") {
+    // Test plan: Verify end-to-end that when a target has use_alternative_target enabled, the
+    // Assigner canonicalizes a real Slicelet's watch from its incoming target to the AppTarget the
+    // Slicelet derives from its App Identifier, and serves the assignment under that AppTarget
+    // identity. Do this by enabling use_alternative_target for the Slicelet's target, configuring
+    // an App Identifier so the Slicelet populates alternative_target, freezing an assignment under
+    // the canonicalized AppTarget identity, and confirming the Slicelet receives it -- which is
+    // only possible if the Assigner canonicalized the watch, since no assignment exists under the
+    // Slicelet's incoming target identity.
+    val appInstanceId: String = "test-instance"
+    configureAppIdentifierForTest(name = "test-app", instanceId = appInstanceId)
+
+    // The config is keyed by target name, which is invariant across the KubernetesTarget ->
+    // AppTarget canonicalization, so enabling it for the incoming target also enables it for the
+    // canonicalized AppTarget.
+    val enabledConfig: InternalTargetConfig =
+      InternalTargetConfig.forTest.DEFAULT.copy(useAlternativeTarget = true)
+    val localTestEnv: InternalDicerTestEnvironment = InternalDicerTestEnvironment.create(
+      config = sharedSliceletTestAssignerConfig,
+      targetConfigMap = InternalTargetConfigMap.create(
+        configScopeOpt = None,
+        targetConfigMap = Map(TargetName.forTarget(defaultTarget) -> enabledConfig)
+      ),
+      withDefaultTargetConfig = false,
+      assignerClusterUri = ASSIGNER_CLUSTER_URI
+    )
+
+    // The AppTarget the Slicelet's watch is canonicalized to: the target's name combined with the
+    // configured app instance.
+    val canonicalizedTarget: Target =
+      Target.createAppTarget(defaultTarget.name, appInstanceId)
+
+    try {
+      // Freeze an assignment under the canonicalized AppTarget identity so the Slicelet's watch
+      // returns promptly. Nothing is frozen under the Slicelet's incoming target, so receiving this
+      // assignment is direct evidence the watch was canonicalized.
+      val assignment: Assignment = TestUtils.awaitResult(
+        localTestEnv.testAssigner.setAndFreezeAssignment(
+          canonicalizedTarget,
+          createProposal(("" -- ∞) -> Seq("other_pod"))
+        ),
+        Duration.Inf
+      )
+
+      val slicelet: SliceletHarness = createSlicelet(localTestEnv)()
+      slicelet.start(selfPort = 0, listenerOpt = None)
+      try {
+        // Verify: The Slicelet receives the assignment frozen under the canonicalized AppTarget.
+        waitForGenerationAtLeast(slicelet, assignment.generation)
+        assert(
+          slicelet.latestAssignmentOpt.contains(assignment),
+          s"Expected the Slicelet to receive the assignment frozen under $canonicalizedTarget, " +
+          s"got: ${slicelet.latestAssignmentOpt}"
+        )
+      } finally {
+        slicelet.stop()
+      }
+    } finally {
+      localTestEnv.stop()
     }
   }
 
@@ -2154,6 +2296,41 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
       assert(reported == oracle.estimate().toDouble)
     }
   }
+
+  test("Rate limiting bounds the Slicelet's watch request rate") {
+    // Test plan: Verify that enabling the Slicelet's rate-limiting override keeps watch traffic low
+    // while the Slicelet continues making progress. Have the Assigner answer watches immediately,
+    // then measure the rate over a short window.
+    //
+    // The Assigner's replies are set up before the Slicelet starts so that it never observes the
+    // Assigner's normal watch pacing, which would hold its first watch request open for seconds.
+    withImmediateWatchResponses(testEnv, defaultTarget, useAssignmentChurn = false) {
+      val slicelet: SliceletHarness =
+        createSlicelet(testEnv)(enableRateLimitingOverrideOpt = Some(true))
+      slicelet.start(selfPort = 1234, listenerOpt = None)
+
+      try {
+        assertWatchRequestRateBounded(
+          clientDescription = "Slicelet",
+          getWatchRequestCount = () => getWatchRequestCount
+        )
+      } finally {
+        slicelet.stop()
+      }
+    }
+  }
+
+  /** Returns how many watch requests the Slicelet under test has sent successfully. */
+  protected final def getWatchRequestCount: Long = {
+    readPrometheusMetric(
+      "dicer_client_watch_requests_total",
+      targetMetricLabels ++ Vector(
+        "clientType" -> ClientType.Slicelet.getMetricLabel,
+        "status" -> "success",
+        "grpc_status" -> "OK"
+      )
+    ).toLong
+  }
 }
 
 /**
@@ -2234,7 +2411,9 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
       branch: Option[String],
       extraDbConfFlags: Map[String, Any],
       extraEnvVars: Map[String, String],
-      useFakeReadinessProvider: Boolean): ScalaSliceletHarness = {
+      useFakeReadinessProvider: Boolean,
+      enableRateLimitingOverrideOpt: Option[Boolean],
+      enableRateLimitingFeatureRollout: Boolean): ScalaSliceletHarness = {
     // Configure the location information.
     val locationConf: LocationConf = LocationConfTestUtils.newTestLocationConfig(
       envMap = extraEnvVars
@@ -2252,6 +2431,11 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
       // produced a status, so tests don't have to wait on real time.
       "databricks.dicer.internal.cachingteamonly.blockedReadinessCheckStartDelayMillis" -> 1000
     )
+    // Leaving the override unset lets the Slicelet fall back to its default policy.
+    for (enableRateLimitingOverride: Boolean <- enableRateLimitingOverrideOpt) {
+      rawConf += "databricks.dicer.internal.cachingteamonly.enableRateLimitingOverride" ->
+      enableRateLimitingOverride
+    }
     rawConf ++= extraDbConfFlags
     for (sliceletHostname: String <- sliceletHostname) {
       rawConf += "databricks.dicer.slicelet.hostname" -> sliceletHostname
@@ -2273,14 +2457,25 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
       override def dicerServerTlsOptions: Option[TLSOptions] =
         TestTLSOptions.serverTlsOptionsOpt
       override def envVars: Map[String, String] = super.envVars ++ extraEnvVars
+
+      override private[dicer] def isFeatureRolloutFlagEnabled(
+          flagName: String,
+          target: Target): Boolean =
+        if (enableRateLimitingFeatureRollout)
+          flagName == DicerClientFeatureRolloutFlag.SLICELET_WATCH_RATE_LIMITING_FLAG_NAME
+        else
+          super.isFeatureRolloutFlagEnabled(flagName, target)
     }
 
     if (useFakeReadinessProvider) {
       val fakeReadinessProvider = new FakeBlockingReadinessProvider()
       new ScalaSliceletHarness(
         Slicelet.forTestStatic.createFromImpl(
-          SliceletImpl
-            .createForExternalWithReadinessProvider(conf, defaultTarget, fakeReadinessProvider)
+          SliceletImpl.createForExternalWithReadinessProvider(
+            conf,
+            defaultTarget,
+            fakeReadinessProvider
+          )
         ),
         fakeReadinessProviderOpt = Some(fakeReadinessProvider)
       )
@@ -2311,6 +2506,32 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
     // Make HTTP request to the readiness endpoint. We don't care about the response, since we check
     // that the readiness source is updated by way of verifying the Slicelet state later.
     val _ = SimpleWebClient.webClient().get(s"http://localhost:$port/ready").aggregate()
+  }
+
+  // TODO(<internal bug>): Move this test to SliceletSuiteBase once the Rust Slicelet resolves rollout
+  // flags too, so that it covers both implementations.
+  test("The watch rate-limiting rollout flag bounds the Slicelet's watch request rate") {
+    // Test plan: Verify that a Slicelet rate limits its watch requests when the watch rate-limiting
+    // rollout flag is enabled for its target, which is how rate limiting reaches production
+    // Slicelets. Verify this by leaving the rate-limiting conf override unset, so that the Slicelet
+    // has to resolve the flag, enabling it via createSlicelet, and then holding the Slicelet to
+    // the same rate bound that the conf override is held to in SliceletSuiteBase.
+    withImmediateWatchResponses(testEnv, defaultTarget, useAssignmentChurn = false) {
+      val slicelet: SliceletHarness = createSlicelet(testEnv)(
+        enableRateLimitingOverrideOpt = None,
+        enableRateLimitingFeatureRollout = true
+      )
+      slicelet.start(selfPort = 1234, listenerOpt = None)
+
+      try {
+        assertWatchRequestRateBounded(
+          clientDescription = "Slicelet",
+          getWatchRequestCount = () => getWatchRequestCount
+        )
+      } finally {
+        slicelet.stop()
+      }
+    }
   }
 
   // This test case only makes sense for Scala, because the Rust Slicelet notifies the application

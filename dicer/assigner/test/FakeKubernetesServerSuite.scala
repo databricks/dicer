@@ -1,5 +1,7 @@
 package com.databricks.dicer.assigner
 
+import com.databricks.dicer.assigner.testing.{FakeKubernetesServer, KubernetesTestUtils}
+
 import java.util.UUID
 
 import scala.collection.JavaConverters._
@@ -31,7 +33,7 @@ class FakeKubernetesServerSuite extends DatabricksTest with TestName {
     )
   private val fakeServer: FakeKubernetesServer = FakeKubernetesServer.createAndStart(sec)
   private val coreV1Api: CoreV1Api =
-    FakeKubernetesTestSupport.buildCoreV1Api(fakeServer, readTimeout = Duration.Zero)
+    KubernetesTestUtils.buildCoreV1Api(fakeServer, readTimeout = Duration.Zero)
 
   /**
    * Wraps a k8s [[SharedIndexInformer]] and records its observed pod additions, modifications,
@@ -181,7 +183,7 @@ class FakeKubernetesServerSuite extends DatabricksTest with TestName {
   /** Returns a pod with a unique Kubernetes UID. */
   private def buildPod(): V1Pod = {
     val uid: String = UUID.randomUUID().toString
-    val pod: V1Pod = FakeKubernetesTestSupport.buildReadyPod(uid, podIP = "127.0.0.1")
+    val pod: V1Pod = KubernetesTestUtils.buildReadyPod(uid, podIP = "127.0.0.1")
     pod.getMetadata.setName(uid)
     pod
   }

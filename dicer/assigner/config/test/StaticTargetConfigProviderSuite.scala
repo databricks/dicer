@@ -1,5 +1,7 @@
 package com.databricks.dicer.assigner.config
 
+import com.databricks.dicer.assigner.config.testing.{ConfigTestUtils}
+
 import scala.concurrent.Promise
 import scala.concurrent.duration._
 import com.databricks.caching.util.{
@@ -34,7 +36,7 @@ class StaticTargetConfigProviderSuite extends DatabricksTest {
 
   /** Randomly generates a non-default configuration. */
   private def createRandomConfig(): InternalTargetConfig = {
-    ConfigTestUtil.createConfig(primaryRateMaxLoadHint = 100.0 + 100.0 * Random.nextDouble())
+    ConfigTestUtils.createConfig(primaryRateMaxLoadHint = 100.0 + 100.0 * Random.nextDouble())
   }
 
   /** Create a simple static target config map for testing. */

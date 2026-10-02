@@ -2,10 +2,9 @@ package com.databricks.dicer.common
 
 import com.databricks.api.proto.dicer.common.DiffAssignmentP.TransferP
 import com.databricks.caching.util.TestUtils.{assertThrow, loadTestData}
-import com.databricks.dicer.common.TestSliceUtils._
 import com.databricks.testing.DatabricksTest
 import com.databricks.dicer.common.test.TransferTestDataP
-import com.databricks.dicer.common.TestSliceUtils.createTestSquid
+import com.databricks.dicer.common.testing.SliceTestUtils.{createTestSquid, toSquid}
 import com.databricks.dicer.common.test.TransferTestDataP.ProtoValidityTestCaseP
 
 class TransferSuite extends DatabricksTest {

@@ -259,6 +259,12 @@ trait SequentialExecutionContext {
 
   /** See [[ExecutorUtil]]. */
   private[util] val contextAwareExecutionContext: ContextAwareExecutionContext
+
+  /**
+   * Runs `func` synchronously on the calling thread while excluding commands scheduled on this
+   * context. See [[SequentialExecutionContextSyncExtensions]] for detailed spec.
+   */
+  private[caching] def callSyncInternal[T](func: => T): T
 }
 
 /** Factory methods and static state for the context. */
@@ -524,6 +530,20 @@ object SequentialExecutionContext {
 
     override def getName: String = name
 
+    override private[caching] def callSyncInternal[T](func: => T): T = withLock(runLock) {
+      if (enableContextPropagation) {
+        // Nothing to do: the context is already attached to the current thread.
+        func
+      } else {
+        // Wrap func in a Runnable that erases the context and run it to populate the result.
+        var result: Option[T] = None
+        val runnable: Runnable = ExecutorUtil.Internal
+          .wrapRunnable(() => result = Some(func), enableContextPropagation = false)
+        runnable.run()
+        result.get
+      }
+    }
+
     /**
      * INTERNAL IMPLEMENTATION SECTION
      *
@@ -531,7 +551,9 @@ object SequentialExecutionContext {
      *
      *  - Private methods must only be called while holding `stateLock` (a single [[ReentrantLock]]
      *    protects all internal state for the context).
-     *  - Corollary: all public methods and callbacks should immediately acquire `stateLock`.
+     *  - Corollary: all public methods and callbacks except [[callSyncInternal]] should immediately
+     *    acquire `stateLock`. `callSyncInternal` acquires `runLock` directly so it can execute on
+     *    the calling thread.
      *  - The `stateLock` must not be held while executing commands supplied to the context.
      *    `runLock` is used for this purpose, and is used to synchronize access to application state
      *    guarded by the executor and to test whether the current thread is running a command.

@@ -1,5 +1,11 @@
 package com.databricks.dicer.common
 
+import com.databricks.dicer.common.testing.{
+  InternalDicerTestEnvironment,
+  SubscriberHandlerMetricTestUtils,
+  TestAssigner
+}
+
 import java.util.UUID
 
 import scala.concurrent.duration.{Duration, _}
@@ -20,8 +26,18 @@ import com.databricks.dicer.assigner.config.{
   InternalTargetConfig,
   InternalTargetConfigMap
 }
-import com.databricks.dicer.common.TestAssigner.AssignerReplyType
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.TestAssigner.AssignerReplyType
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  LowInclusiveStringFluent,
+  ProposedSliceAssignmentFluent,
+  SliceAssignmentSliceFluent,
+  createProposal,
+  sampleProposal,
+  toProposedAssignmentEntry,
+  toSliceKey,
+  toSquid,
+  `∞`
+}
 import com.databricks.dicer.common.Version.LATEST_VERSION
 import com.databricks.dicer.external.{Clerk, ResourceAddress, SliceKey, Slicelet, Target}
 import com.databricks.dicer.friend.{SliceMap, Squid}
@@ -289,12 +305,12 @@ class InternalDicerTestEnvironmentSuite extends DatabricksTest with TestName {
       assert(TargetMetricsUtils.getPodSetSize(target, "Running") == 1)
       assert(TargetMetricsUtils.getAllAssignmentGenerationGenerateDecisions(target) == 1)
       assert(
-        SubscriberHandlerMetricUtils
+        SubscriberHandlerMetricTestUtils
           .getNumSliceletsByHandler(SubscriberHandler.Location.Assigner, target, LATEST_VERSION)
         == 1
       )
       assert(
-        SubscriberHandlerMetricUtils
+        SubscriberHandlerMetricTestUtils
           .getNumClerksByHandler(SubscriberHandler.Location.Slicelet, target, LATEST_VERSION) == 1
       )
     }
@@ -306,12 +322,12 @@ class InternalDicerTestEnvironmentSuite extends DatabricksTest with TestName {
       assert(TargetMetricsUtils.getPodSetSize(target, "Running") == 2)
       assert(TargetMetricsUtils.getAllAssignmentGenerationGenerateDecisions(target) == 2)
       assert(
-        SubscriberHandlerMetricUtils
+        SubscriberHandlerMetricTestUtils
           .getNumSliceletsByHandler(SubscriberHandler.Location.Assigner, target, LATEST_VERSION)
         == 2
       )
       assert(
-        SubscriberHandlerMetricUtils
+        SubscriberHandlerMetricTestUtils
           .getNumClerksByHandler(SubscriberHandler.Location.Slicelet, target, LATEST_VERSION) == 1
       )
     }
@@ -572,4 +588,29 @@ class InternalDicerTestEnvironmentSuite extends DatabricksTest with TestName {
     assert(errorCount.totalChange() == 1)
   }
 
+  test("Slicelet for target with use_alternative_target enabled receives assignment") {
+    // Test plan: Verify that a Slicelet for a target with `use_alternative_target` enabled
+    // receives assignments. Verify this by configuring the target to have
+    // `useAlternativeTarget = true`, creating a Slicelet for the target, and waiting for the
+    // Slicelet to receive an assignment.
+    val target = Target(getGlobalSafeName)
+    val enabledConfig: InternalTargetConfig =
+      InternalTargetConfig.forTest.DEFAULT.copy(useAlternativeTarget = true)
+    val localTestEnv: InternalDicerTestEnvironment = InternalDicerTestEnvironment.create(
+      targetConfigMap = InternalTargetConfigMap.create(
+        configScopeOpt = None,
+        targetConfigMap = Map(TargetName.forTarget(target) -> enabledConfig)
+      ),
+      withDefaultTargetConfig = false
+    )
+    try {
+      val slicelet: Slicelet =
+        localTestEnv.createSlicelet(target).start(selfPort = 1234, listenerOpt = None)
+      AssertionWaiter("Waiting for the Slicelet to receive an assignment").await {
+        assert(slicelet.impl.forTest.getLatestAssignmentOpt.isDefined)
+      }
+    } finally {
+      localTestEnv.stop()
+    }
+  }
 }

@@ -22,10 +22,9 @@ import com.databricks.dicer.common.{
   ClientResponse,
   Generation,
   Incarnation,
-  InternalDicerTestEnvironment,
-  SyncAssignmentState,
-  TestAssigner
+  SyncAssignmentState
 }
+import com.databricks.dicer.common.testing.{InternalDicerTestEnvironment, TestAssigner}
 import com.databricks.dicer.external.Target
 import com.databricks.rpc.testing.TestSslArguments
 import com.databricks.rpc.tls.TLSOptionsMigration

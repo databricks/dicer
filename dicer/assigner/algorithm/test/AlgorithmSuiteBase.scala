@@ -21,10 +21,10 @@ import com.databricks.dicer.common.{
   AssignmentConsistencyMode,
   Generation,
   ProposedAssignment,
-  TargetHelper,
-  TestSliceUtils
+  TargetHelper
 }
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.{SliceTestUtils}
+import com.databricks.dicer.common.testing.SliceTestUtils.createTestSquid
 import com.databricks.dicer.external.Target
 import com.databricks.dicer.friend.Squid
 import com.databricks.testing.DatabricksTest
@@ -98,7 +98,7 @@ abstract class AlgorithmSuiteBase extends DatabricksTest with TestName {
    * [[fakeClock]].
    */
   protected def createGeneration(): Generation = {
-    TestSliceUtils.createLooseGeneration(fakeClock.instant().toEpochMilli)
+    SliceTestUtils.createLooseGeneration(fakeClock.instant().toEpochMilli)
   }
 
   /** Creates `n` resources with names like "resource0", "resource1", etc. */

@@ -1,0 +1,105 @@
+load("@rules_scala//scala:scala.bzl", "scala_library")
+
+package(
+    default_visibility = ["//dicer:internal"],
+)
+
+scala_library(
+    name = "client_slicez_test_utils",
+    srcs = ["src/ClientSlicezTestUtils.scala"],
+    testonly = True,
+    deps = [
+        "//dicer/assigner/algorithm",
+        "//dicer/assigner/config:internal_target_config",
+        "//dicer/client:slicez",
+        "//dicer/common/testing:test_common",
+        "//dicer/common:assignment_core",
+        "//dicer/common:generation",
+        "//dicer/external:conf",
+        "//dicer/external:external_common",
+        "//dicer/friend:slice_map",
+        "//dicer/friend:squid",
+    ],
+)
+
+scala_library(
+    name = "slice_lookup_driver",
+    srcs = ["src/SliceLookupHarness.scala"],
+    testonly = True,
+    deps = [
+        "//caching/util:server_conf",
+        "//caching/util:test_utils",
+        "//dicer/client",
+        "//dicer/client:lookup",
+        "//dicer/client:slicez",
+        "//dicer/common/testing:test_common",
+        "//dicer/common:assignment_core",
+        "//dicer/common:client_request",
+        "//dicer/common:generation",
+        "//dicer/common:sliceset_impl",
+        "//dicer/common:zpage_helpers",
+        "//dicer/external:external_common",
+        "//dicer/external:slicelet",
+        "//dicer/friend:squid",
+        "//wrappers/rpc:client",
+        "//wrappers/rpc:rpc_context",
+        "//wrappers/rpc:rpc_testing",
+        "//wrappers/util:async_test_helpers",
+        "//wrappers/util:databricks-test",
+        "@maven//:io_grpc_grpc_api",
+    ],
+)
+
+scala_library(
+    name = "clerk_harness",
+    srcs = ["src/ClerkHarness.scala"],
+    testonly = True,
+    deps = [
+        "//caching/util:executor_util",
+        "//caching/util:test_util",
+        "//dicer/client:clerk_impl",
+        "//dicer/common/proto:common_proto_scala_lib",
+        "//dicer/common/test/proto:clerk_test_harness_proto_scala_lib",
+        "//dicer/common:assignment_core",
+        "//dicer/common:generation",
+        "//dicer/common:target_helper",
+        "//dicer/external:clerk",
+        "//dicer/external:external_common",
+        "//dicer/friend/external:two_level_sharding_clerk_accessor",
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_code_findbugs_jsr305",
+        "@maven//:com_google_guava_guava",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
+    ],
+)
+
+scala_library(
+    name = "slicelet_harness",
+    srcs = ["src/SliceletHarness.scala"],
+    testonly = True,
+    deps = [
+        "//caching/util:sequential_execution_context",
+        "//caching/util:test_util",
+        "//dicer/client:slicelet_impl",
+        "//dicer/client:test_client",
+        "//dicer/common/proto:common_proto_scala_lib",
+        "//dicer/common/test/proto:slicelet_test_harness_proto_scala_lib",
+        "//dicer/common:assignment_core",
+        "//dicer/common:slice_helper",
+        "//dicer/common:target_helper",
+        "//dicer/external:external_common",
+        "//dicer/external:slicelet",
+        "//dicer/friend:slicelet_accessor",
+        "//dicer/friend:squid",
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_code_findbugs_jsr305",
+        "@maven//:com_google_guava_guava",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
+    ],
+)

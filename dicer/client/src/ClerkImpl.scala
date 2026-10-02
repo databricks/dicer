@@ -23,6 +23,7 @@ import com.databricks.caching.util.{
 }
 import com.google.protobuf.ByteString
 import com.databricks.dicer.client.ClerkMetrics.ClerkFactoryContext
+import com.databricks.dicer.client.featurerollouts.DicerClientFeatureRolloutFlag
 import com.databricks.dicer.common.{
   AssignerServiceInfo,
   Assignment,
@@ -179,12 +180,37 @@ private[dicer] class ClerkImpl[Stub <: AnyRef] private (
     resourceRouter.getStubForKey(primaryKey, secondaryKey)
   }
 
-  /** See [[ResourceRouter.getNextStubForKey]] for spec details. */
+  /**
+   * Returns a [[Stub]] from either the slice's assigned resources or its fallback resource, given
+   * the state of the [[RetryTokenImpl]]. On each call it picks a random unpicked assigned resource
+   * and updates the returned [[RetryTokenImpl]] so that future calls with the same token avoid
+   * picking the same resource.
+   *
+   * Once all assigned resources have been picked, it returns the fallback resource (if any). Once
+   * the assigned resources and the fallback resource have been picked, it returns a random
+   * assigned resource.
+   *
+   * A slice's fallback resource is a resource that is unassigned to the slice, chosen
+   * deterministically per slice so that all clerks fall back to the same resource.
+   *
+   * Returns `None` when the clerk has no assignment.
+   *
+   * The following example shows how `getNextStubForKey` behaves across successive calls:
+   * Assume the requested key is assigned to [Pod1, Pod2, Pod3], the slice's fallback resource is
+   * Pod4, and the assignment does not change between calls.
+   *
+   * 1. The first call to `getNextStubForKey` will return a random pick from [Pod1, Pod2, Pod3].
+   * 2. The second call to `getNextStubForKey` will return a random pick from [Pod1, Pod2].
+   * 3. The third call to `getNextStubForKey` will return Pod3, the last unpicked assigned
+   *    resource.
+   * 4. The fourth call to `getNextStubForKey` will return Pod4, the fallback resource.
+   * 5. The rest of the calls (>=5) to `getNextStubForKey` will always return a random pick from
+   *    [Pod1, Pod2, Pod3].
+   */
   def getNextStubForKey(
       key: SliceKey,
-      retryTokenOpt: Option[RetryTokenImpl]): Option[(Stub, RetryTokenImpl)] = {
+      retryTokenOpt: Option[RetryTokenImpl]): Option[(Stub, RetryTokenImpl)] =
     resourceRouter.getNextStubForKey(key, retryTokenOpt)
-  }
 
   /**
    * Stops all the asynchronous activities (e.g., cancels the [[SliceLookup]] that communicates with
@@ -323,8 +349,14 @@ private[dicer] object ClerkImpl {
         //   alternativeTargetOpt as part of the AppTarget migration.
         // TODO(<internal bug>): Populate alternativeTargetOpt once DBNS can supply it for the target.
         alternativeTargetOpt = None,
-        // TODO(<internal bug>): Use client side feature flag to gradually rollout rate limiting.
-        enableRateLimiting = false,
+        // The conf override, when set, takes precedence over the rollout flag, so that a service
+        // can force rate limiting on or off regardless of the rollout.
+        enableRateLimiting = clerkConf.enableRateLimitingOverrideOpt.getOrElse(
+          clerkConf.isFeatureRolloutFlagEnabled(
+            DicerClientFeatureRolloutFlag.CLERK_WATCH_RATE_LIMITING_FLAG_NAME,
+            targetBestEffortFullyQualified
+          )
+        ),
         sourceIpOpt = sourceIpOpt
       ),
       subscriberDebugName = clerkDebugName
@@ -443,7 +475,9 @@ private[dicer] object ClerkImpl {
         //   alternativeTargetOpt as part of the AppTarget migration.
         // TODO(<internal bug>): Populate alternativeTargetOpt once DBNS can supply it for the target.
         alternativeTargetOpt = None,
-        // TODO(<internal bug>): Use client side feature flag to gradually rollout rate limiting.
+        // TODO(<internal bug>): Resolve the clerk-watch-rate-limiting rollout flag here too. Unlike the
+        // other Clerk entry points, this one is handed no DicerClientConf (see the spec on
+        // DicerClientProtoLoggerConf), so it has nothing to query the flag on.
         enableRateLimiting = false,
         sourceIpOpt = None
       ),
@@ -665,8 +699,14 @@ private[dicer] object ClerkImpl {
         //   alternativeTargetOpt as part of the AppTarget migration.
         // TODO(<internal bug>): Populate alternativeTargetOpt for Direct Clerks
         alternativeTargetOpt = None,
-        // TODO(<internal bug>): Use client side feature flag to gradually rollout rate limiting.
-        enableRateLimiting = false,
+        // The conf override, when set, takes precedence over the rollout flag, so that a service
+        // can force rate limiting on or off regardless of the rollout.
+        enableRateLimiting = clerkConf.enableRateLimitingOverrideOpt.getOrElse(
+          clerkConf.isFeatureRolloutFlagEnabled(
+            DicerClientFeatureRolloutFlag.CLERK_WATCH_RATE_LIMITING_FLAG_NAME,
+            target
+          )
+        ),
         sourceIpOpt = None
       ),
       subscriberDebugName = clerkDebugName
@@ -770,7 +810,7 @@ private class ClerkAssignment private (
       for (sliceAssignment: SliceAssignment <- assignment.sliceMap.entries) {
         val sliceInfo: SliceInfo = sliceInfoMap.lookUp(sliceAssignment.slice.lowInclusive)
         iassert(sliceInfo.slice == sliceAssignment.slice)
-        val isMultiReplica: Boolean = sliceAssignment.resources.size > 1
+        val isMultiReplica: Boolean = sliceAssignment.resourcesSet.size > 1
         iassert(
           sliceInfo.twoLevelHashRingOpt.isDefined == isMultiReplica,
           s"slice ${sliceInfo.slice} hash ring presence " +
@@ -779,20 +819,20 @@ private class ClerkAssignment private (
         )
         for (ring: ConsistentHashRing[Squid, SliceKey] <- sliceInfo.twoLevelHashRingOpt) {
           iassert(
-            ring.nodes.toSet == sliceAssignment.resources,
+            ring.nodes.toSet == sliceAssignment.resourcesSet,
             s"ring nodes ${ring.nodes.toSet} do not match sliceAssignment resources " +
-            s"${sliceAssignment.resources}"
+            s"${sliceAssignment.resourcesSet}"
           )
         }
         // Whether the assignment has at least one resource unassigned to `sliceAssignment.slice`.
         val assignmentHasFallbackResource: Boolean =
-          assignment.assignedResources.exists(!sliceAssignment.resources.contains(_))
+          assignment.assignedResources.exists(!sliceAssignment.resourcesSet.contains(_))
         iassert(sliceInfo.fallbackSquidOpt.isDefined == assignmentHasFallbackResource)
 
         sliceInfo.fallbackSquidOpt match {
           case Some(fallbackSquid: Squid) =>
             iassert(assignment.assignedResources.contains(fallbackSquid))
-            iassert(!sliceAssignment.resources.contains(fallbackSquid))
+            iassert(!sliceAssignment.resourcesSet.contains(fallbackSquid))
           case None => ()
         }
       }
@@ -841,12 +881,12 @@ private object ClerkAssignment {
       sliceAssignments.map {
         case (sliceAssignment: SliceAssignment) =>
           val twoLevelHashRingOpt: Option[ConsistentHashRing[Squid, SliceKey]] =
-            if (sliceAssignment.indexedResources.size > 1) {
+            if (sliceAssignment.resources.size > 1) {
               Some(
                 ConsistentHashRing.create[Squid, SliceKey](
                   // Sort by the Squid ordering so every callsite builds an identical ring across
                   // pods/processes, even if there are hash collisions.
-                  nodes = sliceAssignment.indexedResources.sorted,
+                  nodes = sliceAssignment.resources.sorted,
                   vnodesPerNode = VNODES_PER_RESOURCE,
                   typeMapper = RingTypeMapper
                 )
@@ -907,7 +947,7 @@ private object ClerkAssignment {
     sliceAssignments.iterator.flatMap {
       case sliceAssignment: SliceAssignment =>
         // Skip for slices that are assigned to all resources.
-        if (sliceAssignment.resources.size == assignmentResources.size) {
+        if (sliceAssignment.resourcesSet.size == assignmentResources.size) {
           None
         } else {
           // Walk the ring from the resource owning the `slice.lowInclusive` key and take the first
@@ -916,8 +956,8 @@ private object ClerkAssignment {
           // assigned resource, as it will always return the next unassigned resource on the ring.
           // This is acceptable because balancing load across fallback squids is not a requirement.
           fallbackRing
-            .lookupIterator(key = sliceAssignment.slice.lowInclusive)
-            .find((squid: Squid) => !sliceAssignment.resources.contains(squid))
+            .iteratorFrom(key = sliceAssignment.slice.lowInclusive)
+            .find((squid: Squid) => !sliceAssignment.resourcesSet.contains(squid))
             .map((squid: Squid) => sliceAssignment.slice -> squid)
         }
     }.toMap

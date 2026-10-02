@@ -3,7 +3,7 @@ package com.databricks.dicer.common
 import scala.collection.immutable
 import scala.util.Random
 
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.SliceTestUtils.{LowInclusiveLongFluent, fp, toSliceKey}
 import com.databricks.dicer.external.{HighSliceKey, InfinitySliceKey, Slice, SliceKey}
 import com.databricks.caching.util.TestUtils
 import com.databricks.caching.util.TestUtils.{assertThrow, checkEquality}

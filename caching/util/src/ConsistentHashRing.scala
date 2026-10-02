@@ -79,7 +79,7 @@ final class ConsistentHashRing[T, K] private (
    * Note: For cases where `vnodesPerNode` > 1, the iterator will visit each node `vnodesPerNode`
    * times.
    */
-  def lookupIterator(key: K): Iterator[T] = {
+  def iteratorFrom(key: K): Iterator[T] = {
     val hashedValue: Long = hashBytes(typeMapper.mapKey(key).asReadOnlyByteBuffer())
     val lookupKey: (Long, Long) = (hashedValue, Long.MinValue)
     // Start from the first entry >= `hashedValue`, or wrap to the first entry on the ring if no

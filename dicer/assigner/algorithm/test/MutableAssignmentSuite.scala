@@ -4,9 +4,10 @@ import scala.concurrent.duration._
 import scala.collection.immutable.SortedMap
 
 import com.databricks.caching.util.FakeTypedClock
-import com.databricks.dicer.assigner.config.{ChurnConfig, ConfigTestUtil}
+import com.databricks.dicer.assigner.config.{ChurnConfig}
+import com.databricks.dicer.assigner.config.testing.{ConfigTestUtils}
 import com.databricks.dicer.common.SliceKeyHelper.RichSliceKey
-import com.databricks.dicer.common.TestSliceUtils.{
+import com.databricks.dicer.common.testing.SliceTestUtils.{
   LowInclusiveLongFluent,
   LowInclusiveSliceKeyFluent,
   LowInclusiveStringFluent,
@@ -25,9 +26,9 @@ import com.databricks.dicer.common.{
   AssignmentConsistencyMode,
   Generation,
   SliceWithResources,
-  SubsliceAnnotation,
-  TestSliceUtils
+  SubsliceAnnotation
 }
+import com.databricks.dicer.common.testing.{SliceTestUtils}
 import com.databricks.dicer.external.SliceKey
 import com.databricks.dicer.friend.SliceMap
 import com.databricks.dicer.friend.Squid
@@ -58,7 +59,7 @@ class MutableAssignmentSuite extends DatabricksTest {
     // and verifying the SliceWithResources are as expected.
 
     val clock = new FakeTypedClock
-    val generation: Generation = TestSliceUtils.createLooseGeneration(clock.instant().toEpochMilli)
+    val generation: Generation = SliceTestUtils.createLooseGeneration(clock.instant().toEpochMilli)
     val predecessor: Assignment = createAssignment(
       generation,
       AssignmentConsistencyMode.Affinity,
@@ -83,7 +84,7 @@ class MutableAssignmentSuite extends DatabricksTest {
       predecessor.sliceMap,
       resources,
       loadMap,
-      ConfigTestUtil.ZERO_PENALTY_CHURN_CONFIG
+      ConfigTestUtils.ZERO_PENALTY_CHURN_CONFIG
     )
     mutableAssignment.forTest.checkInvariants()
 
@@ -140,7 +141,7 @@ class MutableAssignmentSuite extends DatabricksTest {
 
     val clock = new FakeTypedClock()
     val generation: Generation =
-      TestSliceUtils.createLooseGeneration(clock.instant().toEpochMilli)
+      SliceTestUtils.createLooseGeneration(clock.instant().toEpochMilli)
     val predecessor: Assignment = createAssignment(
       generation,
       AssignmentConsistencyMode.Affinity,
@@ -162,7 +163,7 @@ class MutableAssignmentSuite extends DatabricksTest {
       predecessor.sliceMap,
       resources,
       loadMap,
-      ConfigTestUtil.ZERO_PENALTY_CHURN_CONFIG
+      ConfigTestUtils.ZERO_PENALTY_CHURN_CONFIG
     )
     mutableAssignment.forTest.checkInvariants()
 
@@ -264,7 +265,7 @@ class MutableAssignmentSuite extends DatabricksTest {
 
     val clock = new FakeTypedClock()
     val generation: Generation =
-      TestSliceUtils.createLooseGeneration(clock.instant().toEpochMilli)
+      SliceTestUtils.createLooseGeneration(clock.instant().toEpochMilli)
     val predecessor: Assignment = createAssignment(
       generation,
       AssignmentConsistencyMode.Affinity,
@@ -286,7 +287,7 @@ class MutableAssignmentSuite extends DatabricksTest {
       predecessor.sliceMap,
       resources,
       loadMap,
-      ConfigTestUtil.ZERO_PENALTY_CHURN_CONFIG
+      ConfigTestUtils.ZERO_PENALTY_CHURN_CONFIG
     )
     mutableAssignment.forTest.checkInvariants()
 
@@ -373,7 +374,7 @@ class MutableAssignmentSuite extends DatabricksTest {
     // contain the unhealthy resources.
 
     val clock = new FakeTypedClock
-    val generation: Generation = TestSliceUtils.createLooseGeneration(clock.instant().toEpochMilli)
+    val generation: Generation = SliceTestUtils.createLooseGeneration(clock.instant().toEpochMilli)
     val predecessor: Assignment = createAssignment(
       generation,
       AssignmentConsistencyMode.Affinity,
@@ -391,7 +392,7 @@ class MutableAssignmentSuite extends DatabricksTest {
       predecessor.sliceMap,
       resources,
       LoadMap.UNIFORM_LOAD_MAP,
-      ConfigTestUtil.ZERO_PENALTY_CHURN_CONFIG
+      ConfigTestUtils.ZERO_PENALTY_CHURN_CONFIG
     )
     mutableAssignment.forTest.checkInvariants()
 
@@ -418,7 +419,7 @@ class MutableAssignmentSuite extends DatabricksTest {
 
     val clock = new FakeTypedClock()
     val generation: Generation =
-      TestSliceUtils.createLooseGeneration(clock.instant().toEpochMilli)
+      SliceTestUtils.createLooseGeneration(clock.instant().toEpochMilli)
     val predecessor: Assignment = createAssignment(
       generation,
       AssignmentConsistencyMode.Affinity,
@@ -446,7 +447,7 @@ class MutableAssignmentSuite extends DatabricksTest {
       predecessor.sliceMap,
       resources,
       loadMap,
-      ConfigTestUtil.ZERO_PENALTY_CHURN_CONFIG
+      ConfigTestUtils.ZERO_PENALTY_CHURN_CONFIG
     )
     mutableAssignment.forTest.checkInvariants()
 
@@ -543,11 +544,11 @@ class MutableAssignmentSuite extends DatabricksTest {
 
     val clock = new FakeTypedClock()
     val generationNow: Generation =
-      TestSliceUtils.createLooseGeneration(clock.instant().toEpochMilli)
+      SliceTestUtils.createLooseGeneration(clock.instant().toEpochMilli)
     val generation1MinuteAgo: Generation =
-      TestSliceUtils.createLooseGeneration(generationNow.number.value - 1.minute.toMillis)
+      SliceTestUtils.createLooseGeneration(generationNow.number.value - 1.minute.toMillis)
     val generation2MinutesAgo: Generation =
-      TestSliceUtils.createLooseGeneration(generationNow.number.value - 2.minute.toMillis)
+      SliceTestUtils.createLooseGeneration(generationNow.number.value - 2.minute.toMillis)
     val predecessor: Assignment = createAssignment(
       generationNow,
       AssignmentConsistencyMode.Affinity,
@@ -631,7 +632,7 @@ class MutableAssignmentSuite extends DatabricksTest {
     // by the split, and that the Slice cannot be split further. Note that this is mostly testing
     // the behavior of `LoadMap.getSplit()` but in the way that it is exercised in Algorithm.scala.
     val clock = new FakeTypedClock
-    val generation = TestSliceUtils.createLooseGeneration(clock.instant().toEpochMilli)
+    val generation = SliceTestUtils.createLooseGeneration(clock.instant().toEpochMilli)
     val predecessor: Assignment = createAssignment(
       generation,
       AssignmentConsistencyMode.Affinity,
@@ -725,7 +726,7 @@ class MutableAssignmentSuite extends DatabricksTest {
     // deallocate operations.
 
     val clock = new FakeTypedClock
-    val generation: Generation = TestSliceUtils.createLooseGeneration(clock.instant().toEpochMilli)
+    val generation: Generation = SliceTestUtils.createLooseGeneration(clock.instant().toEpochMilli)
     val predecessor: Assignment = createAssignment(
       generation,
       AssignmentConsistencyMode.Affinity,
@@ -741,7 +742,7 @@ class MutableAssignmentSuite extends DatabricksTest {
       predecessor.sliceMap,
       resources,
       LoadMap.UNIFORM_LOAD_MAP,
-      ConfigTestUtil.ZERO_PENALTY_CHURN_CONFIG
+      ConfigTestUtils.ZERO_PENALTY_CHURN_CONFIG
     )
     mutableAssignment.forTest.checkInvariants()
     assert(mutableAssignment.currentNumTotalSliceReplicas == 6)

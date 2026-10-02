@@ -240,7 +240,7 @@ class EtcdPreferredAssignerStoreStateMachine(
     }
     val predecessorVersionOpt: Option[Version] = predecessorGenerationOpt match {
       case Some(predecessorGeneration: Generation) =>
-        Some(EtcdClientHelper.getVersionFromNonLooseGeneration(predecessorGeneration))
+        Some(EtcdClientHelper.getVersionFromGeneration(predecessorGeneration))
       case None => None
     }
 

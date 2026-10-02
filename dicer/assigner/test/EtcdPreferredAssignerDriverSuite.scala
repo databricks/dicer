@@ -1,5 +1,7 @@
 package com.databricks.dicer.assigner
 
+import com.databricks.dicer.assigner.testing.{PreferredAssignerTestUtils}
+
 import scala.concurrent.duration._
 import com.databricks.caching.util.{
   AssertionWaiter,
@@ -153,7 +155,7 @@ class EtcdPreferredAssignerDriverSuite extends DatabricksTest with TestName {
     driver.start(assignerInfo, AssignerProtoLogger.createNoop(fakeSec))
 
     // Verify: verify that the initial assigner role is STARTUP.
-    PreferredAssignerTestHelper.assertAssignerRoleGaugeMatches(
+    PreferredAssignerTestUtils.assertAssignerRoleGaugeMatches(
       PreferredAssignerMetrics.MonitoredAssignerRole.STARTUP
     )
 
@@ -162,7 +164,7 @@ class EtcdPreferredAssignerDriverSuite extends DatabricksTest with TestName {
       store.blockWrites() // Block the writes to avoid the driver takeover.
       fakeClock.advanceBy(driverConfig.initialPreferredAssignerTimeout)
     }
-    PreferredAssignerTestHelper.assertAssignerRoleGaugeMatches(
+    PreferredAssignerTestUtils.assertAssignerRoleGaugeMatches(
       PreferredAssignerMetrics.MonitoredAssignerRole.STANDBY_WITHOUT_PREFERRED
     )
 
@@ -172,7 +174,7 @@ class EtcdPreferredAssignerDriverSuite extends DatabricksTest with TestName {
     //     take over.
     store.unblockWrites()
     AssertionWaiter("Assigner becomes preferred").await {
-      PreferredAssignerTestHelper.getLatestKnownPreferredAssignerBlocking(driver, fakeSec) match {
+      PreferredAssignerTestUtils.getLatestKnownPreferredAssignerBlocking(driver, fakeSec) match {
         case PreferredAssignerValue.SomeAssigner(info: AssignerInfo, generation: Generation) =>
           assert(info == assignerInfo)
           predecessorGenerationOpt = Some(generation)
@@ -181,7 +183,7 @@ class EtcdPreferredAssignerDriverSuite extends DatabricksTest with TestName {
     }
 
     // Verify: the assigner role for the current assigner is PREFERRED.
-    PreferredAssignerTestHelper.assertAssignerRoleGaugeMatches(
+    PreferredAssignerTestUtils.assertAssignerRoleGaugeMatches(
       PreferredAssignerMetrics.MonitoredAssignerRole.PREFERRED
     )
 
@@ -198,7 +200,7 @@ class EtcdPreferredAssignerDriverSuite extends DatabricksTest with TestName {
     }
 
     // Verify: the assigner role for the current assigner is STANDBY.
-    PreferredAssignerTestHelper.assertAssignerRoleGaugeMatches(
+    PreferredAssignerTestUtils.assertAssignerRoleGaugeMatches(
       PreferredAssignerMetrics.MonitoredAssignerRole.STANDBY
     )
 
@@ -214,7 +216,7 @@ class EtcdPreferredAssignerDriverSuite extends DatabricksTest with TestName {
     }
 
     // Verify: the assigner role for the current assigner is PREFERRED.
-    PreferredAssignerTestHelper.assertAssignerRoleGaugeMatches(
+    PreferredAssignerTestUtils.assertAssignerRoleGaugeMatches(
       PreferredAssignerMetrics.MonitoredAssignerRole.PREFERRED
     )
 
@@ -222,7 +224,7 @@ class EtcdPreferredAssignerDriverSuite extends DatabricksTest with TestName {
     driver.sendTerminationNotice()
     AssertionWaiter("abdication completes").await {
       val preferredAssignerValue3: PreferredAssignerValue =
-        PreferredAssignerTestHelper.getLatestKnownPreferredAssignerBlocking(driver, fakeSec)
+        PreferredAssignerTestUtils.getLatestKnownPreferredAssignerBlocking(driver, fakeSec)
       preferredAssignerValue3 match {
         case PreferredAssignerValue.NoAssigner(generation: Generation) =>
           predecessorGenerationOpt = Some(generation)
@@ -231,7 +233,7 @@ class EtcdPreferredAssignerDriverSuite extends DatabricksTest with TestName {
     }
 
     // Verify: the assigner role for the current assigner is STANDBY_WITHOUT_PREFERRED.
-    PreferredAssignerTestHelper.assertAssignerRoleGaugeMatches(
+    PreferredAssignerTestUtils.assertAssignerRoleGaugeMatches(
       PreferredAssignerMetrics.MonitoredAssignerRole.STANDBY_WITHOUT_PREFERRED
     )
 
@@ -248,7 +250,7 @@ class EtcdPreferredAssignerDriverSuite extends DatabricksTest with TestName {
     }
 
     // Verify: the assigner role for the current assigner is STANDBY.
-    PreferredAssignerTestHelper.assertAssignerRoleGaugeMatches(
+    PreferredAssignerTestUtils.assertAssignerRoleGaugeMatches(
       PreferredAssignerMetrics.MonitoredAssignerRole.STANDBY
     )
 
@@ -263,7 +265,7 @@ class EtcdPreferredAssignerDriverSuite extends DatabricksTest with TestName {
     }
 
     // Verify: the assigner role for the current assigner is STANDBY_WITHOUT_PREFERRED.
-    PreferredAssignerTestHelper.assertAssignerRoleGaugeMatches(
+    PreferredAssignerTestUtils.assertAssignerRoleGaugeMatches(
       PreferredAssignerMetrics.MonitoredAssignerRole.STANDBY_WITHOUT_PREFERRED
     )
     // Shutdown the store to avoid interference with other tests.
@@ -287,10 +289,10 @@ class EtcdPreferredAssignerDriverSuite extends DatabricksTest with TestName {
 
     // Track changes in committed count and sum.
     val committedCount = ChangeTracker[Long] { () =>
-      PreferredAssignerTestHelper.getPreferredAssignerWriteLatencyCount("committed")
+      PreferredAssignerTestUtils.getPreferredAssignerWriteLatencyCount("committed")
     }
     val committedSum = ChangeTracker[Double] { () =>
-      PreferredAssignerTestHelper.getPreferredAssignerWriteLatencySum("committed")
+      PreferredAssignerTestUtils.getPreferredAssignerWriteLatencySum("committed")
     }
 
     // Verify that a successful write increments the "committed" metric.
@@ -302,7 +304,7 @@ class EtcdPreferredAssignerDriverSuite extends DatabricksTest with TestName {
 
     // Wait for the fakeSec to process the clock advancement and the driver to transition to
     // STANDBY_WITHOUT_PREFERRED.
-    PreferredAssignerTestHelper.assertAssignerRoleGaugeMatches(
+    PreferredAssignerTestUtils.assertAssignerRoleGaugeMatches(
       PreferredAssignerMetrics.MonitoredAssignerRole.STANDBY_WITHOUT_PREFERRED
     )
 
@@ -339,10 +341,10 @@ class EtcdPreferredAssignerDriverSuite extends DatabricksTest with TestName {
 
     // Track changes in OCC failure count.
     val occFailureCount = ChangeTracker[Long] { () =>
-      PreferredAssignerTestHelper.getPreferredAssignerWriteLatencyCount("occ_failure")
+      PreferredAssignerTestUtils.getPreferredAssignerWriteLatencyCount("occ_failure")
     }
     val committedCount = ChangeTracker[Long] { () =>
-      PreferredAssignerTestHelper.getPreferredAssignerWriteLatencyCount("committed")
+      PreferredAssignerTestUtils.getPreferredAssignerWriteLatencyCount("committed")
     }
 
     // Create two drivers that will race to become preferred.
@@ -411,7 +413,7 @@ class EtcdPreferredAssignerDriverSuite extends DatabricksTest with TestName {
 
     // Track changes in exception count.
     val exceptionCount = ChangeTracker[Long] { () =>
-      PreferredAssignerTestHelper.getPreferredAssignerWriteLatencyCount("exception")
+      PreferredAssignerTestUtils.getPreferredAssignerWriteLatencyCount("exception")
     }
 
     // Delete all data from etcd to simulate data loss.

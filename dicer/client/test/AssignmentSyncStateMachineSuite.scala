@@ -37,11 +37,19 @@ import com.databricks.dicer.common.{
   Generation,
   ProposedAssignment,
   Redirect,
-  SyncAssignmentState,
-  TestSliceUtils
+  SyncAssignmentState
 }
+import com.databricks.dicer.common.testing.{SliceTestUtils}
 import com.databricks.dicer.common.TargetHelper.TargetOps
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  GenerationIncarnationFluent,
+  LowInclusiveStringFluent,
+  SliceAssignmentSliceFluent,
+  createAssignment,
+  toProposedAssignmentEntry,
+  toSquid,
+  `∞`
+}
 import com.databricks.dicer.external.{Slice, Target}
 import com.databricks.rpc.tls.TLSOptionsMigration
 import com.databricks.rpc.testing.TestSslArguments
@@ -607,7 +615,7 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     val notServedTarget = Target(getSuffixedSafeName("other"))
     val assignment1: Assignment = ProposedAssignment(
       predecessorOpt = None,
-      sliceMap = TestSliceUtils.createProposal(
+      sliceMap = SliceTestUtils.createProposal(
         ("" -- ∞) -> Seq("Pod2")
       ),
       assignerServiceInfoOpt = None
@@ -669,7 +677,7 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     // still served) should also be incorporated.
     val assignment2: Assignment = ProposedAssignment(
       predecessorOpt = None,
-      sliceMap = TestSliceUtils.createProposal(
+      sliceMap = SliceTestUtils.createProposal(
         ("" -- ∞) -> Seq("Pod3")
       ),
       assignerServiceInfoOpt = None

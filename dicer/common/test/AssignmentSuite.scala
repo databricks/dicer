@@ -7,7 +7,19 @@ import com.databricks.caching.util.TestUtils.{
   loadTestData
 }
 import com.databricks.dicer.common.Assignment.DiffUnused
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  GenerationIncarnationFluent,
+  LowInclusiveStringFluent,
+  SliceAssignmentSliceFluent,
+  createAssignment,
+  createLooseGeneration,
+  createTestSquid,
+  fp,
+  identityKey,
+  parseSimpleDiffAssignment,
+  toSquid,
+  `∞`
+}
 import com.databricks.dicer.external.SliceKey
 import com.databricks.dicer.friend.Squid
 import com.databricks.testing.DatabricksTest
@@ -347,10 +359,10 @@ class AssignmentSuite extends DatabricksTest {
       ("" -- ∞) @@ (35 ## 54) -> Seq("Pod4")
     )
     // Check some keys.
-    val emptyKeyResources: Set[Squid] = assignment.sliceMap.lookUp(SliceKey.MIN).resources
-    assert(emptyKeyResources == assignment.sliceAssignments.head.resources)
-    val gandalfResources: Set[Squid] = assignment.sliceMap.lookUp(fp("Gandalf")).resources
-    assert(gandalfResources == assignment.sliceAssignments.head.resources)
+    val emptyKeyResources: Set[Squid] = assignment.sliceMap.lookUp(SliceKey.MIN).resourcesSet
+    assert(emptyKeyResources == assignment.sliceAssignments.head.resourcesSet)
+    val gandalfResources: Set[Squid] = assignment.sliceMap.lookUp(fp("Gandalf")).resourcesSet
+    assert(gandalfResources == assignment.sliceAssignments.head.resourcesSet)
   }
 
   test("Assignment rejects invalid assignments") {

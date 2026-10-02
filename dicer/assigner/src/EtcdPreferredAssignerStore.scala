@@ -170,7 +170,6 @@ object EtcdPreferredAssignerStore {
   }
 
   /**
-   * REQUIRES: `storeIncarnation` is non-loose.
    * The production implementation of [[EtcdPreferredAssignerStore]]. Separated from the trait to
    * allow tests to override methods.
    */
@@ -181,10 +180,6 @@ object EtcdPreferredAssignerStore {
       random: Random,
       config: EtcdPreferredAssignerStore.Config)
       extends EtcdPreferredAssignerStore {
-    require(
-      storeIncarnation.isNonLoose,
-      f"Store incarnation must be non-loose ($storeIncarnation)."
-    )
 
     private val logger = PrefixLogger.create(this.getClass, s"dicer-preferred-assigner")
 
@@ -268,7 +263,7 @@ object EtcdPreferredAssignerStore {
           val future: Future[EtcdClient.WriteResponse] =
             client.write(
               EtcdPreferredAssignerStore.KEY,
-              EtcdClientHelper.getVersionFromNonLooseGeneration(preferredAssigner.generation),
+              EtcdClientHelper.getVersionFromGeneration(preferredAssigner.generation),
               value = preferredAssigner.toSpecProto.toByteString,
               predecessorVersionOpt,
               isIncremental = false // No incremental writes are needed.

@@ -10,7 +10,14 @@ import com.google.common.collect.{Range, RangeMap, TreeMultimap, TreeRangeMap}
 import com.google.common.primitives.UnsignedLongs
 
 import com.databricks.testing.DatabricksTest
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  LowInclusiveStringFluent,
+  identityKey,
+  rangeFromSlice,
+  sliceFromRange,
+  toSliceKey,
+  `∞`
+}
 import com.databricks.dicer.external.{HighSliceKey, Slice, SliceKey}
 
 class MutableSliceMapSuite extends DatabricksTest {

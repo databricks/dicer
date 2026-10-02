@@ -22,7 +22,16 @@ import com.databricks.dicer.assigner.TargetMetrics.{
   LoadType
 }
 import com.databricks.dicer.common.TargetHelper.TargetOps
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  GenerationIncarnationFluent,
+  LowInclusiveLongFluent,
+  LowInclusiveStringFluent,
+  SliceAssignmentSliceFluent,
+  createAssignment,
+  toSliceKey,
+  toSquid,
+  `∞`
+}
 import com.databricks.dicer.common.{Assignment, AssignmentConsistencyMode}
 import com.databricks.dicer.external.{Slice, Target}
 import com.databricks.dicer.friend.Squid

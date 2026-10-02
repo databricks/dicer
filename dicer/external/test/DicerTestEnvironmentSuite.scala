@@ -8,7 +8,7 @@ import com.databricks.caching.util.{AssertionWaiter, TestUtils}
 import com.databricks.caching.util.TestUtils.assertThrow
 import com.databricks.conf.Configs
 import com.databricks.dicer.client.{TestClientUtils, TlsFilePaths}
-import com.databricks.dicer.common.TestSliceUtils
+import com.databricks.dicer.common.testing.SliceTestUtils
 import com.databricks.dicer.external.DicerTestEnvironment.AssignmentHandle
 import com.databricks.dicer.external.Samples.{SampleClientConf, SampleServer, SampleServerConf}
 import com.databricks.testing.DatabricksTest
@@ -320,7 +320,7 @@ abstract class BaseDicerTestEnvironmentSuite extends DatabricksTest with TestUti
     assert(env.getTotalAttributedLoad(target) == 0)
 
     val slicelet: Slicelet = createSampleServer(target, selfPort = 0).getSlicelet
-    val sliceKey: SliceKey = TestSliceUtils.fp("my-application-key")
+    val sliceKey: SliceKey = SliceTestUtils.fp("my-application-key")
     val assignmentHandle: AssignmentHandle = env.setAndFreezeAssignment(
       target,
       env
@@ -334,7 +334,7 @@ abstract class BaseDicerTestEnvironmentSuite extends DatabricksTest with TestUti
     AssertionWaiter("wait for asn").await {
       assert(env.hasReceivedAtLeast(assignmentHandle, slicelet))
     }
-    Using.resource(slicelet.createHandle(TestSliceUtils.fp("my-application-key"))) {
+    Using.resource(slicelet.createHandle(SliceTestUtils.fp("my-application-key"))) {
       handle: SliceKeyHandle =>
         handle.incrementLoadBy(1)
     }
@@ -346,7 +346,7 @@ abstract class BaseDicerTestEnvironmentSuite extends DatabricksTest with TestUti
       initialLoad
     }
 
-    Using.resource(slicelet.createHandle(TestSliceUtils.fp("my-application-key"))) {
+    Using.resource(slicelet.createHandle(SliceTestUtils.fp("my-application-key"))) {
       handle: SliceKeyHandle =>
         handle.incrementLoadBy(100)
     }

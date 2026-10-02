@@ -1,5 +1,7 @@
 package com.databricks.dicer.common
 
+import com.databricks.dicer.common.testing.{InternalDicerTestEnvironment, TestAssigner}
+
 import scala.collection.mutable
 import scala.concurrent.duration.{Duration, _}
 
@@ -8,7 +10,19 @@ import com.databricks.caching.util.TestUtils
 import com.databricks.caching.util.TestUtils.TestName
 import com.databricks.conf.Configs
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  LowInclusiveStringFluent,
+  SliceAssignmentSliceFluent,
+  awaitAssignment,
+  awaitAssignmentWithResources,
+  createProposal,
+  createTestSquid,
+  fp,
+  toProposedAssignmentEntry,
+  toSliceKey,
+  toSquid,
+  `∞`
+}
 import com.databricks.dicer.external.{ResourceAddress, SliceKey, Slicelet, Target}
 import com.databricks.dicer.friend.{SliceMap, Squid}
 import com.databricks.testing.DatabricksTest
@@ -235,7 +249,7 @@ class GossipSuite extends DatabricksTest with TestName {
     /** Asserts that the `assignment` assigns each Slice to exactly one resource. */
     def assertSingleReplica(assignment: Assignment): Unit = {
       for (sliceAssignment: SliceAssignment <- assignment.sliceMap.entries) {
-        assert(sliceAssignment.resources.size == 1)
+        assert(sliceAssignment.resourcesSet.size == 1)
       }
     }
 
@@ -356,8 +370,8 @@ class GossipSuite extends DatabricksTest with TestName {
      */
     def assertNumReplicas(assignment: Assignment, minReplicas: Int, maxReplicas: Int): Unit = {
       for (sliceAssignment: SliceAssignment <- assignment.sliceMap.entries) {
-        assert(sliceAssignment.resources.size >= minReplicas)
-        assert(sliceAssignment.resources.size <= maxReplicas)
+        assert(sliceAssignment.resourcesSet.size >= minReplicas)
+        assert(sliceAssignment.resourcesSet.size <= maxReplicas)
       }
     }
 
@@ -428,7 +442,7 @@ class GossipSuite extends DatabricksTest with TestName {
       assertNumReplicas(assignment2, minReplicas = 2, maxReplicas = 3)
 
       // Verify: The hot key is assigned to all the 3 resources.
-      assert(assignment2.sliceMap.lookUp(hotSliceKey).resources == Set(squid0, squid1, squid2))
+      assert(assignment2.sliceMap.lookUp(hotSliceKey).resourcesSet == Set(squid0, squid1, squid2))
 
       // Verify: All the clerks should observe that the hot key has been assigned to all the
       // 3 resources.

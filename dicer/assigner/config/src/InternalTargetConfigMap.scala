@@ -2,7 +2,7 @@ package com.databricks.dicer.assigner.config
 
 import java.io.File
 
-import com.databricks.caching.util.ConfigScope
+import com.databricks.caching.util.ClusterConfigScope
 import com.databricks.dicer.assigner.config.TargetConfigReader.readScopeConfigMapFromDirectories
 import com.databricks.dicer.common.TargetName
 
@@ -11,7 +11,7 @@ import com.databricks.dicer.common.TargetName
  */
 private[dicer] trait InternalTargetConfigMap {
   // The scope of the configs used by the map (for debugging purposes).
-  val configScopeOpt: Option[ConfigScope]
+  val configScopeOpt: Option[ClusterConfigScope]
 
   /** Returns the number of targets in this config map. */
   def size: Int
@@ -36,7 +36,7 @@ object InternalTargetConfigMap {
    *                  the same name, regardless of their cluster.
    */
   private final class InternalTargetConfigMapImpl(
-      val configScopeOpt: Option[ConfigScope],
+      val configScopeOpt: Option[ClusterConfigScope],
       private val configMap: Map[TargetName, InternalTargetConfig])
       extends InternalTargetConfigMap {
 
@@ -75,7 +75,7 @@ object InternalTargetConfigMap {
    *                                      //universe/dicer/assigner/config/(dev|staging|prod)
    */
   def create(
-      configScopeOpt: Option[ConfigScope],
+      configScopeOpt: Option[ClusterConfigScope],
       targetConfigDirectory: File,
       advancedTargetConfigDirectory: File): InternalTargetConfigMap = {
     val targetConfigMap: Map[TargetName, InternalTargetConfig] = readScopeConfigMapFromDirectories(
@@ -90,7 +90,7 @@ object InternalTargetConfigMap {
    * Creates a InternalTargetConfigMap based on a mapping from target names to InternalTargetConfig.
    */
   def create(
-      configScopeOpt: Option[ConfigScope],
+      configScopeOpt: Option[ClusterConfigScope],
       targetConfigMap: Map[TargetName, InternalTargetConfig]): InternalTargetConfigMap =
     new InternalTargetConfigMapImpl(configScopeOpt, targetConfigMap)
 }

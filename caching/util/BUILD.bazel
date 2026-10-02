@@ -627,7 +627,6 @@ scala_library(
     srcs = ["src/StateMachineDriver.scala"],
     deps = [
         ":cancellable",
-        ":hybrid_concurrency_domain",
         ":prefix_logger",
         ":sequential_execution_context",
         ":ticker_time",
@@ -759,10 +758,7 @@ scala_test(
     deps = [
         ":delegating_sequential_execution_context",
         ":fake_sequential_execution_context",
-        ":hybrid_concurrency_domain",
         ":metric_utils",
-        ":pipeline",
-        ":prefix_logger",
         ":sequential_execution_context",
         ":state_machine",
         ":test_state_machine_driver",
@@ -1130,6 +1126,7 @@ scala_library(
     name = "config_scope",
     srcs = ["src/ConfigScope.scala"],
     deps = [
+        ":rfc1123",
         "//caching/external/proto:config_scope_specification",
         "//wrappers/conf:dbconf",
         "//wrappers/conf:location",
@@ -1170,7 +1167,6 @@ scala_library(
     srcs = ["src/Pipeline.scala"],
     deps = [
         ":executor_util",
-        ":hybrid_concurrency_domain",
         ":prefix_logger",
         ":sequential_execution_context",
         "@maven//:com_google_code_findbugs_jsr305",
@@ -1184,7 +1180,6 @@ scala_test(
     deps = [
         ":counting_executors",
         ":delegating_sequential_execution_context",
-        ":hybrid_concurrency_domain",
         ":pipeline",
         ":rich_pipeline",
         ":sequential_execution_context",
@@ -1202,38 +1197,6 @@ scala_library(
     srcs = ["test/RichPipeline.scala"],
     testonly = True,
     deps = [":pipeline"],
-)
-
-scala_library(
-    name = "hybrid_concurrency_domain",
-    srcs = ["src/HybridConcurrencyDomain.scala"],
-    deps = [
-        ":executor_util",
-        ":lock",
-        ":prefix_logger",
-        ":sequential_execution_context",
-        ":typed_clock",
-        "@maven//:com_google_code_findbugs_jsr305",
-    ],
-)
-
-scala_test(
-    name = "hybrid_concurrency_domain_test",
-    srcs = ["test/HybridConcurrencyDomainSuite.scala"],
-    timeout = "short",
-    deps = [
-        ":fake_sequential_execution_context",
-        ":fake_typed_clock",
-        ":hybrid_concurrency_domain",
-        ":pipeline",
-        ":sequential_execution_context",
-        ":test_util",
-        ":typed_clock",
-        "//caching/util:alert_owner_team",
-        "//wrappers/util:async_test_helpers",
-        "//wrappers/util:databricks-test",
-        "@maven//:com_google_guava_guava",
-    ],
 )
 
 scala_library(
@@ -1578,7 +1541,6 @@ scala_library(
     deps = [
         ":delegating_sequential_execution_context",
         ":executor_util",
-        ":hybrid_concurrency_domain",
         ":sequential_execution_context",
         ":typed_clock",
     ],

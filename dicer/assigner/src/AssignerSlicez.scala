@@ -423,7 +423,7 @@ object AssignerTargetSlicezData {
  *                                 when no assigner is currently elected.
  * @param eligiblePods The healthy assigner pods currently considered eligible for election.
  * @param k8sConnectionHealth Whether the Kubernetes API connection is currently considered
- *                            healthy by the membership checker's hysteresis monitor.
+ *                            healthy by the membership checker's connection-health monitor.
  */
 case class ConsistentHashingState(
     localAssignerInfo: AssignerInfo,
@@ -435,7 +435,7 @@ object ConsistentHashingState {
 
   import com.databricks.api.proto.dicer.assigner.ConsistentHashingStateViewP.K8sConnectionHealthP
 
-  /** State of the Kubernetes API connection as tracked by the hysteresis monitor. */
+  /** State of the Kubernetes API connection as tracked by the connection-health monitor. */
   sealed abstract class K8sConnectionHealth(val toProto: K8sConnectionHealthP) {
     override def toString: String = this match {
       case K8sConnectionHealth.Init => "INIT"

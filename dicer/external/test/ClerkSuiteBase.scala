@@ -1,27 +1,44 @@
 package com.databricks.dicer.external
 
+import com.databricks.dicer.client.testing.{ClerkHarness}
+
 import java.net.URI
 
 import scala.concurrent.Future
-import scala.concurrent.duration.Duration
+import scala.concurrent.duration.{Duration, FiniteDuration}
+import scala.concurrent.duration._
 
 import com.databricks.caching.util.{AssertionWaiter, MetricUtils}
 import com.databricks.caching.util.MetricUtils.ChangeTracker
 import com.databricks.caching.util.TestUtils
 import com.databricks.caching.util.TestUtils.TestName
 import com.databricks.caching.util.WhereAmITestUtils.withLocationConfSingleton
+import com.databricks.conf.Configs
 import com.databricks.conf.trusted.{LocationConf, LocationConfTestUtils}
+import com.databricks.dicer.assigner.conf.DicerAssignerConf
 import com.databricks.rpc.DatabricksObjectMapper
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.client.featurerollouts.DicerClientFeatureRolloutFlag
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  LowInclusiveSliceKeyFluent,
+  LowInclusiveStringFluent,
+  SliceAssignmentSliceFluent,
+  assertWatchRequestRateBounded,
+  createProposal,
+  fp,
+  toProposedAssignmentEntry,
+  toResourceAddress,
+  toSquid,
+  withImmediateWatchResponses,
+  `∞`
+}
 import com.databricks.dicer.common.{
   AssignerServiceInfo,
   Assignment,
   AssignmentMetricsSource,
   ClientType,
-  InternalDicerTestEnvironment,
-  ProposedSliceAssignment,
-  TestAssigner
+  ProposedSliceAssignment
 }
+import com.databricks.dicer.common.testing.{InternalDicerTestEnvironment, TestAssigner}
 import com.databricks.dicer.friend.SliceMap
 import com.databricks.testing.DatabricksTest
 import io.prometheus.client.CollectorRegistry
@@ -89,12 +106,17 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
   /** The test environment used for all the tests. */
   protected final val testEnv: InternalDicerTestEnvironment =
     InternalDicerTestEnvironment.create(
-      assignerClusterUri = URI_DEV_AWS_US_WEST_2,
-      assignerServiceInfoOpt = Some(ClerkSuite.TEST_ASSIGNER_SERVICE_INFO)
+      TestAssigner.Config.create(
+        assignerConf = new DicerAssignerConf(
+          Configs.parseMap("databricks.dicer.assigner.storeIncarnation" -> 1L)
+        ),
+        assignerServiceInfoOpt = Some(ClerkSuite.TEST_ASSIGNER_SERVICE_INFO)
+      ),
+      assignerClusterUri = URI_DEV_AWS_US_WEST_2
     )
 
   /** The Assigner used for all the tests. */
-  protected final val testAssigner: TestAssigner = testEnv.testAssigner
+  protected final def testAssigner: TestAssigner = testEnv.testAssigner
 
   /** A valid client branch name. */
   protected final val validClientBranch: String =
@@ -104,6 +126,26 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
   protected def clientLanguage: String
 
   /**
+   * Whether the Clerks this suite creates can be given a client branch. False for entry points that
+   * are handed no [[ClerkConf]], which is where the branch comes from. Those entry points never
+   * call `Version.recordClientVersion`, so they emit no `dicer_client_build_info` either.
+   */
+  protected def supportsClientBranch: Boolean = true
+
+  /**
+   * Whether the Clerks this suite creates can be configured for watch-request rate limiting, either
+   * through the conf override or the rollout flag. False for entry points that are handed no
+   * [[ClerkConf]] to read either from.
+   */
+  protected def supportsRateLimitingConfiguration: Boolean = true
+
+  /**
+   * The `factoryContext` metric label that Clerks created by this suite carry, which identifies the
+   * [[ClerkImpl]] entry point they came from.
+   */
+  protected def clerkFactoryContext: String = "clerk"
+
+  /**
    * Creates a clerk for the given target, returning the clerk and the target that it is expected to
    * use.
    *
@@ -111,12 +153,32 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
    * @param clerkLocationConfigMap The location config map for the Clerk's environment. If provided,
    *                               the Clerk will be created with this location configuration.
    * @param clientBranchOpt The optional branch name to use for client version metrics.
+   * @param enableRateLimitingOverrideOpt Whether to force the Clerk's watch requests to be
+   *                                      rate-limited. Leave it [[None]] to have the Clerk fall
+   *                                      back to the default policy in its implementation. See
+   *                                      [[ClerkImpl.create]] for more details.
+   * @param enableRateLimitingFeatureRollout Whether the Clerk's watch rate-limiting rollout flag
+   *                                         resolves as enabled for its target. When false, the
+   *                                         Clerk resolves the process-wide flag.
+   * @param sliceletWatchRpcTimeoutOpt Watch RPC deadline for the Slicelet this Clerk watches, which
+   *                                   the Slicelet suggests back to the Clerk. Ignored by suites
+   *                                   whose Clerk watches the Assigner.
    */
   final protected def createClerk(
       target: Target,
       clerkLocationConfigMap: Option[Map[String, String]],
-      clientBranchOpt: Option[String] = None): (ClerkHarness, Target) = {
-    val clerk: ClerkHarness = createClerkInternal(target, clerkLocationConfigMap, clientBranchOpt)
+      clientBranchOpt: Option[String] = None,
+      enableRateLimitingOverrideOpt: Option[Boolean] = Some(false),
+      enableRateLimitingFeatureRollout: Boolean = false,
+      sliceletWatchRpcTimeoutOpt: Option[FiniteDuration] = None): (ClerkHarness, Target) = {
+    val clerk: ClerkHarness = createClerkInternal(
+      target,
+      clerkLocationConfigMap,
+      clientBranchOpt,
+      enableRateLimitingOverrideOpt,
+      enableRateLimitingFeatureRollout,
+      sliceletWatchRpcTimeoutOpt
+    )
     val locationConf: LocationConf = LocationConfTestUtils.newTestLocationConfig(
       envMap = clerkLocationConfigMap.getOrElse(Map.empty)
     )
@@ -133,7 +195,10 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
   protected def createClerkInternal(
       target: Target,
       clerkLocationConfigMap: Option[Map[String, String]],
-      clientBranchOpt: Option[String] = None): ClerkHarness
+      clientBranchOpt: Option[String] = None,
+      enableRateLimitingOverrideOpt: Option[Boolean] = Some(false),
+      enableRateLimitingFeatureRollout: Boolean = false,
+      sliceletWatchRpcTimeoutOpt: Option[FiniteDuration] = None): ClerkHarness
 
   /**
    * Creates a clerk using [[CrossClusterClerkAccessor]] for cross-cluster subscriptions.
@@ -271,7 +336,7 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
     AssertionWaiter("await frozen assignment").await {
       val lookupResource: Option[ResourceAddress] = clerk.getStubForKey(sliceKey)
       val assignmentResource: ResourceAddress =
-        assignment.sliceMap.entries(4).resources.head.resourceAddress
+        assignment.sliceMap.entries(4).resourcesSet.head.resourceAddress
       assert(lookupResource.contains(assignmentResource))
     }
 
@@ -279,7 +344,7 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
     assert(
       clerk
         .getStubForKey(SliceKey.MIN)
-        .contains(assignment.sliceMap.entries.head.resources.head.resourceAddress)
+        .contains(assignment.sliceMap.entries.head.resourcesSet.head.resourceAddress)
     )
   }
 
@@ -389,9 +454,9 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
   }
 
   /**
-   * Returns the value of a Clerk metric for the given target, filtered to the `clerk`
-   * factoryContext label since both [[ScalaClerkSuite]] and [[RustClerkSuite]] exercise the
-   * public Clerk builder.
+   * Returns the value of a Clerk metric for the given target, filtered to the factoryContext label
+   * that [[clerkFactoryContext]] names, since Clerk metrics are labeled by the entry point the
+   * Clerk was created from.
    */
   private def getClerkMetric(metricName: String, targetIdentifier: Target): Double = {
     readPrometheusMetric(
@@ -400,7 +465,7 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
         "targetCluster" -> targetIdentifier.getTargetClusterLabel,
         "targetName" -> targetIdentifier.getTargetNameLabel,
         "targetInstanceId" -> targetIdentifier.getTargetInstanceIdLabel,
-        "factoryContext" -> "clerk"
+        "factoryContext" -> clerkFactoryContext
       )
     )
   }
@@ -416,7 +481,7 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
         "targetCluster" -> targetIdentifier.getTargetClusterLabel,
         "targetName" -> targetIdentifier.getTargetNameLabel,
         "targetInstanceId" -> targetIdentifier.getTargetInstanceIdLabel,
-        "factoryContext" -> "clerk",
+        "factoryContext" -> clerkFactoryContext,
         "secondaryKeyProvided" -> "false"
       )
     )
@@ -425,6 +490,52 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
   /** Returns the number of Clerk instances created for the given target. */
   private def getClerkCreatedCount(targetIdentifier: Target): Double = {
     getClerkMetric("dicer_clerk_created_total", targetIdentifier)
+  }
+
+  /**
+   * Returns the latest assignment generation number for the given target and assigner service
+   * info.
+   *
+   * @param targetIdentifier The target the assignment was generated for.
+   * @param assignerServiceInfo The service info of the Assigner that generated the assignment.
+   */
+  private def getLatestGenerationNumber(
+      targetIdentifier: Target,
+      assignerServiceInfo: AssignerServiceInfo): Double = {
+    readPrometheusMetric(
+      "dicer_assignment_latest_generation_number",
+      Vector(
+        "targetCluster" -> targetIdentifier.getTargetClusterLabel,
+        "targetName" -> targetIdentifier.getTargetNameLabel,
+        "targetInstanceId" -> targetIdentifier.getTargetInstanceIdLabel,
+        "source" -> AssignmentMetricsSource.Clerk.toString,
+        "assignerName" -> assignerServiceInfo.name,
+        "assignerInstanceId" -> assignerServiceInfo.instanceId
+      )
+    )
+  }
+
+  /**
+   * Returns the latest assignment store incarnation for the given target and assigner service
+   * info.
+   *
+   * @param targetIdentifier The target the assignment was generated for.
+   * @param assignerServiceInfo The service info of the Assigner that generated the assignment.
+   */
+  private def getLatestIncarnationNumber(
+      targetIdentifier: Target,
+      assignerServiceInfo: AssignerServiceInfo): Double = {
+    readPrometheusMetric(
+      "dicer_assignment_latest_store_incarnation",
+      Vector(
+        "targetCluster" -> targetIdentifier.getTargetClusterLabel,
+        "targetName" -> targetIdentifier.getTargetNameLabel,
+        "targetInstanceId" -> targetIdentifier.getTargetInstanceIdLabel,
+        "source" -> AssignmentMetricsSource.Clerk.toString,
+        "assignerName" -> assignerServiceInfo.name,
+        "assignerInstanceId" -> assignerServiceInfo.instanceId
+      )
+    )
   }
 
   test("Clerk records creation and getStubForKey call count metrics") {
@@ -501,34 +612,6 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
     // correctly, creating a second, different assignment, waiting for the clerk to receive the
     // assignment, and verifying that the metrics are updated correctly.
 
-    def getLatestGenerationNumber(source: AssignmentMetricsSource, target: Target): Double = {
-      readPrometheusMetric(
-        "dicer_assignment_latest_generation_number",
-        Vector(
-          "targetCluster" -> target.getTargetClusterLabel,
-          "targetName" -> target.getTargetNameLabel,
-          "targetInstanceId" -> target.getTargetInstanceIdLabel,
-          "source" -> source.toString,
-          "assignerName" -> ClerkSuite.TEST_ASSIGNER_SERVICE_INFO.name,
-          "assignerInstanceId" -> ClerkSuite.TEST_ASSIGNER_SERVICE_INFO.instanceId
-        )
-      )
-    }
-
-    def getLatestIncarnationNumber(source: AssignmentMetricsSource, target: Target): Double = {
-      readPrometheusMetric(
-        "dicer_assignment_latest_store_incarnation",
-        Vector(
-          "targetCluster" -> target.getTargetClusterLabel,
-          "targetName" -> target.getTargetNameLabel,
-          "targetInstanceId" -> target.getTargetInstanceIdLabel,
-          "source" -> source.toString,
-          "assignerName" -> ClerkSuite.TEST_ASSIGNER_SERVICE_INFO.name,
-          "assignerInstanceId" -> ClerkSuite.TEST_ASSIGNER_SERVICE_INFO.instanceId
-        )
-      )
-    }
-
     def getNumNewGenerations(source: AssignmentMetricsSource, target: Target): Double = {
       readPrometheusMetric(
         "dicer_assignment_number_new_generations_total",
@@ -566,11 +649,11 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
     // Incarnation and generation metric should eventually be updated to the assignment just set
     AssertionWaiter("Awaiting metric update").await {
       assert(
-        getLatestGenerationNumber(clerkSource, expectedTarget)
+        getLatestGenerationNumber(expectedTarget, ClerkSuite.TEST_ASSIGNER_SERVICE_INFO)
         == assignment1.generation.number.value
       )
       assert(
-        getLatestIncarnationNumber(clerkSource, expectedTarget)
+        getLatestIncarnationNumber(expectedTarget, ClerkSuite.TEST_ASSIGNER_SERVICE_INFO)
         == assignment1.generation.incarnation.value
       )
       // Don't check for an exact value, because multiple assignments can be delivered (e.g.,
@@ -589,14 +672,89 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
       TestUtils.awaitResult(testAssigner.setAndFreezeAssignment(target, proposal2), Duration.Inf)
     AssertionWaiter("Awaiting new assignment").await {
       assert(
-        getLatestGenerationNumber(clerkSource, expectedTarget)
+        getLatestGenerationNumber(expectedTarget, ClerkSuite.TEST_ASSIGNER_SERVICE_INFO)
         == assignment2.generation.number.value
       )
       assert(
-        getLatestIncarnationNumber(clerkSource, expectedTarget)
+        getLatestIncarnationNumber(expectedTarget, ClerkSuite.TEST_ASSIGNER_SERVICE_INFO)
         == assignment2.generation.incarnation.value
       )
       assert(newGenerationsTracker.totalChange() >= 1)
+    }
+  }
+
+  test("Clerk removes gauges for a target after assigner service info change") {
+    // Test plan: Verify that the Clerk removes gauges for a target after the assigner service info
+    // changes. Verify this by recording metrics for one target under an initial assigner service
+    // info, restarting the Assigner with a different assigner service info, and checking that the
+    // stale metrics are removed.
+    val initialServiceInfo =
+      AssignerServiceInfo(name = "test-assigner-1", instanceId = "test-instance-1")
+    val changedServiceInfo =
+      AssignerServiceInfo(name = "test-assigner-2", instanceId = "test-instance-2")
+    val assignerPort: Int = testEnv.getAssignerPort
+    var sliceletOpt: Option[Slicelet] = None
+    var clerkOpt: Option[ClerkHarness] = None
+
+    try {
+      // Setup: Initialize the assigner with the initial service info.
+      testEnv.restartAssigner(
+        index = 0,
+        TestAssigner.Config.create(
+          assignerConf = new DicerAssignerConf(
+            Configs.parseMap("databricks.dicer.assigner.storeIncarnation" -> 1L)
+          ),
+          designatedDicerAssignerRpcPort = Some(assignerPort),
+          assignerServiceInfoOpt = Some(initialServiceInfo)
+        )
+      )
+
+      val target = Target(getUniqueTargetName)
+      // Direct Clerks also need a live Slicelet to trigger assignment generation.
+      val slicelet: Slicelet = testEnv.createSlicelet(target)
+      sliceletOpt = Some(slicelet)
+      slicelet.start(selfPort = 1234, listenerOpt = None)
+      val (clerk, expectedTarget): (ClerkHarness, Target) =
+        createClerk(target, Some(LOCATION_CONFIG_MAP_DEV_AWS_US_WEST_2))
+      clerkOpt = Some(clerk)
+
+      AssertionWaiter("Clerk records initial Assigner metrics").await {
+        assert(getLatestGenerationNumber(expectedTarget, initialServiceInfo) > 0)
+        assert(getLatestIncarnationNumber(expectedTarget, initialServiceInfo) == 1)
+      }
+
+      // Setup: Restart the assigner with a different assigner service info.
+      testEnv.restartAssigner(
+        index = 0,
+        TestAssigner.Config.create(
+          assignerConf = new DicerAssignerConf(
+            Configs.parseMap("databricks.dicer.assigner.storeIncarnation" -> 1L)
+          ),
+          designatedDicerAssignerRpcPort = Some(assignerPort),
+          assignerServiceInfoOpt = Some(changedServiceInfo)
+        )
+      )
+
+      AssertionWaiter("Clerk records new metrics and removes old gauges").await {
+        assert(getLatestGenerationNumber(expectedTarget, changedServiceInfo) > 0)
+        assert(getLatestIncarnationNumber(expectedTarget, changedServiceInfo) == 1)
+        assert(getLatestGenerationNumber(expectedTarget, initialServiceInfo) == 0)
+        assert(getLatestIncarnationNumber(expectedTarget, initialServiceInfo) == 0)
+      }
+    } finally {
+      // Cleanup: Stop running clients and reset test assigner to original state.
+      clerkOpt.foreach((_: ClerkHarness).stop())
+      sliceletOpt.foreach((_: Slicelet).forTest.stop())
+      testEnv.restartAssigner(
+        index = 0,
+        TestAssigner.Config.create(
+          assignerConf = new DicerAssignerConf(
+            Configs.parseMap("databricks.dicer.assigner.storeIncarnation" -> 1L)
+          ),
+          designatedDicerAssignerRpcPort = Some(assignerPort),
+          assignerServiceInfoOpt = Some(ClerkSuite.TEST_ASSIGNER_SERVICE_INFO)
+        )
+      )
     }
   }
 
@@ -648,6 +806,7 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
   gridTest("Clerk records valid client version")(
     Seq(Target(_: String), Target.createAppTarget(_: String, "instance-id"))
   ) { (targetFactory: String => Target) =>
+    assume(supportsClientBranch, "this Clerk entry point cannot be given a client branch")
     // Test plan: Verify that the client versions are reported for a Clerk with a valid branch.
 
     // Setup: create a Clerk with a conf that has a valid branch.
@@ -695,6 +854,7 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
   gridTest("Clerk records invalid client version")(
     Seq(Target(_: String), Target.createAppTarget(_: String, "instance-id"))
   ) { (targetFactory: String => Target) =>
+    assume(supportsClientBranch, "this Clerk entry point cannot be given a client branch")
     // Test plan: Verify that the client versions are reported for a Clerk with an invalid branch.
 
     // Setup: create a Clerk with a conf that has an invalid branch.
@@ -736,6 +896,7 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
   }
 
   test("Clerk picks up WhereAmI cluster URI if available") {
+    assume(supportsClientBranch, "this Clerk entry point cannot be given a client branch")
     // Test plan: Verify that Clerks created with cluster-unqualified target will pick up cluster
     // URI from environment variable. Verify this by simulating the case where the Clerk, Slicelet
     // and assigner are running in the same cluster with WhereAmI being
@@ -935,19 +1096,73 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
           )
         ).toLong == 1
       )
-      assert(
-        readPrometheusMetric(
-          "dicer_client_build_info",
-          Vector(
-            "targetCluster" -> "",
-            "targetName" -> clusterUnqualifiedTarget.name,
-            "targetInstanceId" -> clusterUnqualifiedTarget.getTargetInstanceIdLabel,
-            "source" -> "Clerk"
-          )
-        ).toLong == 1
-      )
+      if (supportsClientBranch) {
+        assert(
+          readPrometheusMetric(
+            "dicer_client_build_info",
+            Vector(
+              "targetCluster" -> "",
+              "targetName" -> clusterUnqualifiedTarget.name,
+              "targetInstanceId" -> clusterUnqualifiedTarget.getTargetInstanceIdLabel,
+              "source" -> "Clerk"
+            )
+          ).toLong == 1
+        )
+      }
     }
     clerk.stop()
+  }
+
+  test("Rate limiting bounds the Clerk's watch request rate") {
+    assume(
+      supportsRateLimitingConfiguration,
+      "this Clerk entry point has no rate-limiting configuration source"
+    )
+    // Test plan: Verify that enabling the Clerk's rate-limiting override keeps watch traffic low
+    // while the Clerk continues making progress. Have the test environment answer the Clerk's watch
+    // requests as fast as it can send them, then measure the rate over a short window.
+    val target: Target = Target(getUniqueTargetName)
+    val (clerk, expectedTarget): (ClerkHarness, Target) = createClerk(
+      target,
+      Some(LOCATION_CONFIG_MAP_DEV_AWS_US_WEST_2),
+      enableRateLimitingOverrideOpt = Some(true),
+      // Keep the Slicelet's hanging gets short, at the 500ms floor `validateWatchRpcTimeout`
+      // enforces, so a watch arriving between assignment changes still turns over quickly.
+      sliceletWatchRpcTimeoutOpt = Some(500.milliseconds)
+    )
+
+    try {
+      // A Slicelet-watching Clerk only gets a response once the assignment actually changes, so it
+      // needs the assignment churn; an Assigner-watching Clerk is served by a canned reply that
+      // skips the Assigner's watch handling entirely.
+      withImmediateWatchResponses(
+        testEnv,
+        target,
+        useAssignmentChurn = getWatchSource == WatchSourceSlicelet
+      ) {
+        assertWatchRequestRateBounded(
+          clientDescription = "Clerk",
+          getWatchRequestCount = () => getWatchRequestCount(expectedTarget)
+        )
+      }
+    } finally {
+      clerk.stop()
+    }
+  }
+
+  /** Returns how many watch requests the Clerk for `expectedTarget` has sent successfully. */
+  protected final def getWatchRequestCount(expectedTarget: Target): Long = {
+    readPrometheusMetric(
+      "dicer_client_watch_requests_total",
+      Vector(
+        "targetCluster" -> expectedTarget.getTargetClusterLabel,
+        "targetName" -> expectedTarget.getTargetNameLabel,
+        "targetInstanceId" -> expectedTarget.getTargetInstanceIdLabel,
+        "clientType" -> ClientType.Clerk.getMetricLabel,
+        "status" -> "success",
+        "grpc_status" -> "OK"
+      )
+    ).toLong
   }
 }
 
@@ -972,5 +1187,54 @@ abstract class ScalaClerkSuiteBase extends ClerkSuiteBase {
       metricName: String,
       labels: Vector[(String, String)]): Double = {
     MetricUtils.getMetricValue(CollectorRegistry.defaultRegistry, metricName, labels.toMap)
+  }
+
+  /**
+   * Returns the [[DicerClientFeatureRolloutFlag]] that `createClerk` injects into the
+   * [[InternalDicerTestEnvironment]] when `enableRateLimitingFeatureRollout` is true. The flag
+   * reports enabled only for [[DicerClientFeatureRolloutFlag.CLERK_WATCH_RATE_LIMITING_FLAG_NAME]],
+   * so a Clerk querying any other flag name still fails in rollout tests.
+   */
+  protected final val clerkRateLimitingRolloutFlag: DicerClientFeatureRolloutFlag =
+    new DicerClientFeatureRolloutFlag {
+      override def isEnabled(flagName: String, target: Target): Boolean =
+        flagName == DicerClientFeatureRolloutFlag.CLERK_WATCH_RATE_LIMITING_FLAG_NAME
+    }
+
+  // TODO(<internal bug>): Move this test to ClerkSuiteBase once the Rust Clerk resolves rollout flags too,
+  // so that it covers both implementations.
+  test("The watch rate-limiting rollout flag bounds the Clerk's watch request rate") {
+    assume(
+      supportsRateLimitingConfiguration,
+      "this Clerk entry point has no rate-limiting configuration source"
+    )
+    // Test plan: Verify that a Clerk rate limits its watch requests when the watch rate-limiting
+    // rollout flag is enabled for its target, which is how rate limiting reaches production Clerks.
+    // Verify this by leaving the rate-limiting conf override unset, so that the Clerk has to
+    // resolve the flag, enabling it via createClerk, and then holding the Clerk to the same
+    // rate bound that the conf override is held to in ClerkSuiteBase.
+    val target: Target = Target(getUniqueTargetName)
+    val (clerk, expectedTarget): (ClerkHarness, Target) = createClerk(
+      target,
+      Some(LOCATION_CONFIG_MAP_DEV_AWS_US_WEST_2),
+      enableRateLimitingOverrideOpt = None,
+      enableRateLimitingFeatureRollout = true,
+      sliceletWatchRpcTimeoutOpt = Some(500.milliseconds)
+    )
+
+    try {
+      withImmediateWatchResponses(
+        testEnv,
+        target,
+        useAssignmentChurn = getWatchSource == WatchSourceSlicelet
+      ) {
+        assertWatchRequestRateBounded(
+          clientDescription = "Clerk",
+          getWatchRequestCount = () => getWatchRequestCount(expectedTarget)
+        )
+      }
+    } finally {
+      clerk.stop()
+    }
   }
 }

@@ -1,0 +1,2 @@
+# This BUILD file exists to satisfy Bazel's requirement that every .bzl file
+# must have a corresponding package.

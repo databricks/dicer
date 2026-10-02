@@ -4,7 +4,12 @@ import java.time.Instant
 import scala.concurrent.duration.Duration.Inf
 import scala.concurrent.{Future}
 
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  createAssignment,
+  createRandomProposal,
+  createTestSquid,
+  toSliceKey
+}
 import scala.concurrent.duration._
 import scala.util.Random
 import scala.util.control.NonFatal
@@ -27,9 +32,9 @@ import com.databricks.dicer.common.{
   SliceAssignment,
   SliceHelper,
   SliceWithResources,
-  SliceletData,
-  TestSliceUtils
+  SliceletData
 }
+import com.databricks.dicer.common.testing.{SliceTestUtils}
 import com.databricks.dicer.external.{Slice, SliceKey, Target}
 import com.databricks.dicer.friend.{SliceMap, Squid}
 import com.databricks.dicer.friend.SliceMap.GapEntry
@@ -38,7 +43,13 @@ import com.databricks.dicer.common.test.SimpleDiffAssignmentP.SimpleSliceAssignm
 import com.databricks.dicer.common.test.SliceletLoadAccumulatorTestDataP
 import com.databricks.dicer.common.test.SliceletLoadAccumulatorTestDataP.ActionP.Action
 import com.databricks.dicer.common.test.SliceletLoadAccumulatorTestDataP.IncrementPrimaryLoadP.IncrementByKey
-import com.databricks.dicer.common.test.SliceletLoadAccumulatorTestDataP._
+import com.databricks.dicer.common.test.SliceletLoadAccumulatorTestDataP.{
+  CheckAttributedLoadsP,
+  CheckUnattributedLoadP,
+  ExpectedSliceInfoP,
+  ValidCaseP,
+  messageCompanion
+}
 import com.databricks.testing.DatabricksTest
 import org.scalatest.TestData
 
@@ -79,7 +90,7 @@ class SliceletLoadAccumulatorSuite extends DatabricksTest with TestName {
       actionProto.action match {
         case Action.IncrementPrimaryLoad(proto) =>
           val key: SliceKey = proto.incrementByKey match {
-            case IncrementByKey.Key(key) => TestSliceUtils.toSliceKey(key)
+            case IncrementByKey.Key(key) => SliceTestUtils.toSliceKey(key)
             case IncrementByKey.BytesKey(bytes) => SliceKey.fromRawBytes(bytes)
             case IncrementByKey.Empty => SliceKey.MIN // Default to MIN if no key is specified
           }

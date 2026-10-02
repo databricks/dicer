@@ -6,14 +6,15 @@ import com.google.protobuf.ByteString
 import com.databricks.caching.util.TestUtils
 import com.databricks.dicer.common.SliceHelper.RichSlice
 import com.databricks.dicer.common.test.SliceKeyTestDataP
-import com.databricks.dicer.common.TestSliceUtils.{
+import com.databricks.dicer.common.testing.SliceTestUtils
+import com.databricks.dicer.common.testing.SliceTestUtils.{
   highSliceKeyFromProto,
   identityKey,
   singleByteIdentityKey
 }
 import com.databricks.dicer.external.{HighSliceKey, InfinitySliceKey, Slice, SliceKey}
 import com.databricks.testing.DatabricksTest
-import com.databricks.dicer.common.SliceKeyHelper._
+import com.databricks.dicer.common.SliceKeyHelper.RichSliceKey
 import com.databricks.dicer.common.test.SliceKeyTestDataP.ToStringTestCaseP
 
 class SliceKeySuite extends DatabricksTest {
@@ -87,7 +88,7 @@ class SliceKeySuite extends DatabricksTest {
     // Test plan: Run toString on SliceKeys created from shared proto test data. Verify that the
     // string representations match the expected values specified in the test data.
     for (testCase: ToStringTestCaseP <- SliceKeySuite.TEST_DATA.toStringTestCases) {
-      val key: SliceKey = TestSliceUtils.sliceKeyFromProto(testCase.sliceKey.get)
+      val key: SliceKey = SliceTestUtils.sliceKeyFromProto(testCase.sliceKey.get)
       if (testCase.getIsSuccessor) {
         assertResult(testCase.expectedString.get)(key.successor().toString)
       } else {

@@ -4,14 +4,16 @@ import java.io.File
 
 import scala.concurrent.duration._
 
-import com.databricks.caching.util.ConfigScope
+import com.databricks.caching.util.ClusterConfigScope
 import com.databricks.dicer.assigner.config.InternalTargetConfig.LoadWatcherTargetConfig
 import com.databricks.dicer.common.TargetName
 import com.databricks.testing.DatabricksTest
 
 class InternalTargetConfigMapSuite extends DatabricksTest {
 
-  private val AWS_US_WEST_2_SCOPE = ConfigScope("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01")
+  private val AWS_US_WEST_2_SCOPE = ClusterConfigScope(
+    "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01"
+  )
 
   test(
     "InternalTargetConfigMap.get returns Some for targets that exist in config " +

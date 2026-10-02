@@ -1,8 +1,7 @@
 package com.databricks.dicer.assigner
 
 import com.databricks.caching.util.{Cancellable, ValueStreamCallback, WatchValueCell}
-import com.databricks.dicer.common.{Generation, Incarnation}
-import com.databricks.caching.util.UnixTimeVersion
+import com.databricks.dicer.common.Generation
 
 import scala.concurrent.Future
 
@@ -11,19 +10,14 @@ import scala.concurrent.Future
  * created, it always returns a [[PreferredAssignerValue.ModeDisabled]] value. This design is
  * to keep the behavior under the disabled preferred assigner mode as simple as possible.
  */
-class DisabledPreferredAssignerDriver(storeIncarnation: Incarnation)
-    extends PreferredAssignerDriver {
-  require(
-    storeIncarnation.isLoose,
-    s"Store incarnation must be loose when the preferred assigner feature is disabled: " +
-    s"($storeIncarnation)"
-  )
+class DisabledPreferredAssignerDriver extends PreferredAssignerDriver {
 
-  /** The constant disabled preferred assigner value. */
+  /**
+   * The constant disabled preferred assigner value. We set this to `Generation.EMPTY` because
+   * an assigner with PA disabled never writes to etcd.
+   */
   private val DISABLED_PREFERRED_ASSIGNER_VALUE: PreferredAssignerValue =
-    PreferredAssignerValue.ModeDisabled(
-      Generation(incarnation = storeIncarnation, UnixTimeVersion.MIN)
-    )
+    PreferredAssignerValue.ModeDisabled(Generation.EMPTY)
 
   private val preferredAssignerWatchCell: WatchValueCell[PreferredAssignerConfig] =
     new WatchValueCell[PreferredAssignerConfig]()
@@ -53,6 +47,8 @@ class DisabledPreferredAssignerDriver(storeIncarnation: Incarnation)
   }
 
   override def handleHeartbeatRequest(request: HeartbeatRequest): Future[HeartbeatResponse] = {
+    // Receiving a heartbeat request in this mode is surprising because we do not expect a PA
+    // disabled assigner to be elected as preferred.
     val heartbeatResponse = HeartbeatResponse(request.opId, DISABLED_PREFERRED_ASSIGNER_VALUE)
     Future.successful(heartbeatResponse)
   }

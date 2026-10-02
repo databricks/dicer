@@ -5,10 +5,26 @@ import scala.concurrent.duration._
 import org.scalatest.exceptions.TestFailedException
 
 import com.databricks.caching.util.TestUtils.assertThrow
-import com.databricks.dicer.assigner.MigrationTestAssignment._
-import com.databricks.dicer.assigner.MigrationTestAssignment.TestSliceReplica._
+import com.databricks.dicer.assigner.MigrationTestAssignment.{
+  TestResourceAssignmentFluent,
+  TestSliceReplica,
+  doubleToTestSliceReplica
+}
+import com.databricks.dicer.assigner.MigrationTestAssignment.TestSliceReplica.{`--`, `---`}
 import com.databricks.dicer.common.AssignmentConsistencyMode.Affinity
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  LowInclusiveLongFluent,
+  LowInclusiveStringFluent,
+  SliceAssignmentFluet,
+  SliceAssignmentSliceFluent,
+  createAssignment,
+  createLooseGeneration,
+  createTestSquid,
+  toSliceKey,
+  toSquid,
+  toSquidWithValue,
+  `∞`
+}
 import com.databricks.dicer.common.{Assignment, Generation, SliceAssignment, SubsliceAnnotation}
 import com.databricks.caching.util.UnixTimeVersion
 import com.databricks.testing.DatabricksTest
@@ -73,7 +89,7 @@ class MigrationTestAssignmentSuite extends DatabricksTest {
     val assignment: Assignment = migrationTestAssignment.assignment
     assert(
       assignment.sliceAssignments.exists { sliceAssignment: SliceAssignment =>
-        sliceAssignment.resources == Set(createTestSquid("pod0"), createTestSquid("pod1")) &&
+        sliceAssignment.resourcesSet == Set(createTestSquid("pod0"), createTestSquid("pod1")) &&
         sliceAssignment.primaryRateLoadOpt.contains(20.0)
       }
     )

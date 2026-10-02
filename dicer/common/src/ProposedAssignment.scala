@@ -138,10 +138,7 @@ case class ProposedAssignment(
    * [[SliceAssignment]] will be created for a Slice, even if the proposed assignment is
    * identical modulo [[SliceAssignment.primaryRateLoadOpt]]. (See the remarks on
    * [[SliceAssignment]] to understand why we do not require an exact match between the
-   * previous and current load measurements. Note that when the previous Slice is in the "loose"
-   * generation incarnation, any change in load is considered above threshold, as there is no
-   * opportunity to optimize assignment sync by using assignment diffs in that case.) The threshold
-   * is a change ratio relative to:
+   * previous and current load measurements.) The threshold is a change ratio relative to:
    *
    *    `abs(primaryRateLoad - previous.primaryRateLoad) / previous.primaryRateLoad`
    *
@@ -302,11 +299,11 @@ object ProposedAssignment {
 
       val stateProviderCandidates: Set[Squid] = {
         val commonlyAssignedResources: Set[Squid] =
-          previous.resources.intersect(proposed.resources)
+          previous.resourcesSet.intersect(proposed.resources)
         if (commonlyAssignedResources.nonEmpty) {
           commonlyAssignedResources
         } else {
-          previous.resources
+          previous.resourcesSet
         }
       }
       val sortedProviderCandidates: Vector[Squid] = stateProviderCandidates.toVector.sorted
@@ -314,7 +311,7 @@ object ProposedAssignment {
       val sortedProposedResources: Vector[Squid] = proposed.resources.toVector.sorted
 
       for (proposedResource: Squid <- sortedProposedResources) {
-        if (previous.resources.contains(proposedResource)) {
+        if (previous.resourcesSet.contains(proposedResource)) {
           // Carry over all relevant annotations from `previous` for continuously assigned resource.
           // Filter out subslice annotations that do not intersect with the proposed Slice, and for
           // the ones that do, change its subslice to only cover the intersection.
@@ -368,8 +365,7 @@ object ProposedAssignment {
         // Slice only once when we reach the last intersecting entry. By waiting until the last
         // intersecting entry, we ensure that `annotationCandidatesByResource` contains all
         // intersecting subslice annotation candidates for the proposed Slice.
-        if (generation.incarnation.isNonLoose &&
-          previous.resources == proposed.resources &&
+        if (previous.resourcesSet == proposed.resources &&
           previous.slice == proposed.slice &&
           isLoadWithinThreshold(
             previousLoadOpt = previous.primaryRateLoadOpt,
@@ -381,7 +377,6 @@ object ProposedAssignment {
           //  - the same Slice boundary
           //  - the same assigned resources
           //  - the primary rate load is within the given threshold
-          //  - the incarnation is non-loose
           // then we can carry forward the previous Slice, as with `pod0 @42` in the example above.
           // Note that when all these conditions are true we can also directly carry the annotations
           // forward from the previous slice assignment.

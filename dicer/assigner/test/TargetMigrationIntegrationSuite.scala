@@ -12,7 +12,8 @@ import com.databricks.caching.util.{
 import com.databricks.caching.util.MetricUtils.ChangeTracker
 import com.databricks.caching.util.TestUtils.ParameterizedTestNameDecorator
 import com.databricks.dicer.assigner.TargetMetrics.GeneratorShutdownReason
-import com.databricks.dicer.assigner.PreferredAssignerTestHelper.{
+import com.databricks.dicer.assigner.testing.PreferredAssignerTestUtils
+import com.databricks.dicer.assigner.testing.PreferredAssignerTestUtils.{
   advanceClockBySync,
   createAssignerConfig,
   TEST_TARGET_FOR_PA_DISCOVERY
@@ -27,13 +28,9 @@ import com.databricks.dicer.assigner.config.{
 }
 import com.databricks.dicer.assigner.config.TargetConfigProvider.DEFAULT_INITIAL_POLL_TIMEOUT
 import com.databricks.dicer.client.TestClientUtils
-import com.databricks.dicer.common.{
-  Incarnation,
-  InternalDicerTestEnvironment,
-  TargetName,
-  TestAssigner
-}
-import com.databricks.dicer.common.InternalDicerTestEnvironment.InternalTargetConfigMapWithDefault
+import com.databricks.dicer.common.{Incarnation, TargetName}
+import com.databricks.dicer.common.testing.{InternalDicerTestEnvironment, TestAssigner}
+import com.databricks.dicer.common.testing.InternalDicerTestEnvironment.InternalTargetConfigMapWithDefault
 import com.databricks.dicer.external.{Slicelet, Target}
 import com.databricks.testing.DatabricksTest
 import io.prometheus.client.CollectorRegistry
@@ -110,7 +107,7 @@ class ParameterizedTargetMigrationIntegrationSuite(localRole: TargetMigrationRol
       env.testAssigners
     )
     val preferred: TestAssigner =
-      PreferredAssignerTestHelper.getConvergedPreferredAssigner(env.testAssigners)
+      PreferredAssignerTestUtils.getConvergedPreferredAssigner(env.testAssigners)
     (env, preferred)
   }
 
@@ -142,8 +139,7 @@ class ParameterizedTargetMigrationIntegrationSuite(localRole: TargetMigrationRol
         config.preferredAssignerDriverConfig,
         dockerizedEtcdOpt = None
       ),
-      assignerClusterUri = assignerClusterUri,
-      assignerServiceInfoOpt = None
+      assignerClusterUri = assignerClusterUri
     )
   }
 

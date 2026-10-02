@@ -10,7 +10,8 @@ import com.databricks.caching.util.UnixTimeVersion
 import com.databricks.caching.util.TestUtils.assertThrow
 import com.databricks.dicer.assigner.algorithm.Algorithm.computeAdjustedLoadMap
 import com.databricks.dicer.assigner.AssignmentStats.AssignmentLoadStats
-import com.databricks.dicer.assigner.config.{ChurnConfig, ConfigTestUtil, InternalTargetConfig}
+import com.databricks.dicer.assigner.config.{ChurnConfig, InternalTargetConfig}
+import com.databricks.dicer.assigner.config.testing.{ConfigTestUtils}
 import com.databricks.dicer.assigner.config.InternalTargetConfig.{
   KeyReplicationConfig,
   LoadBalancingConfig,
@@ -18,8 +19,12 @@ import com.databricks.dicer.assigner.config.InternalTargetConfig.{
   ReplicationThresholdOverride
 }
 import com.databricks.dicer.assigner.MigrationTestAssignment
-import com.databricks.dicer.assigner.MigrationTestAssignment._
-import com.databricks.dicer.assigner.MigrationTestAssignment.TestSliceReplica._
+import com.databricks.dicer.assigner.MigrationTestAssignment.{
+  TestResourceAssignmentFluent,
+  TestSliceReplica,
+  doubleToTestSliceReplica
+}
+import com.databricks.dicer.assigner.MigrationTestAssignment.TestSliceReplica.{`--`, `---`}
 import com.databricks.dicer.common.{
   Assignment,
   AssignmentConsistencyMode,
@@ -31,7 +36,26 @@ import com.databricks.dicer.common.{
   SubsliceAnnotation
 }
 import com.databricks.dicer.common.SliceKeyHelper.RichSliceKey
-import com.databricks.dicer.common.TestSliceUtils._
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  LowInclusiveLongFluent,
+  LowInclusiveSliceKeyFluent,
+  LowInclusiveStringFluent,
+  ProposedAssignmentEntry,
+  ProposedSliceAssignmentFluent,
+  SliceAssignmentFluet,
+  SliceAssignmentSliceFluent,
+  assertDesirableAssignmentProperties,
+  createAssignment,
+  createLooseGeneration,
+  createProposal,
+  createResources,
+  createTestSquid,
+  toProposedAssignmentEntry,
+  toSliceKey,
+  toSquid,
+  toSquidWithValue,
+  `∞`
+}
 import com.databricks.dicer.external.{Slice, SliceKey, Target}
 import com.databricks.dicer.friend.{MutableSliceMap, SliceMap, Squid}
 
@@ -62,7 +86,7 @@ class NonParameterizedAlgorithmSuite extends AlgorithmSuiteBase {
       predecessor: MigrationTestAssignment,
       expectedOutput: MigrationTestAssignment,
       // Disable churn penalties by default so that it's easier to reason about the effective load.
-      churnConfig: ChurnConfig = ConfigTestUtil.ZERO_PENALTY_CHURN_CONFIG,
+      churnConfig: ChurnConfig = ConfigTestUtils.ZERO_PENALTY_CHURN_CONFIG,
       keyReplicationConfig: KeyReplicationConfig = KeyReplicationConfig.DEFAULT_SINGLE_REPLICA,
       // Default assignment age chosen such that there's no lingering churn penalty for previously
       // assigned Slices for tests that don't care about churn.
@@ -159,8 +183,9 @@ class NonParameterizedAlgorithmSuite extends AlgorithmSuiteBase {
       // be performed.
       for (sliceAssignment: SliceAssignment <- predecessorAssignment.sliceAssignments) {
         val adjustedPerReplicaLoad: Double =
-          reservationAdjustedLoadMap.getLoad(sliceAssignment.slice) / sliceAssignment.resources.size
-        val numReplicas: Int = sliceAssignment.resources.size
+          reservationAdjustedLoadMap.getLoad(sliceAssignment.slice) /
+          sliceAssignment.resourcesSet.size
+        val numReplicas: Int = sliceAssignment.resourcesSet.size
         assert(
           numReplicas <= keyReplicationConfig.maxReplicas,
           s"SliceAssigment $sliceAssignment will be de-replicated from $numReplicas to " +
@@ -292,7 +317,7 @@ class NonParameterizedAlgorithmSuite extends AlgorithmSuiteBase {
             sliceAssignment: SliceAssignment =>
               val subsliceAnnotationsOverride = Map.newBuilder[Squid, Vector[SubsliceAnnotation]]
               val slice: Slice = sliceAssignment.slice
-              for (resource: Squid <- sliceAssignment.resources) {
+              for (resource: Squid <- sliceAssignment.resourcesSet) {
                 mutableSliceMap(resource).lookUp(slice.lowInclusive) match {
                   case Some((sliceInMap: Slice, age: FiniteDuration))
                       if sliceInMap.contains(slice) =>
@@ -363,16 +388,16 @@ class NonParameterizedAlgorithmSuite extends AlgorithmSuiteBase {
         expectedReplicasOrNum match {
           case Left(expectedReplicas: Set[Squid]) =>
             assert(
-              sliceAssignment.resources == expectedReplicas,
+              sliceAssignment.resourcesSet == expectedReplicas,
               s"Expected slice $slice to be assigned to ${expectedReplicas.mkString}, " +
-              s"but got ${sliceAssignment.resources.mkString}. Test case: ${this.description}"
+              s"but got ${sliceAssignment.resourcesSet.mkString}. Test case: ${this.description}"
             )
           case Right(expectedNumReplicas: Int) =>
             assert(
-              sliceAssignment.resources.size == expectedNumReplicas,
+              sliceAssignment.resourcesSet.size == expectedNumReplicas,
               s"Expected slice $slice to have $expectedNumReplicas replicas, but got " +
-              s"${sliceAssignment.resources.size} replicas: " +
-              s"${sliceAssignment.resources.mkString}. Test case: ${this.description}"
+              s"${sliceAssignment.resourcesSet.size} replicas: " +
+              s"${sliceAssignment.resourcesSet.mkString}. Test case: ${this.description}"
             )
         }
       }
@@ -390,10 +415,10 @@ class NonParameterizedAlgorithmSuite extends AlgorithmSuiteBase {
           val expectedDefaultNumReplicas: Int =
             targetConfig.keyReplicationConfig.minReplicas.min(resources.availableResources.size)
           assert(
-            sliceAssignment.resources.size == expectedDefaultNumReplicas,
+            sliceAssignment.resourcesSet.size == expectedDefaultNumReplicas,
             s"Expected slice ${sliceAssignment.slice} to have $expectedDefaultNumReplicas " +
-            s"replicas, but got ${sliceAssignment.resources.size} replicas: " +
-            s"${sliceAssignment.resources.mkString}. Test case: ${this.description}"
+            s"replicas, but got ${sliceAssignment.resourcesSet.size} replicas: " +
+            s"${sliceAssignment.resourcesSet.mkString}. Test case: ${this.description}"
           )
         }
       }
@@ -630,7 +655,7 @@ class NonParameterizedAlgorithmSuite extends AlgorithmSuiteBase {
         )
       // Disable churn penalties, since they make reasoning about the load more challenging.
       val config: InternalTargetConfig =
-        createConfigForLoadBalancing(ConfigTestUtil.ZERO_PENALTY_CHURN_CONFIG, maxLoadHint = 1)
+        createConfigForLoadBalancing(ConfigTestUtils.ZERO_PENALTY_CHURN_CONFIG, maxLoadHint = 1)
 
       // Assume that all resources in the predecessor are available if the test case does not
       // provide them.
@@ -655,7 +680,7 @@ class NonParameterizedAlgorithmSuite extends AlgorithmSuiteBase {
         val (actualSlice, expectedSlice): (SliceAssignment, ProposedSliceAssignment) =
           pair
         if (expectedSlice.resources != wildcardResources.toSet) {
-          assert(actualSlice.resources == expectedSlice.resources, testCase.description)
+          assert(actualSlice.resourcesSet == expectedSlice.resources, testCase.description)
         }
         assert(actualSlice.slice == expectedSlice.slice, testCase.description)
       }
@@ -750,7 +775,7 @@ class NonParameterizedAlgorithmSuite extends AlgorithmSuiteBase {
     // all resources).
     val config: InternalTargetConfig =
       createConfigForLoadBalancing(
-        ConfigTestUtil.ZERO_PENALTY_CHURN_CONFIG,
+        ConfigTestUtils.ZERO_PENALTY_CHURN_CONFIG,
         maxLoadHint = Int.MaxValue
       )
 
@@ -876,7 +901,7 @@ class NonParameterizedAlgorithmSuite extends AlgorithmSuiteBase {
     // Test plan: Verify that `calculateDesiredLoadRange` checks that the number of resources is
     // positive.
     val targetConfig: InternalTargetConfig =
-      createConfigForLoadBalancing(ConfigTestUtil.ZERO_PENALTY_CHURN_CONFIG, maxLoadHint = 1)
+      createConfigForLoadBalancing(ConfigTestUtils.ZERO_PENALTY_CHURN_CONFIG, maxLoadHint = 1)
 
     assertThrow[IllegalArgumentException]("numResources must be positive") {
       Algorithm.calculateDesiredLoadRange(

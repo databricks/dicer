@@ -29,7 +29,8 @@ import com.databricks.rpc.tls.TLSOptions
 import com.databricks.rpc.testing.TestTLSOptions
 
 import scala.concurrent.{Await, Promise}
-import scala.concurrent.duration.Duration
+import scala.concurrent.duration.{Duration, FiniteDuration}
+import scala.concurrent.duration._
 
 /** Paths to the keystore and truststore files for constructing a [[TlsOptions]]. */
 case class TlsFilePaths(keystorePath: String, truststorePath: String)
@@ -76,7 +77,9 @@ object TestClientUtils {
       sliceletHost: String,
       clientTlsFilePathsOpt: Option[TlsFilePaths],
       serverTlsFilePathsOpt: Option[TlsFilePaths],
-      watchFromDataPlane: Boolean): Config = {
+      watchFromDataPlane: Boolean,
+      watchRpcTimeoutOpt: Option[FiniteDuration],
+      enableRateLimitingOverrideOpt: Option[Boolean]): Config = {
     val sliceletConfig = {
       Configs.parseMap(
         "databricks.dicer.slicelet.rpc.port" -> 0,
@@ -90,11 +93,18 @@ object TestClientUtils {
         "databricks.dicer.internal.cachingteamonly.clientUuid" -> UUID.randomUUID().toString
       )
     }
+    val watchRpcTimeoutConfig: Config = Configs.parseMap(
+      watchRpcTimeoutOpt.toSeq.map { timeout: FiniteDuration =>
+        "databricks.dicer.internal.cachingteamonly.watchRpcTimeoutMillis" -> timeout.toMillis
+      }: _*
+    )
     sliceletConfig
       .merge(
         getSslConfig(clientTlsFilePathsOpt, serverTlsFilePathsOpt)
       )
       .merge(createAllowMultipleClientsConfig())
+      .merge(watchRpcTimeoutConfig)
+      .merge(createEnableRateLimitingOverrideConfig(enableRateLimitingOverrideOpt))
   }
 
   /**
@@ -113,14 +123,18 @@ object TestClientUtils {
       clientTlsFilePathsOpt: Option[TlsFilePaths],
       serverTlsFilePathsOpt: Option[TlsFilePaths],
       watchFromDataPlane: Boolean,
-      featureRolloutFlagOpt: Option[DicerClientFeatureRolloutFlag] = None): SliceletConf = {
+      featureRolloutFlagOpt: Option[DicerClientFeatureRolloutFlag] = None,
+      watchRpcTimeoutOpt: Option[FiniteDuration] = None,
+      enableRateLimitingOverrideOpt: Option[Boolean] = Some(false)): SliceletConf = {
     val config: Config =
       createSliceletConfig(
         assignerPort,
         sliceletHost,
         clientTlsFilePathsOpt,
         serverTlsFilePathsOpt,
-        watchFromDataPlane
+        watchFromDataPlane,
+        watchRpcTimeoutOpt,
+        enableRateLimitingOverrideOpt
       )
     new ProjectConfByName("test", config) with SliceletConf with RPCPortConf {
       // See createTestClerkConfInternal on why this value is set for dicerSslArgs.
@@ -159,7 +173,9 @@ object TestClientUtils {
       clientTlsFilePathsOpt: Option[TlsFilePaths],
       serverTlsFilePathsOpt: Option[TlsFilePaths],
       watchFromDataPlane: Boolean,
-      featureRolloutFlagOpt: Option[DicerClientFeatureRolloutFlag] = None): Slicelet = {
+      featureRolloutFlagOpt: Option[DicerClientFeatureRolloutFlag] = None,
+      watchRpcTimeoutOpt: Option[FiniteDuration] = None,
+      enableRateLimitingOverrideOpt: Option[Boolean] = Some(false)): Slicelet = {
     val externalConf: SliceletConf =
       createTestSliceletConf(
         assignerPort,
@@ -167,7 +183,9 @@ object TestClientUtils {
         clientTlsFilePathsOpt,
         serverTlsFilePathsOpt,
         watchFromDataPlane,
-        featureRolloutFlagOpt
+        featureRolloutFlagOpt,
+        watchRpcTimeoutOpt,
+        enableRateLimitingOverrideOpt
       )
     Slicelet(externalConf, target)
   }
@@ -176,16 +194,22 @@ object TestClientUtils {
    * Creates the configuration for a Clerk that communicates with the given Slicelet at
    * `localhost:sliceletPort`.
    */
-  def createClerkConfig(sliceletPort: Int, clientTlsFilePathsOpt: Option[TlsFilePaths]): Config = {
+  def createClerkConfig(
+      sliceletPort: Int,
+      clientTlsFilePathsOpt: Option[TlsFilePaths],
+      enableRateLimitingOverrideOpt: Option[Boolean]): Config = {
     val sslConfig = getSslConfig(
       clientTlsFilePathsOpt,
       serverTlsFilePathsOpt = None
     )
-    val sliceletEndpointConfig: Config = Configs.parseMap(
+    val clerkConfig: Config = Configs.parseMap(
       "databricks.dicer.slicelet.rpc.port" -> sliceletPort,
       "databricks.dicer.internal.cachingteamonly.clientUuid" -> UUID.randomUUID().toString
     )
-    sslConfig.merge(sliceletEndpointConfig).merge(createAllowMultipleClientsConfig())
+    sslConfig
+      .merge(clerkConfig)
+      .merge(createAllowMultipleClientsConfig())
+      .merge(createEnableRateLimitingOverrideConfig(enableRateLimitingOverrideOpt))
   }
 
   /** Creates the configuration for a data plane Clerk that watches the given Assigner directly. */
@@ -221,9 +245,10 @@ object TestClientUtils {
   def createTestClerkConf(
       sliceletPort: Int,
       clientTlsFilePathsOpt: Option[TlsFilePaths],
-      featureRolloutFlagOpt: Option[DicerClientFeatureRolloutFlag] = None): ClerkConf = {
+      featureRolloutFlagOpt: Option[DicerClientFeatureRolloutFlag] = None,
+      enableRateLimitingOverrideOpt: Option[Boolean] = Some(false)): ClerkConf = {
     createTestClerkConfInternal(
-      createClerkConfig(sliceletPort, clientTlsFilePathsOpt),
+      createClerkConfig(sliceletPort, clientTlsFilePathsOpt, enableRateLimitingOverrideOpt),
       featureRolloutFlagOpt
     )
   }
@@ -261,12 +286,14 @@ object TestClientUtils {
       assignerPort: Int,
       clientTlsFilePathsOpt: Option[TlsFilePaths],
       branchOpt: Option[String] = None,
-      featureRolloutFlagOpt: Option[DicerClientFeatureRolloutFlag] = None): ClerkConf = {
+      featureRolloutFlagOpt: Option[DicerClientFeatureRolloutFlag] = None,
+      enableRateLimitingOverrideOpt: Option[Boolean] = Some(false)): ClerkConf = {
     createTestDirectClerkConfInternal(
       assignerPort,
       clientTlsFilePathsOpt,
       branchOpt,
-      featureRolloutFlagOpt
+      featureRolloutFlagOpt,
+      enableRateLimitingOverrideOpt
     )
   }
 
@@ -331,6 +358,23 @@ object TestClientUtils {
   }
 
   /**
+   * Returns a [[Config]] that sets the `enableRateLimitingOverride` conf to
+   * `enableRateLimitingOverrideOpt`, or an empty [[Config]] when it is [[None]]. Leaving the conf
+   * unset is what makes a client fall back to the default rate-limiting policy in its
+   * implementation, as it does in production; tests that are not about rate limiting pass
+   * `Some(false)` so that they pin the policy explicitly.
+   */
+  private def createEnableRateLimitingOverrideConfig(
+      enableRateLimitingOverrideOpt: Option[Boolean]): Config = {
+    Configs.parseMap(
+      enableRateLimitingOverrideOpt.toSeq.map { enableRateLimitingOverride: Boolean =>
+        "databricks.dicer.internal.cachingteamonly.enableRateLimitingOverride" ->
+        enableRateLimitingOverride
+      }: _*
+    )
+  }
+
+  /**
    * Creates an external [[ClerkConf]] using the given raw `config`.
    *
    * @param featureRolloutFlagOpt When defined, the returned conf's
@@ -373,12 +417,15 @@ object TestClientUtils {
       assignerPort: Int,
       clientTlsFilePathsOpt: Option[TlsFilePaths],
       branchOpt: Option[String],
-      featureRolloutFlagOpt: Option[DicerClientFeatureRolloutFlag]): ClerkConf = {
+      featureRolloutFlagOpt: Option[DicerClientFeatureRolloutFlag],
+      enableRateLimitingOverrideOpt: Option[Boolean]): ClerkConf = {
     val sslConfig = getSslConfig(
       clientTlsFilePathsOpt,
       serverTlsFilePathsOpt = None
     )
-    val config: Config = sslConfig.merge(createAllowMultipleClientsConfig())
+    val config: Config = sslConfig
+      .merge(createAllowMultipleClientsConfig())
+      .merge(createEnableRateLimitingOverrideConfig(enableRateLimitingOverrideOpt))
 
     new ProjectConfByName("test", config) with ClerkConf with RPCPortConf {
       // Provide some definition of `dicerSslArgs` since it is required by DicerClientConf.
