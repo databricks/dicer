@@ -1,3 +1,13 @@
+/* Self-hosted (variable font, weights 400-800) to avoid a third-party
+   request to Google Fonts at page load (GDPR). License: fonts/OFL.txt. */
+@font-face {
+  font-family: "DM Sans";
+  font-style: normal;
+  font-weight: 400 800;
+  font-display: swap;
+  src: url("../fonts/DMSans-Variable.woff2") format("woff2");
+}
+
 :root {
   /* Databricks brand palette: Oat / Navy / Lava */
   --bg: #f9f7f4;
