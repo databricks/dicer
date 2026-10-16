@@ -22,8 +22,7 @@ option (scalapb.options) = {
 message DicerClientFeatureRolloutScopeTestDataP {
   // Scope protos that should pass `from_proto`. Each entry's `description` identifies the case.
   //
-  // PRECONDITION: Every field below is required despite being declared `optional` (proto2
-  // limitation); the test suites panic if any is unset.
+  // PRECONDITION: Every field below is required; the test suites panic if any is unset.
   //
   // Next ID: 3.
   message ValidScopeTestCaseP {
@@ -35,10 +34,9 @@ message DicerClientFeatureRolloutScopeTestDataP {
   // Scope protos that should fail `from_proto` with an error containing
   // `expected_error_substring`. Each entry's `description` identifies the case.
   //
-  // PRECONDITION: Every field below is required despite being declared `optional` (proto2
-  // limitation); the test suites panic if any is unset, except for `scope_proto`'s nested
-  // `region_uri`, which is allowed to be absent in order to exercise the absent-`region_uri`
-  // failure path.
+  // PRECONDITION: Every field below is required; the test suites panic if any is unset, except
+  // for `scope_proto`'s nested `region_uri`, which is allowed to be absent in order to exercise
+  // the absent-`region_uri` failure path.
   //
   // Next ID: 4.
   message InvalidScopeTestCaseP {
@@ -47,4 +45,105 @@ message DicerClientFeatureRolloutScopeTestDataP {
     optional string expected_error_substring = 3;
   }
   repeated InvalidScopeTestCaseP invalid_scope_test_cases = 2;
+}
+
+// Test data for `DicerClientFeatureRolloutRuleSuite` (Scala) and
+// `dicer_client_feature_rollout_rule_test` (Rust). The two suites load this same textproto so
+// that input cases stay in sync across languages.
+//
+// Next ID: 3.
+message DicerClientFeatureRolloutRuleTestDataP {
+  // Rule protos that should pass `from_proto`. Each entry's `description` identifies the case.
+  //
+  // PRECONDITION: `description` and `rule_proto` are required; the test suites panic if either is
+  // unset. The repeated fields nested inside `rule_proto` may be empty.
+  //
+  // Next ID: 3.
+  message ValidRuleTestCaseP {
+    optional string description = 1;
+    optional DicerClientFeatureRolloutRuleP rule_proto = 2;
+  }
+  repeated ValidRuleTestCaseP valid_rule_test_cases = 1;
+
+  // Rule protos that should fail `from_proto` with an error containing
+  // `expected_error_substring`. Each entry's `description` identifies the case.
+  //
+  // PRECONDITION: `description`, `rule_proto`, and `expected_error_substring` are required; the
+  // test suites panic if any is unset. Fields nested inside `rule_proto` may be absent in order to
+  // exercise the corresponding validation failure paths.
+  //
+  // Next ID: 4.
+  message InvalidRuleTestCaseP {
+    optional string description = 1;
+    optional DicerClientFeatureRolloutRuleP rule_proto = 2;
+    optional string expected_error_substring = 3;
+  }
+  repeated InvalidRuleTestCaseP invalid_rule_test_cases = 2;
+}
+
+// Test data for `DicerClientFeatureRolloutConfigSuite` (Scala) and
+// `dicer_client_feature_rollout_config_test` (Rust). The two suites load this same textproto so
+// that input cases stay in sync across languages.
+//
+// Next ID: 3.
+message DicerClientFeatureRolloutConfigTestDataP {
+  // Config protos that should pass `from_proto`. Each entry's `description` identifies the case.
+  //
+  // PRECONDITION: `description` and `config_proto` are required; the test suites panic if either
+  // is unset. Fields nested inside `config_proto` may be absent or empty.
+  //
+  // Next ID: 3.
+  message ValidConfigTestCaseP {
+    optional string description = 1;
+    optional DicerClientFeatureRolloutConfigP config_proto = 2;
+  }
+  repeated ValidConfigTestCaseP valid_config_test_cases = 1;
+
+  // Config protos that should fail `from_proto` with an error containing
+  // `expected_error_substring`. Each entry's `description` identifies the case.
+  //
+  // PRECONDITION: `description`, `config_proto`, and `expected_error_substring` are required; the
+  // test suites panic if any is unset. Fields nested inside `config_proto` may be absent in order
+  // to exercise the corresponding validation failure paths.
+  //
+  // Next ID: 4.
+  message InvalidConfigTestCaseP {
+    optional string description = 1;
+    optional DicerClientFeatureRolloutConfigP config_proto = 2;
+    optional string expected_error_substring = 3;
+  }
+  repeated InvalidConfigTestCaseP invalid_config_test_cases = 2;
+}
+
+// Test data for `DicerClientFeatureRolloutRuleOverrideSuite` (Scala) and
+// `dicer_client_feature_rollout_rule_override_test` (Rust). The two suites load this same textproto so
+// that input cases stay in sync across languages.
+//
+// Next ID: 3.
+message DicerClientFeatureRolloutRuleOverrideTestDataP {
+  // Override protos that should pass `from_proto`. Each entry's `description` identifies the case.
+  //
+  // PRECONDITION: Every field below is required; the test suites panic if any is unset.
+  //
+  // Next ID: 3.
+  message ValidRuleOverrideTestCaseP {
+    optional string description = 1;
+    optional DicerClientFeatureRolloutRuleOverrideP override_proto = 2;
+  }
+  repeated ValidRuleOverrideTestCaseP valid_rule_override_test_cases = 1;
+
+  // Override protos that should fail `from_proto` with an error containing
+  // `expected_error_substring`. Each entry's `description` identifies the case.
+  //
+  // PRECONDITION: `description`, `override_proto`, and `expected_error_substring` are required; the
+  // test suites panic if any is unset. Nested fields inside `override_proto` may be absent to
+  // exercise their respective missing-field failure paths.
+  //
+  // Next ID: 4.
+  message InvalidRuleOverrideTestCaseP {
+    optional string description = 1;
+    optional DicerClientFeatureRolloutRuleOverrideP override_proto = 2;
+    optional string expected_error_substring = 3;
+  }
+  repeated InvalidRuleOverrideTestCaseP invalid_rule_override_test_cases = 2;
 }

@@ -350,8 +350,8 @@ object PrefixLogger {
       message: => Any,
       every: FiniteDuration): String = {
     // `split` would allocate an array on every log call just to take its last element. The path
-    // comes from a compile-time macro and always ends in a file name, so scanning back to the last
-    // separator is equivalent.
+    // comes from a compile-time macro and always ends in a file name, so scanning backward to the
+    // last separator avoids the array allocation.
     val filename: String = file.value.substring(file.value.lastIndexOf('/') + 1)
     val everyStr: String =
       if (every == Duration.Zero) "" else s" [every=${durationToCompactString(every)}]"
@@ -360,7 +360,7 @@ object PrefixLogger {
 
   /** Print a compact representation of the given duration, tailored to PrefixLogger's use case. */
   private def durationToCompactString(duration: FiniteDuration): String = {
-    import PrefixLogger.DurationConstants._
+    import PrefixLogger.DurationConstants.{MS_IN_ONE_HOUR, MS_IN_ONE_MINUTE, MS_IN_ONE_SECOND}
     duration.toMillis match {
       case ms if ms < MS_IN_ONE_SECOND => s"${ms}ms"
       case ms if ms < MS_IN_ONE_MINUTE => s"${ms / MS_IN_ONE_SECOND}s"

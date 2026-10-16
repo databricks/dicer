@@ -45,13 +45,13 @@ import com.databricks.dicer.external.ResourceAddress
 
 /**
  * Discovers resources by polling the Kubernetes API for pods and tracks connection health using
- * a consecutive-failure threshold to avoid unnecessarily marking the connection the connection
- * as unhealthy for short periods of time.
+ * a consecutive-failure threshold to avoid unnecessarily marking the connection as unhealthy for
+ *  short periods of time.
  *
  * Resource updates are delivered to [[watch]] subscribers. Each successful poll publishes a
  * [[VersionedResourceSet]] tagged with a monotonically increasing version stamped by this
  * checker (rather than the K8s-supplied `resourceVersion`).
- * Connection health is tracked by [[KubernetesConnectionHealth]].
+ * Connection health is tracked by [[KubernetesConnectionHealthMonitor]].
  *
  * Metrics tracked:
  *  - Latency of the `listNamespacedPod` call.
@@ -182,12 +182,11 @@ private[dicer] class KubernetesMembershipChecker(
   }
 
   /**
-   * Exposes the connection-health cell so the preferred-assigner election driver and the
-   * Assigner's readiness and liveness probes can read the current verdict. The cell is empty
-   * (`None`) until the checker's first poll resolves the [[connectionHealthMonitor]] verdict — a
-   * first success publishes `true`, and only a sustained run reaching
-   * [[KubernetesMembershipChecker.DEFAULT_FAILURE_THRESHOLD]] publishes `false` — so a pod that has
-   * never confirmed connectivity stays `None` (unknown).
+   * Exposes the connection-health cell so the preferred-assigner election driver can read the
+   * current verdict. The cell is empty (`None`) until the checker's first poll resolves the
+   * [[connectionHealthMonitor]] verdict — a first success publishes `true`, and only a sustained
+   * run reaching [[KubernetesMembershipChecker.DEFAULT_FAILURE_THRESHOLD]] publishes `false` —
+   * so a pod that has never confirmed connectivity stays `None` (unknown).
    */
   def connectionHealthCell: WatchValueCell.Consumer[Boolean] = healthCell
 

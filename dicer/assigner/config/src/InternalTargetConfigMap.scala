@@ -11,7 +11,7 @@ import com.databricks.dicer.common.TargetName
  */
 private[dicer] trait InternalTargetConfigMap {
   // The scope of the configs used by the map (for debugging purposes).
-  val configScopeOpt: Option[ClusterConfigScope]
+  val clusterConfigScopeOpt: Option[ClusterConfigScope]
 
   /** Returns the number of targets in this config map. */
   def size: Int
@@ -22,8 +22,11 @@ private[dicer] trait InternalTargetConfigMap {
   /** Returns an iterator over all (targetName, config) entries in this map. */
   def iterator: Iterator[(TargetName, InternalTargetConfig)]
 
-  /** Returns the config for the given target name, if it exists. */
-  def get(targetName: TargetName): Option[InternalTargetConfig]
+  /**
+   * Returns the config for the given target name, scoped to [[clusterConfigScopeOpt]], if it
+   * exists.
+   */
+  def getClusterScoped(targetName: TargetName): Option[InternalTargetConfig]
 }
 
 object InternalTargetConfigMap {
@@ -31,12 +34,12 @@ object InternalTargetConfigMap {
   /**
    * The implementation of InternalTargetConfigMap.
    *
-   * @param configScopeOpt scope of the configs used by the map (for debugging purposes).
+   * @param clusterConfigScopeOpt scope of the configs used by the map (for debugging purposes).
    * @param configMap map from target name to its config. Configs are shared for all targets with
    *                  the same name, regardless of their cluster.
    */
   private final class InternalTargetConfigMapImpl(
-      val configScopeOpt: Option[ClusterConfigScope],
+      val clusterConfigScopeOpt: Option[ClusterConfigScope],
       private val configMap: Map[TargetName, InternalTargetConfig])
       extends InternalTargetConfigMap {
 
@@ -46,51 +49,52 @@ object InternalTargetConfigMap {
 
     override def iterator: Iterator[(TargetName, InternalTargetConfig)] = configMap.iterator
 
-    override def get(targetName: TargetName): Option[InternalTargetConfig] =
+    override def getClusterScoped(targetName: TargetName): Option[InternalTargetConfig] =
       configMap.get(targetName)
 
     override def equals(other: Any): Boolean = other match {
       case that: InternalTargetConfigMapImpl =>
-        configScopeOpt == that.configScopeOpt && configMap == that.configMap
+        clusterConfigScopeOpt == that.clusterConfigScopeOpt && configMap == that.configMap
       case _ => false
     }
 
-    override def hashCode(): Int = (configScopeOpt, configMap).hashCode()
+    override def hashCode(): Int = (clusterConfigScopeOpt, configMap).hashCode()
 
     override def toString: String = {
-      s"InternalTargetConfigMap(configScopeOpt=$configScopeOpt, ${configMap.values.mkString(", ")})"
+      s"InternalTargetConfigMap(" +
+      s"clusterConfigScopeOpt=$clusterConfigScopeOpt, ${configMap.values.mkString(", ")})"
     }
   }
 
   /**
-   * Extracts configurations, optionally merging overrides for the given `configScopeOpt`, by
+   * Extracts configurations, optionally merging overrides for the given `clusterConfigScopeOpt`, by
    * reading the config files from the given `targetConfigDirectory` and
    * `advancedTargetConfigDirectory` paths. These paths should contain the contents of (the
    * appropriate one of) `dicer/external/config/(dev|staging|prod)` in universe.
    *
-   * @param configScopeOpt scope of the configs exposed by the map.
+   * @param clusterConfigScopeOpt scope of the configs exposed by the map.
    * @param targetConfigDirectory Contains a copy of the files at
    *                              //universe/dicer/external/config/(dev|staging|prod)
    * @param advancedTargetConfigDirectory Contains a copy of the files at
    *                                      //universe/dicer/assigner/config/(dev|staging|prod)
    */
   def create(
-      configScopeOpt: Option[ClusterConfigScope],
+      clusterConfigScopeOpt: Option[ClusterConfigScope],
       targetConfigDirectory: File,
       advancedTargetConfigDirectory: File): InternalTargetConfigMap = {
     val targetConfigMap: Map[TargetName, InternalTargetConfig] = readScopeConfigMapFromDirectories(
-      configScopeOpt,
+      clusterConfigScopeOpt,
       targetConfigDirectory,
       advancedTargetConfigDirectory
     )
-    new InternalTargetConfigMapImpl(configScopeOpt, targetConfigMap)
+    new InternalTargetConfigMapImpl(clusterConfigScopeOpt, targetConfigMap)
   }
 
   /**
    * Creates a InternalTargetConfigMap based on a mapping from target names to InternalTargetConfig.
    */
   def create(
-      configScopeOpt: Option[ClusterConfigScope],
+      clusterConfigScopeOpt: Option[ClusterConfigScope],
       targetConfigMap: Map[TargetName, InternalTargetConfig]): InternalTargetConfigMap =
-    new InternalTargetConfigMapImpl(configScopeOpt, targetConfigMap)
+    new InternalTargetConfigMapImpl(clusterConfigScopeOpt, targetConfigMap)
 }

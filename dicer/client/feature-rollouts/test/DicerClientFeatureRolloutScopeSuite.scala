@@ -17,7 +17,9 @@ class DicerClientFeatureRolloutScopeSuite extends DatabricksTest {
     )
 
   namedGridTest("DicerClientFeatureRolloutScope fromProto accepts valid scope protos")(
-    TEST_DATA.validScopeTestCases.map((c: ValidScopeTestCaseP) => c.getDescription -> c).toMap
+    TEST_DATA.validScopeTestCases
+      .map((testCase: ValidScopeTestCaseP) => testCase.getDescription -> testCase)
+      .toMap
   ) { testCase: ValidScopeTestCaseP =>
     // Test plan: Verify that fromProto accepts every valid scope proto from the shared textproto.
     // Do this by iterating over each `valid_scope_test_cases` entry, calling fromProto, and
@@ -28,7 +30,9 @@ class DicerClientFeatureRolloutScopeSuite extends DatabricksTest {
   }
 
   namedGridTest("DicerClientFeatureRolloutScope fromProto rejects invalid scope protos")(
-    TEST_DATA.invalidScopeTestCases.map((c: InvalidScopeTestCaseP) => c.getDescription -> c).toMap
+    TEST_DATA.invalidScopeTestCases
+      .map((testCase: InvalidScopeTestCaseP) => testCase.getDescription -> testCase)
+      .toMap
   ) { testCase: InvalidScopeTestCaseP =>
     // Test plan: Verify that fromProto rejects every invalid scope proto from the shared
     // textproto. Do this by iterating over each `invalid_scope_test_cases` entry and asserting

@@ -13,7 +13,12 @@ import com.databricks.dicer.assigner.WeightedLoadDistributionAggregatorSuite.{
 import com.databricks.dicer.common.SliceKeyHelper.RichSliceKey
 import com.databricks.dicer.common.SliceletData.LoadDistribution
 import com.databricks.dicer.common.SliceletData.LoadDistribution.CdfPoint
-import com.databricks.dicer.common.testing.SliceTestUtils._
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  LowInclusiveStringFluent,
+  identityKey,
+  randomInRange,
+  toSliceKey
+}
 import com.databricks.dicer.external.{HighSliceKey, InfinitySliceKey, Slice, SliceKey}
 import com.databricks.testing.DatabricksTest
 

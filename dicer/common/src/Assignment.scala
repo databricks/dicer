@@ -7,6 +7,8 @@ import com.databricks.caching.util.WatchValueCell
 import com.databricks.dicer.external.SliceKey
 import com.databricks.dicer.friend.{SliceMap, Squid}
 import com.databricks.dicer.friend.SliceMap.GapEntry
+import com.databricks.api.proto.dicer.common.DiffAssignmentP
+import com.databricks.dicer.common.Assignment.unvalidatedCreatePartialDiffSliceMap
 
 /** Consistency mode for assignment checks. */
 sealed trait AssignmentConsistencyMode
@@ -108,18 +110,7 @@ case class Assignment(
       if (fullAssignmentRequired) {
         DiffAssignmentSliceMap.Full(sliceMap)
       } else {
-        // Filter Slice assignments with generations greater than diff generation.
-        val diffSliceAssignments: Seq[SliceAssignment] =
-          sliceMap.entries.filter { sliceAssignment: SliceAssignment =>
-            sliceAssignment.generation > diffGeneration
-          }
-        DiffAssignmentSliceMap.Partial(
-          diffGeneration,
-          SliceMap.createFromOrderedDisjointEntries(
-            diffSliceAssignments,
-            SliceMapHelper.SLICE_ASSIGNMENT_ACCESSOR
-          )
-        )
+        unvalidatedCreatePartialDiffSliceMap(diffGeneration, sliceMap)
       }
     DiffAssignment(
       isFrozen,
@@ -128,6 +119,22 @@ case class Assignment(
       diffSliceMap,
       assignerServiceInfoOpt
     )
+  }
+
+  /**
+   * Returns the serialized size in bytes of the diff of this assignment against `sourceGeneration`,
+   * as it would be marshalled for distribution. Unlike [[toDiff]], does not test requirements for
+   * distributed diffs, hence "speculative": even given a loose or mismatched incarnation, returns
+   * the size of a serialized [[DiffAssignmentP]] with a [[DiffAssignmentSliceMap.Partial]] map.
+   */
+  def speculativeDiffSizeBytes(sourceGeneration: Generation): Int = {
+    val diffSliceMap: DiffAssignmentSliceMap.Partial =
+      unvalidatedCreatePartialDiffSliceMap(sourceGeneration, sliceMap)
+    // We can't create a [[DiffAssignment]] because that would fail validation. Instead, we directly
+    // build a [[DiffAssignmentP]] and get its serialized size.
+    val proto: DiffAssignmentP =
+      DiffAssignment.toProto(isFrozen, generation, diffSliceMap, assignerServiceInfoOpt)
+    proto.serializedSize
   }
 
   /**
@@ -353,6 +360,26 @@ object Assignment {
             )
         }
     }
+  }
+
+  /**
+   * Creates a [[DiffAssignmentSliceMap.Partial]] map contains all slices in `sliceMap` with
+   * generations greater than `diffGeneration`. No validation is performed by this function, that
+   * is the caller's responsibility.
+   */
+  private def unvalidatedCreatePartialDiffSliceMap(
+      diffGeneration: Generation,
+      sliceMap: SliceMap[SliceAssignment]): DiffAssignmentSliceMap.Partial = {
+    // Filter Slice assignments with generations greater than diff generation.
+    val diffSliceAssignments: Seq[SliceAssignment] =
+      sliceMap.entries.filter { sliceAssignment: SliceAssignment =>
+        sliceAssignment.generation > diffGeneration
+      }
+    val gapSliceMap = SliceMap.createFromOrderedDisjointEntries(
+      diffSliceAssignments,
+      SliceMapHelper.SLICE_ASSIGNMENT_ACCESSOR
+    )
+    DiffAssignmentSliceMap.Partial(diffGeneration, gapSliceMap)
   }
 
   /**

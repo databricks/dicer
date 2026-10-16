@@ -18,8 +18,6 @@ import com.databricks.caching.util.{
   Severity,
   WhereAmIHelper
 }
-import com.databricks.common.status.ProbeStatusSource
-import com.databricks.common.status.liveness.LivenessStatusSource
 import com.databricks.conf.Config
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
 import com.databricks.dicer.assigner.config.{
@@ -37,8 +35,7 @@ import com.databricks.dicer.common.{
 
 /**
  * The Assigner's main logic as a class so tests can drive the real [[DatabricksMain]] bootstrap via
- * constructor injection; the bootstrap installs the readiness probe via [[newReadinessSource]] and
- * binds it in [[wrappedMain]]. The production entry point is the [[AssignerMain]] singleton.
+ * constructor injection. The production entry point is the [[AssignerMain]] singleton.
  *
  * @param rawConfigOverrideOpt overrides the process-wide config; production passes `None`.
  * @param confFactory builds the Assigner config from the resolved [[Config]]; production passes a
@@ -53,24 +50,6 @@ private[assigner] class AssignerMainBase(
     extends DatabricksMain(Project.DicerAssigner, rawConfigOpt = rawConfigOverrideOpt) {
 
   private val prefixLogger = PrefixLogger.create(this.getClass, "")
-
-  /**
-   * The Assigner config. MUST stay `lazy`: the probe-source hooks ([[newReadinessSource]] /
-   * [[newLivenessSource]]) read it during `initDatabricks`, but `rawConfig` is only populated by
-   * the [[com.databricks.DatabricksMain]] superclass constructor, which runs after this subclass's
-   * field initializers. An eager `val` would call `confFactory(rawConfig)` on a not-yet-initialized
-   * `rawConfig` and fail construction; `lazy` defers the read until the first hook call, by which
-   * point the superclass is fully constructed.
-   */
-  private lazy val conf: DicerAssignerConf = confFactory(rawConfig)
-
-  /**
-   * Backs both the readiness and liveness probes from one membership-checker connection-health
-   * cell; [[wrappedMain]] binds that cell with the AssignerProbeSource via `init`, and the
-   * [[newReadinessSource]] / [[newLivenessSource]] hooks expose the probes that Kubernetes actually
-   * reads, both from this single instance.
-   */
-  private val assignerProbeSource: AssignerProbeSource = new AssignerProbeSource()
 
   /**
    * Temporary metric to allow us to check the consistency of cluster location information from
@@ -115,29 +94,21 @@ private[assigner] class AssignerMainBase(
    *   code depending on the result of the initialization.
    */
   override final def wrappedMain(args: Array[String]): Unit = {
+    val conf: DicerAssignerConf = confFactory(rawConfig)
     wrappedMainInternal(
       conf,
       localClusterApiClientFactory,
       lingerAfterFinish = BOOTSTRAPPER_LINGER_AFTER_FINISH
     ) match {
-      case Left(assigner: Assigner) =>
-        // Bind the shared connection-health cell now that the Assigner is live; see
-        // [[AssignerProbeSource]] for the contract.
-        assignerProbeSource.init(healthCell = assigner.probePollHealthWatchCell)
+      case Left(_: Assigner) =>
+        // Under normal circumstances, we want the DatabricksMain.main implementation to handle the
+        // exit.
+        ()
       case Right(statusCode: Int) =>
-        // Only exit eagerly when wrappedMainInternal returns a status code. Under normal
-        // circumstances, we want the DatabricksMain.main implementation to handle the exit.
+        // Only exit eagerly when wrappedMainInternal returns a status code.
         sys.exit(statusCode)
     }
   }
-
-  // One flag gates both probes because they act on the same connection-health signal and are
-  // rolled out together.
-  override protected def newReadinessSource(): Option[ProbeStatusSource] =
-    Some(assignerProbeSource.forReadiness(conf.gateProbesOnK8sConnectionHealthFlagProvider))
-
-  override protected def newLivenessSource(): Option[LivenessStatusSource] =
-    Some(assignerProbeSource.forLiveness(conf.gateProbesOnK8sConnectionHealthFlagProvider))
 
   /**
    * See [[wrappedMain]]. Extracted into its own method for testing. Starts the configured execution

@@ -4,8 +4,6 @@ import java.util.concurrent.CountDownLatch
 
 import com.databricks.backend.common.util.CurrentProject
 import com.databricks.backend.common.util.Project
-import com.databricks.common.status.ProbeStatusSource
-import com.databricks.common.status.liveness.LivenessStatusSource
 import com.databricks.common.web.InfoService
 import com.databricks.conf.{Config, RawConfigSingleton}
 import com.databricks.conf.Constants.INFO_SERVICE_PORT
@@ -61,19 +59,4 @@ abstract class DatabricksMain(project: Project.Project, rawConfigOpt: Option[Con
 
   /** Main logic to be implemented by the service. */
   protected def wrappedMain(args: Array[String]): Unit
-
-  /**
-   * Mirrors the internal `DatabricksMain` readiness hook so that services overriding it (e.g.
-   * `AssignerMain`, which is built in OSS) compile against this wrapper. The OSS `main` never calls
-   * it -- only the internal `DatabricksMain` consumes it in its readiness composition -- so
-   * overriding it in an OSS build has no effect.
-   */
-  protected def newReadinessSource(): Option[ProbeStatusSource] = None
-
-  /**
-   * Liveness hook so that services overriding it (e.g. `AssignerMain`, which is built in OSS)
-   * compile against this wrapper. A custom liveness source is not implemented for Dicer OSS yet, so
-   * this returns `None` and the OSS `main` does not gate liveness.
-   */
-  protected def newLivenessSource(): Option[LivenessStatusSource] = None
 }

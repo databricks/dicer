@@ -1810,50 +1810,6 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     slicelet.stop()
   }
 
-  test("Slicelet starts successfully when readiness check blocks indefinitely") {
-    // Test plan: Verify that the Slicelet starts successfully even when the readiness provider's
-    // isReady call blocks indefinitely, using the BLOCKED_READINESS_CHECK_START_DELAY
-    // fallback mechanism. Verify the Slicelet starts up and reports NOT_READY initially, then
-    // transitions to RUNNING after unblocking the readiness provider.
-
-    val slicelet: SliceletHarness = createSlicelet(testEnv)(useFakeReadinessProvider = true)
-    // Setup: Block the readiness provider.
-    slicelet.setReadinessProviderBlocked(true)
-    slicelet.setReadinessStatus(true)
-    val port: Int = 12121
-    slicelet.start(selfPort = port, listenerOpt = None)
-
-    // Verify: The Slicelet should still start successfully (signalled by being included in the
-    // assignment) despite the blocked readiness check.
-    val squid: Squid = waitForSquidWithPort(testEnv, port)
-
-    // Verify: The Slicelet should report NOT_READY, the default readiness starting state.
-    // Use AssertionWaiter since the readiness poller runs in its own execution context.
-    AssertionWaiter("The Slicelet is reporting NOT_READY").await {
-      val requestOpt: Option[ClientRequest] = getLatestSliceletWatchRequest(testEnv, squid)
-      assert(requestOpt.nonEmpty)
-      assert(requestOpt.get.subscriberData.isInstanceOf[SliceletData])
-      val sliceletData = requestOpt.get.subscriberData.asInstanceOf[SliceletData]
-      assert(sliceletData.state == SliceletState.NotReady)
-    }
-
-    // Now unblock the readiness provider. It is already set to report ready.
-    slicelet.setReadinessProviderBlocked(false)
-
-    // Verify: The Slicelet should transition to RUNNING.
-    // AssertionWaiter will retry until the readiness poller (which runs in real time) detects the
-    // change.
-    AssertionWaiter("The Slicelet is reporting RUNNING").await {
-      val requestOpt: Option[ClientRequest] = getLatestSliceletWatchRequest(testEnv, squid)
-      assert(requestOpt.nonEmpty)
-      assert(requestOpt.get.subscriberData.isInstanceOf[SliceletData])
-      val sliceletData = requestOpt.get.subscriberData.asInstanceOf[SliceletData]
-      assert(sliceletData.state == SliceletState.Running)
-    }
-
-    slicelet.stop()
-  }
-
   test("Assigner observes Slicelet readiness state transitions via full probe stack") {
     // Test plan: Verify that the Assigner correctly observes Slicelet state transitions (NOT_READY
     // -> RUNNING -> NOT_READY -> TERMINATING) using the full readiness probe stack
@@ -1947,7 +1903,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     val testEnvObserveSliceletReadiness = InternalDicerTestEnvironment.create(
       config = sharedSliceletTestAssignerConfig,
       targetConfigMap = InternalTargetConfigMap.create(
-        configScopeOpt = None,
+        clusterConfigScopeOpt = None,
         targetConfigMap = Map(
           TargetName(expectedAssignerCanonicalizedTargetIdentifier.name) ->
           InternalTargetConfig.forTest.DEFAULT
@@ -2012,7 +1968,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     val testEnv = InternalDicerTestEnvironment.create(
       config = sharedSliceletTestAssignerConfig,
       targetConfigMap = InternalTargetConfigMap.create(
-        configScopeOpt = None,
+        clusterConfigScopeOpt = None,
         targetConfigMap = Map(
           TargetName(expectedAssignerCanonicalizedTargetIdentifier.name) ->
           InternalTargetConfig.forTest.DEFAULT
@@ -2152,7 +2108,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     val localTestEnv: InternalDicerTestEnvironment = InternalDicerTestEnvironment.create(
       config = sharedSliceletTestAssignerConfig,
       targetConfigMap = InternalTargetConfigMap.create(
-        configScopeOpt = None,
+        clusterConfigScopeOpt = None,
         targetConfigMap = Map(TargetName.forTarget(defaultTarget) -> enabledConfig)
       ),
       withDefaultTargetConfig = false,
@@ -2211,7 +2167,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     val localTestEnv: InternalDicerTestEnvironment = InternalDicerTestEnvironment.create(
       config = sharedSliceletTestAssignerConfig,
       targetConfigMap = InternalTargetConfigMap.create(
-        configScopeOpt = None,
+        clusterConfigScopeOpt = None,
         targetConfigMap = Map(TargetName.forTarget(defaultTarget) -> enabledConfig)
       ),
       withDefaultTargetConfig = false,
@@ -2506,6 +2462,50 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
     // Make HTTP request to the readiness endpoint. We don't care about the response, since we check
     // that the readiness source is updated by way of verifying the Slicelet state later.
     val _ = SimpleWebClient.webClient().get(s"http://localhost:$port/ready").aggregate()
+  }
+
+  test("Slicelet starts successfully when readiness check blocks indefinitely") {
+    // Test plan: Verify that the Slicelet starts successfully even when the readiness provider's
+    // isReady call blocks indefinitely, using the BLOCKED_READINESS_CHECK_START_DELAY
+    // fallback mechanism. Verify the Slicelet starts up and reports NOT_READY initially, then
+    // transitions to RUNNING after unblocking the readiness provider.
+
+    val slicelet: SliceletHarness = createSlicelet(testEnv)(useFakeReadinessProvider = true)
+    // Setup: Block the readiness provider.
+    slicelet.setReadinessProviderBlocked(true)
+    slicelet.setReadinessStatus(true)
+    val port: Int = 12121
+    slicelet.start(selfPort = port, listenerOpt = None)
+
+    // Verify: The Slicelet should still start successfully (signalled by being included in the
+    // assignment) despite the blocked readiness check.
+    val squid: Squid = waitForSquidWithPort(testEnv, port)
+
+    // Verify: The Slicelet should report NOT_READY, the default readiness starting state.
+    // Use AssertionWaiter since the readiness poller runs in its own execution context.
+    AssertionWaiter("The Slicelet is reporting NOT_READY").await {
+      val requestOpt: Option[ClientRequest] = getLatestSliceletWatchRequest(testEnv, squid)
+      assert(requestOpt.nonEmpty)
+      assert(requestOpt.get.subscriberData.isInstanceOf[SliceletData])
+      val sliceletData = requestOpt.get.subscriberData.asInstanceOf[SliceletData]
+      assert(sliceletData.state == SliceletState.NotReady)
+    }
+
+    // Now unblock the readiness provider. It is already set to report ready.
+    slicelet.setReadinessProviderBlocked(false)
+
+    // Verify: The Slicelet should transition to RUNNING.
+    // AssertionWaiter will retry until the readiness poller (which runs in real time) detects the
+    // change.
+    AssertionWaiter("The Slicelet is reporting RUNNING").await {
+      val requestOpt: Option[ClientRequest] = getLatestSliceletWatchRequest(testEnv, squid)
+      assert(requestOpt.nonEmpty)
+      assert(requestOpt.get.subscriberData.isInstanceOf[SliceletData])
+      val sliceletData = requestOpt.get.subscriberData.asInstanceOf[SliceletData]
+      assert(sliceletData.state == SliceletState.Running)
+    }
+
+    slicelet.stop()
   }
 
   // TODO(<internal bug>): Move this test to SliceletSuiteBase once the Rust Slicelet resolves rollout

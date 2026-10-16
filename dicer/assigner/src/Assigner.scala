@@ -18,9 +18,7 @@ import com.databricks.caching.util.{
   SequentialExecutionContextPool,
   Severity,
   TickerTime,
-  ValueStreamCallback,
-  WatchValueCell,
-  WatchValueCellPollAdapter
+  ValueStreamCallback
 }
 import com.databricks.common.util.ShutdownHookManager
 import com.databricks.dicer.assigner.Assigner.logger
@@ -97,9 +95,9 @@ import scala.util.Random
  * @param targetMigrator Watches the current target migration state and exposes it to
  *                       consumers that need to react to the active migration.
  * @param localClusterMembershipChecker Local-cluster membership checker (not yet started). Backs
- *                                      consistent-hashing selection and the readiness probe; not
- *                                      the checker used by [[TargetMigrator]] (that one lives
- *                                      inside the TargetMigrator instance).
+ *                                      consistent-hashing selection; not the checker used by
+ *                                      [[TargetMigrator]] (that one lives inside the
+ *                                      TargetMigrator instance).
  * @param assignerServiceInfoOpt The service info of the Assigner, used to uniquely identify
  *                               an assigner instance. It should be populated but may be absent
  *                               if the service info is not available due to an outdated binary
@@ -176,8 +174,8 @@ class Assigner private (
   private var assignerProtoLogger: AssignerProtoLogger = _
 
   /**
-   * A shared thread pool for the SECs used by [[assignerProtoLogger]] and the sample fraction
-   * poller.
+   * A shared thread pool for the SECs used by [[assignerProtoLogger]] and the simulator event
+   * logger.
    *
    * Context propagation is disabled because proto logging runs in the background and is not part of
    * any user request path.
@@ -205,25 +203,6 @@ class Assigner private (
   @GuardedBy("sec")
   private var latestTargetOwnershipResolver: TargetOwnershipResolver =
     targetMigrator.getLatestResolver
-
-  /** The emitter for sending [[AssignmentGenerator.Event]] to Dicer Tee. */
-  private val dicerTeeEventEmitter: DicerTeeEventEmitter =
-    if (conf.enableDicerTeeForwarding) {
-      DicerTeeEventEmitter.create(
-        assignerSecPool.createExecutionContext("tee-event-emitter"),
-        URI.create(conf.dicerTeeURI),
-        // Since event emitter is a client of DicerTeeBackend, we are using clientSslArgs here.
-        // In prod, conf.dicerClientSslArgs should be the same as conf.sslArgs. However, in tests
-        // conf.dicerClientSslArgs is overridden as TestSslArguments.clientSslArgs while
-        // conf.sslArgs is not, and we can only pass tests with conf.dicerClientSslArgs.
-        conf.getDicerClientTlsOptions,
-        timeoutMs = DicerTeeEventEmitter.DEFAULT_TIMEOUT_MS,
-        numRetryAttempts = DicerTeeEventEmitter.DEFAULT_NUM_RETRY_ATTEMPTS
-      )
-    } else {
-      // If Dicer Tee is disabled, create a NoopEmitter placeholder that does nothing.
-      DicerTeeEventEmitter.getNoopEmitter
-    }
 
   /**
    * The emitter for logging [[AssignmentGenerator.Event]]s to Lumberjack for replay by the Dicer
@@ -412,13 +391,6 @@ class Assigner private (
     assignerInfo
   }
 
-  /**
-   * The local Kubernetes membership checker's connection-health cell, consumed by the Assigner's
-   * readiness probe.
-   */
-  private[assigner] def probePollHealthWatchCell: WatchValueCell.Consumer[Boolean] =
-    localClusterMembershipChecker.connectionHealthCell
-
   /** Starts the RPC server, dynamic config watch, etc. */
   protected def start(): Unit = sec.run {
     server = createAndStartDatabricksServer()
@@ -519,7 +491,14 @@ class Assigner private (
     server.start()
     assignerInfo =
       AssignerInfo(uuid, AssignerUri(host = hostName, port = server.activePort()).toUri)
-    assignerProtoLogger = createAssignerProtoLogger()
+    // Dedicated SEC for proto logging operations to avoid blocking the main SEC.
+    val loggingSec: SequentialExecutionContext =
+      protoLoggerSecPool.createExecutionContext("assigner-proto-logger")
+    assignerProtoLogger = AssignerProtoLogger.create(
+      assignerInfo,
+      conf.protoLoggerGenerationSampleFractionFlag,
+      loggingSec
+    )
     // Start the membership checker before the preferred-assigner driver, which (in
     // consistent-hashing mode) needs the checker running.
     localClusterMembershipChecker.start(assignerProtoLogger)
@@ -547,43 +526,6 @@ class Assigner private (
       }
     })
     server
-  }
-
-  /**
-   * Creates the [[AssignerProtoLogger]] backed by a [[WatchValueCellPollAdapter]] that periodically
-   * polls the [[DicerAssignerConf.protoLoggerGenerationSampleFractionFlag]] SAFE flag for the
-   * sample fraction.
-   *
-   * Intended to be called exactly once, from [[createAndStartDatabricksServer()]] during Assigner
-   * startup.
-   *
-   * PRECONDITION: [[assignerInfo]] must be initialized.
-   * PRECONDITION: Must be called on [[sec]].
-   */
-  private[this] def createAssignerProtoLogger(): AssignerProtoLogger = {
-    sec.assertCurrentContext()
-
-    // Dedicated SEC for proto logging operations to avoid blocking the main SEC.
-    val loggingSec: SequentialExecutionContext =
-      protoLoggerSecPool.createExecutionContext("assigner-proto-logger")
-
-    // Dedicated SEC for polling the sample-fraction SAFE flag, separate from the logging SEC so a
-    // slow SAFE call cannot block log submission.
-    val pollSec: SequentialExecutionContext =
-      protoLoggerSecPool.createExecutionContext("assigner-proto-logger-poller")
-    // We initialize the sample fraction to 0.0, so no logs will be emitted until the first poll
-    // completes and the SAFE flag value is observed.
-    val sampleFractionPollAdapter: WatchValueCellPollAdapter[Double, Double] =
-      new WatchValueCellPollAdapter[Double, Double](
-        initialValueOpt = Some(0.0),
-        poller = () => conf.protoLoggerGenerationSampleFractionFlag.getCurrentValue(),
-        update = (_, sampleFraction: Double) => sampleFraction,
-        pollInterval = conf.protoLoggerGenerationSampleFractionPollInterval,
-        sec = pollSec
-      )
-    sampleFractionPollAdapter.start()
-
-    AssignerProtoLogger.create(assignerInfo, sampleFractionPollAdapter, loggingSec)
   }
 
   /**
@@ -769,7 +711,7 @@ class Assigner private (
     sec.assertCurrentContext()
     val targetName: TargetName = TargetName.forTarget(target)
     configProvider.getLatestTargetConfigMap
-      .get(targetName)
+      .getClusterScoped(targetName)
       .exists((_: InternalTargetConfig).useAlternativeTarget)
   }
 
@@ -872,7 +814,7 @@ class Assigner private (
       case None =>
         val targetName: TargetName = TargetName.forTarget(target)
         val targetConfigOpt: Option[InternalTargetConfig] =
-          configProvider.getLatestTargetConfigMap.get(targetName).orElse {
+          configProvider.getLatestTargetConfigMap.getClusterScoped(targetName).orElse {
             if (conf.allowDefaultTargetConfigForExperimentalTargets) {
               logger.info(
                 s"No config found for $target, using default config for experimental targets " +
@@ -911,7 +853,7 @@ class Assigner private (
 
     val authorizerOpt: Option[Authorizer] =
       configProvider.getLatestTargetConfigMap
-        .get(TargetName.forTarget(target))
+        .getClusterScoped(TargetName.forTarget(target))
         .map((_: InternalTargetConfig).authorizer)
 
     // If we don't have a target config, don't do any validation. In practice the request will fail
@@ -1213,7 +1155,6 @@ class Assigner private (
             ),
             assignerClusterUri,
             minAssignmentGenerationInterval,
-            dicerTeeEventEmitter,
             dicerSimulatorEventLogEmitter,
             assignerProtoLogger,
             assignerServiceInfoOpt
@@ -1331,8 +1272,8 @@ object Assigner {
       remoteClusterMembershipCheckerFactoryOpt: Option[KubernetesMembershipChecker.Factory],
       assignerServiceInfoOpt: Option[AssignerServiceInfo]): Assigner = {
     // The membership checker is a required dependency of the Assigner service: it discovers the
-    // assigner set that consistent-hashing selection needs and backs the readiness probe. A pod
-    // that cannot create one fails startup here (the factory throws) rather than running blind.
+    // assigner set that consistent-hashing selection needs. A pod that cannot create one fails
+    // startup here (the factory throws) rather than running blind.
     val localClusterMembershipChecker: KubernetesMembershipChecker =
       localClusterMembershipCheckerFactory.create(uuid)
     val assignerSecPool =

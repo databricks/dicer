@@ -152,8 +152,10 @@ private object ResourceRouter {
               // assigned resources might have changed. This should pick up updates from slice
               // reassignments, slice boundary changes, etc. This means that the
               // pickedResourceIndices list & fallbackPicked flag reset on every assignment
-              // generation change. This can be optimized in the future by taking a checksum of
-              // the slice assignment (using the squid UUIDs) instead of relying on the generation.
+              // generation change.
+              // The assigner periodically generates new assignments even without slice
+              // reassignments. An optimization could maintain per-endpoint state across requests
+              // and assignment generations to avoid repeatedly selecting failing endpoints.
               (RetryTokenImpl.create(assignmentGeneration), true)
             case Some(token: RetryTokenImpl) => (token, false)
             // Creates a fresh token if the caller did not pass one in.
@@ -201,9 +203,7 @@ private object ResourceRouter {
 
 /**
  * Tracks the context for a chain of getNextStubForKey calls. See [[ClerkImpl.getNextStubForKey]]
- * for how the token is used. A [[RetryTokenImpl]] can be handled by any Clerk instance for a
- * target, which is necessary when an end-client drives retries across process boundaries (e.g.
- * through a proxy).
+ * for how the token is used.
  *
  * Stores the assignment generation to detect assignment updates (i.e. a new resource assigned to a
  * slice), the indices of the assigned resources it has already picked, and whether the fallback

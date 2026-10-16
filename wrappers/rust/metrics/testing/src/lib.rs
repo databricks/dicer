@@ -1,4 +1,4 @@
-//! Test helpers for the OSS metrics facade.
+//! Test helpers for the metrics macros.
 
 use universe_raf_metrics::internal::encode_metrics_for_test as encode_registered_metrics_for_test;
 

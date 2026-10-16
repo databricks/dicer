@@ -35,7 +35,7 @@ import javax.annotation.concurrent.NotThreadSafe
  */
 @NotThreadSafe
 class AsciiTable(headers: Header*) {
-  import AsciiTable._
+  import AsciiTable.{Border, Cursor, TRUNCATION_SUFFIX}
 
   /**
    * The maximum (possibly truncated) length of any value added to each column in the table.

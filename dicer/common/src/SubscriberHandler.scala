@@ -36,7 +36,6 @@ import com.databricks.dicer.common.SubscriberHandler.{
 import com.databricks.dicer.external.{AppTarget, KubernetesTarget, Target}
 import com.databricks.dicer.friend.Squid
 import com.databricks.rpc.RPCContext
-
 /**
  * An abstraction that manages all the subscribers for a given sharded set of resources. It uses the
  * given `cell` to wait for changes to assignments and informs the pending RPC callers when the
@@ -89,6 +88,13 @@ class SubscriberHandler(
     )
   private val serializedAssignmentSizeChild: Histogram.Child =
     SubscriberHandlerMetrics.serializedAssignmentSizeBytes.labels(
+      target.getTargetClusterLabel,
+      target.getTargetNameLabel,
+      target.getTargetInstanceIdLabel,
+      handlerLocation.toString
+    )
+  private val speculativeDiffSizeChild: Histogram.Child =
+    SubscriberHandlerMetrics.speculativeDiffAssignmentSizeBytes.labels(
       target.getTargetClusterLabel,
       target.getTargetNameLabel,
       target.getTargetInstanceIdLabel,
@@ -186,15 +192,15 @@ class SubscriberHandler(
       .flatCall {
         // Get the caller service identity, currently for monitoring purposes and eventually for ACL
         // checking.
-        val serviceIdentityOpt: Option[ServiceIdentity] = rpcContext.getCallerIdentity
+        val callerServiceNameOpt: Option[String] = getCallerServiceNameOpt(rpcContext)
 
         logger.info(
-          s"Watch request: $serviceIdentityOpt, ${request.subscriberDebugName}, " +
+          s"Watch request: $callerServiceNameOpt, ${request.subscriberDebugName}, " +
           s"${request.subscriberData}",
           30.seconds
         )
 
-        updateWatchMetrics(request, serviceIdentityOpt)
+        updateWatchMetrics(request, callerServiceNameOpt)
 
         if (!TargetHelper.shouldServeRequestTarget(target, request.target)) {
           // Implementation note: because of the way `SubscriberHandler` is used in the Assigner (a
@@ -228,9 +234,6 @@ class SubscriberHandler(
             s"and fail to receive assignments.",
             every = 1.minute
           )
-        }
-        for (syncState: SyncAssignmentStateP <- responseP.syncAssignmentState) {
-          serializedAssignmentSizeChild.observe(syncState.serializedSize.toDouble)
         }
         responseP
       }(sec)
@@ -267,10 +270,18 @@ class SubscriberHandler(
     backgroundUpdateMetricsHandle.cancel(Status.CANCELLED)
   }
 
+  /** Returns the service name of the caller that sent the RPC with `rpcContext`, if known. */
+  private def getCallerServiceNameOpt(rpcContext: RPCContext): Option[String] = {
+    val legacyCallerServiceNameOpt: Option[String] =
+      rpcContext.getCallerIdentity.map((_: ServiceIdentity).serviceName)
+
+    legacyCallerServiceNameOpt
+  }
+
   /** Updates various metrics based on receiving the watch request `request`. */
   private def updateWatchMetrics(
       request: ClientRequest,
-      serviceIdentityOpt: Option[ServiceIdentity]): Unit = {
+      callerServiceNameOpt: Option[String]): Unit = {
     val (subscriberInfo, isClerk): (SubscriberInfo, Boolean) = request.subscriberData match {
       case sliceletData: SliceletData =>
         // Slicelet-specific logic: update the assignment distribution latency tracker.
@@ -305,7 +316,7 @@ class SubscriberHandler(
       request.target,
       request.alternativeTargetOpt,
       request.clusterUriOpt,
-      serviceIdentityOpt,
+      callerServiceNameOpt,
       metricsKey
     )
   }
@@ -424,11 +435,26 @@ class SubscriberHandler(
           // Note: The sync state is always derived from the full assignment. If we switch to
           // durable assignments in the future, the sync logic should be optimized to work with
           // partial assignment.
+          val cachedState: CachedSyncAssignmentState =
+            getOrUpdateCachedSyncAssignmentState(watchedAssignment)
           val syncAssignmentStateP: SyncAssignmentStateP =
-            getOrUpdateSyncAssignmentState(
-              watchedAssignment,
-              request.supportsSerializedAssignment
-            )
+            if (cachedState.generation > watchedAssignment.generation) {
+              // The cache is ahead of the watched assignment; reply with only its generation.
+              SyncAssignmentState.KnownGeneration(cachedState.generation).toProto
+            } else {
+              val fullStateP: SyncAssignmentStateP = if (request.supportsSerializedAssignment) {
+                cachedState.syncSerializedAssignmentStateP
+              } else {
+                cachedState.syncAssignmentStateP
+              }
+              // Record the full assignment size alongside the size of the diff against the
+              // subscriber's known generation, to estimate the savings of distributing diffs.
+              serializedAssignmentSizeChild.observe(fullStateP.serializedSize.toDouble)
+              speculativeDiffSizeChild.observe(
+                cachedState.speculativeDiffSizeBytes(request.getKnownGeneration).toDouble
+              )
+              fullStateP
+            }
           val responseP: ClientResponseP = ClientResponse
             .createProtoWithSyncStateP(
               syncAssignmentStateP,
@@ -501,20 +527,13 @@ class SubscriberHandler(
   }
 
   /**
-   * Returns the [[SyncAssignmentStateP]] for the given full `assignment`.
-   * It uses the cached state in [[cachedSyncAssignmentStateOpt]] if possible, and updates the
-   * state if needed.
-   *
-   * @param clientSupportsSerializedAssignment Indicates whether the client supports receiving a
-   *                                           serialized assignment. If true, returns a
-   *                                           SyncAssignmentStateP containing a serialized
-   *                                           assignment; otherwise, returns one containing a
-   *                                           [[DiffAssignmentP]].
-   *
+   * Returns the [[CachedSyncAssignmentState]] for the given full `assignment`, updating
+   * [[cachedSyncAssignmentStateOpt]] if `assignment` is newer than the cached state. The returned
+   * state's generation is never less than `assignment.generation`; it is greater only if the cache
+   * is ahead of `assignment` (unexpected, and alerted).
    */
-  private def getOrUpdateSyncAssignmentState(
-      assignment: Assignment,
-      clientSupportsSerializedAssignment: Boolean): SyncAssignmentStateP = {
+  private def getOrUpdateCachedSyncAssignmentState(
+      assignment: Assignment): CachedSyncAssignmentState = {
     sec.assertCurrentContext()
     // When a newer assignment is received, update the cached state as needed. Reuse it whenever
     // possible to avoid redundant proto conversions. This logic always assumes full assignments.
@@ -544,25 +563,18 @@ class SubscriberHandler(
         }
     }
     if (cachedState.generation > assignment.generation) {
-      // Stale assignment received, return only the generation. We don't expect this to ever
-      // actually occur given how the code is currently structured, but we have added it to
-      // be defensive.
+      // Stale assignment received. We don't expect this to ever actually occur given how the code
+      // is currently structured, but we have added it to be defensive.
       logger.alert(
         Severity.DEGRADED,
         SUBSCRIBER_HANDLER_ASSIGNMENT_CACHE_AHEAD_OF_SOURCE,
-        s"getOrUpdateSyncAssignmentState got a stale assignment for $target (generation " +
+        s"getOrUpdateCachedSyncAssignmentState got a stale assignment for $target (generation " +
         s"${assignment.generation} is less than cached generation " +
         s"${cachedState.generation}). Returning the newer cached generation instead.",
         every = 5.minutes
       )
-      SyncAssignmentState.KnownGeneration(cachedState.generation).toProto
-    } else {
-      if (clientSupportsSerializedAssignment) {
-        cachedState.syncSerializedAssignmentStateP
-      } else {
-        cachedState.syncAssignmentStateP
-      }
     }
+    cachedState
   }
 
   /** Creates and returns a [[CachedSyncAssignmentState]] from the given `assignment`. */
@@ -872,10 +884,29 @@ object SubscriberHandler {
    * @param generation The generation of the assignment.
    */
   private class CachedSyncAssignmentState private (
+      assignment: Assignment,
       val syncAssignmentStateP: SyncAssignmentStateP,
       val syncSerializedAssignmentStateP: SyncAssignmentStateP,
       val generation: Generation
-  )
+  ) {
+
+    /**
+     * Memoized speculative diff sizes, in bytes, for the current assignment, keyed by the
+     * subscriber's known assignment generation.
+     */
+    private val speculativeDiffSizeMemo: mutable.Map[Generation, Int] = mutable.Map.empty
+
+    /**
+     * Returns the speculative diff size, in bytes, of the assignment against the given known
+     * generation. Because it's expensive to compute, the result is memoized.
+     */
+    def speculativeDiffSizeBytes(knownGeneration: Generation): Int = {
+      speculativeDiffSizeMemo.getOrElseUpdate(
+        knownGeneration,
+        assignment.speculativeDiffSizeBytes(knownGeneration)
+      )
+    }
+  }
 
   private object CachedSyncAssignmentState {
 
@@ -890,7 +921,7 @@ object SubscriberHandler {
       val diffAssignment: DiffAssignment = assignment.toDiff(Generation.EMPTY)
       val (newState, newSerializedState): (SyncAssignmentStateP, SyncAssignmentStateP) =
         SyncAssignmentState.KnownAssignment.toCachedProtos(diffAssignment)
-      new CachedSyncAssignmentState(newState, newSerializedState, assignment.generation)
+      new CachedSyncAssignmentState(assignment, newState, newSerializedState, assignment.generation)
     }
   }
 
@@ -949,6 +980,18 @@ object SubscriberHandlerMetrics {
     .build()
     .name("dicer_client_response_size_bytes_histogram")
     .help("Size of ClientResponseP protos distributed by SubscriberHandler in bytes")
+    .labelNames("targetCluster", "targetName", "targetInstanceId", "handlerLocation")
+    .buckets(SERIALIZED_ASSIGNMENT_SIZE_BUCKETS: _*)
+    .register()
+
+  private[common] val speculativeDiffAssignmentSizeBytes: Histogram = Histogram
+    .build()
+    .name("dicer_speculative_diff_assignment_size_bytes_histogram")
+    .help(
+      "Size in bytes of the incremental diff SubscriberHandler would distribute against each " +
+      "subscriber's source generation; compare its sum rate to " +
+      "dicer_serialized_assignment_size_bytes_histogram to estimate assignment-diff savings"
+    )
     .labelNames("targetCluster", "targetName", "targetInstanceId", "handlerLocation")
     .buckets(SERIALIZED_ASSIGNMENT_SIZE_BUCKETS: _*)
     .register()
@@ -1089,13 +1132,9 @@ object SubscriberHandlerMetrics {
       requestTarget: Target,
       alternativeTargetOpt: Option[AppTarget],
       senderClusterUriOpt: Option[KubernetesClusterUri],
-      serviceIdentityOpt: Option[ServiceIdentity],
+      callerServiceNameOpt: Option[String],
       metricsKey: MetricsKey): Unit = {
-    val callerService: String = serviceIdentityOpt
-      .map { serviceIdentity: ServiceIdentity =>
-        serviceIdentity.serviceName
-      }
-      .getOrElse("unknown")
+    val callerService: String = callerServiceNameOpt.getOrElse("unknown")
 
     val matchedLabels: TargetMatchedLabels =
       getWatchRequestTargetMatchedLabels(handlerTarget, requestTarget)

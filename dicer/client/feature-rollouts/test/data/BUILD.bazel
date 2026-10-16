@@ -1,7 +1,12 @@
 
 filegroup(
     name = "data",
-    srcs = ["scope_test_data.textproto"],
+    srcs = [
+        "config_test_data.textproto",
+        "rule_override_test_data.textproto",
+        "rule_test_data.textproto",
+        "scope_test_data.textproto",
+    ],
     testonly = True,
     visibility = ["//dicer:internal"],
 )

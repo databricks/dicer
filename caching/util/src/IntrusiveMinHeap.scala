@@ -112,7 +112,7 @@ trait IntrusiveMinHeapElement[Priority] {
  */
 class IntrusiveMinHeap[Priority, Element <: IntrusiveMinHeapElement[Priority]](
     implicit ordering: Ordering[Priority]) {
-  import IntrusiveMinHeap._
+  import IntrusiveMinHeap.{getLeftChildIndex, getParentIndex}
 
   /**
    * Contains all heap elements. Based on the index of an element in the heap, you can determine

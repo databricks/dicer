@@ -2,6 +2,8 @@
 # Tears down the Dicer demo environment by deleting the KIND cluster.
 # Removes the entire "dicer-demo" cluster and all resources within it.
 # Also removes TLS certificates if they were generated.
+
+# Cleanup failures should visibly fail the script.
 set -euo pipefail
 
 # Use /tmp for certificates to match setup.sh
@@ -10,8 +12,10 @@ CERTS_DIR="/tmp/dicer-demo-certs"
 echo "Cleaning up Dicer demo environment..."
 echo ""
 
-# Delete the KIND cluster
-if kind get clusters 2>/dev/null | grep -q "^dicer-demo$"; then
+# Listing clusters outside the `if` causes the script to abort on a `kind` failure, instead of
+# treating it as a missing cluster.
+CLUSTERS="$(kind get clusters)"
+if grep -q "^dicer-demo$" <<< "$CLUSTERS"; then
     kind delete cluster --name dicer-demo
     echo "KIND cluster 'dicer-demo' deleted."
 else

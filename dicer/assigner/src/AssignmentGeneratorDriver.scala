@@ -1,8 +1,7 @@
 package com.databricks.dicer.assigner
 
-import java.util.UUID
-
 import java.net.URI
+import java.util.UUID
 
 import scala.concurrent.Future
 import scala.util.Try
@@ -51,7 +50,6 @@ class AssignmentGeneratorDriver private (
     keyOfDeathDetector: KeyOfDeathDetector,
     clusterUri: URI,
     minAssignmentGeneration: FiniteDuration,
-    dicerTeeEventEmitter: DicerTeeEventEmitter,
     dicerSimulatorEventLogEmitter: DicerSimulatorEventEmitter,
     assignerProtoLogger: AssignerProtoLogger,
     assignerServiceInfoOpt: Option[AssignerServiceInfo]) {
@@ -122,14 +120,12 @@ class AssignmentGeneratorDriver private (
     handleEvent(Event.Shutdown())
   }
 
-  /** A wrapper method for passing the event to baseDriver and also emitting it to Tee. */
+  /** Passes the event to the state machine and logs it for simulator replay. */
   private def handleEvent(event: Event): Unit = {
     sec.assertCurrentContext()
     baseDriver.handleEvent(event)
-    dicerTeeEventEmitter.maybeEmitEvent(target, event)
 
     // Log the event to Lumberjack for replay by the Dicer Simulator.
-    // TODO(<internal bug>): Remove DicerTeeEventEmitter.
     dicerSimulatorEventLogEmitter.maybeEmitEvent(
       target,
       event,
@@ -141,7 +137,8 @@ class AssignmentGeneratorDriver private (
    * Informs the generator of a termination signal from Kubernetes for the Slicelet with
    * `resourceUuid`.
    */
-  private def onTerminationSignalFromKubernetes(resourceUuid: UUID): Unit = sec.run {
+  private def onTerminationSignalFromKubernetes(resourceUuid: UUID): Unit = {
+    sec.assertCurrentContext()
     logger.info(s"Received termination signal from Kubernetes for resourceUuid: $resourceUuid")
     handleEvent(Event.TerminationSignalFromKubernetes(resourceUuid))
   }
@@ -162,9 +159,32 @@ class AssignmentGeneratorDriver private (
         // Start watching Kubernetes termination signals.
         iassert(kubernetesTargetWatcherOpt.isEmpty)
         logger.info(s"Starting KubernetesTargetWatcher for $watchTarget")
-        val kubernetesTargetWatcher =
-          kubernetesTargetWatcherFactory.create(watchTarget, onTerminationSignalFromKubernetes)
-        kubernetesTargetWatcher.start()
+
+        val kubernetesTargetWatcher: KubernetesTargetWatcher =
+          kubernetesTargetWatcherFactory.create(watchTarget)
+
+        // The last known set of terminating pods, used to perform edge detection on the levels
+        // reported by the watcher. Only accessed on `sec` (inside the callback below).
+        //
+        // TODO(<internal bug>): Remove this after maintaining the set of terminating resources from the
+        // cluster manager in the generator.
+        var knownTerminatingPods: Set[UUID] = Set.empty
+
+        // The watcher invalidates our cached view whenever its terminating set may have changed;
+        // re-read the level and emit a termination event for each newly-terminating pod.
+        val invalidationCallback: () => Unit = () =>
+          sec.run {
+            val terminatingPods: Set[UUID] = kubernetesTargetWatcher.getTerminatingPods()
+
+            val newTerminatingPods: Set[UUID] = terminatingPods -- knownTerminatingPods
+            for (resourceUuid: UUID <- newTerminatingPods) {
+              onTerminationSignalFromKubernetes(resourceUuid)
+            }
+
+            knownTerminatingPods = terminatingPods
+          }
+
+        kubernetesTargetWatcher.start(invalidationCallback)
         kubernetesTargetWatcherOpt = Some(kubernetesTargetWatcher)
 
       case DriverAction.StopKubernetesTargetWatcher() =>
@@ -271,8 +291,6 @@ object AssignmentGeneratorDriver {
    *                           declaring key of death scenarios.
    * @param clusterUri The URI of the cluster in which the generator is running.
    * @param minAssignmentGenerationInterval The minimum interval between assignment generations.
-   * @param dicerTeeEventEmitter The emitter used to optionally
-   *                             send state machine events to Dicer Tee.
    * @param dicerSimulatorEventLogEmitter The emitter used to optionally log state machine events
    *                                      to Lumberjack for replay by the Dicer Simulator.
    * @param assignerProtoLogger The proto logger for Assigner-specific logging events.
@@ -290,7 +308,6 @@ object AssignmentGeneratorDriver {
       keyOfDeathDetector: KeyOfDeathDetector,
       clusterUri: URI,
       minAssignmentGenerationInterval: FiniteDuration,
-      dicerTeeEventEmitter: DicerTeeEventEmitter,
       dicerSimulatorEventLogEmitter: DicerSimulatorEventEmitter,
       assignerProtoLogger: AssignerProtoLogger,
       assignerServiceInfoOpt: Option[AssignerServiceInfo]): AssignmentGeneratorDriver = {
@@ -306,7 +323,6 @@ object AssignmentGeneratorDriver {
         keyOfDeathDetector,
         clusterUri,
         minAssignmentGenerationInterval,
-        dicerTeeEventEmitter,
         dicerSimulatorEventLogEmitter,
         assignerProtoLogger,
         assignerServiceInfoOpt
@@ -330,7 +346,6 @@ object AssignmentGeneratorDriver {
       keyOfDeathDetector: KeyOfDeathDetector,
       clusterUri: URI,
       minAssignmentGeneration: FiniteDuration,
-      dicerTeeEventEmitter: DicerTeeEventEmitter,
       dicerSimulatorEventLogEmitter: DicerSimulatorEventEmitter,
       assignerProtoLogger: AssignerProtoLogger,
       assignerServiceInfoOpt: Option[AssignerServiceInfo])
@@ -345,7 +360,6 @@ object AssignmentGeneratorDriver {
         keyOfDeathDetector,
         clusterUri,
         minAssignmentGeneration,
-        dicerTeeEventEmitter,
         dicerSimulatorEventLogEmitter,
         assignerProtoLogger,
         assignerServiceInfoOpt

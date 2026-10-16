@@ -22,7 +22,7 @@ import com.databricks.dicer.assigner.MigrationMode
 import com.databricks.dicer.assigner.conf.DicerAssignerConf.{logger, ExecutionMode}
 import com.databricks.dicer.assigner.config.TargetMigrationConfig
 import com.databricks.dicer.common.{CommonSslConf, Incarnation, WatchServerConf}
-import com.databricks.featureflag.client.utils.{FlagValueProvider, RuntimeContext}
+import com.databricks.featureflag.client.utils.RuntimeContext
 import com.databricks.featureflag.client.{DynamicConf, FeatureFlagDefinition}
 import com.databricks.rpc.DatabricksObjectMapper
 import com.databricks.rpc.tls.{TLSOptions, TLSOptionsMigration}
@@ -575,16 +575,6 @@ class DicerAssignerConf(config: Config)
   private val forceDisableDynamicConfig: Boolean =
     configure("databricks.dicer.assigner.forceDisableDynamicConfig", false)
 
-  /**
-   * Whether to serve targets that exist only in SAFE dynamic config. When disabled, a target must
-   * exist in the static config shipped with the Assigner binary before it can be served.
-   *
-   * TODO(<internal bug>): Remove this option once DynamicTargetConfigProvider has been rolled out
-   * everywhere and has enough production mileage to be considered stable.
-   */
-  val serveDynamicOnlyTargets: Boolean =
-    configure("databricks.dicer.assigner.serveDynamicOnlyTargets", false)
-
   /** The watch RPC timeout that the Assigner suggests to Clerks that directly connect to it. */
   @FeatureFlagDefinition(
     team = "platform-team",
@@ -594,27 +584,6 @@ class DicerAssignerConf(config: Config)
     FeatureFlag("databricks.dicer.assigner.assignerSuggestedClerkWatchTimeoutSeconds", 5)
 
   /**
-   * When true, both the Assigner's readiness and liveness probes ([[AssignerProbeSource]]) are
-   * gated on the Kubernetes membership checker's connection health. When true:
-   *  - while the connection is unhealthy, the readiness probe reports not-ready and the liveness
-   *    probe reports need-restart;
-   *  - until the first successful poll (connection health unknown), the readiness probe reports
-   *    not-ready while the liveness probe stays alive.
-   * When false, both probes always return ready / alive regardless of connection health. Re-read on
-   * every probe so flips take effect live.
-   */
-  @FeatureFlagDefinition(
-    team = "platform-team",
-    description = "Gates the dicer-assigner readiness and liveness probes on Kubernetes " +
-      "membership checker connection health."
-  )
-  private val gateProbesOnK8sConnectionHealth: FeatureFlag[Boolean] =
-    FeatureFlag(
-      "databricks.dicer.assigner.gateProbesOnK8sConnectionHealth",
-      false
-    )
-
-  /**
    * Whether the Assigner should use [[InternalTargetConfig.DEFAULT_FOR_EXPERIMENTAL_TARGETS]] for
    * targets that do not have a checked-in config. When enabled, watch requests for unconfigured
    * targets will use this default config instead of being rejected. This is intended for allowing
@@ -622,19 +591,6 @@ class DicerAssignerConf(config: Config)
    */
   val allowDefaultTargetConfigForExperimentalTargets: Boolean =
     configure("databricks.dicer.assigner.allowDefaultTargetConfigForExperimentalTargets", false)
-
-  /** Whether the Assigner should forward events for Dicer Tee. */
-  val enableDicerTeeForwarding: Boolean =
-    configure("databricks.dicer.assigner.tee.forwardingEnabled", false)
-
-  /**
-   * URI of DicerTeeBackend, where [[com.databricks.dicer.assigner.DicerTeeEventEmitter]] will emit
-   * events to.
-   */
-  val dicerTeeURI: String = configure(
-    "databricks.dicer.assigner.tee.dicerTeeURI",
-    "dicer-tee-service.dicer-tee.svc.cluster.local"
-  )
 
   /**
    * Whether to log AssignmentGenerator events to Lumberjack for replay by the Dicer Simulator.
@@ -675,9 +631,6 @@ class DicerAssignerConf(config: Config)
   )
   final val protoLoggerGenerationSampleFractionFlag: FeatureFlag[Double] =
     FeatureFlag("databricks.dicer.assigner.protoLogger.dynamicGenerationSampleFraction", 0.0)
-
-  /** Interval at which the SAFE flag for proto logging sample fraction is polled. */
-  private[dicer] val protoLoggerGenerationSampleFractionPollInterval: FiniteDuration = 120.seconds
 
   /**
    * Gets the latest dynamic target configurations from the
@@ -732,18 +685,6 @@ class DicerAssignerConf(config: Config)
       enableDynamicConfig.getCurrentValue(runtimeContext = RuntimeContext.EMPTY)
     }
   }
-
-  /**
-   * Free-standing accessor for [[gateProbesOnK8sConnectionHealth]] so the
-   * path-dependent `FeatureFlag` inner-class type does not leak across module boundaries. The
-   * value is re-read on every `getCurrentValue()` call (the lambda captures the flag, not a
-   * snapshot), so it stays live. This one provider gates both the readiness and the liveness probe.
-   */
-  val gateProbesOnK8sConnectionHealthFlagProvider: FlagValueProvider[Boolean] =
-    FlagValueProvider[Boolean](
-      name = gateProbesOnK8sConnectionHealth.flagName,
-      supplier = () => gateProbesOnK8sConnectionHealth.getCurrentValue()
-    )
 
   /**
    * Tries to derive [[ClusterConfigScope]] from `conf`. Returns `Some` scope if successful; if

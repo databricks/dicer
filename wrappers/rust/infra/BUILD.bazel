@@ -1,0 +1,15 @@
+load("//bazel/rules/rust:rules_rust.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "infra",
+    srcs = ["src/lib.rs"],
+    crate_name = "universe_infra_lib_rust",
+    visibility = ["//visibility:public"],
+)
+
+rust_test(
+    name = "infra_data_model_test",
+    testonly = True,
+    srcs = ["tests/infra_data_model_test.rs"],
+    deps = [":infra"],
+)

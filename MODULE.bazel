@@ -193,6 +193,16 @@ rust.toolchain(
     edition = "2024",
     rust_analyzer_version = RUSTC_VERSION,
     rustfmt_version = RUSTFMT_VERSION,
+    # rules_rust 0.70.0 predates 1.97.1, so it doesn't have its hashes built-in.
+    sha256s = {
+        "cargo-1.97.1-x86_64-unknown-linux-gnu.tar.xz": "e1be5f5ff7f7f80ca506fb65770b759edbdc6d303781ed71c5de8ec8a8394779",
+        "clippy-1.97.1-x86_64-unknown-linux-gnu.tar.xz": "3441df8fb54db985f8c8a3e8356b8874a3f92cc8cca8565cfe36f1dc15935e72",
+        "llvm-tools-1.97.1-x86_64-unknown-linux-gnu.tar.xz": "3e7a1c596a42dea6bf625ec6f006ce2fbcf5d1ff892f082828eb182a5d483b95",
+        "rust-analyzer-1.97.1-x86_64-unknown-linux-gnu.tar.xz": "4d6b6055bea92ed2b2e53a35577d9b43dd4d0c6234be72044d3097b7d3f16572",
+        "rust-src-1.97.1.tar.xz": "e9a1e616d04c6845895c827a178b9227f7c7199f3f4a80af81ab3aff7b80156b",
+        "rust-std-1.97.1-x86_64-unknown-linux-gnu.tar.xz": "1c1e704ae80126b7de34f72ea2825f7fd01736dec20732faed47374b95282fba",
+        "rustc-1.97.1-x86_64-unknown-linux-gnu.tar.xz": "9819d0a32d56bd339585319c80260e332779f5541fd66838ab7e016d6c814819",
+    }, 
     versions = [RUSTC_VERSION],
 )
 
@@ -263,6 +273,12 @@ crate.spec(
 crate.spec(
     package = "tracing",
     version = "=0.1.41",
+)
+crate.spec(
+    default_features = False,
+    features = ["fmt"],
+    package = "tracing-subscriber",
+    version = "=0.3.23",
 )
 
 # ---- buffa message-codegen crates ----

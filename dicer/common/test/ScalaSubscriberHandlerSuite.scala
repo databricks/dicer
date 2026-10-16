@@ -14,7 +14,17 @@ import com.databricks.caching.util.{FakeSequentialExecutionContext, Lock, Metric
 import com.databricks.caching.util.TestUtils.assertThrow
 import com.databricks.dicer.common.Assignment.AssignmentValueCell
 import com.databricks.dicer.common.SubscriberHandler.Location
-import com.databricks.dicer.common.testing.SliceTestUtils.createLooseGeneration
+import com.databricks.dicer.common.TargetHelper.TargetOps
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  LowInclusiveLongFluent,
+  LowInclusiveStringFluent,
+  SliceAssignmentSliceFluent,
+  createAssignment,
+  createLooseGeneration,
+  toSliceKey,
+  toSquid,
+  `∞`
+}
 import com.databricks.dicer.external.Target
 import com.databricks.rpc.RPCContext
 import com.databricks.rpc.testing.JettyTestRPCContext
@@ -634,5 +644,111 @@ class ScalaSubscriberHandlerSuite extends SubscriberHandlerSuiteBase {
 
     // Verify that gen 44 is parked (cell is non-empty, not less than cell's generation).
     state.assertParked(createClientRequest(44, createSliceletData("pod12"), "pod12"))
+  }
+
+  /** Reads the `_sum` of the given histogram for [[target]] at the Assigner handler location. */
+  private def readHistogramSum(metricName: String): Double =
+    readPrometheusMetric(
+      metricName,
+      Vector(
+        "targetCluster" -> target.getTargetClusterLabel,
+        "targetName" -> target.getTargetNameLabel,
+        "targetInstanceId" -> target.getTargetInstanceIdLabel,
+        "handlerLocation" -> Location.Assigner.toString
+      )
+    )
+
+  /** Total bytes of full assignments distributed (the baseline). */
+  private def getSerializedAssignmentSizeSum: Double =
+    readHistogramSum("dicer_serialized_assignment_size_bytes_histogram_sum")
+
+  /** Total bytes of the hypothetical diffs SubscriberHandler would have distributed. */
+  private def getSpeculativeDiffSizeSum: Double =
+    readHistogramSum("dicer_speculative_diff_assignment_size_bytes_histogram_sum")
+
+  // Scala-only: the speculative assignment-diff size is recorded on the Assigner distribution path,
+  // which is implemented in Scala.
+  test("Speculative diff size is recorded and smaller than the full assignment for loose") {
+    // Test plan: Verify that distributing a loose-incarnation assignment records the full size
+    // distributed and the size of the diff against the subscriber's known generation. Build a loose
+    // assignment at generation 50 whose first Slice is unchanged since generation 20 and whose
+    // second Slice changed at 50, then distribute it to a subscriber holding generation 20. Confirm
+    // the full-assignment histogram grew by exactly the distributed sync state's size, and the
+    // speculative-diff histogram grew by exactly the diff against generation 20, which carries the
+    // second Slice (so it is larger than an empty diff) but not the first (so it is smaller than
+    // the full assignment).
+    val state = TestState()
+    val serializedBefore: Double = getSerializedAssignmentSizeSum
+    val speculativeBefore: Double = getSpeculativeDiffSizeSum
+
+    val assignment: Assignment = createAssignment(
+      50,
+      AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
+      ("" -- 0) @@ 20 -> Seq("pod0"),
+      (0 -- ∞) @@ 50 -> Seq("pod1")
+    )
+    state.cell.setValue(assignment)
+
+    // The subscriber holds generation 20, so it is sent the full assignment.
+    val knownGeneration: Generation = 20
+    val responseP: ClientResponseP = TestUtils.awaitResult(
+      state.handler.handleWatch(
+        createRPCContext(),
+        createClientRequest(knownGeneration, createSliceletData("pod0"), "pod0"),
+        state.cell
+      ),
+      Duration.Inf
+    )
+    state.drainSec()
+
+    val serializedBytes: Double = getSerializedAssignmentSizeSum - serializedBefore
+    val speculativeBytes: Double = getSpeculativeDiffSizeSum - speculativeBefore
+    assertResult(responseP.getSyncAssignmentState.serializedSize.toDouble)(serializedBytes)
+    assertResult(assignment.speculativeDiffSizeBytes(knownGeneration).toDouble)(speculativeBytes)
+    val emptyDiffBytes: Double = assignment.speculativeDiffSizeBytes(assignment.generation).toDouble
+    assert(
+      speculativeBytes > emptyDiffBytes,
+      s"diff against generation $knownGeneration ($speculativeBytes bytes) should carry the " +
+      s"Slice changed since then, so exceed an empty diff ($emptyDiffBytes bytes)"
+    )
+    assert(
+      speculativeBytes < serializedBytes,
+      s"diff against generation $knownGeneration ($speculativeBytes bytes) should be smaller " +
+      s"than the full assignment ($serializedBytes bytes)"
+    )
+  }
+
+  // Scala-only: only the Scala SubscriberHandler records the speculative assignment-diff size. The
+  // shared suite covers the full-assignment histogram for generation-only replies.
+  test("Speculative diff size is not recorded for generation-only replies") {
+    // Test plan: Verify that the speculative-diff histogram, like the full-assignment histogram, is
+    // not recorded when the reply carries only a generation, so the two remain comparable. Park a
+    // subscriber that already knows the cell's assignment, advance time past the watch timeout so
+    // it receives a generation-only reply, and confirm the speculative-diff histogram sum is
+    // unchanged.
+    val state = TestState()
+    val assignment: Assignment = createAssignment(
+      50,
+      AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
+      ("" -- ∞) @@ 50 -> Seq("pod0")
+    )
+    state.cell.setValue(assignment)
+    val speculativeBefore: Double = getSpeculativeDiffSizeSum
+
+    val fut: Future[ClientResponseP] = state.handler.handleWatch(
+      createRPCContext(),
+      createClientRequest(assignment.generation, createSliceletData("pod0"), "pod0"),
+      state.cell
+    )
+    state.drainSec()
+    state.sec.getClock.advanceBy(TIMEOUT)
+    val response: ClientResponse =
+      ClientResponse.fromProto(TestUtils.awaitResult(fut, Duration.Inf))
+    state.drainSec()
+
+    assert(response.syncState == SyncAssignmentState.KnownGeneration(assignment.generation))
+    assertResult(speculativeBefore)(getSpeculativeDiffSizeSum)
   }
 }

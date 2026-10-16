@@ -1,0 +1,138 @@
+# proto-file: caching/util/test/proto/test_data.proto
+# proto-message: DeterministicSamplingTestDataP
+#
+# Shared by the Scala and Rust `isSampled` tests.
+
+# Inputs that should be accepted by `isSampled`. Fraction 0.0 samples nothing and 1.0 samples
+# everything.
+valid_test_cases: [
+  {
+    description: "item_0/namespace_0 at fraction 0.0"
+    item: "item_0" sample_namespace: "namespace_0" sample_fraction: 0.0
+    expected_is_sampled: false
+  },
+  {
+    description: "item_1/namespace_1 at fraction 0.0"
+    item: "item_1" sample_namespace: "namespace_1" sample_fraction: 0.0
+    expected_is_sampled: false
+  },
+  {
+    description: "item_2/namespace_2 at fraction 0.0"
+    item: "item_2" sample_namespace: "namespace_2" sample_fraction: 0.0
+    expected_is_sampled: false
+  },
+  {
+    description: "item_3/namespace_3 at fraction 0.0"
+    item: "item_3" sample_namespace: "namespace_3" sample_fraction: 0.0
+    expected_is_sampled: false
+  },
+  {
+    description: "item_4/namespace_4 at fraction 0.0"
+    item: "item_4" sample_namespace: "namespace_4" sample_fraction: 0.0
+    expected_is_sampled: false
+  },
+  {
+    description: "item_5/namespace_5 at fraction 0.0"
+    item: "item_5" sample_namespace: "namespace_5" sample_fraction: 0.0
+    expected_is_sampled: false
+  },
+  {
+    description: "item_6/namespace_6 at fraction 0.0"
+    item: "item_6" sample_namespace: "namespace_6" sample_fraction: 0.0
+    expected_is_sampled: false
+  },
+  {
+    description: "item_7/namespace_7 at fraction 0.0"
+    item: "item_7" sample_namespace: "namespace_7" sample_fraction: 0.0
+    expected_is_sampled: false
+  },
+  {
+    description: "item_8/namespace_8 at fraction 0.0"
+    item: "item_8" sample_namespace: "namespace_8" sample_fraction: 0.0
+    expected_is_sampled: false
+  },
+  {
+    description: "item_9/namespace_9 at fraction 0.0"
+    item: "item_9" sample_namespace: "namespace_9" sample_fraction: 0.0
+    expected_is_sampled: false
+  },
+  {
+    description: "item_0/namespace_0 at fraction 1.0"
+    item: "item_0" sample_namespace: "namespace_0" sample_fraction: 1.0
+    expected_is_sampled: true
+  },
+  {
+    description: "item_1/namespace_1 at fraction 1.0"
+    item: "item_1" sample_namespace: "namespace_1" sample_fraction: 1.0
+    expected_is_sampled: true
+  },
+  {
+    description: "item_2/namespace_2 at fraction 1.0"
+    item: "item_2" sample_namespace: "namespace_2" sample_fraction: 1.0
+    expected_is_sampled: true
+  },
+  {
+    description: "item_3/namespace_3 at fraction 1.0"
+    item: "item_3" sample_namespace: "namespace_3" sample_fraction: 1.0
+    expected_is_sampled: true
+  },
+  {
+    description: "item_4/namespace_4 at fraction 1.0"
+    item: "item_4" sample_namespace: "namespace_4" sample_fraction: 1.0
+    expected_is_sampled: true
+  },
+  {
+    description: "item_5/namespace_5 at fraction 1.0"
+    item: "item_5" sample_namespace: "namespace_5" sample_fraction: 1.0
+    expected_is_sampled: true
+  },
+  {
+    description: "item_6/namespace_6 at fraction 1.0"
+    item: "item_6" sample_namespace: "namespace_6" sample_fraction: 1.0
+    expected_is_sampled: true
+  },
+  {
+    description: "item_7/namespace_7 at fraction 1.0"
+    item: "item_7" sample_namespace: "namespace_7" sample_fraction: 1.0
+    expected_is_sampled: true
+  },
+  {
+    description: "item_8/namespace_8 at fraction 1.0"
+    item: "item_8" sample_namespace: "namespace_8" sample_fraction: 1.0
+    expected_is_sampled: true
+  },
+  {
+    description: "item_9/namespace_9 at fraction 1.0"
+    item: "item_9" sample_namespace: "namespace_9" sample_fraction: 1.0
+    expected_is_sampled: true
+  }
+]
+
+# Inputs that should be rejected by `isSampled`, with fractions outside [0.0, 1.0].
+invalid_test_cases: [
+  {
+    description: "fraction below range (-1.0)"
+    item: "item" sample_namespace: "namespace" sample_fraction: -1.0
+    expected_error_substring: "sampleFraction must be in [0.0, 1.0], got -1.0"
+  },
+  {
+    description: "fraction below range (-0.1)"
+    item: "item" sample_namespace: "namespace" sample_fraction: -0.1
+    expected_error_substring: "sampleFraction must be in [0.0, 1.0], got -0.1"
+  },
+  {
+    description: "fraction above range (1.1)"
+    item: "item" sample_namespace: "namespace" sample_fraction: 1.1
+    expected_error_substring: "sampleFraction must be in [0.0, 1.0], got 1.1"
+  },
+  {
+    description: "fraction above range (2.0)"
+    item: "item" sample_namespace: "namespace" sample_fraction: 2.0
+    expected_error_substring: "sampleFraction must be in [0.0, 1.0], got 2.0"
+  },
+  {
+    description: "fraction is NaN"
+    item: "item" sample_namespace: "namespace" sample_fraction: nan
+    expected_error_substring: "sampleFraction must be in [0.0, 1.0], got NaN"
+  }
+]

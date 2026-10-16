@@ -995,6 +995,7 @@ scala_test(
         ":client_request",
         ":generation",
         ":subscriber_handler",
+        ":target_helper",
         "//caching/util:fake_sequential_execution_context",
         "//caching/util:lock",
         "//caching/util:metric_utils",
@@ -1005,6 +1006,7 @@ scala_test(
         "//dicer/common/testing:subscriber_handler_test_base",
         "//dicer/common/testing:test_common",
         "//dicer/external:slicelet",
+        "//dicer/friend:squid",
         "//wrappers/rpc:rpc_testing",
         "@com_google_protobuf_protobuf_java",
         "@maven//:com_google_code_findbugs_jsr305",
@@ -1074,6 +1076,21 @@ scala_test(
         "//dicer/external:conf",
         "//wrappers/deployment:infra_data_model_lib",
         "//wrappers/deployment:kubernetes_cluster",
+        "//wrappers/util:async_test_helpers",
+        "//wrappers/util:databricks-test",
+    ],
+)
+
+scala_test(
+    name = "target_name_test",
+    srcs = ["test/TargetNameSuite.scala"],
+    data = ["//dicer/common/test/data"],
+    timeout = "short",
+    deps = [
+        ":target_name",
+        "//caching/util:test_util",
+        "//dicer/common/test/proto:test_data_proto_scala_lib",
+        "//dicer/external:target",
         "//wrappers/util:async_test_helpers",
         "//wrappers/util:databricks-test",
     ],

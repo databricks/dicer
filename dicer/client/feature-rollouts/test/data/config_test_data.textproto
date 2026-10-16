@@ -1,0 +1,88 @@
+# proto-file: dicer/client/feature-rollouts/test/proto/test_data.proto
+# proto-message: DicerClientFeatureRolloutConfigTestDataP
+
+# Config protos that should be accepted by `DicerClientFeatureRolloutConfig::from_proto`.
+valid_config_test_cases: [
+  {
+    description: "Empty config (no default rule, no overrides)"
+    config_proto: {}
+  },
+  {
+    description: "Default rule only, no overrides"
+    config_proto: {
+      default_rule: {
+        force_enable_target_names: ["target-a"]
+        target_instance_enable_fraction: 0.2
+      }
+    }
+  },
+  {
+    description: "Default rule with two non-overlapping overrides"
+    config_proto: {
+      default_rule: {
+        force_enable_target_names: ["instance-manager"]
+        force_disable_target_names: ["sql-warehouse"]
+        target_instance_enable_fraction: 0.2
+      }
+      override_rules: [
+        {
+          override_scopes: [
+            { region_uri: "region:prod/cloud1/public/region1" },
+            { region_uri: "region:prod/cloud2/public/region6" }
+          ]
+          override_rule: { target_instance_enable_fraction: 1.0 }
+        },
+        {
+          override_scopes: [{ region_uri: "region:prod/cloud1/public/region2" }]
+          override_rule: {
+            force_enable_target_names: ["sql-warehouse"]
+            force_disable_target_names: ["instance-manager"]
+            target_instance_enable_fraction: 0.5
+          }
+        }
+      ]
+    }
+  }
+]
+
+# Config protos that should be rejected by `DicerClientFeatureRolloutConfig::from_proto`.
+invalid_config_test_cases: [
+  {
+    description: "Region URI appears in two separate override entries"
+    config_proto: {
+      override_rules: [
+        {
+          override_scopes: [{ region_uri: "region:prod/cloud1/public/region2" }]
+          override_rule: { target_instance_enable_fraction: 1.0 }
+        },
+        {
+          override_scopes: [{ region_uri: "region:prod/cloud1/public/region2" }]
+          override_rule: { target_instance_enable_fraction: 0.5 }
+        }
+      ]
+    }
+    expected_error_substring: "Each region URI may appear at most once"
+  },
+  {
+    description: "Region URI appears twice within a single override entry"
+    config_proto: {
+      override_rules: [
+        {
+          override_scopes: [
+            { region_uri: "region:prod/cloud1/public/region2" },
+            { region_uri: "region:prod/cloud1/public/region2" }
+          ]
+          override_rule: { target_instance_enable_fraction: 1.0 }
+        }
+      ]
+    }
+    expected_error_substring: "overrideScopes must not contain duplicate region URIs"
+  },
+  {
+    description: "Validation error in the default rule propagates to the config"
+    config_proto: {
+      default_rule: { target_instance_enable_fraction: 1.5 }
+    }
+    expected_error_substring: "targetInstanceEnableFraction must be in [0.0, 1.0]"
+  }
+]

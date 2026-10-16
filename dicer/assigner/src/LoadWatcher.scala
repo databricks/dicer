@@ -563,7 +563,7 @@ private[assigner] object LoadWatcher {
      * PRECONDITION: The SliceLoadWatcher is non-empty.
      *
      * Returns this Slice's load as [[LoadMap.Entry]]s, each paired with the top keys it contains.
-     * When the freshest Measurement carries a load distribution, the Slice is apportioned into one
+     * When the Slice's Measurements carry a load distribution, the Slice is apportioned into one
      * entry per CDF bucket (see [[apportionLoadUsingDistribution]]); otherwise the whole Slice's
      * load is reported as a single entry.
      *
@@ -786,10 +786,11 @@ private[assigner] object LoadWatcher {
     /**
      * PRECONDITION: The SliceLoadWatcher is non-empty.
      *
-     * Returns the Slice's aggregated total load (including top-key load), the top keys' aggregated
-     * loads, and the load distribution from the freshest Measurement (if any). The load and top
-     * keys are aggregated across the tracked Measurements using the strategy from the "Load report
-     * and aggregation" and "Top keys handling" sections of the main doc of [[LoadWatcher]].
+     * Returns the Slice's aggregated total load (including top keys), the aggregated top keys'
+     * loads, and the aggregated load distribution across the tracked Measurements (if any carry
+     * one). The load, top keys, and distribution are all aggregated across the tracked Measurements
+     * using the strategies from the "Load report and aggregation", "Top keys handling", and "Load
+     * distribution" sections of the main doc of [[LoadWatcher]].
      */
     private def aggregateLoadFromReplicas(
         now: TickerTime): (Double, KeyLoadMap, Option[LoadDistribution]) = {
@@ -813,11 +814,16 @@ private[assigner] object LoadWatcher {
             (keyLoad.key, new WeightedLoadAccumulator(LOAD_WEIGHT_DECAYING_HALFLIFE))
           })
           .toMap
+      // Aggregator for the per-replica load distributions (CDFs).
+      val loadDistributionAggregator = new WeightedLoadDistributionAggregator(
+        slice,
+        LOAD_WEIGHT_DECAYING_HALFLIFE
+      )
 
       // For each Measurement tracked, accumulate its Slice load on
-      // `sliceLoadAccumulatorIncludingTopKeys`, and accumulate its top keys' load on
-      // `topKeyAccumulators`. We assume 0 load for top keys when they don't appear in a load
-      // report.
+      // `sliceLoadAccumulatorIncludingTopKeys`, accumulate its top keys' load on
+      // `topKeyAccumulators` (assuming 0 load for top keys that don't appear in a load report), and
+      // feed its load distribution into `loadDistributionAggregator`.
       for (measurement: MeasurementElement <- measurementsByResource.values) {
         val numReplicas: Int = measurement.numReplicas
         // See `highestMeasurementTimeOpt` for information about normalized age.
@@ -845,6 +851,15 @@ private[assigner] object LoadWatcher {
             numReplicas
           )
         }
+
+        // Feed this Measurement's distribution (if any) into the mixture.
+        for (distribution: LoadDistribution <- measurement.loadDistributionOpt) {
+          loadDistributionAggregator.addDistribution(
+            measurementNormalizedAge,
+            measurement.load,
+            distribution
+          )
+        }
       }
 
       // Build results from the accumulators for Slice and top keys.
@@ -865,22 +880,15 @@ private[assigner] object LoadWatcher {
         resourceOptForDebug = None
       )
 
-      // Unlike scalar load and top keys, we don't aggregate load distributions across Measurements;
-      // the freshest histogram should suffice as a representative load distribution. See the "Load
-      // distribution" section of the main doc.
-      //
-      // TODO(<internal bug>): Picking the freshest distribution is an interim strategy. It is correct when
-      // there is only a single replica, or if a Slice's Measurements come from replicas with
-      // interchangeable key distributions. It does not, however, accurately reflect load that is
-      // distributed asymmetrically across replicas. Refine this to combine the distributions across
-      // replicas, weighted by each replica's age-decayed load.
-      val freshestLoadDistributionOpt: Option[LoadDistribution] =
-        measurementsByResource.values.maxBy((_: MeasurementElement).time).loadDistributionOpt
+      // Compute an aggregate load distribution based on the distributions fed into the
+      // load-weighted mixture (or None if no tracked Measurement carried a distribution).
+      val aggregatedLoadDistributionOpt: Option[LoadDistribution] =
+        loadDistributionAggregator.compute()
 
       (
         accumulatedSliceLoadIncludingTopKeys,
         adjustedAccumulatedTopKeyLoadMap,
-        freshestLoadDistributionOpt
+        aggregatedLoadDistributionOpt
       )
     }
 

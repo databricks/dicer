@@ -89,46 +89,7 @@ case class DiffAssignment(
   }
 
   def toProto: DiffAssignmentP = {
-    val generationProto: Option[GenerationP] = Some(this.generation.toProto)
-    val resourceBuilder = new Assignment.ResourceProtoBuilder
-    val sliceAssignmentProtos = Seq.newBuilder[SliceAssignmentP]
-    val diffGenerationProto: Option[GenerationP] = sliceMap match {
-      case DiffAssignmentSliceMap
-            .Partial(
-            diffGeneration: Generation,
-            sliceMap: SliceMap[GapEntry[SliceAssignment]]
-            ) =>
-        for (entry: GapEntry[SliceAssignment] <- sliceMap.entries) {
-          entry match {
-            case GapEntry.Some(sliceAssignment: SliceAssignment) =>
-              sliceAssignmentProtos += sliceAssignment.toProto(resourceBuilder)
-            case GapEntry.Gap(_) =>
-            // Gaps are not serialized.
-          }
-        }
-        Some(diffGeneration.toProto)
-      case DiffAssignmentSliceMap.Full(
-          sliceMap: SliceMap[SliceAssignment]
-          ) =>
-        for (sliceAssignment: SliceAssignment <- sliceMap.entries) {
-          sliceAssignmentProtos += sliceAssignment.toProto(resourceBuilder)
-        }
-        None
-    }
-    val resourceProtos: Seq[SquidP] = resourceBuilder.toProtos
-    val isFrozenProto: Option[Boolean] = if (this.isFrozen) Some(true) else None
-    val assignerServiceInfoProto: Option[AssignerServiceInfoP] = assignerServiceInfoOpt.map {
-      assignerServiceInfo: AssignerServiceInfo =>
-        assignerServiceInfo.toProto
-    }
-    new DiffAssignmentP(
-      generationProto,
-      sliceAssignmentProtos.result(),
-      resourceProtos,
-      isFrozenProto,
-      diffGenerationProto,
-      assignerServiceInfo = assignerServiceInfoProto
-    )
+    DiffAssignment.toProto(isFrozen, generation, sliceMap, assignerServiceInfoOpt)
   }
 
   /** All resources that are assigned to some slice. */
@@ -227,6 +188,58 @@ object DiffAssignment {
         )
         throw e
     }
+  }
+
+  /**
+   * Builds the [[DiffAssignmentP]] for a diff with the given fields. Shared by
+   * [[DiffAssignment.toProto]] and [[Assignment.speculativeDiffSizeBytes]] (the latter bypasses
+   * [[DiffAssignment]] constructor invariants).
+   */
+  private[common] def toProto(
+      isFrozen: Boolean,
+      generation: Generation,
+      sliceMap: DiffAssignmentSliceMap,
+      assignerServiceInfoOpt: Option[AssignerServiceInfo]): DiffAssignmentP = {
+    val generationProto: Option[GenerationP] = Some(generation.toProto)
+    val resourceBuilder = new Assignment.ResourceProtoBuilder
+    val sliceAssignmentProtos = Seq.newBuilder[SliceAssignmentP]
+    val diffGenerationProto: Option[GenerationP] = sliceMap match {
+      case DiffAssignmentSliceMap
+            .Partial(
+            diffGeneration: Generation,
+            sliceMap: SliceMap[GapEntry[SliceAssignment]]
+            ) =>
+        for (entry: GapEntry[SliceAssignment] <- sliceMap.entries) {
+          entry match {
+            case GapEntry.Some(sliceAssignment: SliceAssignment) =>
+              sliceAssignmentProtos += sliceAssignment.toProto(resourceBuilder)
+            case GapEntry.Gap(_) =>
+            // Gaps are not serialized.
+          }
+        }
+        Some(diffGeneration.toProto)
+      case DiffAssignmentSliceMap.Full(
+          sliceMap: SliceMap[SliceAssignment]
+          ) =>
+        for (sliceAssignment: SliceAssignment <- sliceMap.entries) {
+          sliceAssignmentProtos += sliceAssignment.toProto(resourceBuilder)
+        }
+        None
+    }
+    val resourceProtos: Seq[SquidP] = resourceBuilder.toProtos
+    val isFrozenProto: Option[Boolean] = if (isFrozen) Some(true) else None
+    val assignerServiceInfoProto: Option[AssignerServiceInfoP] = assignerServiceInfoOpt.map {
+      assignerServiceInfo: AssignerServiceInfo =>
+        assignerServiceInfo.toProto
+    }
+    new DiffAssignmentP(
+      generationProto,
+      sliceAssignmentProtos.result(),
+      resourceProtos,
+      isFrozenProto,
+      diffGenerationProto,
+      assignerServiceInfo = assignerServiceInfoProto
+    )
   }
 
   // Private implementation of `fromProto` to permit detailed logging on failure.
@@ -334,6 +347,7 @@ object DiffAssignment {
  * Possible representations of the Slice map in a [[DiffAssignmentSliceMap]] instance.
  */
 sealed trait DiffAssignmentSliceMap
+
 object DiffAssignmentSliceMap {
 
   /**

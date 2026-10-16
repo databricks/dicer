@@ -24,10 +24,11 @@ public class TargetTest {
   @Test
   public void testValidNames() {
     // Test plan: verify that we're able to construct Target using valid names (i.e. names that are
-    // valid DNS labels).
+    // valid DNS labels) and read the original name through the Java API.
     List<String> validNames = TEST_DATA.getValidTargetNamesList();
     for (String validName : validNames) {
       Target target = new Target(validName);
+      assertThat(target.getName()).isEqualTo(validName);
       assertThat(target.toString()).isEqualTo(validName);
     }
   }

@@ -1,7 +1,6 @@
 package com.databricks.dicer.assigner
 
 import scala.collection.mutable
-import scala.concurrent.duration._
 
 import com.databricks.caching.util.SafeConfigUtil.DICER_TARGET_CONFIG_FLAGS_NAME_PREFIX
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
@@ -21,17 +20,12 @@ class TestableDicerAssignerConf(config: Config)
     extends DicerAssignerConf(config)
     with MockFeatureFlagReaderProvider {
 
-  /**
-   * Override of [[DicerAssignerConf.protoLoggerGenerationSampleFractionPollInterval]]. Short
-   * interval so flag updates are observed quickly in tests.
-   */
-  override val protoLoggerGenerationSampleFractionPollInterval: FiniteDuration = 10.milliseconds
-
   /** Sets the test value for the logging sample fraction SAFE flag. */
   def setLoggingSampleFraction(fraction: Double): Unit = {
     mockFeatureFlagReader.setMockValue(
       protoLoggerGenerationSampleFractionFlag.flagName,
-      fraction
+      fraction,
+      runtimeCtxOpt = Some(RuntimeContext.EMPTY)
     )
   }
 

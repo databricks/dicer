@@ -3,8 +3,10 @@ filegroup(
     name = "data",
     srcs = [
         "build_info_test_data.textproto",
+        "deterministic_sampling_test_data.textproto",
         "ewma_accumulator_test_data.textproto",
         "ewma_counter_test_data.textproto",
+        "ewma_quantile_summaries_test_data.textproto",
         "exponential_backoff_test_data.textproto",
         "kubernetes_cluster_uri_test_data.textproto",
         "lossy_ewma_counter_test_data.textproto",

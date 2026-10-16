@@ -357,7 +357,10 @@ class GossipSuite extends DatabricksTest with TestName {
           )
       )
       val enableMultiReplicaConfigMap: InternalTargetConfigMap =
-        InternalTargetConfigMap.create(configScopeOpt = None, targetConfigMap = multiReplicaConfigs)
+        InternalTargetConfigMap.create(
+          clusterConfigScopeOpt = None,
+          targetConfigMap = multiReplicaConfigs
+        )
       InternalDicerTestEnvironment.create(
         config = TestAssigner.Config.create(tlsOptionsOpt = None),
         targetConfigMap = enableMultiReplicaConfigMap

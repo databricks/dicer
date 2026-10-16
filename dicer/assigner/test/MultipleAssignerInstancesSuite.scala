@@ -196,7 +196,7 @@ private object MultipleAssignerInstancesSuite {
 
   /** Configuration map for target configurations, wrapped with default values. */
   private val CONFIG_MAP = new InternalTargetConfigMapWithDefault(
-    InternalTargetConfigMap.create(configScopeOpt = None, Map.empty)
+    InternalTargetConfigMap.create(clusterConfigScopeOpt = None, Map.empty)
   )
 
   /** URI representing the Kubernetes cluster where assigners will run. */

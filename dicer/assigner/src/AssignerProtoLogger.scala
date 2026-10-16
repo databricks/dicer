@@ -1,11 +1,11 @@
 package com.databricks.dicer.assigner
 
 import com.databricks.caching.util.SequentialExecutionContext
-import com.databricks.caching.util.WatchValueCell
 
 import com.databricks.dicer.common.Assignment
 import com.databricks.dicer.common.SliceKeySensitivity
 import com.databricks.dicer.external.Target
+import com.databricks.featureflag.client.DynamicConf
 
 /**
  * A member pod discovered during a Kubernetes membership check: its UUID paired with its
@@ -105,12 +105,12 @@ private[assigner] object AssignerProtoLogger {
    * Creates a new [[AssignerProtoLogger]] instance. Always returns [[NoopAssignerProtoLogger]].
    *
    * @param assignerInfo the AssignerInfo.
-   * @param sampleFractionCell provides the fraction of generations to sample.
+   * @param sampleFractionConf the config for the sample fraction.
    * @param loggingSec the sequential execution context for async logging operations.
    */
   def create(
       assignerInfo: AssignerInfo,
-      sampleFractionCell: WatchValueCell.Consumer[Double],
+      sampleFractionConf: DynamicConf#FeatureFlag[Double],
       loggingSec: SequentialExecutionContext): AssignerProtoLogger = {
     NoopAssignerProtoLogger
   }

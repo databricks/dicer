@@ -874,8 +874,19 @@ private object ClerkAssignment {
   def create(assignment: Assignment): ClerkAssignment = {
     val sliceAssignments: Vector[SliceAssignment] = assignment.sliceMap.entries
 
-    // A map of a slice to the slice's fallback squid (if any)
-    val sliceToFallbackSquid: Map[Slice, Squid] = buildSliceFallbackSquidMap(assignment)
+    // All Clerks use the same assignment-wide ring so fallback traffic for a slice stays
+    // affinitized to one resource, limiting the blast radius of a key-of-death.
+    val assignmentResources: Vector[Squid] = assignment.assignedResources.toVector
+    val fallbackRing: ConsistentHashRing[Squid, SliceKey] =
+      ConsistentHashRing.create[Squid, SliceKey](
+        // Sort by the Squid ordering so every callsite builds an identical ring across
+        // pods/processes, even if there are hash collisions.
+        nodes = assignmentResources.sorted,
+        // `vnodesPerNode` is irrelevant since the ring is not used for balancing keys across the
+        // ring. It is only used to construct a deterministic mapping from a slice to a resource.
+        vnodesPerNode = 1,
+        typeMapper = RingTypeMapper
+      )
 
     val sliceInfoEntries: Vector[SliceInfo] =
       sliceAssignments.map {
@@ -894,10 +905,21 @@ private object ClerkAssignment {
             } else {
               None
             }
+          val fallbackSquidOpt: Option[Squid] =
+            if (sliceAssignment.resourcesSet.size == assignmentResources.size) {
+              // Skip slices that are assigned to all resources.
+              None
+            } else {
+              // Walk the ring from the resource owning the `slice.lowInclusive` key and take the
+              // first resource that is not one of the slice's own resources.
+              fallbackRing
+                .iteratorFrom(key = sliceAssignment.slice.lowInclusive)
+                .find((squid: Squid) => !sliceAssignment.resourcesSet.contains(squid))
+            }
           SliceInfo(
             sliceAssignment.slice,
             twoLevelHashRingOpt,
-            sliceToFallbackSquid.get(sliceAssignment.slice)
+            fallbackSquidOpt
           )
       }
 
@@ -908,58 +930,5 @@ private object ClerkAssignment {
     val sliceMap: SliceMap[SliceInfo] =
       new SliceMap[SliceInfo](sliceInfoEntries, getSlice = (_: SliceInfo).slice)
     new ClerkAssignment(assignment, sliceMap)
-  }
-
-  /**
-   * Builds a map from each slice in `assignment.sliceMap` to the fallback squid chosen for that
-   * slice, used as the fallback resource by [[ResourceRouter]]. A slice has a fallback squid if
-   * and only if the assignment has at least one resource unassigned to the slice.
-   *
-   * A consistent hash ring is built over all of the assignment's resources. For each slice a walk
-   * starts at the resource owning the `slice.lowInclusive` key and returns the first resource it
-   * encounters on the clock-wise walk that is not one of the slice's assigned resources. Using a
-   * consistent hashing algorithm (rather than picking a random unassigned squid) ensures every
-   * clerk picks the same fallback squid for a slice to ensure fallback traffic is affinitized.
-   *
-   * Only a single fallback squid is collected per slice today. This could be extended to collect a
-   * list of unassigned squids to fall back through, but we keep it to one for now, partly to
-   * limit the blast radius of a key-of-death scenario where such a key could take down all the
-   * fallback squids for a slice.
-   *
-   * @param assignment The assignment to construct fallback squids for.
-   * @return A map from a slice to its fallback squid, omitting slices that have none.
-   */
-  private def buildSliceFallbackSquidMap(assignment: Assignment): Map[Slice, Squid] = {
-    val assignmentResources: Vector[Squid] = assignment.assignedResources.toVector
-    val sliceAssignments: Vector[SliceAssignment] = assignment.sliceMap.entries
-
-    val fallbackRing: ConsistentHashRing[Squid, SliceKey] =
-      ConsistentHashRing.create[Squid, SliceKey](
-        // Sort by the Squid ordering so every callsite builds an identical ring across
-        // pods/processes, even if there are hash collisions.
-        nodes = assignmentResources.sorted,
-        // `vnodesPerNode` is irrelevant since the ring is not used for balancing keys across the
-        // ring. It is only used to construct a deterministic mapping from a slice to a resource.
-        vnodesPerNode = 1,
-        typeMapper = RingTypeMapper
-      )
-
-    sliceAssignments.iterator.flatMap {
-      case sliceAssignment: SliceAssignment =>
-        // Skip for slices that are assigned to all resources.
-        if (sliceAssignment.resourcesSet.size == assignmentResources.size) {
-          None
-        } else {
-          // Walk the ring from the resource owning the `slice.lowInclusive` key and take the first
-          // resource that is not one of the slice's own resources.
-          // Note: This walk has a bias in the case where the `slice.lowInclusive` key lands on an
-          // assigned resource, as it will always return the next unassigned resource on the ring.
-          // This is acceptable because balancing load across fallback squids is not a requirement.
-          fallbackRing
-            .iteratorFrom(key = sliceAssignment.slice.lowInclusive)
-            .find((squid: Squid) => !sliceAssignment.resourcesSet.contains(squid))
-            .map((squid: Squid) => sliceAssignment.slice -> squid)
-        }
-    }.toMap
   }
 }

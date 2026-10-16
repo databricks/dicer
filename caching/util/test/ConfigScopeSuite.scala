@@ -145,42 +145,42 @@ class ConfigScopeSuite extends DatabricksTest {
     // are encountered in the overrides.
     // Note that we only care about the shard in which we are currently running, so even if other
     // config scopes have duplicates, there will be no exception thrown.
-    val devAwsUsWest1 =
+    val firstScopeProto =
       ConfigScopeP().withClusterUri("kubernetes-cluster:test-env/cloud1/public/region9/clustertype2/01")
-    val devAwsUsWest2 =
+    val secondScopeProto =
       ConfigScopeP().withClusterUri("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01")
 
-    // Override that we will apply to devAwsUsWest1.
+    // Override that we will apply to firstScopeProto.
     val override1 =
       TestOnlyExampleConfigFieldsP().withIntField(1024).withStringArrayField(Seq("foo", "bar"))
 
-    // Override that we will apply to both devAwsUsWest1 and devAwsUsWest2
+    // Override that we will apply to both firstScopeProto and secondScopeProto.
     val override2 =
       TestOnlyExampleConfigFieldsP().withIntField(2048).withStringArrayField(Seq("foo"))
 
-    val configScopeUsWest1: ClusterConfigScope =
+    val firstScope: ClusterConfigScope =
       ClusterConfigScope("kubernetes-cluster:test-env/cloud1/public/region9/clustertype2/01")
-    val configScopeUsWest2: ClusterConfigScope =
+    val secondScope: ClusterConfigScope =
       ClusterConfigScope("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01")
 
-    // Config scope `devAwsUsWest1` is duplicated in different overrides.
+    // Config scope `firstScopeProto` is duplicated in different overrides.
     val overridesWithDuplicates: Seq[(Seq[ConfigScopeP], TestOnlyExampleConfigFieldsP)] = Seq(
-      (Seq(devAwsUsWest1), override1),
-      (Seq(devAwsUsWest1, devAwsUsWest2), override2)
+      (Seq(firstScopeProto), override1),
+      (Seq(firstScopeProto, secondScopeProto), override2)
     )
 
-    // `configScopeUsWest1` is in both overrides, expect exception to be thrown.
+    // `firstScope` is in both overrides, expect exception to be thrown.
     assertThrow[IllegalArgumentException]("At most one override can be defined") {
       ConfigScope.findScopeOverride(
-        configScopeUsWest1,
+        firstScope,
         overridesWithDuplicates
       )
     }
 
-    // 'shardUsWest2' is not duplicated, so no exception should be thrown.
+    // `secondScope` is not duplicated, so no exception should be thrown.
     val overrideOpt1: Option[TestOnlyExampleConfigFieldsP] =
       ConfigScope.findScopeOverride(
-        configScopeUsWest2,
+        secondScope,
         overridesWithDuplicates
       )
     assert(overrideOpt1.isDefined)
@@ -189,7 +189,7 @@ class ConfigScopeSuite extends DatabricksTest {
 
     // No exception should be thrown if no shard for the override matches the current shard.
     val overrideOpt2: Option[TestOnlyExampleConfigFieldsP] =
-      ConfigScope.findScopeOverride(configScopeUsWest2, Seq())
+      ConfigScope.findScopeOverride(secondScope, Seq())
     assert(overrideOpt2.isEmpty)
   }
 
@@ -201,23 +201,23 @@ class ConfigScopeSuite extends DatabricksTest {
     val instanceWithBadId: ConfigScopeP = ConfigScopeP().withInstanceId("bad_instance")
 
     // Valid shards.
-    val devAwsUsWest1 =
+    val validScopeProto =
       ConfigScopeP().withClusterUri("kubernetes-cluster:test-env/cloud1/public/region9/clustertype2/01")
 
     // Valid override that we will apply to shardWithUnspecifiedCloud, shardWithMissingRegion
-    // and devAwsUsWest1
+    // and validScopeProto.
     val singleValidOverride =
       TestOnlyExampleConfigFieldsP().withIntField(1024).withStringArrayField(Seq("foo", "bar"))
 
     val overridesWithDuplicates: Seq[(Seq[ConfigScopeP], TestOnlyExampleConfigFieldsP)] = Seq(
-      (Seq(shardWithBadUri, instanceWithBadId, devAwsUsWest1), singleValidOverride)
+      (Seq(shardWithBadUri, instanceWithBadId, validScopeProto), singleValidOverride)
     )
 
-    val shardUsWest1 = ClusterConfigScope("kubernetes-cluster:test-env/cloud1/public/region9/clustertype2/01")
+    val validScope = ClusterConfigScope("kubernetes-cluster:test-env/cloud1/public/region9/clustertype2/01")
 
     val overrideOpt: Option[TestOnlyExampleConfigFieldsP] =
       ConfigScope.findScopeOverride(
-        shardUsWest1,
+        validScope,
         overridesWithDuplicates
       )
     assert(overrideOpt.isDefined)
