@@ -15,7 +15,7 @@ import com.databricks.api.proto.dicer.external.LoadBalancingMetricConfigP.{
 }
 import com.databricks.api.proto.dicer.external.{LoadBalancingMetricConfigP, TargetConfigFieldsP}
 import com.databricks.caching.util.MetricUtils.SampleExtensions
-import com.databricks.caching.util.{AssertionWaiter, CachingErrorCode, MetricUtils, Severity}
+import com.databricks.caching.util.MetricUtils
 import com.databricks.caching.util.ConfigTestUtil.{ConfigWriter => SharedConfigWriter}
 import com.databricks.dicer.assigner.config.{AuthorizerHelper, ChurnConfig, InternalTargetConfig}
 import com.databricks.dicer.assigner.config.InternalTargetConfig.{
@@ -147,28 +147,6 @@ object ConfigTestUtils {
   // Helpers on InternalTargetConfigMetrics.
   /** The [[CollectorRegistry]] for which to fetch metric samples for. */
   private val registry: CollectorRegistry = CollectorRegistry.defaultRegistry
-
-  /**
-   * Asserts that the `missingTargetsEventCount` is continuously increasing.
-   * At least 2 increments are required to confirm that the event count consistently increases
-   * before the abnormality gets resolved.
-   */
-  def mssingTargetsEventCountIncreasing(): Unit = {
-    val initialEventCount: Int = MetricUtils.getPrefixLoggerErrorCount(
-      Severity.DEGRADED,
-      CachingErrorCode.MISSING_TARGETS_IN_DYNAMIC_CONFIG,
-      prefix = ""
-    )
-    AssertionWaiter("missing targets event count increasing").await {
-      assert(
-        MetricUtils.getPrefixLoggerErrorCount(
-          Severity.DEGRADED,
-          CachingErrorCode.MISSING_TARGETS_IN_DYNAMIC_CONFIG,
-          prefix = ""
-        ) > initialEventCount + 2
-      )
-    }
-  }
 
   def getDynamicConfigUnavailableValue: Int =
     MetricUtils

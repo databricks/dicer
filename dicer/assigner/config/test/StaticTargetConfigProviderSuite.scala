@@ -42,7 +42,7 @@ class StaticTargetConfigProviderSuite extends DatabricksTest {
   /** Create a simple static target config map for testing. */
   private def createStaticTargetConfigMap(): InternalTargetConfigMap = {
     InternalTargetConfigMap.create(
-      configScopeOpt = None,
+      clusterConfigScopeOpt = None,
       targetConfigMap = Map(
         TargetName("test-target-1") -> createRandomConfig(),
         TargetName("test-target-2") -> createRandomConfig(),

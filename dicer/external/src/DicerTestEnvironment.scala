@@ -290,7 +290,7 @@ object DicerTestEnvironment {
 
   /** For test environment, a target configuration must be created for dev. */
   private val TARGET_CONFIG_MAP = InternalTargetConfigMap.create(
-    configScopeOpt = None,
+    clusterConfigScopeOpt = None,
     new File("dicer/external/config/dev/"),
     new File("dicer/assigner/advanced_config/dev/")
   )

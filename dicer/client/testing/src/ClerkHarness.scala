@@ -6,6 +6,8 @@ import com.databricks.dicer.client.RetryTokenImpl
 import com.databricks.dicer.common.{
   Assignment,
   ClerkCheckInvariantsRequestP,
+  ClerkGetNextStubForKeyRequestP,
+  ClerkGetNextStubForKeyResponseP,
   ClerkGetStubForKeyRequestP,
   ClerkGetStubForKeyResponseP,
   ClerkGetStubForKeyTwoLevelRequestP,
@@ -105,6 +107,14 @@ trait ClerkHarness {
    */
   def getStubForKey(primaryKey: SliceKey, secondaryKey: SliceKey): Option[ResourceAddress]
 
+  /**
+   * See [[com.databricks.dicer.client.ClerkImpl.getNextStubForKey]]. Returns `None` when the Clerk
+   * has no assignment.
+   */
+  def getNextStubForKey(
+      key: SliceKey,
+      tokenOpt: Option[RetryTokenImpl]): Option[(ResourceAddress, RetryTokenImpl)]
+
   /** See [[ClerkImpl.forTest.checkInvariants]]. */
   def checkInvariants(): Unit
 
@@ -147,11 +157,7 @@ class ScalaClerkHarness private (clerk: Clerk[ResourceAddress]) extends ClerkHar
       secondaryKey: SliceKey): Option[ResourceAddress] =
     TwoLevelShardingClerkAccessor.getStubForKey(clerk, primaryKey, secondaryKey)
 
-  /**
-   * See [[com.databricks.dicer.client.ClerkImpl.getNextStubForKey]]. Returns `None` when the Clerk
-   * has no assignment.
-   */
-  def getNextStubForKey(
+  override def getNextStubForKey(
       key: SliceKey,
       tokenOpt: Option[RetryTokenImpl]): Option[(ResourceAddress, RetryTokenImpl)] =
     clerk.impl.getNextStubForKey(key, tokenOpt)

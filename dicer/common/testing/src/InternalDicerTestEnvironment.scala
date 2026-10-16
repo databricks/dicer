@@ -381,7 +381,10 @@ class InternalDicerTestEnvironment private (
     assignerConf.putDynamicTargetConfig(targetName, jsonConfig)
   }
 
-  /** Clears the dynamic config so that the static fallback is used. */
+  /**
+   * Clears SAFE configs; Note that this does not reset the serving config by itself, previously
+   * served configs may still be served depending on the config provider.
+   */
   def clearDynamicConfigs(): Unit = {
     assignerConf.clearDynamicConfigs()
   }
@@ -591,16 +594,16 @@ object InternalDicerTestEnvironment {
   AppIdentifierTestUtils.configureForTest(name = "test-app", instanceId = "test-instance")
 
   /**
-   * Test-only wrapper that makes get() return a default config for any target not in the
-   * underlying map. Only get() has this behavior; size, targetNames, and iterator reflect only
-   * the underlying map (so "default" targets are not included there). Used when tests want to
-   * use arbitrary targets without configuring them (e.g. empty map => every get() returns DEFAULT).
+   * Test-only wrapper that makes [[getClusterScoped]] return a default config for targets absent
+   * from the underlying map. Only this lookup has that behavior; size, targetNames, and iterator
+   * reflect only the underlying map. Used when tests need arbitrary targets without configuring
+   * them.
    *
    * @param targetConfigMap The underlying target config map.
    */
   private[dicer] class InternalTargetConfigMapWithDefault(targetConfigMap: InternalTargetConfigMap)
       extends InternalTargetConfigMap {
-    val configScopeOpt: Option[ClusterConfigScope] = targetConfigMap.configScopeOpt
+    val clusterConfigScopeOpt: Option[ClusterConfigScope] = targetConfigMap.clusterConfigScopeOpt
 
     override def size: Int = targetConfigMap.size
 
@@ -609,8 +612,10 @@ object InternalDicerTestEnvironment {
     override def iterator: Iterator[(TargetName, InternalTargetConfig)] =
       targetConfigMap.iterator
 
-    override def get(targetName: TargetName): Option[InternalTargetConfig] =
-      targetConfigMap.get(targetName).orElse(Some(InternalTargetConfig.forTest.DEFAULT))
+    override def getClusterScoped(targetName: TargetName): Option[InternalTargetConfig] =
+      targetConfigMap
+        .getClusterScoped(targetName)
+        .orElse(Some(InternalTargetConfig.forTest.DEFAULT))
   }
 
   /**
@@ -665,7 +670,7 @@ object InternalDicerTestEnvironment {
   def create(
       config: TestAssigner.Config = TestAssigner.Config.create(),
       targetConfigMap: InternalTargetConfigMap = InternalTargetConfigMap
-        .create(configScopeOpt = None, Map.empty),
+        .create(clusterConfigScopeOpt = None, Map.empty),
       tlsFilePathsOpt: Option[TlsFilePaths] = None,
       sliceletHostNameOpt: Option[String] = None,
       enableDynamicConfig: Boolean = false,

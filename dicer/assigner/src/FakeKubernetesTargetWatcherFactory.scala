@@ -7,7 +7,6 @@ import javax.annotation.concurrent.{GuardedBy, ThreadSafe}
 import scala.collection.mutable
 
 import com.databricks.caching.util.Lock.withLock
-import com.databricks.dicer.assigner.KubernetesTargetWatcher.TerminationHandler
 
 /**
  * FakeKubernetesTargetWatcherFactory - A [[KubernetesTargetWatcher.Factory]] that returns fake k8s
@@ -17,8 +16,8 @@ import com.databricks.dicer.assigner.KubernetesTargetWatcher.TerminationHandler
 class FakeKubernetesTargetWatcherFactory extends KubernetesTargetWatcher.Factory {
 
   /**
-   * Lock to protect [[targetWatcherMap]] and operations (start, stop, isStarted) performed on
-   * each TargetWatcher.
+   * Lock to protect [[targetWatcherMap]] and operations (start, stop) performed on each
+   * TargetWatcher.
    */
   private val lock = new ReentrantLock()
 
@@ -32,54 +31,61 @@ class FakeKubernetesTargetWatcherFactory extends KubernetesTargetWatcher.Factory
 
   /**
    * Fake [[KubernetesTargetWatcher]] for a specific watch target (see [[KubernetesWatchTarget]]).
-   * Bound to a `terminationHandler` for the target. Tracks if the watch has been started.
-   *
-   * @param terminationHandler Method to be called when we receive termination signals for a pod of
-   *                           the given watch target.
+   * The invalidation callback it was started with doubles as the "is started" flag: it is present
+   * iff the watch is currently started.
    */
   @ThreadSafe
-  private class FakeKubernetesTargetWatcher(val terminationHandler: TerminationHandler)
-      extends KubernetesTargetWatcher {
+  private class FakeKubernetesTargetWatcher extends KubernetesTargetWatcher {
 
-    /** If the watcher has been started. */
+    /** The full set of target pod UUIDs that are currently terminating. */
     @GuardedBy("lock")
-    private var isStarted: Boolean = false
+    private[FakeKubernetesTargetWatcherFactory] var terminatingResourceUuids: Set[UUID] = Set.empty
 
-    /** Exposed getter for [[isStarted]] */
-    def getIsStarted: Boolean = withLock(lock) {
-      isStarted
+    /** The callback passed to [[start]], or [[None]] while the watch is stopped. */
+    @GuardedBy("lock")
+    private var invalidationCallbackOpt: Option[() => Unit] = None
+
+    /** Returns the callback passed to [[start]], or [[None]] if the watcher is not started. */
+    def getInvalidationCallbackOpt: Option[() => Unit] = withLock(lock) {
+      invalidationCallbackOpt
     }
 
-    override def start(): Unit = withLock(lock) {
-      isStarted = true
+    override def start(invalidationCallback: () => Unit): Unit = withLock(lock) {
+      invalidationCallbackOpt = Some(invalidationCallback)
     }
 
     override def stop(): Unit = withLock(lock) {
-      isStarted = false
+      invalidationCallbackOpt = None
+    }
+
+    override def getTerminatingPods(): Set[UUID] = withLock(lock) {
+      terminatingResourceUuids
     }
   }
 
-  override def create(
-      kubernetesWatchTarget: KubernetesWatchTarget,
-      terminationHandler: TerminationHandler): KubernetesTargetWatcher = withLock(lock) {
-    targetWatcherMap.getOrElseUpdate(
-      kubernetesWatchTarget,
-      new FakeKubernetesTargetWatcher(terminationHandler)
-    )
-  }
+  override def create(kubernetesWatchTarget: KubernetesWatchTarget): KubernetesTargetWatcher =
+    withLock(lock) {
+      targetWatcherMap.getOrElseUpdate(
+        kubernetesWatchTarget,
+        new FakeKubernetesTargetWatcher()
+      )
+    }
 
   /**
-   * Simulate a termination signal from Kubernetes for the given watch target and podUuid.
+   * Simulates Kubernetes marking `podUuid` as terminating for `kubernetesWatchTarget`.
    *
-   * NOTE: It is OK for termination handlers to be invoked multiple times for the same podUuid.
+   * NOTE: It is OK for the callback to be invoked multiple times for the same podUuid.
    */
+  @throws[IllegalArgumentException](
+    "if no watch on kubernetesWatchTarget has been established, or the watch is not started"
+  )
   def simulateTerminationSignal(
       kubernetesWatchTarget: KubernetesWatchTarget,
       podUuid: UUID): Unit = {
-    // Get the termination handler with lock. We invoke the termination handler ONLY after releasing
-    // the lock, since we should never invoke callbacks under the lock (and also k8s watchers make
-    // no guarantees about serial execution of callbacks).
-    val terminationHandler: TerminationHandler = withLock(lock) {
+    // Record the terminating pod and read the callback under the lock. We invoke the callback ONLY
+    // after releasing the lock, since we should never invoke callbacks under the lock (and also k8s
+    // watchers make no guarantees about serial execution of callbacks).
+    val invalidationCallback: () => Unit = withLock(lock) {
       val targetWatcher: FakeKubernetesTargetWatcher = targetWatcherMap.getOrElse(
         kubernetesWatchTarget,
         throw new IllegalArgumentException(
@@ -87,18 +93,20 @@ class FakeKubernetesTargetWatcherFactory extends KubernetesTargetWatcher.Factory
         )
       )
 
-      // Trigger termination signal only if watcher is running.
-      if (!targetWatcher.getIsStarted) {
+      // The callback is present iff the watch is started; a signal only makes sense while running.
+      val callback: () => Unit = targetWatcher.getInvalidationCallbackOpt.getOrElse(
         throw new IllegalArgumentException(
           s"Watch on $kubernetesWatchTarget has not been started"
         )
-      }
+      )
 
-      targetWatcher.terminationHandler
+      // Record the pod as terminating so the watch's getTerminatingPods() reports it.
+      targetWatcher.terminatingResourceUuids = targetWatcher.terminatingResourceUuids + podUuid
+      callback
     } // lock released
 
-    // NOTE: As documented in the termination handler spec, calls to the handler are not guaranteed
-    // to be serialized (the termination handler can be invoked concurrently from multiple threads).
-    terminationHandler(podUuid)
+    // NOTE: As documented on the watcher's start(), the callback is not guaranteed to be serialized
+    // (it can be invoked concurrently from multiple threads).
+    invalidationCallback()
   }
 }

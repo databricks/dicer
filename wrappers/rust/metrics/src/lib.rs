@@ -1,66 +1,8 @@
-//! OSS metrics facade for Caching and Dicer Rust clients.
+//! Macros for defining Prometheus metrics. The metrics are initialized and registered lazily.
 
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
 use prometheus_client::registry::{Metric, Registry};
-
-/// Registry shared by every metric declared through this crate's macros.
-static PROMETHEUS_REGISTRY: LazyLock<Mutex<Registry>> =
-    LazyLock::new(|| Mutex::new(Registry::default()));
-
-#[doc(hidden)]
-/// Implementation details required by macros expanded in dependent crates.
-pub mod internal {
-    use std::fmt;
-
-    use prometheus_client::encoding::text::encode;
-    pub use prometheus_client::metrics::counter::Counter;
-    pub use prometheus_client::metrics::family::Family;
-    pub use prometheus_client::metrics::gauge::Gauge;
-    pub use prometheus_client::metrics::histogram::Histogram;
-
-    use super::{Metric, MutexGuard, Registry, PROMETHEUS_REGISTRY};
-
-    /// Returns the process-wide registry in Prometheus text exposition format for tests.
-    pub fn encode_metrics_for_test() -> Result<String, fmt::Error> {
-        let mut output = String::new();
-        let registry: MutexGuard<'_, Registry> = PROMETHEUS_REGISTRY
-            .lock()
-            .expect("metrics registry lock is poisoned");
-        encode(&mut output, &registry)?;
-        Ok(output)
-    }
-
-    /// Registers `metric` in the process-wide registry and returns a clone that records into it.
-    pub fn register_metric<T, N, H>(metric: T, name: N, help: H) -> T
-    where
-        T: Metric + Clone,
-        N: Into<String>,
-        H: Into<String>,
-    {
-        let mut registry: MutexGuard<'_, Registry> = PROMETHEUS_REGISTRY
-            .lock()
-            .expect("metrics registry lock is poisoned");
-        registry.register(name, help, metric.clone());
-        metric
-    }
-
-    /// Normalizes a counter name before registering it with `prometheus-client`.
-    ///
-    /// Counter identifiers may include the conventional `_TOTAL` suffix. Macro expansion
-    /// lowercases the identifier, while `prometheus-client` appends `_total` to the encoded sample
-    /// name. Removing one trailing `_total` therefore preserves both accepted naming forms without
-    /// emitting `_total_total`; names without a trailing `_total` are returned unchanged.
-    pub fn strip_total_suffix<N>(counter_name: N) -> String
-    where
-        N: Into<String>,
-    {
-        let name: String = counter_name.into();
-        name.strip_suffix("_total")
-            .map(str::to_owned)
-            .unwrap_or(name)
-    }
-}
 
 /// Defines a static Prometheus counter that is registered on first use.
 ///
@@ -300,4 +242,62 @@ macro_rules! metric {
                 )
             });
     };
+}
+
+/// Registry shared by every metric declared through this crate's macros.
+static PROMETHEUS_REGISTRY: LazyLock<Mutex<Registry>> =
+    LazyLock::new(|| Mutex::new(Registry::default()));
+
+#[doc(hidden)]
+/// Implementation details required by macros expanded in dependent crates.
+pub mod internal {
+    use std::fmt;
+
+    use prometheus_client::encoding::text::encode;
+    pub use prometheus_client::metrics::counter::Counter;
+    pub use prometheus_client::metrics::family::Family;
+    pub use prometheus_client::metrics::gauge::Gauge;
+    pub use prometheus_client::metrics::histogram::Histogram;
+
+    use super::{Metric, MutexGuard, Registry, PROMETHEUS_REGISTRY};
+
+    /// Returns the process-wide registry in Prometheus text exposition format for tests.
+    pub fn encode_metrics_for_test() -> Result<String, fmt::Error> {
+        let mut output = String::new();
+        let registry: MutexGuard<'_, Registry> = PROMETHEUS_REGISTRY
+            .lock()
+            .expect("metrics registry lock is poisoned");
+        encode(&mut output, &registry)?;
+        Ok(output)
+    }
+
+    /// Registers `metric` in the process-wide registry and returns a clone that records into it.
+    pub fn register_metric<T, N, H>(metric: T, name: N, help: H) -> T
+    where
+        T: Metric + Clone,
+        N: Into<String>,
+        H: Into<String>,
+    {
+        let mut registry: MutexGuard<'_, Registry> = PROMETHEUS_REGISTRY
+            .lock()
+            .expect("metrics registry lock is poisoned");
+        registry.register(name, help, metric.clone());
+        metric
+    }
+
+    /// Normalizes a counter name before registering it with `prometheus-client`.
+    ///
+    /// Counter identifiers may include the conventional `_TOTAL` suffix. Macro expansion
+    /// lowercases the identifier, while `prometheus-client` appends `_total` to the encoded sample
+    /// name. Removing one trailing `_total` therefore preserves both accepted naming forms without
+    /// emitting `_total_total`; names without a trailing `_total` are returned unchanged.
+    pub fn strip_total_suffix<N>(counter_name: N) -> String
+    where
+        N: Into<String>,
+    {
+        let name: String = counter_name.into();
+        name.strip_suffix("_total")
+            .map(str::to_owned)
+            .unwrap_or(name)
+    }
 }

@@ -1,4 +1,4 @@
-load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("//bazel/rules/rust:rules_rust.bzl", "rust_library", "rust_test")
 
 rust_library(
     name = "metrics",

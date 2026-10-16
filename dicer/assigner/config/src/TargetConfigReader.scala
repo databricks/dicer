@@ -144,12 +144,12 @@ object TargetConfigReader {
    * Computes a map from [[Target]] names to [[TargetDefaultAndOverride]]s. Each value represents
    * the computed [[InternalTargetConfig]]s for all scopes within a target.
    *
-   * Retains instance-scoped overrides so [[TargetConfigValidator]] can reject them before merge.
+   * Retains instance-scoped overrides so `TargetConfigValidator` can reject them before merge.
    * The runtime path, [[readScopeConfigMapFromDirectories]], ignores instance scopes.
    *
    * @note `new java.io.File` only throws if a null path argument is provided.
    */
-  private[config] def readFullConfigMapFromDirectories(
+  private[assigner] def readFullConfigMapFromDirectories(
       targetConfigDirectory: File,
       advancedTargetConfigDirectory: File): Map[TargetName, TargetDefaultAndOverride] = {
     val fullConfigMap: Map[TargetName, TargetDefaultAndOverride] = readConfigMap(

@@ -1,0 +1,23 @@
+load("//bazel/rules/rust:rules_rust.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "throttled_logger",
+    srcs = ["src/lib.rs"],
+    crate_name = "universe_common_logging_throttled_logger_rust",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@crates//:tokio",
+        "@crates//:tracing",
+    ],
+)
+
+rust_test(
+    name = "throttled_logger_test",
+    testonly = True,
+    srcs = ["tests/throttled_logger_test.rs"],
+    deps = [
+        ":throttled_logger",
+        "@crates//:tokio",
+        "@crates//:tracing",
+    ],
+)

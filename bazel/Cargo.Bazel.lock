@@ -1,5 +1,5 @@
 {
-  "checksum": "02e732e1f763ce56a94b8e829ce62ed22e1c1dfb4111fe005d7fc1c5d9738ed0",
+  "checksum": "220cae72a9b21e0921603229e48d836deff98e02655e98dfe7b31ec096b038aa",
   "crates": {
     "anstream 0.6.21": {
       "name": "anstream",
@@ -1656,6 +1656,10 @@
             {
               "id": "tracing 0.1.41",
               "target": "tracing"
+            },
+            {
+              "id": "tracing-subscriber 0.3.23",
+              "target": "tracing_subscriber"
             }
           ],
           "selects": {}
@@ -2780,6 +2784,45 @@
         "Unlicense"
       ],
       "license_file": "LICENSE-MIT"
+    },
+    "lazy_static 1.5.0": {
+      "name": "lazy_static",
+      "version": "1.5.0",
+      "package_url": "https://github.com/rust-lang-nursery/lazy-static.rs",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/lazy_static/1.5.0/download",
+          "sha256": "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "lazy_static",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "lazy_static",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "edition": "2015",
+        "version": "1.5.0"
+      },
+      "license": "MIT OR Apache-2.0",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "license_file": "LICENSE-APACHE"
     },
     "libc 0.2.189": {
       "name": "libc",
@@ -4337,6 +4380,53 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
+    "sharded-slab 0.1.7": {
+      "name": "sharded-slab",
+      "version": "0.1.7",
+      "package_url": "https://github.com/hawkw/sharded-slab",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/sharded-slab/0.1.7/download",
+          "sha256": "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "sharded_slab",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "sharded_slab",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "deps": {
+          "common": [
+            {
+              "id": "lazy_static 1.5.0",
+              "target": "lazy_static"
+            }
+          ],
+          "selects": {}
+        },
+        "edition": "2018",
+        "version": "0.1.7"
+      },
+      "license": "MIT",
+      "license_ids": [
+        "MIT"
+      ],
+      "license_file": "LICENSE"
+    },
     "simdutf8 0.1.5": {
       "name": "simdutf8",
       "version": "0.1.5",
@@ -4856,6 +4946,54 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
+    "thread_local 1.1.10": {
+      "name": "thread_local",
+      "version": "1.1.10",
+      "package_url": "https://github.com/Amanieu/thread_local-rs",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/thread_local/1.1.10/download",
+          "sha256": "1ad99c4c6d32803332c548b1af0540b357b3f5fc0be8f6c6bfe8b2e6ae784070"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "thread_local",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "thread_local",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "deps": {
+          "common": [
+            {
+              "id": "cfg-if 1.0.4",
+              "target": "cfg_if"
+            }
+          ],
+          "selects": {}
+        },
+        "edition": "2021",
+        "version": "1.1.10"
+      },
+      "license": "MIT OR Apache-2.0",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "license_file": "LICENSE-APACHE"
+    },
     "tokio 1.52.3": {
       "name": "tokio",
       "version": "1.52.3",
@@ -5232,6 +5370,72 @@
       ],
       "license_file": "LICENSE"
     },
+    "tracing-subscriber 0.3.23": {
+      "name": "tracing-subscriber",
+      "version": "0.3.23",
+      "package_url": "https://github.com/tokio-rs/tracing",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/tracing-subscriber/0.3.23/download",
+          "sha256": "cb7f578e5945fb242538965c2d0b04418d38ec25c79d160cd279bf0731c8d319"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "tracing_subscriber",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "tracing_subscriber",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "crate_features": {
+          "common": [
+            "alloc",
+            "fmt",
+            "registry",
+            "sharded-slab",
+            "std",
+            "thread_local"
+          ],
+          "selects": {}
+        },
+        "deps": {
+          "common": [
+            {
+              "id": "sharded-slab 0.1.7",
+              "target": "sharded_slab"
+            },
+            {
+              "id": "thread_local 1.1.10",
+              "target": "thread_local"
+            },
+            {
+              "id": "tracing-core 0.1.36",
+              "target": "tracing_core"
+            }
+          ],
+          "selects": {}
+        },
+        "edition": "2018",
+        "version": "0.3.23"
+      },
+      "license": "MIT",
+      "license_ids": [
+        "MIT"
+      ],
+      "license_file": "LICENSE"
+    },
     "unicode-ident 1.0.24": {
       "name": "unicode-ident",
       "version": "1.0.24",
@@ -5586,7 +5790,8 @@
     "thiserror 2.0.18",
     "tokio 1.52.3",
     "tokio-util 0.7.18",
-    "tracing 0.1.41"
+    "tracing 0.1.41",
+    "tracing-subscriber 0.3.23"
   ],
   "direct_dev_deps": [],
   "unused_patches": []

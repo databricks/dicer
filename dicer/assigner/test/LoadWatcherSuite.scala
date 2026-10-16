@@ -1590,76 +1590,6 @@ class LoadWatcherSuite extends DatabricksTest {
     runApportionCase(testCase)
   }
 
-  test("Load distribution splitting uses the freshest Measurement's distribution") {
-    // Test plan: Verify that load is apportioned according to the freshest Measurement's
-    // distribution. Report two Measurements for the same Slice from different pods: a stale one
-    // with all load at or below "m", and a fresh one with all load at or below "t".
-
-    // Setup: Create an Assignment for a slice covering the entire keyspace, replicated on two pods.
-    val slice: Slice = "".andGreater
-    val watcher = new LoadWatcherWrapper(
-      LoadWatcherTargetConfig(
-        minDuration = 1.minute,
-        maxAge = 1.minute,
-        useTopKeys = false,
-        useLoadDistribution = true
-      ),
-      LoadWatcher.StaticConfig(allowTopKeys = false, allowLoadDistribution = true)
-    )
-    val assignment: Assignment = createAssignment(
-      12,
-      AssignmentConsistencyMode.Affinity,
-      assignerServiceInfoOpt = None,
-      (slice @@ 12 -> Seq("pod0", "pod1")).clearPrimaryRateLoad()
-    )
-    // Setup: Create two distributions - a stale one placing all load at or below "m", and a fresh
-    // one placing all load at or below "t".
-    val staleDistribution = LoadDistribution(
-      points = IndexedSeq(CdfPoint(identityKey("m"), 1.0)),
-      maxErrorFraction = 0.1
-    )
-    val freshDistribution = LoadDistribution(
-      points = IndexedSeq(CdfPoint(identityKey("t"), 1.0)),
-      maxErrorFraction = 0.1
-    )
-    // Setup: Record a stale Measurement (pod0) and a fresher one (pod1). Both pods report the same
-    // per-replica load and replica count, so the aggregated Slice load is exactly 100 regardless of
-    // the age weighting.
-    val now: TickerTime = watcher.now
-    watcher.recordSliceletLoad(
-      Seq(
-        watcher.createMeasurement(
-          time = now - 10.seconds,
-          windowDuration = 1.minute,
-          slice = slice,
-          resource = "pod0",
-          numReplicas = 2,
-          load = 50.0,
-          topKeys = Seq.empty,
-          loadDistributionOpt = Some(staleDistribution)
-        ),
-        watcher.createMeasurement(
-          time = now - 1.second,
-          windowDuration = 1.minute,
-          slice = slice,
-          resource = "pod1",
-          numReplicas = 2,
-          load = 50.0,
-          topKeys = Seq.empty,
-          loadDistributionOpt = Some(freshDistribution)
-        )
-      )
-    )
-    // Verify: The fresh distribution places all load at or below "t", so the whole load lands in
-    // [low, "t".successor()); the stale "m" distribution is not used.
-    val expected: LoadMap = LoadMap
-      .newBuilder()
-      .putLoad(Entry(Slice(slice.lowInclusive, identityKey("t").successor()), 100.0))
-      .build()
-    val actual: LoadMap = watcher.getPrimaryRateLoadMap(assignment).get
-    assertEqualWithinTolerance(actual, expected)
-  }
-
   test("Load distribution incongruent with the Slice's high bound is tolerated and alerted") {
     // Test plan: Verify that the assigner tolerates an incongruent load distribution, i.e. a
     // distribution whose last sample leaves no space below the Slice's high bound ("m".successor())
@@ -1741,6 +1671,120 @@ class LoadWatcherSuite extends DatabricksTest {
         assertEqualWithinTolerance(actual, expected)
         // Verify: the incongruent-distribution alert was fired once for this Slice.
         assert(getIncongruentLoadDistributionAlertCount(slice) == alertCountBefore + 1)
+      }
+    }
+  }
+
+  test("Load distribution apportioning combines all available replica distributions") {
+    // Test plan: Verify that apportioning uses the load- and age-weighted mixture of the available
+    // replica distributions.
+
+    val slice: Slice = Slice.FULL
+    // Create measurements for two replicas: replica A's measurement is stale (one half-life older),
+    // and replica B's measurement is fresh (age 0).
+    // The total Slice load is 2 * (0.5 * 90 + 30) / (0.5 + 1) = 100.
+    val loadA: Double = 90.0
+    val ageA: FiniteDuration = LOAD_WEIGHT_DECAYING_HALFLIFE
+    val distributionA = LoadDistribution(
+      points = IndexedSeq(CdfPoint(identityKey("2"), 1.0)),
+      maxErrorFraction = 0.1
+    )
+    val loadB: Double = 30.0
+    val ageB: FiniteDuration = 0.seconds
+    val distributionB = LoadDistribution(
+      points = IndexedSeq(CdfPoint(identityKey("d"), 1.0)),
+      maxErrorFraction = 0.1
+    )
+    val assignment: Assignment = createAssignment(
+      12,
+      AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
+      (slice @@ 12 -> Seq("pod0", "pod1")).clearPrimaryRateLoad()
+    )
+    // Test cases have the format (name, (distributionAOpt, distributionBOpt, expectedLoadMap)).
+    val cases = Seq(
+      // Case 1: Both replicas report a CDF. The age-decayed loads are 45 and 30, giving mixture
+      // weights of 0.6 and 0.4. At "2", the older input A reports 1.0 and the fresher input B
+      // interpolates to 0.5, giving 0.6 * 1.0 + 0.4 * 0.5 = 0.8. At "d", both inputs reach 1.0. A
+      // zero-load entry above "d" completes coverage of the full keyspace.
+      "both replicas report CDFs" -> (
+        (
+          Some(distributionA),
+          Some(distributionB),
+          LoadMap
+            .newBuilder()
+            .putLoad(
+              Entry("" -- succ("2"), 80.0),
+              Entry(succ("2") -- succ("d"), 20.0),
+              Entry(succ("d").andGreater, 0.0)
+            )
+            .build()
+        )
+      ),
+      // Case 2: Only replica A reports a CDF. Load is therefore apportioned according to A's
+      // distribution.
+      "one replica reports a CDF" -> (
+        (
+          Some(distributionA),
+          None,
+          LoadMap
+            .newBuilder()
+            .putLoad(Entry("" -- succ("2"), 100.0), Entry(succ("2").andGreater, 0.0))
+            .build()
+        )
+      ),
+      // Case 3: Without any reported CDF, the full load remains in a single entry.
+      "neither replica reports a CDF" -> (
+        (
+          None,
+          None,
+          LoadMap.newBuilder().putLoad(Entry(slice, 100.0)).build()
+        )
+      )
+    )
+    for ((name, testCase) <- cases) {
+      withClue(s"$name: ") {
+        val (distributionAOpt, distributionBOpt, expected): (
+            Option[LoadDistribution],
+            Option[LoadDistribution],
+            LoadMap) = testCase
+        val watcher = new LoadWatcherWrapper(
+          LoadWatcherTargetConfig(
+            minDuration = 1.minute,
+            maxAge = 1.minute,
+            useTopKeys = false,
+            useLoadDistribution = true
+          ),
+          LoadWatcher.StaticConfig(allowTopKeys = false, allowLoadDistribution = true)
+        )
+        val now: TickerTime = watcher.now
+        watcher.recordSliceletLoad(
+          Seq(
+            watcher.createMeasurement(
+              time = now - ageA,
+              windowDuration = 1.minute,
+              slice = slice,
+              resource = "pod0",
+              numReplicas = 2,
+              load = loadA,
+              topKeys = Seq.empty,
+              loadDistributionOpt = distributionAOpt
+            ),
+            watcher.createMeasurement(
+              time = now - ageB,
+              windowDuration = 1.minute,
+              slice = slice,
+              resource = "pod1",
+              numReplicas = 2,
+              load = loadB,
+              topKeys = Seq.empty,
+              loadDistributionOpt = distributionBOpt
+            )
+          )
+        )
+        val actual: LoadMap = watcher.getPrimaryRateLoadMap(assignment).get
+        assert(actual.sliceMap.entries.size == expected.sliceMap.entries.size)
+        assertEqualWithinTolerance(actual, expected)
       }
     }
   }

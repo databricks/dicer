@@ -392,7 +392,6 @@ message LossyEwmaCounterTestDataP {
   optional RandomizedReferenceTestCaseP randomized_with_reference_case = 3;
 }
 
-// Test data for [QuantileSummaries] implementations.
 message QuantileSummariesTestDataP {
 
   // One returned entry from a QuantileSummaries `query` call: the chosen value paired with the
@@ -402,10 +401,56 @@ message QuantileSummariesTestDataP {
     optional double cumulative_weight_fraction = 2;
   }
 
+  // Factory parameters for the lossy QuantileSummaries's constructor. The parameters will only
+  // be respected when creating the lossy QuantileSummaries and will be ignored when creating the
+  // NonLossyQuantileSummaries.
+  message QuantileSummariesP {
+    optional double relative_error = 1;
+    optional int32 sample_count_upper_bound = 2;
+  }
+
   // An action to insert a `(value, weight)` observation to the QuantileSummaries.
   message InsertP {
     optional int32 value = 1;
     optional double weight = 2;
+  }
+
+  // Describing the distribution of values and weights for the InsertManyP action.
+  message DistributionP {
+    oneof pattern {
+      LinearP linear = 1;
+      ExponentialP exponential = 2;
+      UniformRandomP random = 3;
+    }
+  }
+
+  // Creates a sequence of linearly distributed data where the `i`th value is `start + step * i`.
+  // A `step` of 0 yields a constant. `i` is indexed from 0.
+  message LinearP {
+    optional int32 start = 1;
+    optional int32 step = 2;
+  }
+
+  // Creates a sequence of exponentially distributed data where the `i`th value is
+  // `start * multiplier ^ i`. `i` is indexed from 0.
+  message ExponentialP {
+    optional int32 start = 1;
+    optional double multiplier = 2;
+  }
+
+  // Creates a sequence of uniform random numbers in `[min, max)`.
+  message UniformRandomP {
+    optional int32 min = 1;
+    optional int32 max = 2;
+  }
+
+  // An action to insert `num_inserts` observations into quantile summaries. The `i`th insert takes
+  // the `i`th sample of `value_distribution` (truncated to an int) as its value and the i-th sample
+  // of `weight_distribution` as its weight.
+  message InsertManyP {
+    optional DistributionP value_distribution = 1;
+    optional DistributionP weight_distribution = 2;
+    optional int32 num_inserts = 3;
   }
 
   // Call `rescaleWeights` (Scala) / `rescale_weights` (Rust) of QuantileSummaries by `factor`.
@@ -413,12 +458,7 @@ message QuantileSummariesTestDataP {
     optional double factor = 1;
   }
 
-  // Call `query` of QuantileSummaries and assert the result of it. The test runner feeds
-  // `quantiles` into one call and verifies the returned `(value, cumulative_fraction)` pairs
-  // against `expected_results`. The returned sequence is expected to be in the same order as
-  // `quantiles`: the i-th returned pair answers `quantiles[i]`. If `expected_results` is empty,
-  // the query is expected to return an empty sequence (only when the summary has no
-  // observations).
+  // Call `query` of QuantileSummaries and assert the result of it.
   message AssertQueryEqualsP {
     // The `quantiles` to be given to the query() call.
     repeated double quantiles = 1;
@@ -427,12 +467,41 @@ message QuantileSummariesTestDataP {
     repeated CdfPoint expected_results = 2;
   }
 
+  // An action to call `query` and assert that, for every queried quantile, the value returned
+  // satisfies the documented error bound against the exact distribution of everything
+  // inserted so far. `expected_relative_error` is the relative error the results are verified
+  // against.
+  //
+  // See the main doc of QuantileSummaries for the error bound contract.
+  //
+  // When testing NonLossyQuantileSummaries, this action overrides the relative error to 0 and
+  // always verifies the exact result.
+  message AssertQueryWithinErrorBoundP {
+    repeated double quantiles = 1;
+    optional double expected_relative_error = 2;
+  }
+
+  // An action to assert the sketch has retained at most `max_count` stats. This action will be
+  // ignored by the NonLossyQuantileSummaries.
+  message AssertSampleCountAtMostP {
+    optional int64 max_count = 1;
+  }
+
+  // An action to assert the lossy QuantileSummaries' force-compression has fired at least one more
+  // time since the previous `assert_force_merged` action or since construction. This action will be
+  // ignored when testing the NonLossyQuantileSummaries.
+  message AssertForceCompressionP {}
+
   // An action to call a method or to assert some results from QuantileSummaries.
   message ActionP {
     oneof action {
       InsertP insert = 1;
       AssertQueryEqualsP assert_query_equals = 2;
       RescaleP rescale = 3;
+      InsertManyP insert_many = 4;
+      AssertQueryWithinErrorBoundP assert_query_within_error_bound = 5;
+      AssertSampleCountAtMostP assert_sample_count_at_most = 6;
+      AssertForceCompressionP assert_force_merged = 7;
     }
   }
 
@@ -441,10 +510,12 @@ message QuantileSummariesTestDataP {
     optional string test_case_name = 1;
     repeated ActionP actions = 2;
 
-    // A logically optional error message to verify against for an invalid case. At least one of the
-    // actions above should cause the following error message thrown or returned for the test case
-    // to pass.
+    // Set only for invalid cases: when present, at least one action construction must fail with an
+    // error whose message contains this string.
     optional string error_message_opt = 3;
+
+    // See [QuantileSummariesP].
+    optional QuantileSummariesP quantile_summaries = 4;
   }
 
   // The test cases with valid inputs.
@@ -452,6 +523,69 @@ message QuantileSummariesTestDataP {
 
   // The test cases with invalid inputs.
   repeated TestCaseP invalid_cases = 2;
+}
+
+message EwmaQuantileSummariesTestDataP {
+
+  // One returned entry from an EwmaQuantileSummaries `query` call: the chosen value paired with the
+  // cumulative-weight fraction at that value (over the EWMA-amplified weights).
+  message CdfPoint {
+    optional int32 value = 1;
+    optional double cumulative_weight_fraction = 2;
+  }
+
+  // The factory parameters.
+  message EwmaQuantileSummariesP {
+    optional double half_life_seconds = 1;
+    optional double relative_error = 2;
+    optional int32 sample_count_upper_bound = 3;
+  }
+
+  // An action to insert a `(value, weight)` observation at `start_time + elapsed_ms`. `start_time`
+  // is the time when the test case started to run and is determined by the test harness.
+  message InsertP {
+    optional int32 value = 1;
+    optional int32 weight = 2;
+    optional int64 elapsed_ms = 3;
+  }
+
+  // Call `query` of EwmaQuantileSummaries and assert each returned `(value, cumulative_fraction)`
+  // pair matches the corresponding `expected_results` entry: the value exactly, and the
+  // cumulative-weight fraction within `relative_error`. The test runner feeds `quantiles` into one
+  // call; the returned sequence is in the same order as `quantiles`, so the i-th returned pair
+  // answers `quantiles[i]`. If `expected_results` is empty, the query is expected to return an
+  // empty sequence (only when the summary has no observations).
+  message AssertQueryWithinP {
+    // The `quantiles` to be given to the query() call.
+    repeated double quantiles = 1;
+
+    // The expected `(value, cumulative_weight_fraction)` pairs, one per requested quantile (same
+    // order as `quantiles`). `cumulative_weight_fraction` is over the EWMA-amplified weights.
+    repeated CdfPoint expected_results = 2;
+
+    // Tolerance when comparing each returned `cumulative_weight_fraction` against the corresponding
+    // `expected_results` entry.
+    optional double relative_error = 3;
+  }
+
+  // An action to call a method or to assert results on EwmaQuantileSummaries.
+  message ActionP {
+    oneof action {
+      InsertP insert = 1;
+      AssertQueryWithinP assert_query_within = 3;
+    }
+  }
+
+  // A test case with a name and the actions to perform against an EwmaQuantileSummaries.
+  message TestCaseP {
+    optional string test_case_name = 1;
+    optional EwmaQuantileSummariesP ewma_quantile_summaries = 2;
+    repeated ActionP actions = 3;
+  }
+
+  // Valid test cases. No invalid cases because all invalid inputs are declared as undefined
+  // behavior (PRECONDITION) by the underlying QuantileSummaries.
+  repeated TestCaseP valid_cases = 1;
 }
 
 // Tests for verifying the correctness of ProtocolDuration parsing logic.
@@ -487,4 +621,28 @@ message ExponentialBackoffTestDataP {
   optional int32 iterations_at_max_interval = 6;
   // Additional calls that must keep returning a delay.
   optional int32 max_elapsed_none_iterations = 7;
+}
+
+// Shared test data for the DeterministicSampling `isSampled` contract.
+message DeterministicSamplingTestDataP {
+  // Inputs that `isSampled` accepts, paired with the expected sampling result.
+  message ValidTestCaseP {
+    optional string description = 1; // The name of the test case.
+    optional string item = 2;
+    optional string sample_namespace = 3;
+    optional double sample_fraction = 4;
+    optional bool expected_is_sampled = 5; // Whether `item` is expected to be sampled.
+  }
+
+  // Inputs that `isSampled` rejects, paired with a substring of the expected error message.
+  message InvalidTestCaseP {
+    optional string description = 1; // The name of the test case.
+    optional string item = 2;
+    optional string sample_namespace = 3;
+    optional double sample_fraction = 4;
+    optional string expected_error_substring = 5;
+  }
+
+  repeated ValidTestCaseP valid_test_cases = 1; // Cases for valid inputs.
+  repeated InvalidTestCaseP invalid_test_cases = 2; // Cases for invalid inputs.
 }

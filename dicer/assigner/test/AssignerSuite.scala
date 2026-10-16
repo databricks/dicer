@@ -464,27 +464,22 @@ class AssignerSuite extends DatabricksTest with TestName {
     )
   }
 
-  namedGridTest("createAndStart() completes successfully")(
-    Seq(
-      "static-required-target-config-provider" -> false,
-      "dynamic-target-config-provider" -> true
-    )
-  ) { serveDynamicOnlyTargets: Boolean =>
-    // Test plan: create an Assigner with the default k8s watcher and health watcher under each
-    // target config provider mode. This verifies that Assigner startup works with both providers.
+  test("createAndStart() completes successfully") {
+    // Test plan: Exercise the production startup path, which creates the membership checker,
+    // store factory, and default health watcher factory. TestAssigner supplies these dependencies
+    // through separate test wiring. Verify that startup and shutdown both complete successfully.
 
     val assignerConf = new DicerAssignerConf(
       Configs.parseMap(
         "databricks.dicer.assigner.rpc.port" -> 0,
         "databricks.dicer.library.server.keystore" -> TestTLSOptions.serverKeystorePath,
-        "databricks.dicer.library.server.truststore" -> TestTLSOptions.serverTruststorePath,
-        "databricks.dicer.assigner.serveDynamicOnlyTargets" -> serveDynamicOnlyTargets
+        "databricks.dicer.library.server.truststore" -> TestTLSOptions.serverTruststorePath
       )
     )
 
     // Create a dynamic config provider. Specific configs are not important for this test.
     val staticTargetConfigMap: InternalTargetConfigMap = InternalTargetConfigMap.create(
-      configScopeOpt = None,
+      clusterConfigScopeOpt = None,
       targetConfigMap = Map.empty
     )
     val dynamicConfigProvider: TargetConfigProvider =
@@ -1017,7 +1012,7 @@ class AssignerSuite extends DatabricksTest with TestName {
       )
     )
     val staticTargetConfigMap: InternalTargetConfigMap = InternalTargetConfigMap.create(
-      configScopeOpt = None,
+      clusterConfigScopeOpt = None,
       targetConfigMap = Map(configuredTargetName -> configuredTargetConfig)
     )
 
@@ -1143,7 +1138,7 @@ class AssignerSuite extends DatabricksTest with TestName {
     val disabledConfig: InternalTargetConfig =
       InternalTargetConfig.forTest.DEFAULT.copy(useAlternativeTarget = false)
     val staticTargetConfigMap: InternalTargetConfigMap = InternalTargetConfigMap.create(
-      configScopeOpt = None,
+      clusterConfigScopeOpt = None,
       targetConfigMap = Map(
         enabledTargetName -> enabledConfig,
         disabledTargetName -> disabledConfig
@@ -1301,7 +1296,7 @@ class AssignerSuite extends DatabricksTest with TestName {
     val enabledConfig: InternalTargetConfig =
       InternalTargetConfig.forTest.DEFAULT.copy(useAlternativeTarget = true)
     val staticTargetConfigMap: InternalTargetConfigMap = InternalTargetConfigMap.create(
-      configScopeOpt = None,
+      clusterConfigScopeOpt = None,
       targetConfigMap = Map(enabledTargetName -> enabledConfig)
     )
 

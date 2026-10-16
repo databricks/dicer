@@ -9,7 +9,6 @@ java_library(
     deps = [
         "//caching/util:rfc1123",
         "//dicer/external:conf",
-        "@maven//:org_scala_lang_scala_library",
     ],
 )
 
@@ -17,10 +16,7 @@ java_library(
     name = "resource_address",
     srcs = ["src/ResourceAddress.java"],
     visibility = ["//visibility:public"],
-    deps = [
-        "//dicer/external:external_common",
-        "@maven//:org_scala_lang_scala_library",
-    ],
+    deps = ["//dicer/external:external_common"],
 )
 
 java_library(
@@ -43,10 +39,7 @@ java_library(
 java_library(
     name = "impl_friend",
     srcs = ["src/ImplFriend.java"],
-    visibility = [
-        "//dicer-proxy/external/java:__pkg__",
-        "//dicer:caching",
-    ],
+    visibility = ["//dicer:caching"],
     deps = [
         ":clerk",
         ":resource_address",

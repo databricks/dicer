@@ -81,7 +81,7 @@ class TopKeysSuite extends DatabricksTest {
       loadWatcherConfig = loadWatcherConfig,
       loadBalancingConfig = loadBalancingConfig
     )
-    InternalTargetConfigMap.create(configScopeOpt = None, Map(targetName -> config))
+    InternalTargetConfigMap.create(clusterConfigScopeOpt = None, Map(targetName -> config))
   }
 
   test("Hot keys cause Slice split") {

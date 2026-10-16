@@ -999,6 +999,46 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
     }
   }
 
+  test("Assignment size metric is not recorded for generation-only replies") {
+    // Test plan: Verify that `dicer_serialized_assignment_size_bytes` records only replies that
+    // carry an assignment. Park a subscriber that already knows the handler's assignment, advance
+    // time past the watch timeout so it receives a generation-only reply, and confirm the response
+    // size metric recorded that reply while the assignment size metric did not change.
+    val location = Location.Assigner
+    val driver: SubscriberHandlerHarness = createDriver(location, target)
+    val assignment: Assignment = createRandomAssignment(
+      generation = Generation(Incarnation(1), 42),
+      Vector("pod0", "pod1")
+    )
+    driver.setAssignment(assignment)
+    val assignmentSumTracker = MetricUtils.ChangeTracker(
+      () => getSerializedAssignmentSizeSum(target, location)
+    )
+    val responseSumTracker = MetricUtils.ChangeTracker(
+      () => getClientResponseSizeSum(target, location)
+    )
+
+    val fut: Future[ClientResponseP] = driver.handleWatch(
+      createClientRequest(assignment.generation, ClerkData, "subscriber"),
+      redirectOpt = None
+    )
+    driver.waitForSubscriberHandler(target, expectedWatchCount = 1)
+    driver.advanceTime(TIMEOUT)
+    val responseP: ClientResponseP = TestUtils.awaitResult(fut, Duration.Inf)
+    assert(
+      ClientResponse.fromProto(responseP).syncState ==
+      SyncAssignmentState.KnownGeneration(assignment.generation)
+    )
+
+    // The response size metric confirms the reply was recorded before checking that the
+    // assignment size metric was not.
+    AssertionWaiter("Response size recorded", pollInterval = METRICS_ASSERTION_POLL_INTERVAL)
+      .await {
+        assert(responseSumTracker.totalChange() == responseP.serializedSize.toDouble)
+      }
+    assert(assignmentSumTracker.totalChange() == 0.0)
+  }
+
   test("Alerts when watch response is near or exceeding the content length limit") {
     // Test plan: Verify that SubscriberHandler fires the
     // SUBSCRIBER_HANDLER_WATCH_RESPONSE_NEAR_OR_EXCEEDING_LIMIT alert (observed via the

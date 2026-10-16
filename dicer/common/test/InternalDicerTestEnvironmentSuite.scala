@@ -598,7 +598,7 @@ class InternalDicerTestEnvironmentSuite extends DatabricksTest with TestName {
       InternalTargetConfig.forTest.DEFAULT.copy(useAlternativeTarget = true)
     val localTestEnv: InternalDicerTestEnvironment = InternalDicerTestEnvironment.create(
       targetConfigMap = InternalTargetConfigMap.create(
-        configScopeOpt = None,
+        clusterConfigScopeOpt = None,
         targetConfigMap = Map(TargetName.forTarget(target) -> enabledConfig)
       ),
       withDefaultTargetConfig = false

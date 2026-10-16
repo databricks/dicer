@@ -59,6 +59,11 @@ service ClerkTestHarness {
   // Gets the latest assignment generation known to a Rust `Clerk`.
   rpc GetClerkLatestGeneration(GetClerkLatestGenerationRequestP)
       returns (GetClerkLatestGenerationResponseP);
+
+  // Calls `get_next_stub_for_key` on a previously created `Clerk`, passing the retry token
+  // across the test RPC boundary.
+  rpc ClerkGetNextStubForKey(ClerkGetNextStubForKeyRequestP)
+      returns (ClerkGetNextStubForKeyResponseP);
 }
 
 // A request to create a Rust `Clerk`.
@@ -220,4 +225,35 @@ message GetClerkLatestGenerationRequestP {
 message GetClerkLatestGenerationResponseP {
   // The latest assignment generation known to the Clerk.
   optional GenerationP generation = 1;
+}
+
+// The state of a retry token exchanged by the Scala and Rust test harnesses.
+message ClerkRetryTokenP {
+  optional GenerationP assignment_generation = 1;
+
+  // Indices into the slice's deterministically ordered assigned resources.
+  repeated int32 picked_resource_indices = 2;
+
+  optional bool fallback_picked = 3;
+}
+
+// A request to call `get_next_stub_for_key` on a `Clerk`.
+message ClerkGetNextStubForKeyRequestP {
+  // The ID for the Clerk that was previously returned by a `CreateClerk` request.
+  optional int64 clerk_id = 1;
+
+  // The slice key to look up.
+  optional bytes slice_key = 2;
+
+  // The retry token from the previous retry attempt, or absent to start a fresh chain.
+  optional ClerkRetryTokenP retry_token = 3;
+}
+
+// The response to a `ClerkGetNextStubForKey` request.
+message ClerkGetNextStubForKeyResponseP {
+  // The picked resource address. Absent when the Clerk has no assignment.
+  optional string resource_address = 1;
+
+  // The returned retry token, to pass to the next call. Absent when the Clerk has no assignment.
+  optional ClerkRetryTokenP retry_token = 2;
 }

@@ -11,7 +11,6 @@ scala_library(
     deps = [
         "//caching/util:config_test_util",
         "//caching/util:metric_utils",
-        "//caching/util:prefix_logger",
         "//caching/util:test_util",
         "//dicer/assigner/config/proto:advanced_target_config_scala_lib",
         "//dicer/assigner/config:authorizer",

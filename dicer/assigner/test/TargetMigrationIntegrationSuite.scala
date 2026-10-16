@@ -122,7 +122,7 @@ class ParameterizedTargetMigrationIntegrationSuite(localRole: TargetMigrationRol
       assignerClusterUri: URI
   ): TestAssigner = {
     val configMap: InternalTargetConfigMap = new InternalTargetConfigMapWithDefault(
-      InternalTargetConfigMap.create(configScopeOpt = None, Map.empty)
+      InternalTargetConfigMap.create(clusterConfigScopeOpt = None, Map.empty)
     )
     val configProvider: TargetConfigProvider =
       TargetConfigProviderFactory.createBlocking(

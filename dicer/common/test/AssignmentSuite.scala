@@ -9,6 +9,7 @@ import com.databricks.caching.util.TestUtils.{
 import com.databricks.dicer.common.Assignment.DiffUnused
 import com.databricks.dicer.common.testing.SliceTestUtils.{
   GenerationIncarnationFluent,
+  LowInclusiveLongFluent,
   LowInclusiveStringFluent,
   SliceAssignmentSliceFluent,
   createAssignment,
@@ -17,6 +18,7 @@ import com.databricks.dicer.common.testing.SliceTestUtils.{
   fp,
   identityKey,
   parseSimpleDiffAssignment,
+  toSliceKey,
   toSquid,
   `∞`
 }
@@ -243,6 +245,50 @@ class AssignmentSuite extends DatabricksTest {
     assertThrow[IllegalArgumentException](testCase.getExpectedError) {
       assignment.toDiff(diffGeneration = diffGeneration)
     }
+  }
+
+  test("Assignment.speculativeDiffSizeBytes for loose incarnations") {
+    // Test plan: For a loose incarnation, toDiff emits a full assignment, but
+    // speculativeDiffSizeBytes measures the smaller partial diff Dicer would distribute if loose
+    // diffs were allowed. Build a loose assignment at generation 50 whose first Slice is unchanged
+    // since 20 and whose second Slice changed at 50, and confirm the speculative diff against
+    // generation 20 is smaller than the full assignment toDiff emits for the same generation, and
+    // smaller than the speculative diff against an empty source generation (which includes every
+    // Slice).
+    val assignment: Assignment = createAssignment(
+      50,
+      AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
+      ("" -- 0) @@ 20 -> Seq("pod0"),
+      (0 -- ∞) @@ 50 -> Seq("pod1")
+    )
+
+    assert(
+      assignment.speculativeDiffSizeBytes(createLooseGeneration(20)) <
+      assignment.toDiff(createLooseGeneration(20)).toProto.serializedSize
+    )
+    assert(
+      assignment.speculativeDiffSizeBytes(createLooseGeneration(20)) <
+      assignment.speculativeDiffSizeBytes(Generation.EMPTY)
+    )
+  }
+
+  test("Assignment.speculativeDiffSizeBytes matches toDiff for non-loose incarnations") {
+    // Test plan: Verify that for a non-loose incarnation (where toDiff already emits partial
+    // diffs), speculativeDiffSizeBytes equals the serialized size of the real toDiff, confirming
+    // the two share the same diff computation. Build a non-loose assignment at 2##50 whose first
+    // Slice is unchanged since 2##20.
+    val assignment: Assignment = createAssignment(
+      2 ## 50,
+      AssignmentConsistencyMode.Affinity,
+      assignerServiceInfoOpt = None,
+      ("" -- 0) @@ (2 ## 20) -> Seq("pod0"),
+      (0 -- ∞) @@ (2 ## 50) -> Seq("pod1")
+    )
+    val sourceGeneration: Generation = 2 ## 20
+    assertResult(assignment.toDiff(sourceGeneration).toProto.serializedSize)(
+      assignment.speculativeDiffSizeBytes(sourceGeneration)
+    )
   }
 
   test("Assignment.assignedResources shared test data") {

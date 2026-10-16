@@ -9,6 +9,8 @@ import com.databricks.caching.util.Lock.withLock
 import scala.concurrent.{Future, Promise}
 import scala.util.Failure
 
+import com.databricks.caching.util.WatchCell.{Active, Initial, State, Terminal}
+
 /**
  * This abstraction provides the notion of a "cell", a single value of type T that can be watched
  * by one or more subscribers. A single producer (or a coordinated set of producers) produce values
@@ -23,16 +25,40 @@ import scala.util.Failure
 @ThreadSafe
 sealed class WatchCell[T] extends WatchCell.Consumer[T] with WatchCell.Producer[T] {
 
-  /** The lock used to guard the internal state. */
+  /**
+   * The lock used to guard the internal state.
+   *
+   * CONCURRENCY CONTROL STRATEGY:
+   *
+   * We achieve wait-free reads by combining this lock with the volatile [[state]] reference:
+   *
+   * [[getLatestValueOpt]] and [[getStatus]] both read [[state]] without acquiring the lock,
+   * allowing reads to proceed concurrently with writes.
+   *
+   * Writes to [[state]], reads and writes to [[watchCallbacks]], and watch callback invocations are
+   * guarded by [[lock]], so the public methods other than the ones mentioned above follow the usual
+   * coarse-grained locking approach and acquire `lock` as a first step. This guarantees that the
+   * order in which the callbacks receive written values is consistent with the order in which the
+   * values are applied to [[state]]. It also guarantees that multiple reads of [[state]] would
+   * observe the same value (the lock guards against intervening writes). However, while this would
+   * be correct, we avoid the unnecessary expense of multiple volatile reads by using local derived
+   * values instead (at worst, it would be possible to capture the entire state reference in a local
+   * reference).
+   *
+   * Compared to a pure ReentrantLock approach where every method, including reads, simply acquires
+   * the lock, this approach achieves significantly better read throughput at the cost of a minor
+   * hit to write throughput (due to volatile write overhead). This is a worthwhile tradeoff given
+   * that most workloads are read-heavy.
+   */
   private val lock = new ReentrantLock()
 
-  /** The latest value set by the caller, if any. */
-  @GuardedBy("lock")
-  private var value: Option[T] = None
-
-  /** Error set by the caller, if any. */
-  @GuardedBy("lock")
-  private var status: Status = Status.OK
+  /**
+   * The current state of the cell. Transitions are guarded by [[lock]] and involve swapping the
+   * pointer to a new [[State]] instance.
+   *
+   * See the comments above for the concurrency control strategy and @volatile.
+   */
+  @volatile private var state: State[T] = new Initial[T]
 
   /** The set of callbacks watching this cell. */
   @GuardedBy("lock")
@@ -52,11 +78,14 @@ sealed class WatchCell[T] extends WatchCell.Consumer[T] with WatchCell.Producer[
   // Consumer calls.
 
   override def watch(callback: StreamCallback[T]): Cancellable = withLock(lock) {
-    assert(watchCallbacks.add(callback), s"Callback already present in set: $callback")
-    if (!status.isOk) { // If an error is set, that is what the caller is informed.
-      informError()
-    } else if (value.isDefined) { // If there is any value present, inform the caller.
-      informSuccess(callback)
+    require(watchCallbacks.add(callback), s"Callback already present in set: $callback")
+    state match {
+      case _: Initial[T] =>
+      case active: Active[T] =>
+        callback.executeOnSuccess(active.value.value)
+      case terminal: Terminal[T] =>
+        callback.executeOnFailure(terminal.status)
+        watchCallbacks.remove(callback)
     }
     (_: Status) =>
       withLock(lock) {
@@ -64,43 +93,70 @@ sealed class WatchCell[T] extends WatchCell.Consumer[T] with WatchCell.Producer[
       }
   }
 
-  override def getLatestValueOpt: Option[T] = withLock(lock) {
-    value
+  override def getLatestValueOpt: Option[T] = {
+    state match {
+      case _: Initial[T] =>
+        None
+      case active: Active[T] =>
+        active.value
+      case terminal: Terminal[T] =>
+        terminal.valueOpt
+    }
   }
 
-  override def getStatus: Status = withLock(lock) {
-    status
+  override def getStatus: Status = {
+    state match {
+      case _: Initial[T] | _: Active[T] =>
+        Status.OK
+      case terminal: Terminal[T] =>
+        terminal.status
+    }
   }
 
   override def notifyInitial(): (Future[Unit], Cancellable) = withLock(lock) {
-    if (!status.isOk || value.isDefined) {
-      (Future.successful(()), new Cancellable {
-        override def cancel(reason: Status): Unit = { /* Successful Future, nothing to cancel. */ }
-      })
-    } else {
-      val promise = Promise[Unit]()
-      notifyInitialPromises.add(promise)
+    state match {
+      case _: Initial[T] =>
+        val promise = Promise[Unit]()
+        notifyInitialPromises.add(promise)
 
-      val cancellable = new Cancellable {
-        override def cancel(reason: Status): Unit = withLock(lock) {
-          // When the observation is cancelled, complete the Future and clean up the backing
-          // promise.
-          promise.tryComplete(Failure(reason.asRuntimeException()))
-          notifyInitialPromises.remove(promise)
+        val cancellable = new Cancellable {
+          override def cancel(reason: Status): Unit = withLock(lock) {
+            // When the observation is cancelled, complete the Future and clean up the backing
+            // promise.
+            promise.tryComplete(Failure(reason.asRuntimeException()))
+            notifyInitialPromises.remove(promise)
+          }
         }
-      }
-      (promise.future, cancellable)
+        (promise.future, cancellable)
+      case _: Active[T] | _: Terminal[T] =>
+        (Future.successful(()), new Cancellable {
+          override def cancel(reason: Status): Unit = {
+            /* Successful Future, nothing to cancel. */
+          }
+        })
     }
   }
 
   // Producer calls.
 
   override def setValue(newValue: T): Unit = withLock(lock) {
-    assert(newValue != null, "Value cannot be set to null")
-    assert(status.isOk, s" Setting value when an error already exists ($status): $newValue")
-    value = Some(newValue)
-    for (callback <- watchCallbacks) {
-      informSuccess(callback)
+    require(newValue != null, "Value cannot be set to null")
+    val newState: Active[T] = state match {
+      case _: Initial[T] | _: Active[T] =>
+        new Active[T](Some(newValue))
+      case terminal: Terminal[T] =>
+        throw new IllegalStateException(
+          s"Setting value when an error already exists (${terminal.status}): $newValue"
+        )
+    }
+
+    // Write the value before dispatching any callbacks so that they're guaranteed to observe
+    // at least this value through `getLatestValueOpt`. Ordering is important because
+    // `getLatestValueOpt` doesn't acquire the lock.
+    state = newState
+
+    for (callback: StreamCallback[T] <- watchCallbacks) {
+      callback.executeOnSuccess(newValue)
     }
     for (promise: Promise[Unit] <- notifyInitialPromises) {
       promise.trySuccess(())
@@ -110,36 +166,31 @@ sealed class WatchCell[T] extends WatchCell.Consumer[T] with WatchCell.Producer[
   }
 
   override def setErrorStatus(newStatus: Status): Unit = withLock(lock) {
-    assert(!newStatus.isOk, s"Cannot set status to be ok for error")
-    assert(status.isOk, s"Setting status when an error already exists ($status): $newStatus")
-    status = newStatus
-    informError()
+    require(!newStatus.isOk, s"Cannot set status to be ok for error")
+    val valueOpt: Option[T] = state match {
+      case _: Initial[T] =>
+        None
+      case active: Active[T] =>
+        active.value
+      case terminal: Terminal[T] =>
+        throw new IllegalStateException(
+          s"Setting status when an error already exists (${terminal.status}): $newStatus"
+        )
+    }
+
+    // Like in `setValue`, write the new state before dispatching callbacks.
+    val newState = new Terminal[T](valueOpt, newStatus)
+    state = newState
+
+    for (callback: StreamCallback[T] <- watchCallbacks) {
+      callback.executeOnFailure(newStatus)
+    }
+    watchCallbacks.clear()
     for (promise: Promise[Unit] <- notifyInitialPromises) {
       promise.trySuccess(())
     }
     // Clean up all the backing promises.
     notifyInitialPromises.clear()
-  }
-
-  // Private functions.
-
-  /** Informs the watching subscriber about the current value in this cell via `callback`. */
-  @GuardedBy("lock")
-  private def informSuccess(callback: StreamCallback[T]): Unit = {
-    assert(lock.isHeldByCurrentThread)
-    assert(status.isOk && value.isDefined, s"Already an error $status or $value is none")
-    callback.executeOnSuccess(value.get)
-  }
-
-  /** Informs all watching subscribers about the final error status and unregisters them. */
-  @GuardedBy("lock")
-  private def informError(): Unit = {
-    assert(lock.isHeldByCurrentThread)
-    assert(!status.isOk, s"No error exists")
-    for (callback <- watchCallbacks) {
-      callback.executeOnFailure(status)
-    }
-    watchCallbacks.clear()
   }
 }
 
@@ -197,6 +248,24 @@ object WatchCell {
      */
     def setErrorStatus(newStatus: Status): Unit
   }
+
+  /**
+   * The current state of the cell. [[State]] instances are immutable (and thus thread-safe), and
+   * changes to the state of the cell are made by pointing at new [[State]]s.
+   */
+  @ThreadSafe
+  private sealed trait State[T]
+
+  /** The state before the cell has received a value or error. */
+  private class Initial[T] extends State[T]
+
+  /** The state after the cell has received `value` but no error. */
+  // We store Some[T] instead of T itself so that `getLatestValueOpt` doesn't have to allocate a new
+  // Some instance on each call.
+  private class Active[T](val value: Some[T]) extends State[T]
+
+  /** The state after the cell has received a permanent error, preserving its latest value. */
+  private class Terminal[T](val valueOpt: Option[T], val status: Status) extends State[T]
 }
 
 /** Extends [[ValueStreamCallback]] with a handler for the failure case. */

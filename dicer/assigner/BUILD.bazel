@@ -56,7 +56,6 @@ scala_library(
     deps = [
         ":assigner",
         ":assigner_conf",
-        ":assigner_probe_source",
         ":assigner_slicez",
         ":kubernetes_api_client_factory",
         ":kubernetes_membership_checker",
@@ -67,7 +66,6 @@ scala_library(
         "//caching/util:prefix_logger",
         "//caching/util:sequential_execution_context",
         "//caching/util:server_conf",
-        "//caching/util:watch_cell",
         "//caching/util:where_am_i_helper",
         "//dicer/assigner/config:config_provider",
         "//dicer/assigner/config:internal_target_config_map",
@@ -77,8 +75,6 @@ scala_library(
         "//dicer/common:generation",
         "//dicer/common/proto:common_proto_scala_lib",
         "//dicer/external:slicelet",
-        "//wrappers/common/status",
-        "//wrappers/common/status/liveness:liveness-status",
         "//wrappers/conf:core",
         "//wrappers/conf:kam-client-config",
         "//wrappers/conf:location",
@@ -320,7 +316,6 @@ scala_library(
         ":assignment_generator_driver",
         ":consistent_hashing_preferred_assigner_driver",
         ":dicer_simulator_event_emitter",
-        ":dicer_tee_event",
         ":disabled_preferred_assigner_driver",
         ":etcd_preferred_assigner_driver",
         ":etcd_preferred_assigner_store",
@@ -351,7 +346,6 @@ scala_library(
         "//caching/util:server_conf",
         "//caching/util:state_machine",
         "//caching/util:watch_cell",
-        "//caching/util:watch_cell_adapter",
         "//dicer/assigner/config:authorizer",
         "//dicer/assigner/config:config_provider",
         "//dicer/assigner/config:internal_target_config_map",
@@ -1126,7 +1120,6 @@ scala_library(
         ":assignment_generator_driver",
         ":assignment_stats",
         ":dicer_simulator_event_emitter",
-        ":dicer_tee_event",
         ":generator",
         ":in_memory_store",
         ":kubernetes_target_watcher",
@@ -1291,7 +1284,6 @@ scala_library(
     deps = [
         ":kubernetes_api_client_factory",
         "//caching/util:lock",
-        "//caching/util:prefix_logger",
         "//wrappers/logging",
         "@maven//:com_google_code_findbugs_jsr305",
         "@maven//:com_squareup_okhttp3_okhttp",
@@ -1375,68 +1367,6 @@ scala_test(
 )
 
 scala_library(
-    name = "assigner_probe_source",
-    srcs = ["src/AssignerProbeSource.scala"],
-    visibility = ["//dicer/assigner:__pkg__"],
-    deps = [
-        "//caching/util:lock",
-        "//caching/util:watch_cell",
-        "//wrappers/common/status/liveness:liveness-status",
-        "//wrappers/common/status:status",
-        "//wrappers/feature-flag",
-        "@maven//:com_google_code_findbugs_jsr305",
-        "@maven//:io_prometheus_simpleclient",
-    ],
-)
-
-scala_test(
-    name = "assigner_probe_source_test",
-    srcs = ["test/AssignerProbeSourceSuite.scala"],
-    timeout = "short",
-    deps = [
-        ":assigner_probe_source",
-        "//caching/util:metric_utils",
-        "//caching/util:watch_cell",
-        "//wrappers/common/status/liveness:liveness-status",
-        "//wrappers/common/status:status",
-        "//wrappers/feature-flag",
-        "//wrappers/util:async_test_helpers",
-        "//wrappers/util:databricks-test",
-        "@maven//:com_google_guava_guava",
-        "@maven//:io_prometheus_simpleclient",
-    ],
-)
-
-scala_library(
-    name = "dicer_tee_event",
-    srcs = [
-        "src/DicerSimulatorEvent.scala",
-        "src/DicerTeeEventEmitter.scala",
-        "src/DicerTeeEventEmitterImpl.scala",
-    ],
-    visibility = ["//dicer:internal"],
-    deps = [
-        ":generator",
-        ":store_interface",
-        "//caching/util:assert_macros",
-        "//caching/util:prefix_logger",
-        "//caching/util:sequential_execution_context",
-        "//caching/util:state_machine",
-        "//dicer/common/proto:common_proto_scala_lib",
-        "//dicer/common:assignment_core",
-        "//dicer/common:client_request",
-        "//dicer/common:generation",
-        "//dicer/common:target_helper",
-        "//dicer/common:target_unmarshaller",
-        "//dicer/external:conf",
-        "//wrappers/rpc:client",
-        "//wrappers/rpc:rpc_tls",
-        "@scala_proto_rules_grpc_api",
-        "@scala_proto_rules_grpc_netty",
-    ],
-)
-
-scala_library(
     name = "dicer_simulator_event_emitter",
     srcs = [
         "src/DicerSimulatorEventEmitter.scala",
@@ -1461,7 +1391,6 @@ scala_library(
         ":assigner_conf",
         ":assigner_proto_logger",
         ":dicer_simulator_event_emitter",
-        ":dicer_tee_event",
         ":generator",
         ":kubernetes_target_watcher",
         ":store_interface",
@@ -1548,10 +1477,8 @@ scala_test(
         "//caching/util:test_util",
         "//dicer/common/testing:test_common",
         "//dicer/common:client_request",
-        "//dicer/common:generation",
         "//dicer/common:slicekey_helper",
         "//dicer/external:external_common",
-        "//dicer/friend:squid",
         "//wrappers/util:async_test_helpers",
         "//wrappers/util:databricks-test",
     ],
@@ -1802,7 +1729,6 @@ scala_library(
         "//wrappers/conf:project-conf",
         "//wrappers/feature-flag",
         "//wrappers/util:jsonutil",
-        "@maven//:com_google_guava_guava",
         "@maven//:com_typesafe_config",
     ],
 )
@@ -2325,10 +2251,10 @@ scala_library(
         ":preferred_assigner_value",
         "//caching/util:sequential_execution_context",
         "//caching/util:state_machine",
-        "//caching/util:watch_cell",
         "//dicer/common:assignment_core",
         "//dicer/common:slice_key_sensitivity",
         "//dicer/external:slicelet",
+        "//wrappers/feature-flag",
     ],
 )
 

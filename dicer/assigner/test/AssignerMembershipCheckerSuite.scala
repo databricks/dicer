@@ -25,7 +25,8 @@ import com.databricks.conf.Configs
 import com.databricks.dicer.assigner.EtcdPreferredAssignerStore.DEFAULT_CONFIG
 import com.databricks.dicer.assigner.config.{
   InternalTargetConfigMap,
-  StaticTargetConfigProvider,
+  TargetConfigProvider,
+  TargetConfigProviderFactory,
   TargetMigrationConfig
 }
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
@@ -120,11 +121,11 @@ class AssignerMembershipCheckerSuite extends DatabricksTest with TestName {
       uuid: UUID,
       factory: KubernetesMembershipChecker.Factory): Assigner = {
     val staticTargetConfigMap: InternalTargetConfigMap = InternalTargetConfigMap.create(
-      configScopeOpt = None,
+      clusterConfigScopeOpt = None,
       targetConfigMap = Map.empty
     )
-    val dynamicConfigProvider: StaticTargetConfigProvider =
-      StaticTargetConfigProvider.createBlocking(
+    val dynamicConfigProvider: TargetConfigProvider =
+      TargetConfigProviderFactory.createBlocking(
         staticTargetConfigMap,
         assignerConf,
         initialPollTimeout = 1.second
@@ -250,11 +251,11 @@ class AssignerMembershipCheckerSuite extends DatabricksTest with TestName {
       }
     val assignerConf: DicerAssignerConf = createMinimalAssignerConf()
     val staticTargetConfigMap: InternalTargetConfigMap = InternalTargetConfigMap.create(
-      configScopeOpt = None,
+      clusterConfigScopeOpt = None,
       targetConfigMap = Map.empty
     )
-    val configProvider: StaticTargetConfigProvider =
-      StaticTargetConfigProvider.createBlocking(
+    val configProvider: TargetConfigProvider =
+      TargetConfigProviderFactory.createBlocking(
         staticTargetConfigMap,
         assignerConf,
         initialPollTimeout = 1.second

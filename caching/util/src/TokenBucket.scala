@@ -31,7 +31,7 @@ class TokenBucket private (
     initCapacityInSecondsOfRate: Long,
     initRate: Long,
     initTime: TickerTime) {
-  import TokenBucket._
+  import TokenBucket.{NANOS_PER_SECOND, validateCapacity, validateRate}
 
   validateCapacity(initCapacityInSecondsOfRate)
   validateRate(initRate)

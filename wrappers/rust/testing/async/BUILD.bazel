@@ -1,0 +1,23 @@
+load("//bazel/rules/rust:rules_rust.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "async",
+    testonly = True,
+    srcs = ["src/lib.rs"],
+    crate_name = "universe_raf_testing_async",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@crates//:futures",
+        "@crates//:tokio",
+    ],
+)
+
+rust_test(
+    name = "async_test",
+    testonly = True,
+    srcs = ["tests/async_test.rs"],
+    deps = [
+        ":async",
+        "@crates//:tokio",
+    ],
+)

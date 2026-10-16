@@ -627,7 +627,6 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
       new KeyOfDeathDetector(target, keyOfDeathDetectorConfig),
       GENERATOR_CLUSTER_URI,
       minAssignmentGenerationInterval,
-      DicerTeeEventEmitter.getNoopEmitter,
       dicerSimulatorEventLogEmitter,
       assignerProtoLogger,
       assignerServiceInfoOpt

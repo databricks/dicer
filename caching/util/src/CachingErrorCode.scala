@@ -260,14 +260,6 @@ object CachingErrorCode {
   }
 
   /**
-   * The dynamic config lacks certain targets found in the Dicer static config. See the comment for
-   * `MISSING_NAMESPACES_IN_DYNAMIC_CONFIG` for potential causes and actions.
-   */
-  case object MISSING_TARGETS_IN_DYNAMIC_CONFIG extends CachingErrorCode {
-    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
-  }
-
-  /**
    * The dynamic target migration config from SAFE is unexpectedly empty. A default fallback must
    * always be defined.
    */
@@ -465,8 +457,7 @@ object CachingErrorCode {
   }
 
   /**
-   * The proto logging sample fraction supplied to [[com.databricks.dicer.common.DicerProtoLogger]]
-   * is outside the valid range [0, 1].
+   * The configured Dicer proto logging sample fraction is outside the valid range [0, 1].
    */
   case object DICER_PROTO_LOGGER_INVALID_SAMPLE_FRACTION extends CachingErrorCode {
     override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam

@@ -1,0 +1,240 @@
+# proto-file: caching/util/test/proto/test_data.proto
+# proto-message: EwmaQuantileSummariesTestDataP
+
+# This is a plumbing test to verify EwmaQuantileSummaries correctly integrates QuantileSummaries
+# and EwmaAmplifier. For more detailed tests about the histogram tracking functionality, see tests
+# for QuantileSummaries. For more detailed tests about the EWMA handling, see tests for
+# EwmaAmplifier.
+valid_cases: [
+  {
+    test_case_name: "empty summary"
+    # Test plan: Verify that querying an empty EWMA summary returns an empty result regardless
+    # of how many quantiles are batched together.
+    ewma_quantile_summaries: {
+      half_life_seconds: 10.0
+      relative_error: 1e-3
+      sample_count_upper_bound: 1000
+    }
+    actions: [
+      { assert_query_within: { quantiles: [0, 0.5, 1] relative_error: 1e-3 } }
+    ]
+  },
+  {
+    test_case_name: "single insert"
+    # Test plan: Verify that every quantile resolves to the sole inserted value when only one
+    # observation is recorded.
+    ewma_quantile_summaries: {
+      half_life_seconds: 10.0
+      relative_error: 1e-3
+      sample_count_upper_bound: 1000
+    }
+    actions: [
+      { insert: { value: 42 weight: 3 elapsed_ms: 0 } },
+      {
+        assert_query_within: {
+          quantiles: [0, 0.5, 1]
+          relative_error: 1e-3
+          expected_results: [
+            { value: 42 cumulative_weight_fraction: 1.0 },
+            { value: 42 cumulative_weight_fraction: 1.0 },
+            { value: 42 cumulative_weight_fraction: 1.0 }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    test_case_name: "insertions at the same time behave like non-EWMA"
+    # Test plan: Verify that when all inserts happen at the same time, no EWMA decay happens and
+    # each weight is stored as-is. Verify by inserting four equal-weight observations at
+    # `elapsed_ms = 0` and checking the standard quartile answers.
+    ewma_quantile_summaries: {
+      half_life_seconds: 10.0
+      relative_error: 1e-3
+      sample_count_upper_bound: 1000
+    }
+    actions: [
+      { insert: { value: 10 weight: 1 elapsed_ms: 0 } },
+      { insert: { value: 20 weight: 1 elapsed_ms: 0 } },
+      { insert: { value: 30 weight: 1 elapsed_ms: 0 } },
+      { insert: { value: 40 weight: 1 elapsed_ms: 0 } },
+      {
+        assert_query_within: {
+          quantiles: [0, 0.25, 0.5, 0.75, 1]
+          relative_error: 1e-3
+          expected_results: [
+            { value: 10 cumulative_weight_fraction: 0.25 },
+            { value: 10 cumulative_weight_fraction: 0.25 },
+            { value: 20 cumulative_weight_fraction: 0.5 },
+            { value: 30 cumulative_weight_fraction: 0.75 },
+            { value: 40 cumulative_weight_fraction: 1.0 }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    test_case_name: "inserting zero weight is a no-op"
+    # Test plan: Verify that inserting a 0 weight is a no-op.
+    ewma_quantile_summaries: { half_life_seconds: 10.0 relative_error: 1e-3 sample_count_upper_bound: 1000 }
+    actions: [
+      { insert: { value: 0 weight: 0 elapsed_ms: 0 } },
+      { insert: { value: 10 weight: 1 elapsed_ms: 0 } },
+      { insert: { value: 20 weight: 0 elapsed_ms: 0 } },
+      {
+        assert_query_within: {
+          quantiles: [0, 0.5, 1]
+          relative_error: 1e-3
+          expected_results: [
+            { value: 10 cumulative_weight_fraction: 1.0 },
+            { value: 10 cumulative_weight_fraction: 1.0 },
+            { value: 10 cumulative_weight_fraction: 1.0 }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    test_case_name: "inserting negative weight is a no-op"
+    # Test plan: Verify that a negative-weight insert for an already-present value does not reduce
+    # that value's stored weight (or its quantile coverage).
+    ewma_quantile_summaries: { half_life_seconds: 10.0 relative_error: 1e-3 sample_count_upper_bound: 1000 }
+    actions: [
+      { insert: { value: 10 weight: 2 elapsed_ms: 0 } },
+      { insert: { value: 20 weight: 2 elapsed_ms: 0 } },
+      { insert: { value: 10 weight: -1 elapsed_ms: 0 } },
+      {
+        assert_query_within: {
+          quantiles: [0, 0.5, 1]
+          relative_error: 1e-3
+          expected_results: [
+            # The cumulative weight fraction for value 10 is still 50%.
+            { value: 10 cumulative_weight_fraction: 0.5 },
+            { value: 10 cumulative_weight_fraction: 0.5 },
+            { value: 20 cumulative_weight_fraction: 1.0 }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    test_case_name: "newer inserts dominate older ones by exact half-life ratio"
+    # Test plan: Verify that an insert one half-life later has exactly twice the effective
+    # weight of an earlier same-weight insert.
+    ewma_quantile_summaries: { half_life_seconds: 1.0 relative_error: 1e-3 sample_count_upper_bound: 1000 }
+    actions: [
+      # Despite both weights being 1, the value inserted 1s later should have twice the weight.
+      { insert: { value: 10 weight: 1 elapsed_ms: 0 } },
+      { insert: { value: 20 weight: 1 elapsed_ms: 1000 } },
+      {
+        assert_query_within: {
+          quantiles: [0, 0.32, 0.34, 0.5, 1]
+          relative_error: 1e-3
+          expected_results: [
+            { value: 10 cumulative_weight_fraction: 0.3333333333333333 },
+            { value: 10 cumulative_weight_fraction: 0.3333333333333333 },
+            { value: 20 cumulative_weight_fraction: 1.0 },
+            { value: 20 cumulative_weight_fraction: 1.0 },
+            { value: 20 cumulative_weight_fraction: 1.0 }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    test_case_name: "non-monotonic timestamp does not regress amplification"
+    # Test plan: Verify that a backward timestamp passed to insert is treated as belonging to
+    # the latest seen time.
+    ewma_quantile_summaries: { half_life_seconds: 1.0 relative_error: 1e-3 sample_count_upper_bound: 1000 }
+    actions: [
+      { insert: { value: 10 weight: 1 elapsed_ms: 0 } },
+      { insert: { value: 20 weight: 1 elapsed_ms: 1000 } },
+      # This should be treated as if it's called at 1000ms.
+      { insert: { value: 30 weight: 1 elapsed_ms: 0 } },
+      # Eventually, the weight ratio for values 10, 20, 30 is 1:2:2.
+      # Cumulative fractions: 10 -> 0.2, 20 -> 0.6, 30 -> 1.0.
+      {
+        assert_query_within: {
+          quantiles: [0, 0.19, 0.6, 1]
+          relative_error: 1e-3
+          expected_results: [
+            { value: 10 cumulative_weight_fraction: 0.2 },
+            { value: 10 cumulative_weight_fraction: 0.2 },
+            { value: 20 cumulative_weight_fraction: 0.6 },
+            { value: 30 cumulative_weight_fraction: 1.0 }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    test_case_name: "repeated inserts settle into a steady EWMA weight ratio"
+    # Test plan: Verify that with a steady stream of inputs, EwmaQuantileSummaries remembers recent
+    # things strongly and lets old things fade away.
+    ewma_quantile_summaries: {
+      half_life_seconds: 1.0
+      relative_error: 1e-3
+      sample_count_upper_bound: 1000
+    }
+    actions: [
+      # Once every second, a weight is inserted for value 10.
+      { insert: { value: 10 weight: 1 elapsed_ms: 0 } },
+      { insert: { value: 10 weight: 1 elapsed_ms: 1000 } },
+      { insert: { value: 10 weight: 1 elapsed_ms: 2000 } },
+      { insert: { value: 10 weight: 1 elapsed_ms: 3000 } },
+      { insert: { value: 10 weight: 1 elapsed_ms: 4000 } },
+      { insert: { value: 10 weight: 1 elapsed_ms: 5000 } },
+      { insert: { value: 10 weight: 1 elapsed_ms: 6000 } },
+      { insert: { value: 10 weight: 1 elapsed_ms: 7000 } },
+      { insert: { value: 10 weight: 1 elapsed_ms: 8000 } },
+      { insert: { value: 10 weight: 1 elapsed_ms: 9000 } },
+      # Insert (20, 4) at the same final second (t = 9s). Although we inserted many weights for
+      # value 10, the historical weights decay, so the final weight ratio (20 : 10) is still
+      # roughly (4 : 2). (Why does value 10 have roughly weight 2? Because 1 + 1/2 + 1/4 + ... ~= 2.)
+      { insert: { value: 20 weight: 4 elapsed_ms: 9000 } },
+      {
+        assert_query_within: {
+          quantiles: [0, 0.32, 0.34, 0.5, 1]
+          relative_error: 1e-3
+          expected_results: [
+            { value: 10 cumulative_weight_fraction: 0.3333333333333333 },
+            { value: 10 cumulative_weight_fraction: 0.3333333333333333 },
+            { value: 20 cumulative_weight_fraction: 1.0 },
+            { value: 20 cumulative_weight_fraction: 1.0 },
+            { value: 20 cumulative_weight_fraction: 1.0 }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    test_case_name: "overflow rescaling preserves quantiles"
+    # Test plan: Verify that EwmaQuantileSummaries correctly rescales internally.
+    ewma_quantile_summaries: {
+      half_life_seconds: 0.5
+      relative_error: 1e-3
+      sample_count_upper_bound: 1000
+    }
+    actions: [
+      { insert: { value: 10 weight: 1 elapsed_ms: 0 } },
+      # Jump ~1024 seconds ahead, long enough to trigger internal rescale.
+      { insert: { value: 10 weight: 1 elapsed_ms: 1024000 } },
+      # Second value at the same final second; stored-weight ratio (20 : 10) = 3.
+      { insert: { value: 20 weight: 3 elapsed_ms: 1024000 } },
+      {
+        assert_query_within: {
+          quantiles: [0, 0.24, 0.26, 0.5, 1]
+          relative_error: 1e-3
+          expected_results: [
+            # The initial weight 1 for value 10 should be decayed to near 0.
+            { value: 10 cumulative_weight_fraction: 0.25 },
+            { value: 10 cumulative_weight_fraction: 0.25 },
+            { value: 20 cumulative_weight_fraction: 1.0 },
+            { value: 20 cumulative_weight_fraction: 1.0 },
+            { value: 20 cumulative_weight_fraction: 1.0 }
+          ]
+        }
+      }
+    ]
+  }
+]

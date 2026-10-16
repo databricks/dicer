@@ -2,62 +2,59 @@ package com.databricks.caching.util
 
 import scala.util.Random
 
+import com.databricks.caching.util.TestUtils.loadTestData
+import com.databricks.caching.util.test.DeterministicSamplingTestDataP
+import com.databricks.caching.util.test.DeterministicSamplingTestDataP.{
+  InvalidTestCaseP,
+  ValidTestCaseP
+}
 import com.databricks.testing.DatabricksTest
 
 class DeterministicSamplingSuite extends DatabricksTest {
 
-  test("0.0 fraction samples nothing") {
-    // Test plan: Verify that a sample fraction of 0.0 never samples any item regardless of the
-    // flag name. Do this by sampling all items and asserting the count is 0.
-    val sampledCount: Int = (0 until 10).count { i: Int =>
-      DeterministicSampling.isSampled(
-        item = s"item_$i",
-        sampleNamespace = s"flag_$i",
-        sampleFraction = 0.0
-      )
-    }
-    assert(
-      sampledCount == 0,
-      s"Expected 0 sampled items at fraction 0.0, got $sampledCount"
+  private val TEST_DATA: DeterministicSamplingTestDataP =
+    loadTestData[DeterministicSamplingTestDataP](
+      "caching/util/test/data/deterministic_sampling_test_data.textproto"
     )
+
+  namedGridTest("isSampled returns the expected result for valid inputs")(
+    TEST_DATA.validTestCases
+      .map((testCase: ValidTestCaseP) => testCase.getDescription -> testCase)
+      .toMap
+  ) { testCase: ValidTestCaseP =>
+    // Test plan: Verify that isSampled returns the expected result for every valid input from the
+    // shared textproto. Do this by iterating over each `valid_test_cases` entry, calling isSampled,
+    // and asserting the result equals `expected_is_sampled`.
+    val result: Boolean = DeterministicSampling.isSampled(
+      item = testCase.getItem,
+      sampleNamespace = testCase.getSampleNamespace,
+      sampleFraction = testCase.getSampleFraction
+    )
+    assert(result == testCase.getExpectedIsSampled)
   }
 
-  test("1.0 fraction samples everything") {
-    // Test plan: Verify that a sample fraction of 1.0 always samples every item regardless of the
-    // flag name. Do this by sampling all items and asserting the count equals item count.
-    val sampledCount: Int = (0 until 10).count { i: Int =>
-      DeterministicSampling.isSampled(
-        item = s"item_$i",
-        sampleNamespace = s"flag_$i",
-        sampleFraction = 1.0
-      )
-    }
-    assert(
-      sampledCount == 10,
-      s"Expected 10 sampled items at fraction 1.0, got $sampledCount"
-    )
-  }
-
-  gridTest("Throws IllegalArgumentException with correct message for out-of-range fraction")(
-    Seq(-1.0, -0.1, 1.1, 2.0, Double.NaN)
-  ) { fraction: Double =>
-    // Test plan: Verify that isSampled throws IllegalArgumentException with
-    // the correct message when sampleFraction is outside [0.0, 1.0]. Do this by calling the method
-    // with an invalid fraction and asserting on both the exception type and message.
+  namedGridTest("isSampled rejects invalid inputs")(
+    TEST_DATA.invalidTestCases
+      .map((testCase: InvalidTestCaseP) => testCase.getDescription -> testCase)
+      .toMap
+  ) { testCase: InvalidTestCaseP =>
+    // Test plan: Verify that isSampled rejects every invalid input from the shared textproto. Do
+    // this by iterating over each `invalid_test_cases` entry and asserting isSampled throws
+    // IllegalArgumentException whose message contains the expected substring.
     val exception: IllegalArgumentException = intercept[IllegalArgumentException] {
       DeterministicSampling.isSampled(
-        item = "item",
-        sampleNamespace = "flag",
-        sampleFraction = fraction
+        item = testCase.getItem,
+        sampleNamespace = testCase.getSampleNamespace,
+        sampleFraction = testCase.getSampleFraction
       )
     }
     assert(
-      exception.getMessage == s"sampleFraction must be in [0.0, 1.0], got $fraction",
+      exception.getMessage.contains(testCase.getExpectedErrorSubstring),
       s"Unexpected exception message: ${exception.getMessage}"
     )
   }
 
-  test("Same item and flag name always produce the same sampling result") {
+  test("Same item and namespace always produce the same sampling result") {
     // Test plan: Verify that sampling is stable across repeated calls for the same (item,
     // sampleNamespace) pair. Do this by generating a random item and namespace, calling isSampled
     // 10 times, and asserting every result matches the first.
@@ -87,36 +84,36 @@ class DeterministicSamplingSuite extends DatabricksTest {
     }
   }
 
-  test("Different flag names can yield different sampling results for the same item") {
-    // Test plan: Verify that the flag name acts as an independent salt so that the same item can
-    // have different sampling decisions across flags. Do this by comparing the result for a single
-    // item under two different flag names, and asserting the results are not identical.
+  test("Different namespaces can yield different sampling results for the same item") {
+    // Test plan: Verify that the namespace acts as an independent salt so that the same item can
+    // have different sampling decisions across namespaces. Do this by comparing the result for a
+    // single item under two different namespaces, and asserting the results are not identical.
     val item: String = "some_item"
-    val resultForFlagA: Boolean = DeterministicSampling.isSampled(
+    val resultForNamespaceA: Boolean = DeterministicSampling.isSampled(
       item = item,
-      sampleNamespace = "flag_a",
+      sampleNamespace = "namespace_a",
       sampleFraction = 0.5
     )
-    val resultForFlagB: Boolean = DeterministicSampling.isSampled(
+    val resultForNamespaceB: Boolean = DeterministicSampling.isSampled(
       item = item,
-      sampleNamespace = "flag_c",
+      sampleNamespace = "namespace_b",
       sampleFraction = 0.5
     )
-    assert(resultForFlagA != resultForFlagB)
+    assert(resultForNamespaceA != resultForNamespaceB)
   }
 
-  test("Different items can yield different sampling results for the same flag name") {
-    // Test plan: Verify that the item acts as an independent salt so that the same flag name can
+  test("Different items can yield different sampling results for the same namespace") {
+    // Test plan: Verify that the item acts as an independent salt so that the same namespace can
     // have different sampling decisions across items. Do this by comparing the result for a single
-    // flag name under two different items, and asserting the results are not identical.
-    val namespace: String = "some_flag"
+    // namespace under two different items, and asserting the results are not identical.
+    val namespace: String = "some_namespace"
     val resultForItemA: Boolean = DeterministicSampling.isSampled(
       item = "item_a",
       sampleNamespace = namespace,
       sampleFraction = 0.5
     )
     val resultForItemB: Boolean = DeterministicSampling.isSampled(
-      item = "item_c",
+      item = "item_b",
       sampleNamespace = namespace,
       sampleFraction = 0.5
     )
@@ -160,7 +157,7 @@ class DeterministicSamplingSuite extends DatabricksTest {
     val sampledCount: Int = (0 until n).count { i: Int =>
       DeterministicSampling.isSampled(
         item = s"item_$i",
-        sampleNamespace = "sampling_flag",
+        sampleNamespace = "sampling_namespace",
         sampleFraction = fraction
       )
     }

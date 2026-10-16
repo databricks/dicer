@@ -1,0 +1,62 @@
+# proto-file: dicer/client/feature-rollouts/test/proto/test_data.proto
+# proto-message: DicerClientFeatureRolloutRuleOverrideTestDataP
+
+# RuleOverride protos that should be accepted by
+# `DicerClientFeatureRolloutRuleOverride::from_proto`.
+valid_rule_override_test_cases: [
+  {
+    description: "Two distinct scopes with a fraction rule"
+    override_proto: {
+      override_scopes: [
+        { region_uri: "region:prod/cloud1/public/region1" },
+        { region_uri: "region:prod/cloud2/public/region10" }
+      ]
+      override_rule: { target_instance_enable_fraction: 1.0 }
+    }
+  },
+  {
+    description: "Two distinct scopes with a rule that sets all fields"
+    override_proto: {
+      override_scopes: [
+        { region_uri: "region:prod/cloud1/public/region1" },
+        { region_uri: "region:prod/cloud2/public/region10" }
+      ]
+      override_rule: {
+        force_enable_target_names: ["target-a", "target-b"]
+        force_disable_target_names: ["target-c"]
+        target_instance_enable_fraction: 1.0
+      }
+    }
+  }
+]
+
+# RuleOverride protos that should be rejected by
+# `DicerClientFeatureRolloutRuleOverride::from_proto`. Each entry pairs the proto with a substring
+# expected to appear in the error message.
+invalid_rule_override_test_cases: [
+  {
+    description: "overrideScopes is empty"
+    override_proto: {
+      override_rule: { target_instance_enable_fraction: 0.5 }
+    }
+    expected_error_substring: "overrideScopes must be non-empty"
+  },
+  {
+    description: "overrideScopes contains duplicate region URIs"
+    override_proto: {
+      override_scopes: [
+        { region_uri: "region:prod/cloud1/public/region2" },
+        { region_uri: "region:prod/cloud1/public/region2" }
+      ]
+      override_rule: { target_instance_enable_fraction: 0.5 }
+    }
+    expected_error_substring: "overrideScopes must not contain duplicate region URIs"
+  },
+  {
+    description: "overrideRule is absent"
+    override_proto: {
+      override_scopes: [{ region_uri: "region:prod/cloud1/public/region2" }]
+    }
+    expected_error_substring: "overrideRule must be set"
+  }
+]
