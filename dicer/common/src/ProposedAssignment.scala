@@ -29,7 +29,7 @@ case class ProposedSliceAssignment(
   val resources: Set[Squid] = sliceWithResources.resources
 
   if (primaryRateLoadOpt.isDefined) {
-    LoadMeasurement.requireValidLoadMeasurement(primaryRateLoadOpt.get)
+    MetricMeasurement.requireValidMeasurement(primaryRateLoadOpt.get)
   }
 
   override def toString: String = {
@@ -56,7 +56,7 @@ object ProposedSliceAssignment {
   @throws[IllegalArgumentException]("If `resources` is empty.")
   @throws[IllegalArgumentException](
     "If `primaryRateLoadOpt` is defined but doesn't satisfy " +
-    "LoadMeasurement.requireValidLoadMeasurement()."
+    "MetricMeasurement.requireValidMeasurement()."
   )
   def apply(
       slice: Slice,
@@ -162,8 +162,6 @@ case class ProposedAssignment(
    *    `SliceAssignment([a .. b), gen47, pod-0, ..., primaryRateLoad = 12.0)` in the committed
    *    assignment. In this case, the new load (12.0) is outside of the threshold (10.0 +/- 10%), so
    *    the committed `SliceAssignment` has a new generation, and the primary rate load is changed.
-   *
-   * @throws NotImplementedError TODO(<internal bug>) support Consistency mode
    */
   @throws[IllegalArgumentException](
     "If predecessor exists but new generation is not within same incarnation as predecessor."
@@ -171,15 +169,10 @@ case class ProposedAssignment(
   @throws[IllegalArgumentException](
     "If predecessor exists but the new generation is no greater than predecessor generation."
   )
-  @throws[NotImplementedError]("If `consistencyMode` is Strong.")
   def commit(
       isFrozen: Boolean,
-      consistencyMode: AssignmentConsistencyMode,
       generation: Generation,
       primaryRateLoadThreshold: Double = 0.1): Assignment = {
-    if (consistencyMode != AssignmentConsistencyMode.Affinity) {
-      throw new NotImplementedError("TODO(<internal bug>): Only Affinity is currently supported")
-    }
     predecessorOpt match {
       case Some(predecessor: Assignment)
           if predecessor.generation.incarnation == generation.incarnation =>
@@ -187,7 +180,6 @@ case class ProposedAssignment(
           sliceMap,
           predecessor,
           isFrozen,
-          consistencyMode,
           generation,
           primaryRateLoadThreshold,
           assignerServiceInfoOpt
@@ -197,7 +189,6 @@ case class ProposedAssignment(
         commitWithoutPredecessor(
           sliceMap,
           isFrozen,
-          consistencyMode,
           generation,
           assignerServiceInfoOpt
         )
@@ -230,7 +221,6 @@ object ProposedAssignment {
       proposedSliceMap: SliceMap[ProposedSliceAssignment],
       predecessor: Assignment,
       isFrozen: Boolean,
-      consistencyMode: AssignmentConsistencyMode,
       generation: Generation,
       primaryRateLoadThreshold: Double,
       assignerServiceInfoOpt: Option[AssignerServiceInfo]
@@ -402,7 +392,6 @@ object ProposedAssignment {
       SliceMapHelper.ofSliceAssignments(committedSliceAssignments.toVector)
     Assignment(
       isFrozen,
-      consistencyMode,
       generation,
       committedSliceMap,
       assignerServiceInfoOpt
@@ -416,7 +405,6 @@ object ProposedAssignment {
   private def commitWithoutPredecessor(
       sliceMap: SliceMap[ProposedSliceAssignment],
       isFrozen: Boolean,
-      consistencyMode: AssignmentConsistencyMode,
       generation: Generation,
       assignerServiceInfoOpt: Option[AssignerServiceInfo]): Assignment = {
     val committedSliceAssignments = Vector.newBuilder[SliceAssignment]
@@ -434,7 +422,6 @@ object ProposedAssignment {
       SliceMapHelper.ofSliceAssignments(committedSliceAssignments.result())
     Assignment(
       isFrozen,
-      consistencyMode,
       generation,
       committedSliceMap,
       assignerServiceInfoOpt

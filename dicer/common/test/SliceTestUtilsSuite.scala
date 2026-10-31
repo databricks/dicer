@@ -217,14 +217,12 @@ class SliceTestUtilsSuite extends DatabricksTest {
     assert(
       createAssignment(
         42 ## 47,
-        AssignmentConsistencyMode.Strong,
         assignerServiceInfoOpt = None,
         ("" -- fp("Balin")) @@ (42 ## 47) -> Seq("resource1"),
         (fp("Balin") -- ∞) @@ (42 ## 42) -> Seq("resource2", "resource3")
       )
       == Assignment(
         isFrozen = false,
-        AssignmentConsistencyMode.Strong,
         Generation(Incarnation(42), 47),
         SliceMapHelper.ofSliceAssignments(
           Vector(
@@ -250,7 +248,6 @@ class SliceTestUtilsSuite extends DatabricksTest {
     assert(
       createAssignment(
         42 ## 47,
-        AssignmentConsistencyMode.Strong,
         assignerServiceInfoOpt =
           Some(AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")),
         Seq(
@@ -260,7 +257,6 @@ class SliceTestUtilsSuite extends DatabricksTest {
       )
       == Assignment(
         isFrozen = false,
-        AssignmentConsistencyMode.Strong,
         Generation(Incarnation(42), 47),
         SliceMapHelper.ofSliceAssignments(
           Vector(

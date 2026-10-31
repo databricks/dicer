@@ -1,16 +1,11 @@
 package com.databricks.dicer.assigner.conf
 
-import java.util.UUID
-
 import com.databricks.conf.Configs
 import com.databricks.dicer.assigner.{
   Assigner,
   DisabledPreferredAssignerDriver,
-  KubernetesMembershipChecker,
-  MigrationMode,
-  MigrationPreferredAssignerDriver
+  EtcdPreferredAssignerDriver
 }
-import com.databricks.dicer.assigner.testing.KubernetesTestUtils
 import com.databricks.dicer.common.Incarnation
 import com.databricks.rpc.DatabricksObjectMapper
 import com.databricks.testing.DatabricksTest
@@ -27,11 +22,10 @@ class PreferredAssignerStoreConfSuite extends DatabricksTest {
   private def generateConfigMap(
       preferredAssignerEnabled: Boolean,
       preferredAssignerStoreIncarnation: Incarnation,
-      etcdEndpoints: Seq[String],
-      migrationModeOpt: Option[MigrationMode] = None): Map[String, Any] = {
+      etcdEndpoints: Seq[String]): Map[String, Any] = {
     val endpointsConfigString: String = DatabricksObjectMapper.toJson(etcdEndpoints)
 
-    val baseConfig: Map[String, Any] = Map(
+    Map(
       "databricks.dicer.assigner.preferredAssigner.modeEnabled" ->
       preferredAssignerEnabled,
       "databricks.dicer.assigner.preferredAssigner.storeIncarnation" ->
@@ -39,13 +33,6 @@ class PreferredAssignerStoreConfSuite extends DatabricksTest {
       "databricks.dicer.assigner.preferredAssigner.etcd.endpoints" ->
       endpointsConfigString
     )
-    migrationModeOpt match {
-      case Some(migrationMode: MigrationMode) =>
-        baseConfig +
-        ("databricks.dicer.assigner.preferredAssigner.migrationMode" -> migrationMode.name)
-      case None =>
-        baseConfig
-    }
   }
 
   test("Cannot create a PA store when the PA mode is disabled") {
@@ -89,12 +76,8 @@ class PreferredAssignerStoreConfSuite extends DatabricksTest {
   }
 
   test("createPreferredAssignerDriver selects the driver by PA mode") {
-    // Test plan: verify createPreferredAssignerDriver returns a MigrationPreferredAssignerDriver
-    // when the preferred assigner mode is enabled, and a DisabledPreferredAssignerDriver when it is
-    // disabled. Supply an inert membership checker (the driver requires one but never polls it).
-    val checker: KubernetesMembershipChecker =
-      KubernetesTestUtils.inertMembershipCheckerFactory.create(UUID.randomUUID())
-
+    // Test plan: verify enabled PA mode creates an EtcdPreferredAssignerDriver and disabled PA mode
+    // creates a DisabledPreferredAssignerDriver.
     val enabledConf = new DicerAssignerConf(
       Configs.parseMap(
         generateConfigMap(
@@ -104,9 +87,9 @@ class PreferredAssignerStoreConfSuite extends DatabricksTest {
         )
       )
     )
-    Assigner.createPreferredAssignerDriver(enabledConf, checker) match {
-      case _: MigrationPreferredAssignerDriver => // expected
-      case driver => fail(s"expected MigrationPreferredAssignerDriver but got $driver")
+    Assigner.createPreferredAssignerDriver(enabledConf) match {
+      case _: EtcdPreferredAssignerDriver => // expected
+      case driver => fail(s"expected EtcdPreferredAssignerDriver but got $driver")
     }
 
     val disabledConf = new DicerAssignerConf(
@@ -118,10 +101,9 @@ class PreferredAssignerStoreConfSuite extends DatabricksTest {
         )
       )
     )
-    Assigner.createPreferredAssignerDriver(disabledConf, checker) match {
+    Assigner.createPreferredAssignerDriver(disabledConf) match {
       case _: DisabledPreferredAssignerDriver => // expected
       case driver => fail(s"expected DisabledPreferredAssignerDriver but got $driver")
     }
   }
-
 }

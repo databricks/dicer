@@ -36,7 +36,7 @@ import com.databricks.testing.DatabricksTest
 
 /**
  * End-to-end tests verifying the [[KubernetesMembershipChecker]] integration within a running
- * [[EtcdPreferredAssignerDriver]]. These tests use a [[FakeKubernetesServer]] to exercise the
+ * [[Assigner]]. These tests use a [[FakeKubernetesServer]] to exercise the
  * full HTTP polling path without requiring a real Kubernetes cluster.
  */
 class AssignerMembershipCheckerSuite extends DatabricksTest with TestName {
@@ -52,10 +52,7 @@ class AssignerMembershipCheckerSuite extends DatabricksTest with TestName {
   private val etcd: EtcdTestEnvironment = EtcdTestEnvironment.create()
 
   override def afterAll(): Unit = {
-    try {
-    } finally {
-      etcd.close()
-    }
+    etcd.close()
   }
 
   override def beforeEach(): Unit = {
@@ -112,9 +109,9 @@ class AssignerMembershipCheckerSuite extends DatabricksTest with TestName {
   }
 
   /**
-   * Creates and starts an [[Assigner]] via [[Assigner.BaseForTest]] with the given factory
-   * injected into an [[EtcdPreferredAssignerDriver]]. Uses a unique DPage namespace (derived
-   * from the UUID) to avoid conflicts with other tests.
+   * Creates and starts an [[Assigner]] via [[Assigner.BaseForTest]] with the given membership
+   * checker factory and an etcd-backed preferred-assigner driver. Uses a unique DPage namespace
+   * (derived from the UUID) to avoid conflicts with other tests.
    */
   private def createAndStartAssigner(
       assignerConf: DicerAssignerConf,
@@ -165,20 +162,11 @@ class AssignerMembershipCheckerSuite extends DatabricksTest with TestName {
       store,
       EtcdPreferredAssignerDriver.Config()
     )
-    val chDriver: ConsistentHashingPreferredAssignerDriver =
-      new ConsistentHashingPreferredAssignerDriver(driverSec, membershipChecker)
-    val migrationDriver: MigrationPreferredAssignerDriver = new MigrationPreferredAssignerDriver(
-      driverSec,
-      migrationMode = MigrationMode.ShadowMode,
-      oldDriver = etcdDriver,
-      newDriver = chDriver
-    )
-
     val assigner = new Assigner.BaseForTest(
       assignerSecPool,
       assignerSec,
       assignerConf,
-      migrationDriver,
+      etcdDriver,
       Assigner.createStoreFactory(assignerConf),
       KubernetesTargetWatcher.NoOpFactory,
       HealthWatcher.DefaultFactory,

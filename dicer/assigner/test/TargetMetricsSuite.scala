@@ -32,7 +32,7 @@ import com.databricks.dicer.common.testing.SliceTestUtils.{
   toSquid,
   `∞`
 }
-import com.databricks.dicer.common.{Assignment, AssignmentConsistencyMode}
+import com.databricks.dicer.common.Assignment
 import com.databricks.dicer.external.{Slice, Target}
 import com.databricks.dicer.friend.Squid
 import com.databricks.testing.DatabricksTest
@@ -292,7 +292,6 @@ abstract class TargetMetricsSuiteBase extends DatabricksTest with TestName {
         .build()
     val asn0: Assignment = createAssignment(
       12 ## 42,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       ("" -- HALF_POINT) @@ (12 ## 42) -> Seq("pod0"),
       (HALF_POINT -- ∞) @@ (12 ## 42) -> Seq("pod1")
@@ -303,7 +302,6 @@ abstract class TargetMetricsSuiteBase extends DatabricksTest with TestName {
     // with the former being reassigned to pod2.
     val asn1: Assignment = createAssignment(
       12 ## 59,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       ("" -- HALF_POINT / 2) @@ (12 ## 59) -> Seq("pod2"),
       (HALF_POINT / 2 -- HALF_POINT) @@ (12 ## 59) -> Seq("pod0"),
@@ -350,7 +348,6 @@ abstract class TargetMetricsSuiteBase extends DatabricksTest with TestName {
     // pod1 is removed and Slice [HALF_POINT -- ∞) is reassigned to pod0.
     val asn2: Assignment = createAssignment(
       12 ## 59,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       ("" -- HALF_POINT / 2) @@ (12 ## 59) -> Seq("pod0"),
       (HALF_POINT / 2 -- HALF_POINT) @@ (12 ## 59) -> Seq("pod2"),
@@ -426,14 +423,12 @@ abstract class TargetMetricsSuiteBase extends DatabricksTest with TestName {
         .build()
     val twoResourceAssignment: Assignment = createAssignment(
       12 ## 42,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       ("" -- HALF_POINT) @@ (12 ## 42) -> Seq("pod0"),
       (HALF_POINT -- ∞) @@ (12 ## 42) -> Seq("pod1")
     )
     val threeResourceAssignment: Assignment = createAssignment(
       12 ## 42,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       ("" -- HALF_POINT / 2) @@ (12 ## 42) -> Seq("pod0"),
       (HALF_POINT / 2 -- HALF_POINT) @@ (12 ## 42) -> Seq("pod2"),
@@ -647,7 +642,6 @@ abstract class TargetMetricsSuiteBase extends DatabricksTest with TestName {
         .build()
     val assignment: Assignment = createAssignment(
       12 ## 42,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       ("" -- HALF_POINT) @@ (12 ## 42) -> Seq("pod0"),
       (HALF_POINT -- ∞) @@ (12 ## 42) -> Seq("pod1")
@@ -708,7 +702,6 @@ abstract class TargetMetricsSuiteBase extends DatabricksTest with TestName {
         .build()
     val asn: Assignment = createAssignment(
       12 ## 59,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       ("" -- HALF_POINT) @@ (12 ## 59) -> Seq("r1", "r2"),
       (HALF_POINT -- ∞) @@ (12 ## 59) -> Seq("r2", "r3")

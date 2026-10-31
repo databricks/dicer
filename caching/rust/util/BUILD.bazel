@@ -1,0 +1,398 @@
+load("//bazel/rules/rust:rules_rust.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "util_lib",
+    srcs = [
+        "src/build_info.rs",
+        "src/caching_error_code.rs",
+        "src/caching_errors.rs",
+        "src/caching_latency_histogram.rs",
+        "src/clock.rs",
+        "src/code_ext.rs",
+        "src/consistent_hash_ring.rs",
+        "src/deterministic_sampling.rs",
+        "src/ewma_accumulator.rs",
+        "src/ewma_amplifier.rs",
+        "src/ewma_counter.rs",
+        "src/ewma_quantile_summaries.rs",
+        "src/exponential_backoff.rs",
+        "src/format_bytes.rs",
+        "src/hyper_log_log.rs",
+        "src/instantiation_tracker.rs",
+        "src/kubernetes_cluster_uri.rs",
+        "src/lib.rs",
+        "src/lossy_ewma_counter.rs",
+        "src/panic_util.rs",
+        "src/prefix_logger.rs",
+        "src/protocol_duration.rs",
+        "src/quantile_summaries.rs",
+        "src/region_uri.rs",
+        "src/rfc1123.rs",
+        "src/sequential_executor.rs",
+        "src/sliding_hyper_log_log.rs",
+        "src/timestamp.rs",
+        "src/token_bucket.rs",
+        "src/unwrap_ref_or_default.rs",
+        "src/watch_cell.rs",
+        "src/watch_value_cell_poll_adapter.rs",
+    ],
+    crate_name = "caching_rust_util",
+    visibility = ["//caching:all_caching"],
+    deps = [
+        "//caching/util/proto:hyper_log_log_proto_prost_lib",
+        "//wrappers/rust/infra:infra",
+        "//wrappers/rust/metrics",
+        "//wrappers/rust/throttled_logger",
+        "@crates//:anyhow",
+        "@crates//:backoff",
+        "@crates//:chrono",
+        "@crates//:derive_more",
+        "@crates//:farmhash",
+        "@crates//:futures",
+        "@crates//:ordered-float",
+        "@crates//:prometheus-client",
+        "@crates//:regex",
+        "@crates//:tokio",
+        "@crates//:tonic",
+        "@crates//:tracing",
+    ],
+)
+
+rust_test(
+    name = "build_info_test",
+    srcs = ["tests/build_info_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":util_lib",
+        "//caching/rust/util/testing:testing_lib",
+        "//caching/util/test/proto:test_data_proto_buffa_lib",
+    ],
+)
+
+rust_test(
+    name = "ewma_counter_test",
+    srcs = ["tests/ewma_counter_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":util_lib",
+        "//caching/rust/util/testing:testing_lib",
+        "//caching/util/test/proto:test_data_proto_buffa_lib",
+        "@crates//:chrono",
+        "@crates//:rand",
+        "@crates//:rand_distr",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "exponential_backoff_test",
+    srcs = ["tests/exponential_backoff_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":util_lib",
+        "//caching/rust/util/testing:testing_lib",
+        "@crates//:backoff",
+    ],
+)
+
+rust_test(
+    name = "ewma_accumulator_test",
+    srcs = ["tests/ewma_accumulator_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":util_lib",
+        "//caching/rust/util/testing:testing_lib",
+        "//caching/util/test/proto:test_data_proto_buffa_lib",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "caching_errors_test",
+    srcs = ["tests/caching_errors_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":util_lib",
+        "//wrappers/rust/metrics/testing",
+    ],
+)
+
+rust_test(
+    name = "format_bytes_test",
+    srcs = ["tests/format_bytes_test.rs"],
+    crate_features = ["test"],
+    deps = [":util_lib"],
+)
+
+rust_test(
+    name = "kubernetes_cluster_uri_test",
+    srcs = ["tests/kubernetes_cluster_uri_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":util_lib",
+        "//caching/rust/util/testing:testing_lib",
+    ],
+)
+
+rust_test(
+    name = "prefix_logger_test",
+    srcs = ["tests/prefix_logger_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":util_lib",
+        "@crates//:tracing",
+        "@crates//:tracing-subscriber",
+    ],
+)
+
+rust_test(
+    name = "clock_test",
+    srcs = ["tests/clock_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":util_lib",
+        "@crates//:chrono",
+        "@crates//:tokio",
+    ],
+)
+
+rust_test(
+    name = "protocol_duration_test",
+    srcs = ["tests/protocol_duration_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":util_lib",
+        "//caching/rust/util/testing:testing_lib",
+        "//caching/util/test/proto:test_data_proto_buffa_lib",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "lossy_ewma_counter_test",
+    srcs = [
+        "tests/inefficient_lossy_ewma_counter.rs",
+        "tests/lossy_ewma_counter_test.rs",
+    ],
+    crate_features = ["test"],
+    deps = [
+        ":util_lib",
+        "//caching/rust/util/testing:testing_lib",
+        "//caching/util/test/proto:test_data_proto_buffa_lib",
+        "@crates//:anyhow",
+        "@crates//:chrono",
+        "@crates//:rand",
+        "@crates//:rand_distr",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "rfc1123_test",
+    srcs = ["tests/rfc1123_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":util_lib",
+        "//caching/rust/util/testing:testing_lib",
+    ],
+)
+
+rust_test(
+    name = "sequential_executor_test",
+    srcs = ["tests/sequential_executor_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":util_lib",
+        "//caching/rust/util/testing:testing_lib",
+        "@crates//:futures-util",
+        "@crates//:tokio",
+    ],
+)
+
+rust_test(
+    name = "timestamp_test",
+    srcs = ["tests/timestamp_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":util_lib",
+        "@crates//:chrono",
+    ],
+)
+
+rust_test(
+    name = "panic_util_test",
+    srcs = ["tests/panic_util_test.rs"],
+    crate_features = ["test"],
+    deps = [":util_lib"],
+)
+
+rust_test(
+    name = "unwrap_ref_or_default_test",
+    srcs = ["tests/unwrap_ref_or_default_test.rs"],
+    crate_features = ["test"],
+    deps = [":util_lib"],
+)
+
+rust_test(
+    name = "watch_cell_test",
+    srcs = ["tests/watch_cell_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":util_lib",
+        "@crates//:tokio",
+    ],
+)
+
+rust_test(
+    name = "watch_value_cell_poll_adapter_test",
+    srcs = ["tests/watch_value_cell_poll_adapter_test.rs"],
+    crate_features = ["test"],
+    testonly = True,
+    timeout = "short",
+    deps = [
+        ":util_lib",
+        "//caching/rust/util/testing:testing_lib",
+        "@crates//:tokio",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "instantiation_tracker_test",
+    srcs = ["tests/instantiation_tracker_test.rs"],
+    crate_features = ["test"],
+    env = {
+        "RUST_BACKTRACE": "full"
+    },
+    deps = [
+        ":util_lib",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "token_bucket_test",
+    srcs = ["tests/token_bucket_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":util_lib",
+        "//caching/rust/util/testing:testing_lib",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "region_uri_test",
+    srcs = ["tests/region_uri_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":util_lib",
+        "//caching/rust/util/testing:testing_lib",
+    ],
+)
+
+rust_test(
+    name = "non_lossy_quantile_summaries_test",
+    srcs = ["tests/non_lossy_quantile_summaries_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        "//caching/rust/util/testing:testing_lib",
+        "//caching/util/test/proto:test_data_proto_buffa_lib",
+    ],
+)
+
+rust_test(
+    name = "quantile_summaries_test",
+    srcs = ["tests/quantile_summaries_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":util_lib",
+        "//caching/rust/util/testing:testing_lib",
+        "//caching/util/test/proto:test_data_proto_buffa_lib",
+        "@crates//:rand",
+    ],
+)
+
+rust_test(
+    name = "hyper_log_log_test",
+    srcs = ["tests/hyper_log_log_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":util_lib",
+        "//caching/util/proto:hyper_log_log_proto_prost_lib",
+        "@crates//:prost",
+    ],
+)
+
+rust_test(
+    name = "sliding_hyper_log_log_test",
+    srcs = ["tests/sliding_hyper_log_log_test.rs"],
+    crate_features = ["test"],
+    deps = [":util_lib"],
+)
+
+rust_test(
+    name = "ewma_quantile_summaries_test",
+    srcs = ["tests/ewma_quantile_summaries_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":util_lib",
+        "//caching/rust/util/testing:testing_lib",
+        "//caching/util/test/proto:test_data_proto_buffa_lib",
+        "@crates//:chrono",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "caching_latency_histogram_test",
+    srcs = ["tests/caching_latency_histogram_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":util_lib",
+        "//caching/rust/util/testing:testing_lib",
+        "//wrappers/rust/metrics",
+        "//wrappers/rust/metrics/registry",
+        "//wrappers/rust/metrics/testing",
+        "@crates//:prometheus-client",
+        "@crates//:tokio",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "deterministic_sampling_test",
+    srcs = ["tests/deterministic_sampling_test.rs"],
+    crate_features = ["test"],
+    data = ["//caching/util/test/data"],
+    deps = [
+        ":util_lib",
+        "//caching/rust/util/testing:testing_lib",
+        "//caching/util/test/proto:test_data_proto_buffa_lib",
+        "@crates//:rand",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "code_ext_test",
+    srcs = ["tests/code_ext_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":util_lib",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "ewma_amplifier_test",
+    srcs = ["tests/ewma_amplifier_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":util_lib",
+        "//caching/rust/util/testing:testing_lib",
+        "//caching/util/test/proto:test_data_proto_buffa_lib",
+        "@crates//:chrono",
+        "@crates//:tonic",
+    ],
+)

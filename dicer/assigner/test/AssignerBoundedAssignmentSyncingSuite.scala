@@ -10,16 +10,16 @@ import io.grpc.Deadline
 
 import com.databricks.api.proto.dicer.common.AssignmentServiceGrpc.AssignmentServiceStub
 import com.databricks.api.proto.dicer.common.ClientResponseP
-import com.databricks.backend.common.util.Project
 import com.databricks.caching.util.{FakeSequentialExecutionContextPool, FakeTypedClock, TestUtils}
 import com.databricks.caching.util.TestUtils.TestName
 import com.databricks.conf.Configs
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
-import com.databricks.dicer.client.WatchStubManager
+import com.databricks.dicer.client.{WatchStubManager, WatchStubManagerConfig}
 import com.databricks.dicer.common.{
   ClerkData,
   ClientRequest,
   ClientResponse,
+  ClientType,
   Generation,
   Incarnation,
   SyncAssignmentState
@@ -76,11 +76,14 @@ class AssignerBoundedAssignmentSyncingSuite extends DatabricksTest with TestName
   /** Creates a watch stub for `target` pointed at `assigner`. */
   private def createStub(assigner: TestAssigner, target: Target): AssignmentServiceStub = {
     new WatchStubManager(
-      clientName = Project.DicerAssigner.name,
-      defaultWatchAddress = URI.create(s"http://localhost:${assigner.localUri.getPort}"),
-      tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
-      watchFromDataPlane = false,
-      sourceIpOpt = None
+      WatchStubManagerConfig(
+        clientType = ClientType.Slicelet,
+        targetName = "assigner-bounded-assignment-syncing-suite-test",
+        watchAddress = URI.create(s"http://localhost:${assigner.localUri.getPort}"),
+        tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
+        watchFromDataPlane = false,
+        sourceIpOpt = None
+      )
     ).createWatchStub(redirectAddressOpt = None, target = target, clientIdOpt = None)
   }
 

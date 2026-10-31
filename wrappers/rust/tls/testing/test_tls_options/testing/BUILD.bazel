@@ -1,0 +1,14 @@
+load("//bazel/rules/rust:rules_rust.bzl", "rust_library")
+
+rust_library(
+    name = "test_identity",
+    testonly = True,
+    srcs = ["test_identity.rs"],
+    crate_name = "raf_tls_test_identity",
+    visibility = [
+        "//wrappers/rust/server:__pkg__",
+        "//wrappers/rust/tls:__pkg__",
+        "//wrappers/rust/tls/testing/test_tls_options:__pkg__",
+    ],
+    deps = ["@crates//:rcgen"],
+)

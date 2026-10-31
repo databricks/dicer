@@ -2,12 +2,76 @@ package com.databricks.caching.util
 
 import com.databricks.api.proto.caching.external.ConfigScopeP
 import com.databricks.api.proto.caching.util.test.TestOnlyExampleConfigFieldsP
-import com.databricks.caching.util.TestUtils.assertThrow
+import com.databricks.caching.util.TestUtils.{assertThrow, checkComparisons}
 import com.databricks.conf.trusted.LocationConf
 import com.databricks.conf.trusted.LocationConfTestUtils
 import com.databricks.testing.DatabricksTest
 
 class ConfigScopeSuite extends DatabricksTest {
+  test("ConfigScope comparison") {
+    // Test plan: Verify that cluster scopes precede instance scopes and that scopes within each
+    // kind are ordered lexicographically. Do this by checking an ordered sequence with the shared
+    // comparison utility. Since "instance-a" precedes "kubernetes..." lexicographically, this also
+    // validates that ClusterConfigScope precedes InstanceConfigScope regardless of the identifiers.
+    val orderedScopes: Vector[ConfigScope] = Vector(
+      ClusterConfigScope(clusterUri = "kubernetes-cluster:test/a"),
+      ClusterConfigScope(clusterUri = "kubernetes-cluster:test/b"),
+      InstanceConfigScope(instanceId = "instance-a"),
+      InstanceConfigScope(instanceId = "instance-b")
+    )
+    checkComparisons(orderedScopes)
+  }
+
+  test("ConfigScope comparison treats equal-but-distinct scopes as equal") {
+    // Test plan: Verify that equal-but-distinct scopes compare as equal in both directions. Do this
+    // by constructing separate objects with the same cluster URI or instance ID, checking their
+    // distinct identities, and comparing each pair in both directions.
+    val clusterScope1: ConfigScope = ClusterConfigScope(clusterUri = "kubernetes-cluster:test/a")
+    val clusterScope2: ConfigScope = ClusterConfigScope(clusterUri = "kubernetes-cluster:test/a")
+    val instanceScope1: ConfigScope = InstanceConfigScope(instanceId = "instance-a")
+    val instanceScope2: ConfigScope = InstanceConfigScope(instanceId = "instance-a")
+
+    // Sanity check they do not just refer to the same instance.
+    assert(clusterScope1 ne clusterScope2)
+    assert(clusterScope1 == clusterScope2)
+    assert(clusterScope1.compare(clusterScope2) == 0)
+    assert(clusterScope2.compare(clusterScope1) == 0)
+
+    // Sanity check they do not just refer to the same instance.
+    assert(instanceScope1 ne instanceScope2)
+    assert(instanceScope1 == instanceScope2)
+    assert(instanceScope1.compare(instanceScope2) == 0)
+    assert(instanceScope2.compare(instanceScope1) == 0)
+  }
+
+  gridTest("ClusterConfigScope proto round trips")(
+    Seq(
+      "kubernetes-cluster:prod/cloud1/public/region2/clustertype2/01",
+      "kubernetes-cluster:prod/cloud2/public/region6/clustertype2/01",
+      "kubernetes-cluster:prod/cloud3/public/region5/clustertype2/01"
+    )
+  ) { clusterUri: String =>
+    // Test plan: Verify that cluster scopes serialize to the cluster URI field and round-trip
+    // unchanged. Do this by serializing through the ConfigScope interface, checking the field,
+    // and parsing it to recover the original scope.
+    val scope: ConfigScope = ClusterConfigScope(clusterUri = clusterUri)
+    val proto: ConfigScopeP = scope.toProto
+    assertResult(ConfigScopeP.Scope.ClusterUri(clusterUri))(proto.scope)
+    assertResult(scope)(ConfigScope.fromProto(proto))
+  }
+
+  gridTest("InstanceConfigScope proto round trips")(
+    Seq("a", "0", "instance-1", "a" * 63)
+  ) { instanceId: String =>
+    // Test plan: Verify that instance scopes serialize to the instance ID field and round-trip
+    // unchanged, including minimum and maximum length IDs. Do this by serializing through the
+    // ConfigScope interface, checking the proto field, and parsing it back to the original scope.
+    val scope: ConfigScope = InstanceConfigScope(instanceId = instanceId)
+    val proto: ConfigScopeP = scope.toProto
+    assertResult(ConfigScopeP.Scope.InstanceId(instanceId))(proto.scope)
+    assertResult(scope)(ConfigScope.fromProto(proto))
+  }
+
   test("Creating `ClusterConfigScope` instances from `ConfigScopeP` messages") {
     // Test plan: Construct `ClusterConfigScope` with various `ConfigScopeP` messages, verify that
     // exceptions are thrown for an invalid `cluster_uri` and an unset scope.

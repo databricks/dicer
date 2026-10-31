@@ -125,7 +125,6 @@ class CommonSlicezSuite extends DatabricksTest {
     // returned when no assignment exists.
     val assignment: Assignment = createAssignment(
       23 ## 67,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       ("" -- "Balin") @@ (23 ## 34) -> Seq("Pod2"),
       ("Balin" -- "Fili") @@ (23 ## 34) -> Seq("Pod0"),
@@ -194,7 +193,6 @@ class CommonSlicezSuite extends DatabricksTest {
     val generation: Generation = 23 ## 67
     val assignment: Assignment = createAssignment(
       generation = generation,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       ("" -- ∞) @@ (23 ## 34) -> Seq("Pod0")
     )
@@ -214,7 +212,6 @@ class CommonSlicezSuite extends DatabricksTest {
     val generation: Generation = 23 ## 67
     val assignment: Assignment = createAssignment(
       generation = generation,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       ("" -- ∞) @@ (23 ## 34) -> Seq("Pod0")
     )

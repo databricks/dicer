@@ -102,23 +102,6 @@ class EtcdPreferredAssignerDriver(
       watchPreferredAssignerValueChanges()
     }
 
-  /**
-   * Pass `None` to clear the pick; the state machine then falls back to writing
-   * `selfAssignerInfo`. This implementation forwards onto [[sec]] for processing, so it
-   * accepts calls from any thread.
-   *
-   * Today, only `MigrationPreferredAssignerDriver` in the consistent-hashing modes
-   * (`ConsistentHashingNominatedEtcdReadMode` and `ConsistentHashingPrimaryEtcdWritesMode`) calls
-   * this.
-   *
-   * PRECONDITION: [[start]] has been called.
-   */
-  override private[assigner] def updateExternalPick(externalPickOpt: Option[AssignerInfo]): Unit =
-    sec.run {
-      iassert(baseDriver != null, "must not be called before start().")
-      baseDriver.handleEvent(Event.ExternalPickReceived(externalPickOpt))
-    }
-
   // The etcd-backed driver does not run a consistent-hashing election, so it has no snapshot.
   override private[assigner] def consistentHashingStateView
       : Future[Option[ConsistentHashingState]] =

@@ -1,3 +1,4 @@
+// LINT.IfChange
 package com.databricks.dicer.external
 
 import java.net.URI
@@ -191,3 +192,5 @@ private[dicer] object AppTarget {
     require(Rfc1123.isValid(instanceId), s"Instance ID is invalid: $instanceId")
   }
 }
+// LINT.ThenChange(dicer/external/javaapi/src/Target.java)
+// LINT.ThenChange(dicer/rust/external/types/src/target.rs)

@@ -1,0 +1,83 @@
+load("//bazel/rules/rust:rules_rust.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "testing_lib",
+    srcs = [
+        "src/assertion_waiter.rs",
+        "src/change_tracker.rs",
+        "src/fake_clock.rs",
+        "src/lib.rs",
+        "src/non_lossy_quantile_summaries.rs",
+        "src/one_location.rs",
+        "src/quantile_summaries_test_harness.rs",
+        "src/test_data.rs",
+        "src/test_data_parser.rs",
+        "src/test_utils.rs",
+    ],
+    crate_name = "caching_rust_util_testing",
+    data = ["//caching/util/test/data"],
+    testonly = True,
+    visibility = ["//caching:all_caching"],
+    deps = [
+        "//caching/rust/util:util_lib",
+        "//caching/util/test/proto:test_data_proto_buffa_lib",
+        "@crates//:buffa",
+        "@crates//:futures",
+        "@crates//:futures-util",
+        "@crates//:ordered-float",
+        "@crates//:prost",
+        "@crates//:rand",
+        "@crates//:scopeguard",
+        "@crates//:static_assertions",
+        "@crates//:tokio",
+        "@crates//:tonic",
+        "@rules_rust//tools/runfiles",
+    ],
+)
+
+rust_test(
+    name = "change_tracker_test",
+    srcs = ["tests/change_tracker_test.rs"],
+    crate_features = ["test"],
+    testonly = True,
+    deps = [
+        ":testing_lib",
+        "//wrappers/rust/metrics",
+        "@crates//:prometheus-client",
+    ],
+)
+
+rust_test(
+    name = "fake_clock_test",
+    srcs = ["tests/fake_clock_test.rs"],
+    crate_features = ["test"],
+    testonly = True,
+    deps = [
+        ":testing_lib",
+        "//caching/rust/util:util_lib",
+        "//wrappers/rust/testing/async",
+        "@crates//:futures",
+        "@crates//:tokio",
+    ],
+)
+
+rust_test(
+    name = "assertion_waiter_test",
+    srcs = ["tests/assertion_waiter_test.rs"],
+    crate_features = ["test"],
+    testonly = True,
+    deps = [
+        ":testing_lib",
+        "@crates//:tokio",
+        "@crates//:tracing",
+        "@crates//:tracing-test",
+    ],
+)
+
+rust_test(
+    name = "test_utils_test",
+    srcs = ["tests/test_utils_test.rs"],
+    crate_features = ["test"],
+    testonly = True,
+    deps = [":testing_lib"],
+)

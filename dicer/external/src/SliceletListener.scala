@@ -1,3 +1,4 @@
+// LINT.IfChange
 package com.databricks.dicer.external
 
 /**
@@ -60,3 +61,5 @@ trait SliceletListener {
    */
   def onAssignmentUpdated(): Unit
 }
+// LINT.ThenChange(dicer/external/javaapi/src/SliceletListener.java)
+// LINT.ThenChange(dicer/rust/external/slicelet/src/slicelet.rs)

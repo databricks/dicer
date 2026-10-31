@@ -1,0 +1,26 @@
+load("//bazel/rules/rust:rules_rust.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "examples_lib",
+    srcs = [
+        "src/assignment_generator.rs",
+        "src/lib.rs",
+    ],
+    crate_name = "caching_rust_util_examples",
+    deps = [
+        "//caching/rust/util/state_machine:state_machine_lib",
+        "//caching/rust/util:util_lib",
+    ],
+)
+
+rust_test(
+    name = "assignment_generator_test",
+    srcs = ["tests/assignment_generator_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":examples_lib",
+        "//caching/rust/util/testing:testing_lib",
+        "//caching/rust/util:util_lib",
+        "@crates//:tokio",
+    ],
+)

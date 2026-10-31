@@ -23,7 +23,7 @@ import com.databricks.testing.DatabricksTest
  * This class contains the test cases that apply to Scala and Rust. Tests that rely on the
  * scala-only `ClerkImpl.createFor*` factories are in [[ScalaSingletonSliceLookupSuite]].
  *
- * `createForDataPlaneDirectClerk` is tested in [[DataPlaneDirectClerkAccessorSuiteBase]].
+ * `createForDirectClerk` is tested in [[DataPlaneDirectClerkAccessorSuiteBase]].
  */
 abstract class SingletonSliceLookupSuiteBase extends DatabricksTest with TestName {
 

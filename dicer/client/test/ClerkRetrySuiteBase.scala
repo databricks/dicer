@@ -41,20 +41,18 @@ abstract class ClerkRetrySuiteBase extends DatabricksTest with TestUtils.TestNam
   protected def createClerkHarness(target: Target, slicelet: Slicelet): ClerkHarness
 
   /**
-   * Returns a call-count tracker for `target` and `resourceType`, or `None` if the driver cannot
-   * observe that metric. The target's per-test-unique name isolates this test's calls.
+   * Returns a call-count tracker for `target` and `resourceType`. The target's per-test-unique name
+   * isolates this test's calls. Changes are measured from tracker creation.
    */
-  // TODO(<internal bug>): Make this tracker non-optional once Rust retry metrics are implemented.
-  protected def getNextStubForKeyCallCountTrackerOpt(
+  protected def getNextStubForKeyCallCountTracker(
       target: Target,
-      resourceType: String): Option[MetricUtils.ChangeTracker[Double]]
+      resourceType: String): MetricUtils.ChangeTracker[Double]
 
   /**
-   * Returns a tracker for the histogram's sum of picked-resource counts for the test's unique
-   * target, or `None` if the driver cannot observe that metric.
+   * Tracks the histogram's sum of picked-resource counts for the test's unique target.
+   * Changes are measured from tracker creation.
    */
-  protected def getPickedResourceCountTrackerOpt(
-      target: Target): Option[MetricUtils.ChangeTracker[Double]]
+  protected def getPickedResourceCountTracker(target: Target): MetricUtils.ChangeTracker[Double]
 
   /**
    * Calls [[ClerkHarness.getNextStubForKey]] on `harness` for `key`, verifying the Clerk
@@ -72,26 +70,11 @@ abstract class ClerkRetrySuiteBase extends DatabricksTest with TestUtils.TestNam
     resultOpt.getOrElse(throw new AssertionError("Expected a stub with a retry token"))
   }
 
-  /**
-   * Asserts the metric's cumulative change since the tracker was created, when available.
-   * Calling this helper does not reset the tracker's baseline.
-   */
-  // TODO(<internal bug>): Remove this helper once all drivers provide non-optional metric trackers.
-  private def expectMetricChangeIfDefined(
-      trackerOpt: Option[MetricUtils.ChangeTracker[Double]],
-      expectedChange: Double): Unit = {
-    trackerOpt match {
-      case Some(tracker) =>
-        assertResult(expectedChange)(tracker.totalChange())
-      case None => ()
-    }
-  }
-
   test("getNextStubForKey returns the assigned resource when retryToken is None") {
-    // Test plan: Verify that getNextStubForKey returns the assigned resource if the
-    // retryToken passed in is None. Verify this by calling getNextStubForKey 5 times
-    // with None as the retryToken and checking that it returns the assigned resource every time
-    // with the picked resource count always at 1, including in the histogram.
+    // Test plan: Verify that getNextStubForKey returns the assigned resource if the retryToken
+    // passed in is None. Verify this by calling getNextStubForKey 5 times with None as the
+    // retryToken and checking that it returns the assigned resource every time, records it in the
+    // token's pickedResources, and observes a picked resource count of 1 in the histogram.
     val target = Target(getSafeName)
     val slicelet: Slicelet =
       testEnv.createSlicelet(target).start(selfPort = 1234, listenerOpt = None)
@@ -112,23 +95,22 @@ abstract class ClerkRetrySuiteBase extends DatabricksTest with TestUtils.TestNam
       )
     }
 
-    val assignedCallCountOpt: Option[MetricUtils.ChangeTracker[Double]] =
-      getNextStubForKeyCallCountTrackerOpt(target, "assigned")
-    val pickedResourceSumOpt: Option[MetricUtils.ChangeTracker[Double]] =
-      getPickedResourceCountTrackerOpt(target)
+    val assignedCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallCountTracker(target, "assigned")
+    val pickedResourceSum: MetricUtils.ChangeTracker[Double] =
+      getPickedResourceCountTracker(target)
     for (i <- 1 to 5) {
       val (stub, token): (ResourceAddress, RetryTokenImpl) =
         getNextStubForKey(clerk, SliceKey.MIN, None)
       assert(stub == toResourceAddress("Pod1"))
-      assert(token.pickedResourceIndices.size == 1)
-      expectMetricChangeIfDefined(assignedCallCountOpt, expectedChange = i)
-      expectMetricChangeIfDefined(pickedResourceSumOpt, expectedChange = i)
+      assert(token.pickedResources.contains(toSquid(stub.toString)))
+      assertResult(i)(assignedCallCount.totalChange())
+      assertResult(i)(pickedResourceSum.totalChange())
     }
   }
 
   test(
-    "getNextStubForKey returns a random first pick when a slice is assigned to " +
-    "multiple resources"
+    "getNextStubForKey returns a random first pick when a slice is assigned to multiple resources"
   ) {
     // Test plan: Verify that getNextStubForKey eventually returns each assigned
     // resource as the first pick when retryToken passed in is None. Verify this by calling
@@ -154,8 +136,8 @@ abstract class ClerkRetrySuiteBase extends DatabricksTest with TestUtils.TestNam
       )
     }
 
-    val assignedCallCountOpt: Option[MetricUtils.ChangeTracker[Double]] =
-      getNextStubForKeyCallCountTrackerOpt(target, "assigned")
+    val assignedCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallCountTracker(target, "assigned")
     val returnedStubs: mutable.Set[ResourceAddress] = mutable.Set.empty
     val expectedStubs: Set[ResourceAddress] = Set("Pod1", "Pod2")
     // The assertion waiter runs an unknown number of iterations, so track the expected call count
@@ -166,105 +148,17 @@ abstract class ClerkRetrySuiteBase extends DatabricksTest with TestUtils.TestNam
       val (stub, _): (ResourceAddress, RetryTokenImpl) =
         getNextStubForKey(clerk, SliceKey.MIN, None)
       numAssertionIterations += 1
-      expectMetricChangeIfDefined(assignedCallCountOpt, expectedChange = numAssertionIterations)
+      assertResult(numAssertionIterations)(assignedCallCount.totalChange())
       returnedStubs.add(stub)
       assert(returnedStubs == expectedStubs)
     }
-  }
-
-  test("getNextStubForKey returns a newly assigned resource after an assignment update") {
-    // Test plan: Verify that during a chain of retry requests, if an assignment update happens,
-    // the token's pickedResourceIndices & fallbackPicked are reset and the newly assigned resource
-    // is returned next. Verify this by generating an assignment in between the retry attempts.
-    // Verify that the histogram observes the reset picked-resource count.
-    val target = Target(getSafeName)
-    val slicelet: Slicelet =
-      testEnv.createSlicelet(target).start(selfPort = 1234, listenerOpt = None)
-    val clerk: ClerkHarness = createClerkHarness(target, slicelet)
-    val assignedResources: Set[ResourceAddress] = Set("Pod1", "Pod2")
-    val proposal: SliceMap[ProposedSliceAssignment] = createProposal(
-      ("" -- "Dori") -> assignedResources.map { resource: ResourceAddress =>
-        toSquid(resource.uri.toString)
-      },
-      ("Dori" -- "Fili") -> Seq("Pod2"),
-      ("Fili" -- "Kili") -> Seq("Pod3"),
-      ("Kili" -- "Nori") -> Seq("Pod4"),
-      ("Nori" -- ∞) -> Seq("Pod5")
-    )
-    val assignment: Assignment =
-      TestUtils.awaitResult(testEnv.setAndFreezeAssignment(target, proposal), Duration.Inf)
-    AssertionWaiter("Wait for the assignment to reach the Clerk").await {
-      assert(
-        clerk.getLatestGenerationOpt.contains(assignment.generation)
-      )
-    }
-
-    val assignedCallCountOpt: Option[MetricUtils.ChangeTracker[Double]] =
-      getNextStubForKeyCallCountTrackerOpt(target, "assigned")
-    val fallbackCallCountOpt: Option[MetricUtils.ChangeTracker[Double]] =
-      getNextStubForKeyCallCountTrackerOpt(target, "fallback")
-    val tokenResetCallCountOpt: Option[MetricUtils.ChangeTracker[Double]] =
-      getNextStubForKeyCallCountTrackerOpt(target, "assignedAfterTokenReset")
-
-    val pickedResourceSumOpt: Option[MetricUtils.ChangeTracker[Double]] =
-      getPickedResourceCountTrackerOpt(target)
-
-    val (firstStub, firstToken): (ResourceAddress, RetryTokenImpl) =
-      getNextStubForKey(clerk, SliceKey.MIN, None)
-    assert(assignedResources.contains(firstStub))
-    assert(!firstToken.fallbackPicked)
-    assert(firstToken.pickedResourceIndices.size == 1)
-    expectMetricChangeIfDefined(assignedCallCountOpt, expectedChange = 1.0)
-
-    val (secondStub, secondToken): (ResourceAddress, RetryTokenImpl) =
-      getNextStubForKey(clerk, SliceKey.MIN, Some(firstToken))
-    assert(assignedResources.contains(secondStub))
-    assert(secondStub != firstStub)
-    assert(!secondToken.fallbackPicked)
-    assert(secondToken.pickedResourceIndices.size == 2)
-    expectMetricChangeIfDefined(assignedCallCountOpt, expectedChange = 2.0)
-
-    val (fallbackStub, fallbackToken): (ResourceAddress, RetryTokenImpl) =
-      getNextStubForKey(clerk, SliceKey.MIN, Some(secondToken))
-    assert(!assignedResources.contains(fallbackStub))
-    assert(fallbackToken.fallbackPicked)
-    assert(fallbackToken.pickedResourceIndices.size == 2)
-    expectMetricChangeIfDefined(fallbackCallCountOpt, expectedChange = 1.0)
-
-    // Create a new assignment. SLICE_MIN is now assigned to Pod3, instead of Pod1 and Pod2.
-    val proposal2: SliceMap[ProposedSliceAssignment] = createProposal(
-      ("" -- "Dori") -> Seq("Pod3"),
-      ("Dori" -- "Fili") -> Seq("Pod2"),
-      ("Fili" -- "Kili") -> Seq("Pod1"),
-      ("Kili" -- "Nori") -> Seq("Pod4"),
-      ("Nori" -- ∞) -> Seq("Pod5")
-    )
-    val assignment2: Assignment =
-      TestUtils.awaitResult(testEnv.setAndFreezeAssignment(target, proposal2), Duration.Inf)
-    AssertionWaiter("Wait for the assignment to reach the Clerk").await {
-      assert(
-        clerk.getLatestGenerationOpt.contains(assignment2.generation)
-      )
-    }
-
-    // The next call returns the newly assigned resource with the token's pickedResourceIndices &
-    // fallbackPicked reset.
-    val (stub, token): (ResourceAddress, RetryTokenImpl) =
-      getNextStubForKey(clerk, SliceKey.MIN, Some(fallbackToken))
-    assert(stub == toResourceAddress("Pod3"))
-    assert(token.pickedResourceIndices.size == 1)
-    assert(!token.fallbackPicked)
-    expectMetricChangeIfDefined(tokenResetCallCountOpt, expectedChange = 1.0)
-    expectMetricChangeIfDefined(assignedCallCountOpt, expectedChange = 2.0)
-    expectMetricChangeIfDefined(fallbackCallCountOpt, expectedChange = 1.0)
-    expectMetricChangeIfDefined(pickedResourceSumOpt, expectedChange = 6.0)
   }
 
   test("getNextStubForKey returns assigned resources before the fallback resource") {
     // Test plan: Verify that getNextStubForKey returns assigned resources first before
     // returning the fallback resource. Verify this by checking that all assigned resources are
     // returned by passing back the retry token. Check the histogram after each call, including
-    // fallback and random assigned picks that leave the picked-resource count unchanged.
+    // random assigned picks that leave the picked-resource count unchanged.
     val target = Target(getSafeName)
     val slicelet: Slicelet =
       testEnv.createSlicelet(target).start(selfPort = 1234, listenerOpt = None)
@@ -284,16 +178,16 @@ abstract class ClerkRetrySuiteBase extends DatabricksTest with TestUtils.TestNam
       )
     }
 
-    val assignedCallCountOpt: Option[MetricUtils.ChangeTracker[Double]] =
-      getNextStubForKeyCallCountTrackerOpt(target, "assigned")
-    val fallbackCallCountOpt: Option[MetricUtils.ChangeTracker[Double]] =
-      getNextStubForKeyCallCountTrackerOpt(target, "fallback")
-    val randomAssignedCallCountOpt: Option[MetricUtils.ChangeTracker[Double]] =
-      getNextStubForKeyCallCountTrackerOpt(target, "randomAssigned")
+    val assignedCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallCountTracker(target, "assigned")
+    val fallbackCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallCountTracker(target, "fallback")
+    val randomAssignedCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallCountTracker(target, "randomAssigned")
 
     // The first 3 calls will return the assigned resources in some order.
-    val pickedResourceSumOpt: Option[MetricUtils.ChangeTracker[Double]] =
-      getPickedResourceCountTrackerOpt(target)
+    val pickedResourceSum: MetricUtils.ChangeTracker[Double] =
+      getPickedResourceCountTracker(target)
     val sliceMinAssignedResources: Set[ResourceAddress] = Set("Pod1", "Pod2", "Pod5")
     val seenSoFar: mutable.Set[ResourceAddress] = mutable.Set.empty
     var lastTokenOpt: Option[RetryTokenImpl] = None
@@ -301,11 +195,12 @@ abstract class ClerkRetrySuiteBase extends DatabricksTest with TestUtils.TestNam
       val (stub, token): (ResourceAddress, RetryTokenImpl) =
         getNextStubForKey(clerk, SliceKey.MIN, lastTokenOpt)
       assert(sliceMinAssignedResources.contains(stub))
-      assert(token.pickedResourceIndices.size == i)
+      assert(token.pickedResources.contains(toSquid(stub.toString)))
+      assert(token.pickedResources.size == i)
       assert(!seenSoFar.contains(stub))
-      expectMetricChangeIfDefined(assignedCallCountOpt, expectedChange = i)
+      assertResult(i)(assignedCallCount.totalChange())
       // The histogram sums the picked-resource counts: 1 + 2 + ... + i.
-      expectMetricChangeIfDefined(pickedResourceSumOpt, expectedChange = i * (i + 1) / 2.0)
+      assertResult(i * (i + 1) / 2.0)(pickedResourceSum.totalChange())
       seenSoFar.add(stub)
       lastTokenOpt = Some(token)
     }
@@ -313,11 +208,11 @@ abstract class ClerkRetrySuiteBase extends DatabricksTest with TestUtils.TestNam
     val (fallbackStub, fallbackToken): (ResourceAddress, RetryTokenImpl) =
       getNextStubForKey(clerk, SliceKey.MIN, lastTokenOpt)
     assert(!sliceMinAssignedResources.contains(fallbackStub))
-    assert(fallbackToken.pickedResourceIndices.size == 3)
-    assert(fallbackToken.fallbackPicked)
-    expectMetricChangeIfDefined(fallbackCallCountOpt, expectedChange = 1.0)
-    // The three assigned picks and the fallback observe counts 1, 2, 3, and 3: a sum of 9.
-    expectMetricChangeIfDefined(pickedResourceSumOpt, expectedChange = 9.0)
+    assert(fallbackToken.pickedResources.contains(toSquid(fallbackStub.toString)))
+    assert(fallbackToken.pickedResources.size == 4)
+    assertResult(1.0)(fallbackCallCount.totalChange())
+    // The three assigned picks and the fallback observe counts 1, 2, 3, and 4: a sum of 10.
+    assertResult(10.0)(pickedResourceSum.totalChange())
     lastTokenOpt = Some(fallbackToken)
     // Once the assigned resources and the fallback resource are exhausted, subsequent calls return
     // a random assigned resource (same behaviour as getStubForKey).
@@ -325,17 +220,17 @@ abstract class ClerkRetrySuiteBase extends DatabricksTest with TestUtils.TestNam
       val (stub, token): (ResourceAddress, RetryTokenImpl) =
         getNextStubForKey(clerk, SliceKey.MIN, lastTokenOpt)
       assert(sliceMinAssignedResources.contains(stub))
-      // The fallback resource has already been returned, so the token stays in the steady state.
-      assert(token.pickedResourceIndices.size == 3)
-      assert(token.fallbackPicked)
-      expectMetricChangeIfDefined(randomAssignedCallCountOpt, expectedChange = i)
-      expectMetricChangeIfDefined(pickedResourceSumOpt, expectedChange = 9.0 + 3 * i)
+      // The fallback resource has already been returned, so the token's pickedResources are
+      // unchanged.
+      assert(token.pickedResources.size == 4)
+      assertResult(i)(randomAssignedCallCount.totalChange())
+      assertResult(10.0 + 4 * i)(pickedResourceSum.totalChange())
     }
   }
 
   test(
-    "getNextStubForKey returns the same fallback resource for the same slice key " +
-    "across multiple clerks"
+    "getNextStubForKey returns the same fallback resource for the same slice key across multiple " +
+    "clerks"
   ) {
     // Test plan: Verify that multiple clerks return the same fallback resource for the same slice.
     // Verify this by spinning up two clerks with the same assignment, advancing both past the
@@ -363,28 +258,28 @@ abstract class ClerkRetrySuiteBase extends DatabricksTest with TestUtils.TestNam
       )
     }
 
-    val assignedCallCountOpt: Option[MetricUtils.ChangeTracker[Double]] =
-      getNextStubForKeyCallCountTrackerOpt(target, "assigned")
-    val fallbackCallCountOpt: Option[MetricUtils.ChangeTracker[Double]] =
-      getNextStubForKeyCallCountTrackerOpt(target, "fallback")
+    val assignedCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallCountTracker(target, "assigned")
+    val fallbackCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallCountTracker(target, "fallback")
 
     // The first call returns the assigned resource (Pod1) on both clerks.
     val (firstStub1, firstToken1): (ResourceAddress, RetryTokenImpl) =
       getNextStubForKey(clerk1, SliceKey.MIN, None)
     assert(firstStub1 == toResourceAddress("Pod1"))
-    expectMetricChangeIfDefined(assignedCallCountOpt, expectedChange = 1.0)
+    assertResult(1.0)(assignedCallCount.totalChange())
     val (firstStub2, firstToken2): (ResourceAddress, RetryTokenImpl) =
       getNextStubForKey(clerk2, SliceKey.MIN, None)
     assert(firstStub2 == toResourceAddress("Pod1"))
-    expectMetricChangeIfDefined(assignedCallCountOpt, expectedChange = 2.0)
+    assertResult(2.0)(assignedCallCount.totalChange())
 
     // The second call returns the fallback resource, which must be identical across clerks.
     val (fallbackStub1, _): (ResourceAddress, RetryTokenImpl) =
       getNextStubForKey(clerk1, SliceKey.MIN, Some(firstToken1))
-    expectMetricChangeIfDefined(fallbackCallCountOpt, expectedChange = 1.0)
+    assertResult(1.0)(fallbackCallCount.totalChange())
     val (fallbackStub2, _): (ResourceAddress, RetryTokenImpl) =
       getNextStubForKey(clerk2, SliceKey.MIN, Some(firstToken2))
-    expectMetricChangeIfDefined(fallbackCallCountOpt, expectedChange = 2.0)
+    assertResult(2.0)(fallbackCallCount.totalChange())
     // A fallback resource, not the assigned resource.
     assert(fallbackStub1 != toResourceAddress("Pod1"))
     assert(fallbackStub1 == fallbackStub2)
@@ -418,22 +313,22 @@ abstract class ClerkRetrySuiteBase extends DatabricksTest with TestUtils.TestNam
       )
     }
 
-    val assignedCallCountOpt: Option[MetricUtils.ChangeTracker[Double]] =
-      getNextStubForKeyCallCountTrackerOpt(target, "assigned")
-    val fallbackCallCountOpt: Option[MetricUtils.ChangeTracker[Double]] =
-      getNextStubForKeyCallCountTrackerOpt(target, "fallback")
+    val assignedCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallCountTracker(target, "assigned")
+    val fallbackCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallCountTracker(target, "fallback")
 
     val (_, firstToken): (ResourceAddress, RetryTokenImpl) =
       getNextStubForKey(clerk1, SliceKey.MIN, None)
-    expectMetricChangeIfDefined(assignedCallCountOpt, expectedChange = 1.0)
+    assertResult(1.0)(assignedCallCount.totalChange())
     // Clerk2 resumes from clerk1's token. The fallback stub is returned because clerk1's first
-    // getNextStubForKey call already recorded a picked index in the token.
+    // getNextStubForKey call already recorded a picked resource in the token.
     val (resumedStub, resumedToken): (ResourceAddress, RetryTokenImpl) =
       getNextStubForKey(clerk2, SliceKey.MIN, Some(firstToken))
     assert(resumedStub != toResourceAddress("Pod1"))
-    assert(resumedToken.fallbackPicked)
-    assert(resumedToken.pickedResourceIndices.size == 1)
-    expectMetricChangeIfDefined(fallbackCallCountOpt, expectedChange = 1.0)
+    assert(resumedToken.pickedResources.contains(toSquid(resumedStub.toString)))
+    assert(resumedToken.pickedResources.size == 2)
+    assertResult(1.0)(fallbackCallCount.totalChange())
   }
 
   test("The fallback resource excludes resources that are not part of the assignment") {
@@ -474,28 +369,23 @@ abstract class ClerkRetrySuiteBase extends DatabricksTest with TestUtils.TestNam
         clerk.getLatestGenerationOpt.contains(assignment2.generation)
       )
     }
-    val assignedCallCountOpt: Option[MetricUtils.ChangeTracker[Double]] =
-      getNextStubForKeyCallCountTrackerOpt(target, "assigned")
-    val fallbackCallCountOpt: Option[MetricUtils.ChangeTracker[Double]] =
-      getNextStubForKeyCallCountTrackerOpt(target, "fallback")
-    val tokenResetCallCountOpt: Option[MetricUtils.ChangeTracker[Double]] =
-      getNextStubForKeyCallCountTrackerOpt(target, "assignedAfterTokenReset")
+    val assignedCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallCountTracker(target, "assigned")
+    val fallbackCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallCountTracker(target, "fallback")
 
     val (firstStub, firstToken): (ResourceAddress, RetryTokenImpl) =
       getNextStubForKey(clerk, SliceKey.MIN, None)
     assert(firstStub == toResourceAddress("Pod10"))
-    expectMetricChangeIfDefined(assignedCallCountOpt, expectedChange = 1.0)
+    assertResult(1.0)(assignedCallCount.totalChange())
     // Verify that the fallback resource is now one of the new resources, and not the assigned one.
     val newResources: Set[ResourceAddress] = Set("Pod10", "Pod20", "Pod30", "Pod40", "Pod50")
     val (secondStub, secondToken): (ResourceAddress, RetryTokenImpl) =
       getNextStubForKey(clerk, SliceKey.MIN, Some(firstToken))
     assert(newResources.contains(secondStub))
     assert(secondStub != toResourceAddress("Pod10"))
-    assert(secondToken.fallbackPicked)
-    expectMetricChangeIfDefined(fallbackCallCountOpt, expectedChange = 1.0)
-
-    // Both calls ran against the latest assignment, so neither reset the token.
-    expectMetricChangeIfDefined(tokenResetCallCountOpt, expectedChange = 0.0)
+    assert(secondToken.pickedResources.contains(toSquid(secondStub.toString)))
+    assertResult(1.0)(fallbackCallCount.totalChange())
   }
 
   test("getNextStubForKey returns None when there is no assignment") {
@@ -522,38 +412,31 @@ abstract class ClerkRetrySuiteBase extends DatabricksTest with TestUtils.TestNam
     val (_, callerToken): (ResourceAddress, RetryTokenImpl) =
       getNextStubForKey(assignedClerk, SliceKey.MIN, None)
 
-    val assignedCallCountOpt: Option[MetricUtils.ChangeTracker[Double]] =
-      getNextStubForKeyCallCountTrackerOpt(target, "assigned")
-    val fallbackCallCountOpt: Option[MetricUtils.ChangeTracker[Double]] =
-      getNextStubForKeyCallCountTrackerOpt(target, "fallback")
-    val randomAssignedCallCountOpt: Option[MetricUtils.ChangeTracker[Double]] =
-      getNextStubForKeyCallCountTrackerOpt(target, "randomAssigned")
-    val tokenResetCallCountOpt: Option[MetricUtils.ChangeTracker[Double]] =
-      getNextStubForKeyCallCountTrackerOpt(target, "assignedAfterTokenReset")
+    val assignedCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallCountTracker(target, "assigned")
+    val fallbackCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallCountTracker(target, "fallback")
+    val randomAssignedCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallCountTracker(target, "randomAssigned")
 
-    val pickedResourceSumOpt: Option[MetricUtils.ChangeTracker[Double]] =
-      getPickedResourceCountTrackerOpt(target)
+    val pickedResourceSum: MetricUtils.ChangeTracker[Double] =
+      getPickedResourceCountTracker(target)
 
     // Neither call makes a pick (the clerk has no assignment), so no metrics are recorded.
     assert(clerk.getNextStubForKey(SliceKey.MIN, None).isEmpty)
-    expectMetricChangeIfDefined(assignedCallCountOpt, expectedChange = 0.0)
-    expectMetricChangeIfDefined(fallbackCallCountOpt, expectedChange = 0.0)
-    expectMetricChangeIfDefined(randomAssignedCallCountOpt, expectedChange = 0.0)
-    expectMetricChangeIfDefined(tokenResetCallCountOpt, expectedChange = 0.0)
-    expectMetricChangeIfDefined(pickedResourceSumOpt, expectedChange = 0.0)
+    assertResult(0.0)(assignedCallCount.totalChange())
+    assertResult(0.0)(fallbackCallCount.totalChange())
+    assertResult(0.0)(randomAssignedCallCount.totalChange())
+    assertResult(0.0)(pickedResourceSum.totalChange())
 
     assert(clerk.getNextStubForKey(SliceKey.MIN, Some(callerToken)).isEmpty)
-    expectMetricChangeIfDefined(assignedCallCountOpt, expectedChange = 0.0)
-    expectMetricChangeIfDefined(fallbackCallCountOpt, expectedChange = 0.0)
-    expectMetricChangeIfDefined(randomAssignedCallCountOpt, expectedChange = 0.0)
-    expectMetricChangeIfDefined(tokenResetCallCountOpt, expectedChange = 0.0)
-    expectMetricChangeIfDefined(pickedResourceSumOpt, expectedChange = 0.0)
+    assertResult(0.0)(assignedCallCount.totalChange())
+    assertResult(0.0)(fallbackCallCount.totalChange())
+    assertResult(0.0)(randomAssignedCallCount.totalChange())
+    assertResult(0.0)(pickedResourceSum.totalChange())
   }
 
-  test(
-    "getNextStubForKey never returns a fallback resource when the assignment has " +
-    "none"
-  ) {
+  test("getNextStubForKey never returns a fallback resource when the assignment has none") {
     // Test plan: Verify that when the assignment has no resource unassigned to a slice (i.e. the
     // assigned resources == all assignment resources), the slice has no fallback resource, so
     // getNextStubForKey keeps returning the slice's only resource and never advances to a fallback
@@ -579,15 +462,15 @@ abstract class ClerkRetrySuiteBase extends DatabricksTest with TestUtils.TestNam
       )
     }
 
-    val randomAssignedCallCountOpt: Option[MetricUtils.ChangeTracker[Double]] =
-      getNextStubForKeyCallCountTrackerOpt(target, "randomAssigned")
-    val assignedCallCountOpt: Option[MetricUtils.ChangeTracker[Double]] =
-      getNextStubForKeyCallCountTrackerOpt(target, "assigned")
+    val randomAssignedCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallCountTracker(target, "randomAssigned")
+    val assignedCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallCountTracker(target, "assigned")
     // The first call picks the single assigned resource.
     val (firstStub, firstToken): (ResourceAddress, RetryTokenImpl) =
       getNextStubForKey(clerk, SliceKey.MIN, None)
     assert(firstStub == toResourceAddress("Pod1"))
-    expectMetricChangeIfDefined(assignedCallCountOpt, expectedChange = 1.0)
+    assertResult(1.0)(assignedCallCount.totalChange())
 
     var lastTokenOpt: Option[RetryTokenImpl] = Some(firstToken)
     // Each subsequent call returns a random assigned resource because there is no fallback
@@ -597,9 +480,8 @@ abstract class ClerkRetrySuiteBase extends DatabricksTest with TestUtils.TestNam
         getNextStubForKey(clerk, SliceKey.MIN, lastTokenOpt)
       assert(stub == toResourceAddress("Pod1"))
       // The picked-resource count stays at 1: there is no fallback resource to advance to.
-      assert(token.pickedResourceIndices.size == 1)
-      assert(!token.fallbackPicked)
-      expectMetricChangeIfDefined(randomAssignedCallCountOpt, expectedChange = i)
+      assert(token.pickedResources.size == 1)
+      assertResult(i)(randomAssignedCallCount.totalChange())
       lastTokenOpt = Some(token)
     }
   }
@@ -646,38 +528,175 @@ abstract class ClerkRetrySuiteBase extends DatabricksTest with TestUtils.TestNam
       for (i <- 1 to numResources) {
         // The call-count trackers are scoped per slice iteration, so the expected counts restart
         // for each slice.
-        val assignedCallCountOpt: Option[MetricUtils.ChangeTracker[Double]] =
-          getNextStubForKeyCallCountTrackerOpt(target, "assigned")
-        val (_, token1): (ResourceAddress, RetryTokenImpl) =
+        val assignedCallCount: MetricUtils.ChangeTracker[Double] =
+          getNextStubForKeyCallCountTracker(target, "assigned")
+        val (stub1, token1): (ResourceAddress, RetryTokenImpl) =
           getNextStubForKey(clerk1, slice.lowInclusive, lastTokenOpt1)
-        expectMetricChangeIfDefined(assignedCallCountOpt, expectedChange = 1.0)
-        assert(token1.pickedResourceIndices.size == i)
-        assert(!token1.fallbackPicked)
+        assertResult(1.0)(assignedCallCount.totalChange())
+        assert(token1.pickedResources.contains(toSquid(stub1.toString)))
+        assert(token1.pickedResources.size == i)
 
-        val (_, token2): (ResourceAddress, RetryTokenImpl) =
+        val (stub2, token2): (ResourceAddress, RetryTokenImpl) =
           getNextStubForKey(clerk2, slice.lowInclusive, lastTokenOpt2)
-        expectMetricChangeIfDefined(assignedCallCountOpt, expectedChange = 2.0)
-        assert(token2.pickedResourceIndices.size == i)
-        assert(!token2.fallbackPicked)
+        assertResult(2.0)(assignedCallCount.totalChange())
+        assert(token2.pickedResources.contains(toSquid(stub2.toString)))
+        assert(token2.pickedResources.size == i)
 
         // Pick up the tokens for the next iteration call.
         lastTokenOpt1 = Some(token1)
         lastTokenOpt2 = Some(token2)
       }
-      val fallbackCallCountOpt: Option[MetricUtils.ChangeTracker[Double]] =
-        getNextStubForKeyCallCountTrackerOpt(target, "fallback")
+      val fallbackCallCount: MetricUtils.ChangeTracker[Double] =
+        getNextStubForKeyCallCountTracker(target, "fallback")
       // The next call should return the fallback resource on both clerks.
       val (fallbackStub1, fallbackToken1): (ResourceAddress, RetryTokenImpl) =
         getNextStubForKey(clerk1, slice.lowInclusive, lastTokenOpt1)
-      expectMetricChangeIfDefined(fallbackCallCountOpt, expectedChange = 1.0)
-      assert(fallbackToken1.fallbackPicked)
+      assertResult(1.0)(fallbackCallCount.totalChange())
+      assert(fallbackToken1.pickedResources.contains(toSquid(fallbackStub1.toString)))
 
       val (fallbackStub2, fallbackToken2): (ResourceAddress, RetryTokenImpl) =
         getNextStubForKey(clerk2, slice.lowInclusive, lastTokenOpt2)
-      expectMetricChangeIfDefined(fallbackCallCountOpt, expectedChange = 2.0)
-      assert(fallbackToken2.fallbackPicked)
+      assertResult(2.0)(fallbackCallCount.totalChange())
+      assert(fallbackToken2.pickedResources.contains(toSquid(fallbackStub2.toString)))
 
       assert(fallbackStub1 == fallbackStub2)
     }
+  }
+
+  test("getNextStubForKey picks resources from assignment updates during a retry chain") {
+    // Test plan: Verify that after an assignment update during a retry chain, getNextStubForKey
+    // returns an unpicked assigned resource first, then an unpicked fallback resource, and
+    // then a random assigned resource, treating a resource as picked even if its role changed.
+    // Verify this by picking the slice's assigned and fallback resources, then checking the next
+    // pick after each of four assignment updates: adding an assigned resource to the slice returns
+    // it, moving every other slice to new resources returns the new fallback resource, swapping the
+    // roles of two picked resources returns a random assigned resource without changing the token's
+    // pickedResources, and adding another assigned resource after those random picks returns it.
+    // Verify the call counts and the picked-resource histogram at the end.
+    val target = Target(getSafeName)
+    val slicelet: Slicelet =
+      testEnv.createSlicelet(target).start(selfPort = 1234, listenerOpt = None)
+    val clerk: ClerkHarness = createClerkHarness(target, slicelet)
+    // SLICE_MIN is assigned to Pod1, so its fallback resource is one of the other slices'
+    // resources.
+    val proposal: SliceMap[ProposedSliceAssignment] = createProposal(
+      ("" -- "Dori") -> Seq("Pod1"),
+      ("Dori" -- "Fili") -> Seq("Pod2"),
+      ("Fili" -- "Kili") -> Seq("Pod3"),
+      ("Kili" -- "Nori") -> Seq("Pod4"),
+      ("Nori" -- ∞) -> Seq("Pod5")
+    )
+    val assignment: Assignment =
+      TestUtils.awaitResult(testEnv.setAndFreezeAssignment(target, proposal), Duration.Inf)
+    AssertionWaiter("Wait for the assignment to reach the Clerk").await {
+      assert(clerk.getLatestGenerationOpt.contains(assignment.generation))
+    }
+
+    val assignedCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallCountTracker(target, "assigned")
+    val fallbackCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallCountTracker(target, "fallback")
+    val randomAssignedCallCount: MetricUtils.ChangeTracker[Double] =
+      getNextStubForKeyCallCountTracker(target, "randomAssigned")
+    val pickedResourceSum: MetricUtils.ChangeTracker[Double] = getPickedResourceCountTracker(target)
+
+    val (firstStub, firstToken): (ResourceAddress, RetryTokenImpl) =
+      getNextStubForKey(clerk, SliceKey.MIN, None)
+    assert(firstStub == toResourceAddress("Pod1"))
+    assert(firstToken.pickedResources.contains(toSquid(firstStub.toString)))
+
+    val (fallbackStub, fallbackToken): (ResourceAddress, RetryTokenImpl) =
+      getNextStubForKey(clerk, SliceKey.MIN, Some(firstToken))
+    assert(fallbackStub != firstStub)
+    assert(fallbackToken.pickedResources.contains(toSquid(fallbackStub.toString)))
+
+    // Assigns the new Pod6 to SLICE_MIN alongside the already picked Pod1.
+    val proposal2: SliceMap[ProposedSliceAssignment] = createProposal(
+      ("" -- "Dori") -> Seq("Pod1", "Pod6"),
+      ("Dori" -- "Fili") -> Seq("Pod2"),
+      ("Fili" -- "Kili") -> Seq("Pod3"),
+      ("Kili" -- "Nori") -> Seq("Pod4"),
+      ("Nori" -- ∞) -> Seq("Pod5")
+    )
+    val assignment2: Assignment =
+      TestUtils.awaitResult(testEnv.setAndFreezeAssignment(target, proposal2), Duration.Inf)
+    AssertionWaiter("Wait for the second assignment to reach the Clerk").await {
+      assert(clerk.getLatestGenerationOpt.contains(assignment2.generation))
+    }
+
+    val (newAssignedStub, newAssignedToken): (ResourceAddress, RetryTokenImpl) =
+      getNextStubForKey(clerk, SliceKey.MIN, Some(fallbackToken))
+    assert(newAssignedStub == toResourceAddress("Pod6"))
+    assert(newAssignedToken.pickedResources.contains(toSquid(newAssignedStub.toString)))
+
+    // Moves every other slice to new resources, so SLICE_MIN gets a new fallback resource that has
+    // not been picked.
+    val proposal3: SliceMap[ProposedSliceAssignment] = createProposal(
+      ("" -- "Dori") -> Seq("Pod1", "Pod6"),
+      ("Dori" -- "Fili") -> Seq("Pod7"),
+      ("Fili" -- "Kili") -> Seq("Pod8"),
+      ("Kili" -- "Nori") -> Seq("Pod9"),
+      ("Nori" -- ∞) -> Seq("Pod10")
+    )
+    val assignment3: Assignment =
+      TestUtils.awaitResult(testEnv.setAndFreezeAssignment(target, proposal3), Duration.Inf)
+    AssertionWaiter("Wait for the third assignment to reach the Clerk").await {
+      assert(clerk.getLatestGenerationOpt.contains(assignment3.generation))
+    }
+
+    val (newFallbackStub, newFallbackToken): (ResourceAddress, RetryTokenImpl) =
+      getNextStubForKey(clerk, SliceKey.MIN, Some(newAssignedToken))
+    assert(!Set(firstStub, newAssignedStub).contains(newFallbackStub))
+    assert(newFallbackToken.pickedResources.contains(toSquid(newFallbackStub.toString)))
+
+    // Swaps the roles of two picked resources: the new fallback resource becomes SLICE_MIN's only
+    // assigned resource, and Pod1 becomes its only possible fallback resource.
+    val proposal4: SliceMap[ProposedSliceAssignment] = createProposal(
+      ("" -- "Dori") -> Seq(newFallbackStub.toString),
+      ("Dori" -- "Fili") -> Seq("Pod1"),
+      ("Fili" -- "Kili") -> Seq("Pod1"),
+      ("Kili" -- "Nori") -> Seq("Pod1"),
+      ("Nori" -- ∞) -> Seq("Pod1")
+    )
+    val assignment4: Assignment =
+      TestUtils.awaitResult(testEnv.setAndFreezeAssignment(target, proposal4), Duration.Inf)
+    AssertionWaiter("Wait for the fourth assignment to reach the Clerk").await {
+      assert(clerk.getLatestGenerationOpt.contains(assignment4.generation))
+    }
+
+    var lastTokenOpt: Option[RetryTokenImpl] = Some(newFallbackToken)
+    for (_ <- 1 to 3) {
+      val (randomStub, randomToken): (ResourceAddress, RetryTokenImpl) =
+        getNextStubForKey(clerk, SliceKey.MIN, lastTokenOpt)
+      assert(randomStub == newFallbackStub)
+      assert(randomToken.pickedResources.size == 4)
+      lastTokenOpt = Some(randomToken)
+    }
+
+    // Assigns the new Pod11 to SLICE_MIN alongside its already picked resource.
+    val proposal5: SliceMap[ProposedSliceAssignment] = createProposal(
+      ("" -- "Dori") -> Seq("Pod11"),
+      ("Dori" -- "Fili") -> Seq("Pod1"),
+      ("Fili" -- "Kili") -> Seq("Pod1"),
+      ("Kili" -- "Nori") -> Seq("Pod1"),
+      ("Nori" -- ∞) -> Seq("Pod1")
+    )
+    val assignment5: Assignment =
+      TestUtils.awaitResult(testEnv.setAndFreezeAssignment(target, proposal5), Duration.Inf)
+    AssertionWaiter("Wait for the fifth assignment to reach the Clerk").await {
+      assert(clerk.getLatestGenerationOpt.contains(assignment5.generation))
+    }
+
+    val (lastAssignedStub, lastAssignedToken): (ResourceAddress, RetryTokenImpl) =
+      getNextStubForKey(clerk, SliceKey.MIN, lastTokenOpt)
+    assert(lastAssignedStub == toResourceAddress("Pod11"))
+    assert(lastAssignedToken.pickedResources.contains(toSquid(lastAssignedStub.toString)))
+
+    assertResult(3.0)(assignedCallCount.totalChange())
+    assertResult(2.0)(fallbackCallCount.totalChange())
+    assertResult(3.0)(randomAssignedCallCount.totalChange())
+    // Each call observes the token's picked-resource count: 1, 2, 3, and 4 for the first four
+    // picks, 4 for each of the three random picks, and 5 for the last pick, a sum of 27.
+    assertResult(27.0)(pickedResourceSum.totalChange())
   }
 }

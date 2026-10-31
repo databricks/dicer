@@ -5,13 +5,16 @@ import java.util.concurrent.CompletionException
 import scala.collection.{SortedMap, mutable}
 import scala.concurrent.duration._
 import scala.concurrent.{Await, Future}
-import io.grpc.{Status, StatusException}
+import io.grpc.{Status, StatusException, StatusRuntimeException}
 import io.prometheus.client.CollectorRegistry
 import io.etcd.jetcd
 import io.etcd.jetcd.ByteSequence
 import io.etcd.jetcd.api.RangeResponse
 import io.etcd.jetcd.kv.GetResponse
-import io.grpc.{StatusRuntimeException, Status => JetcdStatus}
+import io.grpc.{
+  Status => JetcdStatus,
+  StatusRuntimeException => JetcdStatusRuntimeException
+}
 import com.databricks.caching.util.MetricUtils.ChangeTracker
 import com.databricks.caching.util.TestUtils.assertThrow
 import com.google.protobuf.ByteString
@@ -58,6 +61,19 @@ class EtcdClientSuite extends DatabricksTest {
 
   /** Converts the given string to its UTF-8 ByteSequence encoding. */
   private def byteSequence(s: String): ByteSequence = ByteSequence.from(s, UTF_8)
+
+  /**
+   * Awaits `future`, which must fail with a `grpc_shaded` [[StatusRuntimeException]] with the code
+   * and description of `expected`.
+   */
+  private def assertFailsWithStatus(future: Future[_], expected: Status): Unit = {
+    val exception: StatusRuntimeException =
+      assertThrow[StatusRuntimeException](expected.getDescription) {
+        Await.result(future, Duration.Inf)
+      }
+    assert(exception.getStatus.getCode == expected.getCode)
+    assert(exception.getStatus.getDescription == expected.getDescription)
+  }
 
   /**
    * Calls `client.write(key, version, value, previousVersion, isIncremental)` and awaits successful
@@ -1523,7 +1539,7 @@ class EtcdClientSuite extends DatabricksTest {
       Duration.Inf
     )
     val error = JetcdStatus.INTERNAL.withDescription("foo")
-    jetcdWrapper.startFailingGets(new StatusRuntimeException(error))
+    jetcdWrapper.startFailingGets(new JetcdStatusRuntimeException(error))
 
     // Start watching.
     val callback = new LoggingStreamCallback[WatchEvent](sec)
@@ -1585,7 +1601,7 @@ class EtcdClientSuite extends DatabricksTest {
 
     // Fail the established watch.
     val error = JetcdStatus.UNAVAILABLE.withDescription("foo")
-    jetcdWrapper.failCurrentWatch(new StatusRuntimeException(error))
+    jetcdWrapper.failCurrentWatch(new JetcdStatusRuntimeException(error))
 
     // The watch failure should be visible eventually.
     AssertionWaiter("Wait for watch failure").await {
@@ -1612,7 +1628,7 @@ class EtcdClientSuite extends DatabricksTest {
       Duration.Inf
     )
     val error = JetcdStatus.UNAVAILABLE.withDescription("client closed")
-    jetcdWrapper.startThrowingFromGets(new StatusRuntimeException(error))
+    jetcdWrapper.startThrowingFromGets(new JetcdStatusRuntimeException(error))
 
     // Start watching. The synchronous throw must surface as a normal failure callback.
     val callback = new LoggingStreamCallback[WatchEvent](sec)
@@ -1645,7 +1661,7 @@ class EtcdClientSuite extends DatabricksTest {
       Duration.Inf
     )
     val error = JetcdStatus.UNAVAILABLE.withDescription("watch client closed")
-    jetcdWrapper.startThrowingFromWatches(new StatusRuntimeException(error))
+    jetcdWrapper.startThrowingFromWatches(new JetcdStatusRuntimeException(error))
 
     // Start watching. The initial read returns no rows, the state machine then attempts to start
     // the underlying etcd watch, and the synchronous throw must surface as a failure callback.
@@ -1660,6 +1676,78 @@ class EtcdClientSuite extends DatabricksTest {
       assert(log.last.status.getCode == Status.Code.UNAVAILABLE)
       assert(log.last.status.getDescription == "watch client closed")
     }
+  }
+
+  test("Read converts underlying jetcd-shaded errors to grpc-shaded ones") {
+    // Test plan: Verify that failures returned from etcd for a read surface as a `Status` error,
+    // converted from the etcd shaded gRPC library type to the version of `Status` used in the rest
+    // of Dicer.
+    val (client, jetcdWrapper): (EtcdClient, InterposingJetcdWrapper) =
+      etcd.createEtcdClientWithInterposingJetcdWrapper(
+        new FakeTypedClock,
+        EtcdClient.Config(NAMESPACE)
+      )
+    jetcdWrapper.startFailingGets(
+      new JetcdStatusRuntimeException(JetcdStatus.INTERNAL.withDescription("foo"))
+    )
+
+    assertFailsWithStatus(client.read("key"), Status.INTERNAL.withDescription("foo"))
+  }
+
+  test("Write converts underlying jetcd-shaded errors to grpc-shaded ones") {
+    // Test plan: Verify that failures returned from etcd for the transaction of each write
+    // operation (initializing the version high watermark, creating a key and updating a key)
+    // surface as a `Status` error, converted from the etcd shaded gRPC library type to the version
+    // of `Status` used in the rest of Dicer. Commits succeed between the failing operations to set
+    // up the next one.
+    val (client, jetcdWrapper): (EtcdClient, InterposingJetcdWrapper) =
+      etcd.createEtcdClientWithInterposingJetcdWrapper(
+        new FakeTypedClock,
+        EtcdClient.Config(NAMESPACE)
+      )
+    val failure: JetcdStatusRuntimeException =
+      new JetcdStatusRuntimeException(JetcdStatus.UNAVAILABLE.withDescription("foo"))
+    val expected: Status = Status.UNAVAILABLE.withDescription("foo")
+    val initialWatermark: Version = Version(ARBITRARY_NON_NEGATIVE_VALUE, 0)
+    val createVersion: Version = Version(ARBITRARY_NON_NEGATIVE_VALUE, 1)
+
+    jetcdWrapper.startFailingCommits(failure)
+    assertFailsWithStatus(client.initializeVersionHighWatermarkUnsafe(initialWatermark), expected)
+
+    jetcdWrapper.stopFailingCommits()
+    Await.result(client.initializeVersionHighWatermarkUnsafe(initialWatermark), Duration.Inf)
+    jetcdWrapper.startFailingCommits(failure)
+    assertFailsWithStatus(
+      client.write(
+        "key",
+        createVersion,
+        bytes("value1"),
+        previousVersionOpt = None,
+        isIncremental = false
+      ),
+      expected
+    )
+
+    jetcdWrapper.stopFailingCommits()
+    awaitSuccessfulWrite(
+      client,
+      "key",
+      createVersion,
+      "value1",
+      previousVersionOpt = None,
+      isIncremental = false
+    )
+    jetcdWrapper.startFailingCommits(failure)
+    assertFailsWithStatus(
+      client.write(
+        "key",
+        Version(ARBITRARY_NON_NEGATIVE_VALUE, 2),
+        bytes("value2"),
+        previousVersionOpt = Some(createVersion),
+        isIncremental = false
+      ),
+      expected
+    )
   }
 
   test("Watch sees across different values for high bits") {

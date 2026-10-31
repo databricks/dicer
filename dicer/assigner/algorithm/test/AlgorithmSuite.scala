@@ -22,7 +22,6 @@ import com.databricks.dicer.assigner.config.InternalTargetConfig.{
 }
 import com.databricks.dicer.common.{
   Assignment,
-  AssignmentConsistencyMode,
   Generation,
   ProposedAssignment,
   ProposedSliceAssignment,
@@ -469,7 +468,6 @@ class ParameterizedAlgorithmSuite(keyReplicationConfig: KeyReplicationConfig)
       createNResources(targetConfig.keyReplicationConfig.minReplicas)
     val assignment: Assignment = createAssignment(
       generation,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       ("" -- 10) @@ generation -> startingResources.availableResources,
       (10 -- 11) @@ generation -> startingResources.availableResources,
@@ -611,7 +609,8 @@ class ParameterizedAlgorithmSuite(keyReplicationConfig: KeyReplicationConfig)
     // than 64 per resource), and checking that the merger did not merge any Slices when a better
     // merge candidate was available. We do this by identifying merged Slices in the output of the
     // algorithm (no splits are expected given the inputs) and checking whether any adjacent Slices
-    // could have been merged instead to produce a lower combined load.
+    // that both have the minimum number of replicas (the only merge candidates) could have been
+    // merged instead to produce a lower combined load.
 
     val rng: Random = createRng() // logs RNG seed for failure reproducibility
     // Choose a maxLoadHint that is high enough to prevent splits or load balancing decisions
@@ -624,13 +623,18 @@ class ParameterizedAlgorithmSuite(keyReplicationConfig: KeyReplicationConfig)
       createConfigForLoadBalancing(ChurnConfig.DEFAULT, maxLoadHint)
     val numResources = 10
     val resources = createNResources(numResources)
+    val minReplicas: Int = targetConfig.keyReplicationConfig.minReplicas.min(numResources)
+    // Every Slice reaches the merge phase with the minimum number of replicas (the random proposal
+    // has at most `minReplicas`, and the algorithm raises any fewer to the minimum), so every
+    // adjacent pair is a merge candidate. Phases that run after merging never go below the
+    // minimum, so an adjacent pair that ends with the minimum was a candidate when merging.
     val predecessor: Assignment = commitProposal(
       ProposedAssignment(
         predecessorOpt = None,
         sliceMap = createRandomProposal(
           numSlices = numResources * 80, // > 64 Slices per resource
           resources.availableResources.toVector,
-          numMaxReplicas = targetConfig.keyReplicationConfig.maxReplicas,
+          numMaxReplicas = minReplicas,
           rng
         ),
         assignerServiceInfoOpt = None
@@ -676,15 +680,18 @@ class ParameterizedAlgorithmSuite(keyReplicationConfig: KeyReplicationConfig)
       }
       .toSet
 
-    // Find the best (remaining) merge candidate, i.e., the adjacent Slices with the least
-    // combined load.
+    // Find the best (remaining) merge candidate, i.e., the adjacent Slices that both have the
+    // minimum number of replicas with the least combined load.
     var bestMergedLoad = Double.MaxValue
     var previousSliceAssignment: SliceAssignment = actual.sliceAssignments.head
     for (sliceAssignment: SliceAssignment <- actual.sliceAssignments.tail) {
-      val mergedLoad = loadMap.getLoad(previousSliceAssignment.slice) + loadMap.getLoad(
-          sliceAssignment.slice
-        )
-      bestMergedLoad = math.min(bestMergedLoad, mergedLoad)
+      if (previousSliceAssignment.resourcesSet.size == minReplicas &&
+        sliceAssignment.resourcesSet.size == minReplicas) {
+        val mergedLoad = loadMap.getLoad(previousSliceAssignment.slice) + loadMap.getLoad(
+            sliceAssignment.slice
+          )
+        bestMergedLoad = math.min(bestMergedLoad, mergedLoad)
+      }
       previousSliceAssignment = sliceAssignment
     }
     // Any Slices merged Slices had better have combined load that is at most as high as that of
@@ -709,7 +716,6 @@ class ParameterizedAlgorithmSuite(keyReplicationConfig: KeyReplicationConfig)
     val assignment: Assignment =
       createAssignment(
         generation,
-        AssignmentConsistencyMode.Affinity,
         assignerServiceInfoOpt = None,
         ("" -- ∞) @@ generation -> Seq("resourceUnhealthy")
       )
@@ -1262,7 +1268,6 @@ class ParameterizedAlgorithmSuite(keyReplicationConfig: KeyReplicationConfig)
     val generation: Generation = createGeneration()
     val initialAssignment: Assignment = createAssignment(
       generation,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       (("" -- "k1") @@ generation -> coldSquids).withPrimaryRateLoad(10.0),
       (("k1" -- "k2") @@ generation -> mediumSquids).withPrimaryRateLoad(6.0),

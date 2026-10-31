@@ -1,6 +1,40 @@
 //! Test helpers for the metrics macros.
 
-use universe_raf_metrics::internal::encode_metrics_for_test as encode_registered_metrics_for_test;
+use std::hash::Hash;
+use std::sync::atomic::Ordering;
+
+use prometheus_client::metrics::counter::Counter;
+use prometheus_client::metrics::family::Family;
+use prometheus_client::metrics::gauge::Gauge;
+use raf_metrics::internal::encode_metrics_for_test as encode_registered_metrics_for_test;
+
+/// A trait for resetting a metric to its initial state, so tests can share static metrics.
+pub trait ResetMetric {
+    /// Resets the metric to its initial state.
+    fn reset(&self);
+}
+
+impl ResetMetric for Counter {
+    /// Sets the internal value of the counter to zero.
+    fn reset(&self) {
+        self.inner().store(0, Ordering::SeqCst);
+    }
+}
+
+impl ResetMetric for Gauge {
+    /// Sets the internal value of the gauge to zero.
+    fn reset(&self) {
+        self.inner().store(0, Ordering::SeqCst);
+    }
+}
+
+// prometheus-client has no API to reset a single histogram, so reset histograms through a family.
+impl<S: Clone + Hash + Eq, M> ResetMetric for Family<S, M> {
+    /// Clears all children in the metric family.
+    fn reset(&self) {
+        self.clear();
+    }
+}
 
 /// Encodes the process-wide registry for assertions in tests.
 pub fn encode_metrics_for_test() -> String {

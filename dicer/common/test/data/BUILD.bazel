@@ -18,6 +18,7 @@ filegroup(
         "slice_map_test_data.textproto",
         "slice_set_test_data.textproto",
         "slicelet_data_test_data.textproto",
+        "slicelet_load_accumulator_distribution_test_data.textproto",
         "slicelet_load_accumulator_test_data.textproto",
         "slicelet_test_data.textproto",
         "squid_test_data.textproto",

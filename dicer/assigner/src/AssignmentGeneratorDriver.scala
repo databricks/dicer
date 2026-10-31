@@ -118,6 +118,10 @@ class AssignmentGeneratorDriver private (
     sec.assertCurrentContext()
 
     handleEvent(Event.Shutdown())
+
+    // TODO(<internal bug>): The SEC name includes the AppTarget instance ID, and SEC metrics are never
+    // removed, so metric cardinality grows with transient AppTarget instances. Bound the
+    // cardinality or remove the SEC metrics. See the ticket for more details.
   }
 
   /** Passes the event to the state machine and logs it for simulator replay. */
@@ -131,16 +135,6 @@ class AssignmentGeneratorDriver private (
       event,
       sliceKeySensitivity = targetConfig.keySensitivityConfig.sliceKeySensitivity
     )
-  }
-
-  /**
-   * Informs the generator of a termination signal from Kubernetes for the Slicelet with
-   * `resourceUuid`.
-   */
-  private def onTerminationSignalFromKubernetes(resourceUuid: UUID): Unit = {
-    sec.assertCurrentContext()
-    logger.info(s"Received termination signal from Kubernetes for resourceUuid: $resourceUuid")
-    handleEvent(Event.TerminationSignalFromKubernetes(resourceUuid))
   }
 
   /** Starts the driver. */
@@ -163,25 +157,13 @@ class AssignmentGeneratorDriver private (
         val kubernetesTargetWatcher: KubernetesTargetWatcher =
           kubernetesTargetWatcherFactory.create(watchTarget)
 
-        // The last known set of terminating pods, used to perform edge detection on the levels
-        // reported by the watcher. Only accessed on `sec` (inside the callback below).
-        //
-        // TODO(<internal bug>): Remove this after maintaining the set of terminating resources from the
-        // cluster manager in the generator.
-        var knownTerminatingPods: Set[UUID] = Set.empty
-
         // The watcher invalidates our cached view whenever its terminating set may have changed;
-        // re-read the level and emit a termination event for each newly-terminating pod.
+        // re-read and deliver the complete level so the generator never has to reconstruct it from
+        // edge-triggered events.
         val invalidationCallback: () => Unit = () =>
           sec.run {
-            val terminatingPods: Set[UUID] = kubernetesTargetWatcher.getTerminatingPods()
-
-            val newTerminatingPods: Set[UUID] = terminatingPods -- knownTerminatingPods
-            for (resourceUuid: UUID <- newTerminatingPods) {
-              onTerminationSignalFromKubernetes(resourceUuid)
-            }
-
-            knownTerminatingPods = terminatingPods
+            val terminatingUuids: Set[UUID] = kubernetesTargetWatcher.getTerminatingPods()
+            handleEvent(Event.InformClusterManagerResources(terminatingUuids))
           }
 
         kubernetesTargetWatcher.start(invalidationCallback)

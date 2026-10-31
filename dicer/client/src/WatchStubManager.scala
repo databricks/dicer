@@ -1,6 +1,6 @@
 package com.databricks.dicer.client
 
-import java.net.{InetAddress, URI}
+import java.net.URI
 
 import io.grpc.ChannelCredentials
 import io.grpc.Grpc
@@ -15,26 +15,20 @@ import java.util.UUID
 import com.databricks.caching.util.StatusOr
 import com.databricks.dicer.common.WatchServerHelper
 import com.databricks.dicer.external.Target
-import com.databricks.rpc.tls.TLSOptions
 
 /**
  * Manages the creation of watch stubs for watching assignments.
  *
- * @note `watchFromDataPlane` and `sourceIpOpt` are unused but match the internal implementation
- * signature for compatibility.
+ * @note The config's `watchFromDataPlane` and `sourceIpOpt` are unused but match the internal
+ * implementation signature for compatibility.
  */
-class WatchStubManager private[dicer] (
-    clientName: String,
-    defaultWatchAddress: URI,
-    tlsOptionsOpt: Option[TLSOptions],
-    watchFromDataPlane: Boolean,
-    sourceIpOpt: Option[InetAddress]) {
+class WatchStubManager private[dicer] (config: WatchStubManagerConfig) {
 
   /**
    * The default channel to use for watching assignments.
-   * It is bound to the `defaultWatchAddress` provided when the class is instantiated.
+   * It is bound to the config's watch address provided when the class is instantiated.
    */
-  private val defaultGrpcChannel: ManagedChannel = createGrpcChannel(defaultWatchAddress)
+  private val defaultGrpcChannel: ManagedChannel = createGrpcChannel(config.watchAddress)
 
   /**
    * PRECONDITION: If [[redirectAddressOpt]] is provided, it must be a URI containing a direct
@@ -43,7 +37,7 @@ class WatchStubManager private[dicer] (
    * Creates a watch stub for watching assignments.
    *
    * @param redirectAddressOpt The address of the redirect target to create a watch stub for.
-   *                           If not provided, returns a stub bound to [[defaultWatchAddress]].
+   *                           If not provided, returns a stub bound to the config's watch address.
    * @param target             Unused; present only for signature parity with the internal
    *                           implementation.
    * @param clientIdOpt        Unused; present only for signature parity with the internal
@@ -75,11 +69,11 @@ class WatchStubManager private[dicer] (
 
   /** Creates a gRPC channel that's bound to the provided `address`. */
   private def createGrpcChannel(address: URI): ManagedChannel = {
-    ClientMetrics.incrementWatchChannelsCreated(clientName)
+    ClientMetrics.incrementWatchChannelsCreated(config.clientName)
     val correctedUri: URI = normalizeAddress(address)
 
     // Use gRPC's transport-independent TLS API.
-    val credentials: ChannelCredentials = tlsOptionsOpt match {
+    val credentials: ChannelCredentials = config.tlsOptionsOpt match {
       case Some(tlsOptions) => tlsOptions.channelCredentials()
       case None => InsecureChannelCredentials.create()
     }

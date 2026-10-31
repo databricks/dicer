@@ -52,7 +52,6 @@ class DPageViewHelpersSuite extends DatabricksTest {
     val comparableResult: AssignmentViewP = AssignmentViewP(
       generation = result.generation,
       isFrozen = result.isFrozen,
-      consistencyMode = result.consistencyMode,
       resources = result.resources.map { resource: ResourceViewP =>
         // We intentionally do not compare UUID and creation time for SQUIDs: the shared
         // test fixture names resources by address rather than specifying full SQUID identity.

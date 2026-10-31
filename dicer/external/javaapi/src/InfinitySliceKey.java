@@ -1,3 +1,4 @@
+// LINT.IfChange
 package com.databricks.dicer.external.javaapi;
 
 /**
@@ -41,3 +42,5 @@ public final class InfinitySliceKey extends HighSliceKey {
     return com.databricks.dicer.external.InfinitySliceKeyInterop.INFINITY_SLICE_KEY();
   }
 }
+// LINT.ThenChange(dicer/external/src/SliceKey.scala)
+// LINT.ThenChange(dicer/rust/external/types/src/slice_key.rs)

@@ -9,10 +9,8 @@ import javax.annotation.concurrent.ThreadSafe
  * `dicer/client/feature-rollouts/proto/dicer_client_feature_rollout_config.proto` for a detailed
  * usage.
  *
- * User code obtains the production instance through `DicerClientConf.dicerClientFeatureRollout`;
- * the trait itself will be used by both the production code and the unit test for test value
- * injection purpose.
- * TODO(<internal bug>): Add the above features in a following-up PR.
+ * Slicelets and Clerks query flags through `DicerClientConf.isFeatureRolloutFlagEnabled`, which
+ * delegates to a process-wide singleton created by [[DicerClientFeatureRolloutFlagImpl.create]].
  *
  * In production code, isEnabled it should be queried once at Slicelet or Clerk creation time at the
  * top-level, and the flag value should be passed into the rest of the code via InternalClientConfig

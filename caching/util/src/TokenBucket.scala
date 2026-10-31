@@ -91,6 +91,11 @@ class TokenBucket private (
     }
   }
 
+  /** Returns the number of tokens that can be acquired immediately. */
+  private[util] def getAvailableTokenCount: Long = {
+    availableTokens.floor.toLong
+  }
+
   /**
    * Returns the earliest ticker time `t` such that a call to [[refill(t)]] and then
    * [[tryAcquire(desired)]] with no intervening calls will succeed. Returns the last time provided

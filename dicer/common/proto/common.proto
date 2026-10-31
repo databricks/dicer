@@ -42,7 +42,7 @@ message DiffAssignmentP {
   // the message contains a full assignment.
   repeated SliceAssignmentP slice_assignments = 2;
 
-  // The resource incarnations to which `slice_assignments` or `squid_leases` refer.
+  // The resource incarnations to which `slice_assignments` refer.
   repeated dicer.friend.SquidP resources = 3;
 
   // OPTIONAL (absent means "not frozen"): whether the assignment is "frozen". When an assignment is
@@ -54,21 +54,12 @@ message DiffAssignmentP {
   // OPTIONAL (absent interpreted as `Generation.EMPTY`). See `slice_assignments`.
   optional GenerationP diff_generation = 5;
 
-  // SQUID leases, populated only for consistent assignments. Contains an entry for all SQUID leases
-  // in the "active" or "recalled" state. Also includes all leases that entered the "revoked" state
-  // no earlier than the current GC threshold (see `squid_lease_gc_threshold_generation_number`).
-  repeated SquidLeaseP squid_leases = 6;
-
-  // The GC threshold for `squid_leases`. The earliest assignment generation for which "revoked"
-  // leases are retained has incarnation `generation.incarnation` and generation number
-  // `squid_lease_gc_threshold_generation_number`.
-  optional int64 squid_lease_gc_threshold_generation_number = 7;
-
-  // OPTIONAL (absent interpreted as "inconsistent"): whether consistent assignment is enabled.
-  // When true, Slicelets must verify strict ownership to satisfy
-  // `SliceletHandle.isContinuouslyAssigned` checks. Must only be set for assignments in durable or
-  // "non-loose" incarnations (in which divergent assignment histories are not possible).
-  optional bool is_consistent = 8;
+  // Fields 6-8 (`squid_leases`, `squid_lease_gc_threshold_generation_number`, `is_consistent`) are
+  // retired: Dicer never supported consistent assignments, so they were never set. VERSION SKEW:
+  // all deployed binaries interpret the absence of `is_consistent` as "inconsistent", so these
+  // numbers must never be reused by fields whose absence means anything else.
+  reserved 6, 7, 8;
+  reserved "squid_leases", "squid_lease_gc_threshold_generation_number", "is_consistent";
 
   // OPTIONAL (absent interpreted as no known assigner identity): information about the assigner
   // service that generated this assignment.
@@ -129,10 +120,9 @@ message DiffAssignmentP {
     //
     // If an ownership_transfer exists (we have not yet added a field for it), the subslice is not
     // strictly owned by the resource until the previous owner, identified by
-    // `ownership_transfer.from_resource_id`, has surrendered the subslice, or until the SQUID for
-    // the previous owner has been revoked. The Assigner will remove the ownership transfer when
-    // either of these conditions is met. As an optimization, `resource_id` may establish ownership
-    // of the subslice as soon as it learns about the surrender by
+    // `ownership_transfer.from_resource_id`, has surrendered the subslice. The Assigner will remove
+    // the ownership transfer when this condition is met. As an optimization, `resource_id` may
+    // establish ownership of the subslice as soon as it learns about the surrender by
     // `ownership_transfer.from_resource_id`, without waiting for the Assigner to update the
     // assignment.
     //
@@ -151,16 +141,8 @@ message DiffAssignmentP {
     optional TransferP state_transfer = 4;
   }
 
-  // A request to transfer a subslice assignment from one resource to another. "Transfer" can
-  // refer to state (for state transfer) and/or strict ownership (for consistent assignments).
-  //
-  // For consistent assignments, a transfer completes and the
-  // `SubsliceAnnotationP.ownership_transfer` is removed when either:
-  //  - The "from" resource (identified by `TransferP.from_resource_id`) surrenders the
-  //    subslice assignment.
-  //  - The "from" resource has its SQUID lease revoked by the Assigner.
-  //
-  // For inconsistent assignments, transfers may complete when either:
+  // A request to transfer subslice state from one resource to another. A transfer may complete
+  // when either:
   //  - The target of the transfer (identified by `SubsliceAnnotationP.resource_id`) signals that
   //    state has been transferred.
   //  - The Assigner arbitrarily decides the transfer is complete (e.g., if the Assigner decides
@@ -174,46 +156,9 @@ message DiffAssignmentP {
     // a different resource than `SubsliceAnnotationP.resource_id`.
     optional int32 from_resource_id = 2;
 
-    // OPTIONAL: The generation number from which `from_resource_id` had continuous ownership of the
-    // current subslice. For state transfer with consistent assignments, this is used to ensure a
-    // linearizable history of the state - see
-    // <internal link>.8vy8b2elpow6 for more details. This field
-    // is not currently populated for state transfer, as it is not required with inconsistent
-    // assignments.
-    //
-    // For an ownership transition, this is included in the "to" resource's relinquish RPC to ensure
-    // that the "from" resource does not unnecessarily relinquish ownership based on a stale RPC.
-    // Prior to relinquishing ownership, the "from" resource can still satisfy
-    // `isAssignedContinuously` checks for the subslice.
-    // NOTE: at present, this is not a helpful field, since the Slicelet is designed to immediately
-    // surrender when it observes such a transition. Longer term, we may benefit from the ability
-    // to defer surrender until, e.g., the LinkStore client library observes that outstanding write
-    // handles have been closed.
-    optional int64 continuous_ownership_generation_number = 3;
-  }
-
-  message SquidLeaseP {
-    // An index into the `resources` array referencing the SQUID to which this lease applies.
-    optional int32 resource_id = 1;
-
-    // Possible lease states. If no field is present, it indicates that the lease has been
-    // permanently revoked.
-    oneof lease_state {
-      // The lease is active. The SQUID lease holder may assume that if the lease is subsequently
-      // recalled, the lease can not be permanently revoked until at least the given number of
-      // seconds have elapsed or the lease holder acknowledges the recall, whichever comes first.
-      //
-      // For a given SQUID, the grace period will never change.
-      int32 lease_active_grace_period_seconds = 2;
-
-      // The lease has been recalled. The value indicates the minimum number of seconds that must
-      // elapse after this assignment is committed before the lease can be permanently revoked, if
-      // it not revoked sooner by way of a recall acknowledgment from the SQUID lease holder. This
-      // value may decrease in successive assignments, but will never increase. The value is used by
-      // the assigner to determine when it is safe to permanently revoke the lease absent a recall
-      // acknowledgment.
-      int32 lease_recalled_grace_period_seconds = 3;
-    }
+    // Field 3 (`continuous_ownership_generation_number`) is retired: it was never set.
+    reserved 3;
+    reserved "continuous_ownership_generation_number";
   }
 
   // Identifying information about an instance of the assigner service.
@@ -497,36 +442,10 @@ message ClientRequestP {
     // Kubernetes namespace for the Slicelet host.
     optional string kubernetes_namespace = 7;
 
-    // OPTIONAL: the latest assignment generation at which the Slicelet knows that `squid` had never
-    // been recalled. This field is ignored for inconsistent assignments. When assignment
-    // consistency is enabled for a target, the Slicelet sets the field to request activation of its
-    // SQUID lease.
-    //  - If this field is not set, it means that the heartbeat is for a new Slicelet incarnation
-    //    and the Slicelet needs to receive the latest assignment before a SQUID lease can be
-    //    activated. The Assigner does not yet incorporate the Slicelet into the assignment, and
-    //    instead waits until it receives a heartbeat from the Slicelet with this field populated.
-    //    Once the Slicelet has observed the latest assignment, it sends another heartbeat with this
-    //    field populated because it knows that the SQUID cannot have been recalled before
-    //    activation is requested.
-    //  - When supplied, the Assigner will:
-    //      - Do nothing if the SQUID lease is already known to be active, recalled, or revoked.
-    //      - If it's a new SQUID from the Assigner's perspective and the Assigner can prove that
-    //        the SQUID has not been recalled since `never_recalled_generation`, the Assigner will
-    //        activate the lease by adding it to the assignment.
-    //      - If the Assigner cannot prove that the SQUID has not been recalled or revoked since
-    //        `never_recalled_generation` (if `never_recalled_generation` is earlier than the GC
-    //        threshold for lease recall and revocation), the Assigner immediately moves the lease
-    //        to the revoked state rather than activating a lease. This guarantees that SQUID leases
-    //        are never resurrected.
-    optional GenerationP never_recalled_generation = 8;
-
-    // SQUIDs previously chosen by the Slicelet that it has released. By including a SQUID in this
-    // collection, the Slicelet indicates that it is no longer satisfying any ownership checks using
-    // the SQUID. The Slicelet includes a SQUID in this list when it notices that the SQUID is
-    // marked "recalled" in the assignment. The Slicelet may stop including a SQUID in this list
-    // when the assignment indicates that the SQUID is "revoked" or when the SQUID no longer appears
-    // in the assignment.
-    repeated dicer.friend.SquidP released_squids = 9;
+    // Fields 8 and 9 (`never_recalled_generation`, `released_squids`) are retired: they supported
+    // SQUID leases for consistent assignments, which Dicer never implemented, and were never set.
+    reserved 8, 9;
+    reserved "never_recalled_generation", "released_squids";
 
     // Indicates to the Assigner that the resource from which a subslice assignment is transitioning
     // is being surrendered by the current owner.
@@ -583,73 +502,6 @@ message ClientResponseP {
 service AssignmentService {
   // The Clerk/Slicelet watch RPC to the Assigner.
   rpc Watch(ClientRequestP) returns (ClientResponseP) {
-
-  }
-}
-
-// -Protos and service definitions for the SquidLeaseRecallService:
-
-// Request type for a `SquidLeaseRecallService.GetRecallStatus` RPC
-message GetRecallStatusRequestP {
-  option (scalapb.message).extends = "com.databricks.rpc.RPC[GetRecallStatusResponseP]";
-
-  // The name of the Dicer target to which the Slicelet belongs.
-  optional string target_name = 1;
-
-  // The SQUID for which lease status is requested.
-  optional dicer.friend.SquidP squid = 2;
-
-  // The latest assignment generation at which the Slicelet knows its SQUID lease had never been
-  // recalled. This is generally the generation of the latest assignment in which the SQUID lease
-  // was marked active, but the Slicelet bootstraps the value by observing the latest assignment
-  // _before_ it requests activation of the lease. Because the SQUID is single-use, the Assigner
-  // cannot have recalled the lease before the Slicelet requests activation of the lease!
-  optional GenerationP never_recalled_generation = 3;
-}
-
-// Response type for a `SquidLeaseRecallService.GetRecallStatus` RPC.
-message GetRecallStatusResponseP {
-  // is_valid = true
-  // ---------------
-  // When true, it means that there was no recall of the lease recorded at the time of the request,
-  // and the lease service has knowledge of all recalls committed after `never_recalled_generation`.
-  // The Slicelet can assume that its SQUID lease is valid while the grace period (from
-  // `SquidLeaseP.lease_active_grace_period_seconds`) has not yet elapsed.
-  //
-  // The Slicelet must start a timer before calling the `GetRecallStatusRequestP` RPC. When it
-  // receives a `NOT_RECALLED` response, it can assume that its lease remains valid until the
-  // timer reaches `lease_active_grace_period_seconds / (1 + clock_rate_skew)`, or until it
-  // voluntarily releases the lease (see below).
-  //
-  // is_valid = false
-  // ----------------
-  // When false (or unset), the Slicelet _must_ immediately stop satisfying any ownership checks for
-  // the SQUID.
-  //
-  // The Slicelet _should_ repeatedly acknowledge the recall to the Assigner (by including the
-  // corresponding SQUID in `SliceletDataP.released_squids` in its heartbeats) until it observes
-  // that the lease has been successfully revoked. Acknowledging the recall allows the Assigner to
-  // more quickly reassign Slices assigned to the current SQUID.
-  optional bool is_valid = 1;
-
-  // The worst-case ratio by which the Slicelet's ticker clock may be skewed relative to the "ideal"
-  // clock. For example, if the skew is 5%, it means that the Slicelet's ticker clock may run faster
-  // than the ideal clock by up to 5%. The Slicelet can only be certain that _at most_ 21 ideal
-  // seconds have elapsed when its clock has measured _at most_ 20 elapsed seconds
-  // (21 seconds / (1 + 0.05)).
-  //
-  // The clock rate skew configuration is relatively static, but we include it in the response so
-  // that it is possible for the skew to be adjusted by Dicer backend services if necessary.
-  optional double clock_rate_skew = 2;
-}
-
-// The service used by Slicelet to determine whether their SQUID leases have been recalled.
-service SquidLeaseRecallService {
-
-  // Checks whether a SQUID has been recalled and how long the Slicelet may assume its SQUID will
-  // remain valid. (After a SQUID is recalled, it is guaranteed to remain valid for some interval of
-  // time.)
-  rpc GetRecallStatus(GetRecallStatusRequestP) returns (GetRecallStatusResponseP) {
 
   }
 }

@@ -29,7 +29,7 @@ import com.databricks.dicer.assigner.LoadWatcher.{
 import com.databricks.dicer.assigner.conf.LoadWatcherConf
 import com.databricks.dicer.common.SliceKeyHelper.RichSliceKey
 import com.databricks.dicer.common.SliceletData.{KeyLoad, LoadDistribution}
-import com.databricks.dicer.common.{Assignment, LoadMeasurement, SliceAssignment}
+import com.databricks.dicer.common.{Assignment, MetricMeasurement, SliceAssignment}
 import com.databricks.dicer.external.{InfinitySliceKey, ResourceAddress, Slice, SliceKey}
 
 /**
@@ -381,7 +381,7 @@ private[assigner] object LoadWatcher {
    * @throws IllegalArgumentException If windowDuration is negative.
    * @throws IllegalArgumentException If numReplicas is non-positive.
    * @throws IllegalArgumentException If load doesn't satisfy
-   *                                  LoadMeasurement.requireValidLoadMeasurement().
+   *                                  MetricMeasurement.requireValidMeasurement().
    */
   class Measurement @throws[IllegalArgumentException] private[LoadWatcher] (
       val time: TickerTime,
@@ -398,7 +398,7 @@ private[assigner] object LoadWatcher {
     if (numReplicas <= 0) {
       throw new IllegalArgumentException(s"numReplicas must be positive: $numReplicas")
     }
-    LoadMeasurement.requireValidLoadMeasurement(load)
+    MetricMeasurement.requireValidMeasurement(load)
   }
 
   /**
@@ -415,7 +415,7 @@ private[assigner] object LoadWatcher {
       val loadDistributionOpt: Option[LoadDistribution]
   ) extends IntrusiveMinHeapElement[TickerTime] {
     iassert(numReplicas > 0)
-    LoadMeasurement.requireValidLoadMeasurement(load)
+    MetricMeasurement.requireValidMeasurement(load)
 
     /** Exposes the protected remove method to the [[LoadWatcher]] implementation. */
     def removeFromHeap(): Unit = remove()
@@ -1097,14 +1097,14 @@ private[assigner] object LoadWatcher {
     private var totalWeightedLoad: Double = 0.0
 
     /**
-     * PRECONDITION: `load` satisfies [[LoadMeasurement.requireValidLoadMeasurement]].
+     * PRECONDITION: `load` satisfies [[MetricMeasurement.requireValidMeasurement]].
      * PRECONDITION: `numReplicas` > 0.
      *
      * Accumulates `load` for a slice replica that reported that it was one of `numReplicas`, and
      * whose age is `age`.
      */
     def accumulate(age: FiniteDuration, load: Double, numReplicas: Int): Unit = {
-      LoadMeasurement.requireValidLoadMeasurement(load)
+      MetricMeasurement.requireValidMeasurement(load)
       iassert(numReplicas > 0)
 
       val weight: Double = Math.pow(2, -age.toMillis.toDouble / halfLife.toMillis)

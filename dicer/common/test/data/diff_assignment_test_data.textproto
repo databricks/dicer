@@ -2,21 +2,6 @@
 # proto-message: DiffAssignmentTestDataP
 
 invariant_validity_test_cases: [
-  # Loose incarnation for consistent assignment.
-  {
-    expected_error: "Consistent assignment cannot be in the loose incarnation"
-    diff_assignment {
-      is_consistent: true
-      generation: { incarnation: 1 number: 42 }
-      slice_assignments: [
-        {
-          slice: { low_inclusive: "" }
-          generation: { incarnation: 1 number: 42 }
-          resources: ["Pod1"]
-        }
-      ]
-    }
-  },
   # Partial diff assignment in loose incarnation.
   {
     expected_error: "Assignments in the loose incarnation cannot have diffs"

@@ -1,3 +1,4 @@
+load("//bazel/rules/rust:rules_rust.bzl", "rust_prost_library")
 load("@rules_proto//proto:defs.bzl", "proto_library")
 load("@rules_scala//scala_proto:scala_proto.bzl", "scala_proto_library")
 
@@ -33,4 +34,18 @@ scala_proto_library(
         "//dicer:internal",
     ],
     deps = [":common_proto"],
+)
+
+rust_prost_library(
+    name = "common_proto_prost_lib",
+    crate_name = "dicer_common_proto_common_proto",
+    proto = ":common_proto",
+    visibility = ["//dicer:internal"],
+)
+
+rust_prost_library(
+    name = "dpage_proto_library_prost_lib",
+    crate_name = "dicer_common_proto_dpage_proto_library",
+    proto = ":dpage_proto_library",
+    visibility = ["//dicer:internal"],
 )

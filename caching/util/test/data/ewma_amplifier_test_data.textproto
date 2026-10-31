@@ -1,0 +1,227 @@
+# proto-file: caching/util/test/proto/test_data.proto
+# proto-message: EwmaAmplifierTestDataP
+
+# The test data for Ewma Amplifier shared by its Rust and Scala test suites. Unfortunately, some
+# of the test data here will be a bit invasive into the implementation details. The absolute values
+# of EwmaAmplifier output is not meaningful by contract (only the multiplicative relationship
+# between them is important). However, in order to express the expected output in this test fixture,
+# we need to reason about the expected absolute values of the output and thus, need to reason about
+# how the amplification is initialized and when exactly will rescale happen, which is not part of
+# the public interface of EwmaAmplifier.
+test_cases: [
+  # Test plan: verify that constructing an EwmaAmplifier with a non-positive half life
+  # seconds fails.
+  {
+    test_case_name: "validate_half_life_seconds_zero"
+    ewma_amplifier: { half_life_seconds: 0 error_message_opt: "must be positive" }
+  },
+  {
+    test_case_name: "validate_half_life_seconds_negative"
+    ewma_amplifier: { half_life_seconds: -1.0 error_message_opt: "must be positive" }
+  },
+
+  # Test plan: verify that amplification of values grows with time.
+  {
+    test_case_name: "amplification_grows_with_time"
+    ewma_amplifier: { half_life_seconds: 10.0 }
+    actions: [
+      # With half_life = 10s the amplification starts at alpha (= 1 - 2^(-1/10) ~= 0.067) and
+      # doubles every 10s.
+      { advance_and_rescale_if_needed: { elapsed_ms: 0 } },
+      {
+        amplify_and_increment: {
+          value: 1
+          expected_amplified_value: 0.0669670
+        }
+      },
+
+      { advance_and_rescale_if_needed: { elapsed_ms: 10000 } },
+      # At t = 10s, amplification is ~2 * alpha. amplifyAndIncrement(1) returns that
+      # amplified value.
+      {
+        amplify_and_increment: {
+          value: 1
+          expected_amplified_value: 0.13393402
+        }
+      },
+
+      # Advance to t = 20s.
+      { advance_and_rescale_if_needed: { elapsed_ms: 20000 } },
+      # At t = 20s, amplification is ~4 * alpha.
+      {
+        amplify_and_increment: {
+          value: 1
+          expected_amplified_value: 0.26786804 # 2 times of 0.13393402.
+        }
+      },
+
+      # Advance to t = 30s.
+      { advance_and_rescale_if_needed: { elapsed_ms: 30000 } },
+      {
+        amplify_and_increment: {
+          value: 1
+          expected_amplified_value: 0.53573608 # 2 times of 0.26786804.
+        }
+      },
+
+      # The running total now reflects the 4 amplified inserts.
+      { assert_total_equals: { expected_total: 1.0045051 } }
+    ]
+  },
+
+  # Test plan: advanceAndRescaleIfNeeded can rescale when the time is advanced very far and the next
+  # increment would overflow the total load. With half_life = 1s (decay = 0.5, alpha = 1/2) the
+  # amplification doubles every second, so at t = 995s the projected amplification (alpha * 2^995 =
+  # 2^994) is still finite, but reserving room for one more Int.MaxValue increment (2^994 * ~2^31 >
+  # Double.MaxValue) would overflow, forcing a rescale. The returned rescale factor is decay^995 =
+  # 2^-995 = 2.99e-300.
+  {
+    test_case_name: "advanceAndRescaleIfNeeded with large advancement rescales"
+    ewma_amplifier: { half_life_seconds: 1.0 }
+    actions: [
+      { advance_and_rescale_if_needed: { elapsed_ms: 995000 expected_rescale_factor_opt: 2.9864436e-300 } },
+      # After rescale, amplification is reset to alpha (= 0.5 for half_life = 1s).
+      {
+        amplify_and_increment: {
+          value: 1
+          expected_amplified_value: 0.5
+        }
+      }
+    ]
+  },
+
+  # Test plan: advanceAndRescaleIfNeeded can rescale when the total weight is already near the max,
+  # and the next insert can overflow the total load. First insert the total to ~1.7977e308 (just
+  # under Double.MaxValue) at t = 994s, then call advanceAndRescaleIfNeeded again
+  # at the same epoch: one more Int.MaxValue increment would overflow the total, so it rescales. The
+  # fold-in factor is decay^994 = 2^-994.
+  {
+    test_case_name: "advanceAndRescaleIfNeeded with large existing total load rescales"
+    ewma_amplifier: { half_life_seconds: 1.0 }
+    actions: [
+      # Advance to t = 994s (no rescale) and add Int.MaxValue to bring the total to just under the
+      # max.
+      { advance_and_rescale_if_needed: { elapsed_ms: 994000 } }, # No rescale yet.
+      {
+        amplify_and_increment: {
+          value: 2147483647
+          expected_amplified_value: 1.7976931e308
+        }
+      },
+      # The total is now near the max, so calling advanceAndRescaleIfNeeded at the same time would
+      # rescale.
+      { advance_and_rescale_if_needed: { elapsed_ms: 994000 expected_rescale_factor_opt: 5.9728872e-300 } },
+      # Post-rescale: amplification is reset to alpha (= 0.5) and the total has been scaled down.
+      {
+        amplify_and_increment: {
+          value: 1
+          expected_amplified_value: 0.5
+        }
+      },
+      # Verify the total value is rescaled. The total original incremented value is 2147483647.
+      # After the rescale, it should be 2147483647 * alpha = 1073741823.5.
+      { assert_total_equals: { expected_total: 1073741823.5 } }
+    ]
+  },
+
+  # Test plan: Verify that calling duplicated advance_and_rescale_if_needed at the same time is a
+  # no-op.
+  {
+    test_case_name: "call advance_and_rescale_if_needed again at the same time is a noop"
+    ewma_amplifier: { half_life_seconds: 10.0 }
+    actions: [
+      # Bring the amplifier to (~4 * alpha) so the rescale below visibly changes it.
+      { advance_and_rescale_if_needed: { elapsed_ms: 20000 } },
+      {
+        amplify_and_increment: {
+          value: 1
+          expected_amplified_value: 0.26786803
+        }
+      },
+
+      # 10^12 milliseconds elapsed, advanceAndRescaleIfNeeded rescales because the amplification
+      # would overflow. The rescale factor is so small and underflows to 0.0.
+      { advance_and_rescale_if_needed: { elapsed_ms: 1000000000000 expected_rescale_factor_opt: 0.0 } },
+      # After rescale, amplification is back to alpha.
+      {
+        amplify_and_increment: {
+          value: 1
+          expected_amplified_value: 0.066967008
+        }
+      },
+
+      # At the same elapsed time, advanceAndRescaleIfNeeded is a no-op (the epoch has not moved).
+      { advance_and_rescale_if_needed: { elapsed_ms: 1000000000000 } },
+      # amplifyAndIncrement with a large value now succeeds, returning alpha * 10^9 ~= 6.7 * 10^7.
+      {
+        amplify_and_increment: {
+          value: 1000000000
+          expected_amplified_value: 6.6967008e7
+        }
+      }
+    ]
+  },
+
+  # Test plan: Verify that rescale() is a no-op and returns no factor when there is no deferred
+  # decay. Also verify that it rescales the total load and amplification and returns the factor when
+  # there is deferred decay.
+  {
+    test_case_name: "rescale"
+    ewma_amplifier: { half_life_seconds: 10.0 }
+    actions: [
+      # Fresh amplifier, rescale() returns no factor.
+      { rescale: { } },
+
+      # Advance to t = 10s and insert, then rescale() again: the deferred decay over 10s folds in a
+      # factor of decay^10 = 2^(-10/10) = 0.5.
+      { advance_and_rescale_if_needed: { elapsed_ms: 10000 } },
+      {
+        amplify_and_increment: {
+          value: 1
+          expected_amplified_value: 0.13393402
+        }
+      },
+      { rescale: { expected_factor_opt: 0.5 } },
+
+      # After rescale, total has been scaled by 0.5 (~0.1340 * 0.5 ~= 0.0670).
+      { assert_total_equals: { expected_total: 0.066967008 } },
+
+      # A rescale() happening again at the same time has no deferred decay left, so it returns no
+      # factor and leaves total unchanged.
+      { rescale: { } },
+      { assert_total_equals: { expected_total: 0.066967008 } }
+    ]
+  },
+
+  # Test plan: When amplifyAndIncrement would overflow the total (due to
+  # advance_and_rescale_if_needed not properly called), it returns failure and leaves `total`
+  # unchanged.
+  {
+    test_case_name: "amplify_and_increment_reports_overflow_and_preserves_total"
+    ewma_amplifier: { half_life_seconds: 1.0 }
+    actions: [
+      # Advance to t = 994s, reserving room for exactly one Int.MaxValue increment (no rescale).
+      { advance_and_rescale_if_needed: { elapsed_ms: 994000 } },
+      # amplifyAndIncrement(Int.MaxValue) at that reserved state does not overflow (~= 1.7977e308).
+      {
+        amplify_and_increment: {
+          value: 2147483647
+          expected_amplified_value: 1.7976931e308
+        }
+      },
+      { assert_total_equals: { expected_total: 1.7976931e308 } },
+
+      # A second increment of the same size, with no advanceAndRescaleIfNeeded to reserve room,
+      # would push total past Double.MaxValue, so the call must report the overflow.
+      {
+        amplify_and_increment: {
+          value: 2147483647
+          error_message_opt: "reserve room and avoid overflow"
+        }
+      },
+
+      # The failed call left `total` untouched, so the amplifier remains usable.
+      { assert_total_equals: { expected_total: 1.7976931e308 } }
+    ]
+  }
+]

@@ -42,7 +42,8 @@ class TestableDicerAssignerConf(config: Config)
 
   /** Updates dynamic configuration targets to include the given parsed `config`. */
   def putDynamicTargetConfig(targetName: TargetName, config: InternalTargetConfig): Unit = {
-    val json: String = NamedInternalTargetConfig(targetName, config).toJsonString
+    val json: String =
+      NamedInternalTargetConfig(targetName, config, overrides = Map.empty).toJsonString
     putDynamicTargetConfig(targetName.value, json)
   }
 

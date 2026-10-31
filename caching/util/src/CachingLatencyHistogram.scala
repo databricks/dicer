@@ -8,7 +8,7 @@ import scala.util.control.NonFatal
 import scala.util.{Failure, Success, Try}
 
 import io.grpc.Status
-import io.prometheus.client.CollectorRegistry
+import io.prometheus.client.{CollectorRegistry, Histogram}
 
 import com.databricks.ErrorCode
 import com.databricks.api.ErrorCodeUtils
@@ -40,6 +40,7 @@ import com.databricks.caching.util.Pipeline.InlinePipelineExecutor
  *                 this and other registered objects and then no further statistics will be
  *                 recorded.)
  * @param statusCodeExtractor Extracts gRPC status code from an exception.
+ * @param errorCodeOverride Optionally overrides the error code extracted from an exception.
  */
 @ThreadSafe
 class CachingLatencyHistogram private (
@@ -48,7 +49,8 @@ class CachingLatencyHistogram private (
     extraLabelNames: Iterable[String],
     bucketSecs: Vector[Double],
     registry: CollectorRegistry,
-    statusCodeExtractor: Throwable => Status.Code) {
+    statusCodeExtractor: Throwable => Status.Code,
+    errorCodeOverride: Throwable => Option[ErrorCode]) {
 
   /** The underlying histogram. */
   private val histogram = io.prometheus.client.Histogram
@@ -125,6 +127,66 @@ class CachingLatencyHistogram private (
     }
   }
 
+  /**
+   * Returns a recorder for `operation` whose extra labels are always `extraLabels`. Recording
+   * through it is equivalent to [[recordLatencySync]] with a `computeExtraLabels` function that
+   * always returns `extraLabels`, but it does not rebuild the label values or look up the
+   * histogram series for each successful operation. Intended for callers that record many
+   * operations with the same labels.
+   *
+   * @param operation   The cache operation whose latency is being recorded, e.g. "read".
+   * @param extraLabels The extra label values, in the order of the label names sequence that was
+   *                    passed to the factory method that created this object.
+   * @throws IllegalArgumentException If the number of `extraLabels` doesn't match the number of
+   *                                  extra label names of this histogram.
+   */
+  @throws[IllegalArgumentException]
+  def fixedLabelsRecorder(operation: String, extraLabels: Seq[String]): FixedLabelsRecorder = {
+    new FixedLabelsRecorder(operation, extraLabels)
+  }
+
+  /**
+   * Records operation latencies for one operation and one set of extra labels. See
+   * [[fixedLabelsRecorder]].
+   *
+   * @throws IllegalArgumentException If the number of `extraLabels` doesn't match the number of
+   *                                  extra label names of the enclosing histogram.
+   */
+  @ThreadSafe
+  class FixedLabelsRecorder @throws[IllegalArgumentException] private[CachingLatencyHistogram] (
+      operation: String,
+      extraLabels: Seq[String]) {
+
+    /** The series that successful operations are recorded in. */
+    private val successChild: Histogram.Child = histogram.labels(
+      (Seq(operation, "success", Status.Code.OK.toString, "") ++ extraLabels): _*
+    )
+
+    /**
+     * Records the latency of a thunk that returns a value synchronously. Same as
+     * [[CachingLatencyHistogram.recordLatencySync]] with this recorder's operation and extra
+     * labels.
+     *
+     * @param thunk Thunk to instrument.
+     * @tparam T    The return type of `thunk`.
+     * @throws Exception If `thunk` itself throws, the latency will still be recorded and the
+     *                   exception will then be re-thrown.
+     */
+    def recordLatencySync[T](thunk: => T): T = {
+      val startTime: TickerTime = clock.tickerTime()
+      try {
+        val result: T = thunk // invokes the thunk.
+        val latencyDuration: FiniteDuration = clock.tickerTime() - startTime
+        successChild.observe(latencyDuration.toUnit(TimeUnit.SECONDS))
+        result
+      } catch {
+        case NonFatal(ex) =>
+          onFailure(operation, startTime, ex, extraLabels)
+          throw ex
+      }
+    }
+  }
+
   /** Helper function to observe the latency since `startTime` with the given labels. */
   def observeLatency(
       latencyDuration: FiniteDuration,
@@ -171,7 +233,7 @@ class CachingLatencyHistogram private (
       latencyDuration = latencyDuration,
       operation = operation,
       statusCode = statusCodeExtractor(ex),
-      errorCodeOpt = Some(ErrorCodeUtils.getFinalErrorCode(ex)),
+      errorCodeOpt = Some(errorCodeOverride(ex).getOrElse(ErrorCodeUtils.getFinalErrorCode(ex))),
       extraLabels = extraLabels
     )
   }
@@ -183,24 +245,24 @@ object CachingLatencyHistogram {
   /**
    * The buckets are chosen to be exponentially spaced 10 microseconds to 631 seconds
    * (10.5 minutes).
-   * 10, 15.85, 25.12, 39.81, 63.10, 100 (microseconds)
-   * 158.49, 251.19, 398.11, 630.96, 1000 (microseconds)
-   * 1.58, 2.51, 3.98, 6.31, 10 (milliseconds)
-   * 15.85, 25.12, 39.81, 63.09, 100 (milliseconds)
-   * 158.49, 251.19, 398.11, 630.96, 1000 (milliseconds) (1 second)
+   * 10, 25.12, 63.10 (microseconds)
+   * 158.49, 398.11, 1000 (microseconds)
+   * 2.51, 6.31 (milliseconds)
+   * 15.85, 39.81, 100 (milliseconds)
+   * 251.19, 630.96 (milliseconds)
    *
-   * 1.0, 2.51, 6.31, 15.85, 39.81, 100.0, 251.19, 630.96 (seconds)
+   * 2.51, 15.85, 100.0, 630.96 (seconds)
    *
-   * 10 microseconds to 1 sec[26 buckets] is mainly for cache latency
-   * f(i) = 10 * 10^(0.2 * i) / 1000000
-   * and 1 sec to 631 sec [7 buckets] is for cache miss database latency
-   * f(i) = 10^(0.4 * i)
+   * 10 microseconds to 631 milliseconds [13 buckets] is mainly for cache latency
+   * f(i) = 10 * 10^(0.4 * i) / 1000000
+   * and 2.51 seconds to 631 seconds [4 buckets] is for cache miss database latency
+   * f(i) = 10^(0.4 * (2 * i - 1))
    *
-   * total 26 + 7 = 33 buckets
+   * total 13 + 4 = 17 buckets
    */
   private val LOW_LATENCY_BUCKET_SECS: Vector[Double] = {
-    ((for (i <- 0 until 26) yield 10 * math.pow(10, 0.2 * i) / 1000000.0) ++
-    (for (i <- 1 until 8) yield math.pow(10, 0.4 * i))).toVector
+    ((for (i <- 0 until 13) yield 10 * math.pow(10, 0.4 * i) / 1000000.0) ++
+    (for (i <- 1 until 5) yield math.pow(10, 0.4 * (2 * i - 1)))).toVector
   }
 
   /**
@@ -220,14 +282,16 @@ object CachingLatencyHistogram {
       metric: String,
       extraLabelNames: Iterable[String],
       statusCodeExtractor: Throwable => Status.Code = DEFAULT_STATUS_CODE_EXTRACTOR,
-      customBucketsSecs: Vector[Double] = LOW_LATENCY_BUCKET_SECS): CachingLatencyHistogram = {
+      customBucketsSecs: Vector[Double] = LOW_LATENCY_BUCKET_SECS,
+      errorCodeOverride: Throwable => Option[ErrorCode] = _ => None): CachingLatencyHistogram = {
     new CachingLatencyHistogram(
       metric,
       RealtimeTypedClock, // Measure latency using the system clock.
       extraLabelNames,
       customBucketsSecs,
       CollectorRegistry.defaultRegistry, // Collect metrics using the real Prometheus registry.
-      statusCodeExtractor
+      statusCodeExtractor,
+      errorCodeOverride
     )
   }
 
@@ -247,15 +311,16 @@ object CachingLatencyHistogram {
         extraLabelNames: Iterable[String] = Vector.empty,
         bucketSecs: Vector[Double] = LOW_LATENCY_BUCKET_SECS,
         registry: CollectorRegistry = CollectorRegistry.defaultRegistry,
-        statusCodeExtractor: Throwable => Status.Code = DEFAULT_STATUS_CODE_EXTRACTOR)
-        : CachingLatencyHistogram = {
+        statusCodeExtractor: Throwable => Status.Code = DEFAULT_STATUS_CODE_EXTRACTOR,
+        errorCodeOverride: Throwable => Option[ErrorCode] = _ => None): CachingLatencyHistogram = {
       new CachingLatencyHistogram(
         metric,
         clock,
         extraLabelNames,
         bucketSecs,
         registry,
-        statusCodeExtractor
+        statusCodeExtractor,
+        errorCodeOverride
       )
     }
   }

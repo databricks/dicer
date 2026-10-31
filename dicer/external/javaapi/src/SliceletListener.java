@@ -1,3 +1,4 @@
+// LINT.IfChange
 package com.databricks.dicer.external.javaapi;
 
 /**
@@ -10,3 +11,5 @@ public interface SliceletListener {
    */
   void onAssignmentUpdated();
 }
+// LINT.ThenChange(dicer/external/src/SliceletListener.scala)
+// LINT.ThenChange(dicer/rust/external/slicelet/src/slicelet.rs)

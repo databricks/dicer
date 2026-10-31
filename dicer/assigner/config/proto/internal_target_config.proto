@@ -2,6 +2,7 @@ syntax = "proto2";
 
 package dicer;
 
+import "caching/external/proto/config_scope_specification.proto";
 import "dicer/assigner/config/proto/advanced_target_config.proto";
 import "dicer/external/proto/target.proto";
 import "scalapb.proto";
@@ -17,18 +18,43 @@ option (scalapb.options) = {
 
 // The overall Dicer configuration for a target name. This message is used for data
 // (de)serialization in exchange with SAFE.
+//
+// WARNING: This proto is serialized in json and as such any field rename is a breaking change.
 message InternalDicerTargetConfigP {
   // The name of targets for which this configuration applies. (Targets may also be scoped to
   // particular clusters, which is why we define the configuration as applying to configurations
   // with a particular target name, rather than applying to a particular target.)
   // NOTE: for legacy reasons, the field is named "target", but a more reasonable name would be
-  //       "target_name". Since the protos are serialized in json format, a rename would be a
-  //       breaking change.
+  //       "target_name"; we do not rename as it would be a breaking change.
   optional string target = 1;
 
   // Contains the derived target configuration after applying scope specific overrides.
+  // TODO(<internal bug>): When `overrides` has been populated and the assigners have been
+  //                using the configs solely through that map for overridden clusters, this field
+  //                should become solely the default config used when `overrides` has no
+  //                entry matching the requested config scope.
   optional TargetConfigFieldsP target_config = 2;
 
   // Contains the derived advanced target configuration after applying scope specific overrides.
+  // TODO(<internal bug>): When `overrides` has been populated and the assigners have been
+  //                using the configs solely through that map for overridden clusters, this field
+  //                should become solely the default config used when `overrides` has no
+  //                entry matching the requested config scope.
+  optional AdvancedTargetConfigFieldsP advanced_config = 3;
+
+  // Fully resolved configurations after applying the scoped overrides. Each scope must appear
+  // at most once.
+  repeated InternalDicerOverrideP overrides = 4;
+}
+
+// A fully resolved target configuration for one scope.
+message InternalDicerOverrideP {
+  // The scope of the override. Must be specified.
+  optional databricks.caching.ConfigScopeP override_scope = 1;
+
+  // Contains the full target configuration to use for the override scope.
+  optional TargetConfigFieldsP target_config = 2;
+
+  // Contains the full advanced target configuration to use for the override scope.
   optional AdvancedTargetConfigFieldsP advanced_config = 3;
 }

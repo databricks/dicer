@@ -27,7 +27,6 @@ import com.databricks.dicer.friend.Squid
 import com.databricks.testing.DatabricksTest
 import com.databricks.dicer.common.test.AssignmentTestDataP
 import com.databricks.dicer.common.test.AssignmentTestDataP.DiffUnusedP.DIFF_UNUSED_P_UNSPECIFIED
-import com.databricks.dicer.common.test.AssignmentTestDataP.FromDiffFailureTestCaseP.ExpectedFailure
 import com.databricks.dicer.common.test.AssignmentTestDataP.{
   AssignedResourcesTestCaseP,
   DiffUnusedP,
@@ -54,19 +53,11 @@ class AssignmentSuite extends DatabricksTest {
     Assignment
       .fromDiff(
         knownAssignmentOpt = None,
-        // `fromDiff` forbids diffs with strong consistency, so we convert to affinity mode here
-        // and then convert back to strong mode if needed below.
         parseSimpleDiffAssignment(assignment)
-          .copy(consistencyMode = AssignmentConsistencyMode.Affinity)
       )
       .left
       .toOption
       .get
-      .copy(consistencyMode = if (assignment.getIsConsistent) {
-        AssignmentConsistencyMode.Strong
-      } else {
-        AssignmentConsistencyMode.Affinity
-      })
   }
 
   test("Assignment round-tripping with full diff") {
@@ -208,27 +199,16 @@ class AssignmentSuite extends DatabricksTest {
       val knownAssignmentOpt: Option[Assignment] =
         testCase.knownAssignment.map(parseSimpleAssignment)
       val diff: DiffAssignment = parseSimpleDiffAssignment(testCase.getDiff)
-      testCase.expectedFailure match {
-        case ExpectedFailure.ExpectedDiffUnused(expectedDiffUnusedProto: DiffUnusedP) =>
-          val expectedDiffUnused: DiffUnused = expectedDiffUnusedProto match {
-            case DiffUnusedP.INCONSISTENCY => DiffUnused.INCONSISTENCY
-            case DiffUnusedP.TOO_STALE_DIFF => DiffUnused.TOO_STALE_DIFF
-            case DiffUnusedP.DIFF_MATCHES_KNOWN => DiffUnused.DIFF_MATCHES_KNOWN
-            case DiffUnusedP.NO_KNOWN => DiffUnused.NO_KNOWN
-            case DiffUnusedP.TOO_STALE_KNOWN => DiffUnused.TOO_STALE_KNOWN
-            case DIFF_UNUSED_P_UNSPECIFIED =>
-              throw new IllegalArgumentException("Invalid DiffUnusedP")
-          }
-          assert(
-            Assignment.fromDiff(knownAssignmentOpt, diff) == Right(expectedDiffUnused)
-          )
-        case ExpectedFailure.ExpectedError(expectedError: String) =>
-          assertThrow[NotImplementedError](expectedError) {
-            Assignment.fromDiff(knownAssignmentOpt, diff)
-          }
-        case ExpectedFailure.Empty =>
-          throw new IllegalArgumentException("Empty expected failure")
+      val expectedDiffUnused: DiffUnused = testCase.getExpectedDiffUnused match {
+        case DiffUnusedP.INCONSISTENCY => DiffUnused.INCONSISTENCY
+        case DiffUnusedP.TOO_STALE_DIFF => DiffUnused.TOO_STALE_DIFF
+        case DiffUnusedP.DIFF_MATCHES_KNOWN => DiffUnused.DIFF_MATCHES_KNOWN
+        case DiffUnusedP.NO_KNOWN => DiffUnused.NO_KNOWN
+        case DiffUnusedP.TOO_STALE_KNOWN => DiffUnused.TOO_STALE_KNOWN
+        case DIFF_UNUSED_P_UNSPECIFIED =>
+          throw new IllegalArgumentException("Invalid DiffUnusedP")
       }
+      assert(Assignment.fromDiff(knownAssignmentOpt, diff) == Right(expectedDiffUnused))
     }
   }
 
@@ -257,7 +237,6 @@ class AssignmentSuite extends DatabricksTest {
     // Slice).
     val assignment: Assignment = createAssignment(
       50,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       ("" -- 0) @@ 20 -> Seq("pod0"),
       (0 -- ∞) @@ 50 -> Seq("pod1")
@@ -280,7 +259,6 @@ class AssignmentSuite extends DatabricksTest {
     // Slice is unchanged since 2##20.
     val assignment: Assignment = createAssignment(
       2 ## 50,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       ("" -- 0) @@ (2 ## 20) -> Seq("pod0"),
       (0 -- ∞) @@ (2 ## 50) -> Seq("pod1")
@@ -344,7 +322,6 @@ class AssignmentSuite extends DatabricksTest {
       // Create the input assignment by parsing the test proto data.
       val assignment: Assignment = createAssignment(
         generation = Generation.fromProto(testCase.getAssignment.getGeneration),
-        consistencyMode = AssignmentConsistencyMode.Affinity,
         assignerServiceInfoOpt = None,
         entries = testCase.getAssignment.sliceAssignments.map((proto: SimpleSliceAssignmentP) => {
           val sliceWithResources: SliceWithResources = SliceWithResources(
@@ -400,7 +377,6 @@ class AssignmentSuite extends DatabricksTest {
     // Full range.
     val assignment: Assignment = createAssignment(
       35 ## 64,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       ("" -- ∞) @@ (35 ## 54) -> Seq("Pod4")
     )
@@ -413,29 +389,15 @@ class AssignmentSuite extends DatabricksTest {
 
   test("Assignment rejects invalid assignments") {
     // Test plan: Verify that `Assignment` rejects invalid assignments. Verify this by
-    // creating an assignment with an empty generation number and an assignment with strong
-    // consistency mode and a loose generation number and checking that the constructor throws an
-    // exception.
+    // creating an assignment with an empty generation number and checking that the constructor
+    // throws an exception.
 
     // Empty generation number.
     assertThrow[IllegalArgumentException]("Assignment must have non-empty generation.") {
       createAssignment(
         generation = Generation.EMPTY,
-        AssignmentConsistencyMode.Affinity,
         assignerServiceInfoOpt = None,
         ("" -- ∞) @@ 1 -> Seq("pod0")
-      )
-    }
-
-    // Strong consistency mode with loose generation number.
-    assertThrow[IllegalArgumentException](
-      "Consistent assignment cannot be in the loose incarnation."
-    ) {
-      createAssignment(
-        generation = 10,
-        AssignmentConsistencyMode.Strong,
-        assignerServiceInfoOpt = None,
-        ("" -- ∞) @@ 10 -> Seq("pod0")
       )
     }
   }

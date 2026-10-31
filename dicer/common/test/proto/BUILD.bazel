@@ -1,3 +1,4 @@
+load("//bazel/rules/rust:rules_rust.bzl", "rust_buffa_library", "rust_prost_library")
 load("@protobuf//bazel:java_proto_library.bzl", "java_proto_library")
 load("@rules_proto//proto:defs.bzl", "proto_library")
 load("@rules_scala//scala_proto:scala_proto.bzl", "scala_proto_library")
@@ -22,6 +23,23 @@ java_proto_library(
     deps = [":test_data_proto"],
 )
 
+rust_prost_library(
+    name = "test_data_proto_prost_lib",
+    crate_name = "dicer_common_test_proto_test_data_proto",
+    proto = ":test_data_proto",
+    testonly = True,
+    visibility = ["//dicer:internal"],
+)
+
+rust_buffa_library(
+    name = "test_data_proto_buffa_lib",
+    crate_name = "dicer_common_test_proto_test_data_proto_buffa",
+    proto = ":test_data_proto",
+    testonly = True,
+    text = True,
+    visibility = ["//dicer:internal"],
+)
+
 scala_proto_library(
     name = "test_data_proto_scala_lib",
     testonly = True,
@@ -36,6 +54,7 @@ proto_library(
     visibility = ["//dicer:internal"],
     deps = [
         "//dicer/common/proto:common_proto",
+        "//dicer/friend/proto:friend_proto_library",
         "//wrappers/rpc:scalapb_proto",
     ],
 )
@@ -64,4 +83,20 @@ scala_proto_library(
     testonly = True,
     visibility = ["//dicer:internal"],
     deps = [":slicelet_test_harness_proto"],
+)
+
+rust_prost_library(
+    name = "clerk_test_harness_proto_prost_lib",
+    crate_name = "dicer_common_test_proto_clerk_test_harness_proto",
+    proto = ":clerk_test_harness_proto",
+    testonly = True,
+    visibility = ["//dicer:internal"],
+)
+
+rust_prost_library(
+    name = "slicelet_test_harness_proto_prost_lib",
+    crate_name = "dicer_common_test_proto_slicelet_test_harness_proto",
+    proto = ":slicelet_test_harness_proto",
+    testonly = True,
+    visibility = ["//dicer:internal"],
 )

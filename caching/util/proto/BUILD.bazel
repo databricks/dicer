@@ -1,3 +1,4 @@
+load("//bazel/rules/rust:rules_rust.bzl", "rust_prost_library")
 load("@rules_proto//proto:defs.bzl", "proto_library")
 load("@rules_scala//scala_proto:scala_proto.bzl", "scala_proto_library")
 
@@ -15,4 +16,11 @@ scala_proto_library(
         "//dicer:__subpackages__",
     ],
     deps = [":hyper_log_log_proto"],
+)
+
+rust_prost_library(
+    name = "hyper_log_log_proto_prost_lib",
+    crate_name = "caching_util_proto_hyper_log_log_proto",
+    proto = ":hyper_log_log_proto",
+    visibility = ["//caching:all_caching"],
 )

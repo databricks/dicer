@@ -158,6 +158,12 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
     MetricUtils.getMetricValue(CollectorRegistry.defaultRegistry, metricName, labels.toMap)
   }
 
+  override protected def readPrometheusMetricSum(
+      metricName: String,
+      labels: Vector[(String, String)]): Double = {
+    MetricUtils.getMetricValuesSum(CollectorRegistry.defaultRegistry, metricName, labels.toMap)
+  }
+
   // This test case is not exercised for Rust, because the Rust implementation currently (as of
   // April 2026) does not have z-pages.
   // TODO(<internal bug>): Move this test to SliceLookupSuiteBase.scala once Rust getSlicezData is fully
@@ -228,7 +234,7 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
     clerkSliceLookup.start(() => ClerkData)
     val slicelet1Config: InternalClientConfig = createInternalClientConfig(
       ClientType.Slicelet,
-      clerkSliceLookupConfig.watchAddress,
+      clerkConfig.watchStubManagerConfig.watchAddress,
       clerkSliceLookupConfig.watchStubCacheTime,
       subscriberDebugName = slicelet1DebugName,
       enableRateLimiting = false,
@@ -288,7 +294,7 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
       squidOpt = None,
       unattributedLoadBySliceOpt = None,
       subscriberDebugName = clerkDebugName,
-      watchAddress = clerkSliceLookupConfig.watchAddress,
+      watchAddress = clerkConfig.watchStubManagerConfig.watchAddress.toString,
       lastSuccessfulHeartbeat = clerkSlicezData.lastSuccessfulHeartbeat,
       watchAddressUsedSince = clerkSlicezData.watchAddressUsedSince,
       clientClusterOpt = clerkSlicezData.clientClusterOpt
@@ -328,7 +334,7 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
     // Start slicelet2's SliceLookup.
     val slicelet2Config: InternalClientConfig = createInternalClientConfig(
       ClientType.Slicelet,
-      clerkSliceLookupConfig.watchAddress,
+      clerkConfig.watchStubManagerConfig.watchAddress,
       clerkSliceLookupConfig.watchStubCacheTime,
       subscriberDebugName = slicelet2DebugName,
       enableRateLimiting = false,

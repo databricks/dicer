@@ -4,7 +4,7 @@ rust_library(
     name = "async",
     testonly = True,
     srcs = ["src/lib.rs"],
-    crate_name = "universe_raf_testing_async",
+    crate_name = "raf_testing_async",
     visibility = ["//visibility:public"],
     deps = [
         "@crates//:futures",
@@ -14,6 +14,7 @@ rust_library(
 
 rust_test(
     name = "async_test",
+    timeout = "short",
     testonly = True,
     srcs = ["tests/async_test.rs"],
     deps = [

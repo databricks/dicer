@@ -9,6 +9,7 @@ import scala.concurrent.duration._
 import scala.concurrent.{Await, Future}
 import scala.util.{Failure, Random, Success, Try}
 
+import com.databricks.{ErrorCode => MetricErrorCode}
 import com.databricks.api.base.DatabricksServiceException
 import com.databricks.ErrorCode
 
@@ -387,13 +388,14 @@ class CachingLatencyHistogramSuite extends DatabricksTest {
     // Make sure that we have buckets at the expected intervals
     // (e.g. 10 microsecond intervals up to 100 microseconds.)
     assert(bucketSecs(0).seconds == 10.microseconds)
-    assert(bucketSecs.length == 33)
-    val expectedBucketRatio: Double = Math.pow(10, 0.2)
-    for (i: Int <- 1 until 26) {
+    assert(bucketSecs.length == 17)
+    val expectedBucketRatio: Double = Math.pow(10, 0.4)
+    for (i: Int <- 1 until 13) {
       assertApproxEqual(bucketSecs(i) / bucketSecs(i - 1), expectedBucketRatio)
     }
-    val expectedBigBucketRatio: Double = Math.pow(10, 0.4)
-    for (i: Int <- 26 until bucketSecs.length) {
+    assertApproxEqual(bucketSecs(13) / bucketSecs(12), Math.pow(10, 0.6))
+    val expectedBigBucketRatio: Double = Math.pow(10, 0.8)
+    for (i: Int <- 14 until bucketSecs.length) {
       assertApproxEqual(bucketSecs(i) / bucketSecs(i - 1), expectedBigBucketRatio)
     }
 
@@ -439,6 +441,65 @@ class CachingLatencyHistogramSuite extends DatabricksTest {
       ) {
         clock.advanceBy(4.milliseconds)
       }
+    }
+  }
+
+  test("Fixed labels recorder records the same metrics as recordLatencySync") {
+    // Test plan: Verify that a fixed labels recorder records successes and failures in the same
+    // series and buckets as recordLatencySync. Do this by recording two successful thunks that take
+    // 4 and 6 milliseconds and a failing thunk that takes 0.5 milliseconds through the recorder,
+    // and checking the bucket counts that the synchronous tests above expect for the same
+    // latencies.
+    val registry = new CollectorRegistry(true)
+    val histogram = CachingLatencyHistogram.staticForTest.create(
+      METRIC,
+      clock,
+      METRIC_LABEL_NAMES,
+      BUCKETS_SECS,
+      registry
+    )
+    val recorder: histogram.FixedLabelsRecorder =
+      histogram.fixedLabelsRecorder(WRITE, METRIC_LABELS)
+
+    val result: String = recorder.recordLatencySync {
+      clock.advanceBy(4.milliseconds)
+      "result"
+    }
+    assert(result == "result")
+    val result2: String = recorder.recordLatencySync {
+      clock.advanceBy(6.milliseconds)
+      "result2"
+    }
+    assert(result2 == "result2")
+    awaitHistogramCounts(Seq(0, 0, 1, 2, 2), registry, WRITE, SUCCESS, Some(Status.OK))
+
+    assertThrows[StatusException] {
+      recorder.recordLatencySync[String] {
+        clock.advanceBy(0.5.milliseconds)
+        throw new StatusException(Status.INTERNAL.withDescription("Internal error thrown"))
+      }
+    }
+    awaitHistogramCounts(Seq(1, 1, 1, 1, 1), registry, WRITE, FAILURE, Some(Status.INTERNAL))
+    assert(getHistogramCount(registry, WRITE, SUCCESS, Some(Status.OK)) == 2)
+  }
+
+  test("Fixed labels recorder rejects the wrong number of labels") {
+    // Test plan: Verify that creating a fixed labels recorder with too few or too many extra
+    // labels throws, instead of failing later on the first recorded operation.
+    val registry = new CollectorRegistry(true)
+    val histogram = CachingLatencyHistogram.staticForTest.create(
+      METRIC,
+      clock,
+      METRIC_LABEL_NAMES,
+      BUCKETS_SECS,
+      registry
+    )
+
+    assertThrow[IllegalArgumentException]("Incorrect number of labels.") {
+      histogram.fixedLabelsRecorder(WRITE, Seq(NAMESPACE))
+    }
+    assertThrow[IllegalArgumentException]("Incorrect number of labels.") {
+      histogram.fixedLabelsRecorder(WRITE, Seq(NAMESPACE, SOFTMAP, "extra_label"))
     }
   }
 
@@ -491,6 +552,84 @@ class CachingLatencyHistogramSuite extends DatabricksTest {
 
     // failure bucket for all failures should be the same as INTERNAL only
     awaitHistogramCounts(Seq(1, 1, 1, 1, 1), registry, WRITE, FAILURE, None)
+  }
+
+  gridTest("Error code overrides preserve gRPC status")(Seq(true, false)) { asynchronous: Boolean =>
+    // Test plan: Record failures through both synchronous and asynchronous paths. Verify that a
+    // typed error code override changes only its label, while unrelated errors and successes retain
+    // their standard labels.
+    // Setup: Override only deadline failures in an isolated histogram registry.
+    val registry = new CollectorRegistry(true)
+    val histogram = CachingLatencyHistogram.staticForTest.create(
+      METRIC,
+      clock,
+      METRIC_LABEL_NAMES,
+      BUCKETS_SECS,
+      registry,
+      errorCodeOverride = {
+        case ex: StatusException if ex.getStatus.getCode == Status.Code.DEADLINE_EXCEEDED =>
+          Some(MetricErrorCode.CANCELLED)
+        case _ => None
+      }
+    )
+
+    for (status: Status <- Seq(Status.DEADLINE_EXCEEDED, Status.INTERNAL)) {
+      val exception = new StatusException(
+        status.withCause(DatabricksServiceException(ErrorCode.INTERNAL_ERROR, "test failure"))
+      )
+      assertThrows[StatusException] {
+        if (asynchronous) {
+          TestUtils.awaitResult(
+            histogram
+              .recordLatencyAsync(READ, (_: Try[Unit]) => METRIC_LABELS) {
+                Pipeline.failed[Unit](exception)
+              }
+              .toFuture,
+            Inf
+          )
+        } else {
+          histogram.recordLatencySync(READ, (_: Try[Unit]) => METRIC_LABELS) {
+            throw exception
+          }
+        }
+      }
+      val expectedErrorCode: String =
+        if (status.getCode == Status.Code.DEADLINE_EXCEEDED) "CANCELLED"
+        else "INTERNAL_ERROR"
+      // Verify: Each failure retains its gRPC status and uses the expected error code label.
+      assert(
+        MetricUtils.getHistogramCount(
+          registry,
+          METRIC,
+          Map(
+            "operation" -> READ,
+            "grpc_status" -> status.getCode.toString,
+            "error_code" -> expectedErrorCode
+          )
+        ) == 1
+      )
+    }
+
+    if (asynchronous) {
+      TestUtils.awaitResult(
+        histogram
+          .recordLatencyAsync(READ, (_: Try[Unit]) => METRIC_LABELS) {
+            Pipeline.successful(())
+          }
+          .toFuture,
+        Inf
+      )
+    } else {
+      histogram.recordLatencySync(READ, (_: Try[Unit]) => METRIC_LABELS) { () }
+    }
+    // Verify: Success retains an OK status and an empty error code label.
+    assert(
+      MetricUtils.getHistogramCount(
+        registry,
+        METRIC,
+        Map("operation" -> READ, "grpc_status" -> "OK", "error_code" -> "")
+      ) == 1
+    )
   }
 
   test("Latency metrics for asynchronous call with computed labels") {

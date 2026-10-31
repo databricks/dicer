@@ -1,3 +1,4 @@
+// LINT.IfChange
 package com.databricks.dicer.external
 
 /**
@@ -76,3 +77,5 @@ object Slice {
   /** Creates an open-ended Slice containing all keys `key` such that `lowInclusive <= key`. */
   def atLeast(lowInclusive: SliceKey): Slice = Slice(lowInclusive, InfinitySliceKey)
 }
+// LINT.ThenChange(dicer/external/javaapi/src/Slice.java)
+// LINT.ThenChange(dicer/rust/external/types/src/slice.rs)

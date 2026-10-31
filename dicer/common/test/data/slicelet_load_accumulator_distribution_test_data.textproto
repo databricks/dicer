@@ -1,0 +1,1024 @@
+# proto-file: dicer/common/test/proto/test_data.proto
+# proto-message: SliceletLoadAccumulatorTestDataP
+
+# Load-distribution reporting cases, currently consumed only by Rust.
+
+valid_cases: [
+  # Test plan: No CDF is produced in load report when distribution reporting is
+  # disabled by setting cdf_point_budget to 0.
+  {
+    name: "Distribution reporting disabled"
+    factory_parameter_opt: {
+      # budget being 0 means the load distribution reporting is disabled.
+      cdf_point_budget: 0 max_key_length_bytes: 64
+    }
+    actions: [
+      { change_assignment: {
+        generation: { incarnation: 2 number: 42 }
+        current_squid: "slicelet-0"
+        new_assignment: [
+          { slice: { } resources: ["slicelet-0"]
+            generation: { incarnation: 2 number: 42 } }
+        ]
+      } },
+      { increment_primary_load: { bytes_key: "a" value: 1 } },
+      { advance_clock: { } },
+      { check_attributed_loads: {
+        debug_msg: "Check per-Slice CDFs"
+        expected_size: 1
+        expected_slice_info: [
+          { slice: { }
+            top_slice_keys: ["a"]
+            approximate_primary_load: 1.0
+          }
+          # Empty expected_load_distribution.
+        ]
+      } },
+      { check_unattributed_load: {
+        debug_msg: "Check unattributed load has no CDF" expected_value: 0.0
+        # Empty expected_load_distribution.
+      } }
+    ]
+  },
+
+  # Test plan: No CDF is reported for unattributed load even when reporting is enabled.
+  {
+    name: "No CDF for unattributed load with reporting enabled"
+    factory_parameter_opt: {
+      cdf_point_budget: 7 max_key_length_bytes: 64
+    }
+    actions: [
+      { change_assignment: {
+        generation: { incarnation: 2 number: 42 }
+        current_squid: "slicelet-0"
+        new_assignment: [
+          { slice: { } resources: ["slicelet-1"] # Whole Slice space assigned to other Slicelet.
+            generation: { incarnation: 2 number: 42 } }
+        ]
+      } },
+      { increment_primary_load: { bytes_key: "z" value: 3 } },
+      { advance_clock: { } },
+      { check_attributed_loads: {
+        debug_msg: "No Slices are assigned to this Slicelet"
+        expected_size: 0
+      } },
+      { check_unattributed_load: {
+        debug_msg: "Check unattributed load has no CDF" expected_value: 3.0
+        # Empty expected_load_distribution.
+      } }
+    ]
+  },
+
+  # Test plan: An assigned Slice with a positive budget but no observations has no CDF reported.
+  {
+    name: "No observations"
+    factory_parameter_opt: {
+      cdf_point_budget: 7 max_key_length_bytes: 64
+    }
+    actions: [
+      { change_assignment: {
+        generation: { incarnation: 2 number: 42 }
+        current_squid: "slicelet-0"
+        new_assignment: [
+          { slice: { } resources: ["slicelet-0"]
+            generation: { incarnation: 2 number: 42 } }
+        ]
+      } },
+      { advance_clock: { } },
+      { check_attributed_loads: {
+        debug_msg: "Check per-Slice CDFs"
+        expected_size: 1
+        expected_slice_info: [
+          { slice: { }
+            approximate_primary_load: 0.0
+            # Empty expected_load_distribution.
+          }
+        ]
+      } },
+      { check_unattributed_load: {
+        debug_msg: "Check unattributed load has no CDF" expected_value: 0.0
+        # Empty expected_load_distribution.
+      } }
+    ]
+  },
+
+  # Test plan: Report a CDF for a single assigned Slice. Confirm the budget is respected and that we
+  # pick CDF points by fraction in complete dyadic levels (i.e. 1/2; 1/4, 3/4; 1/8, ...). With
+  # budget 4, the third level (4 more points) would exceed the budget, so only 1/4, 1/2, 3/4 are
+  # chosen.
+  {
+    name: "Reports a CDF for an assigned Slice"
+    factory_parameter_opt: {
+      cdf_point_budget: 4 max_key_length_bytes: 64
+    }
+    actions: [
+      { change_assignment: {
+        generation: { incarnation: 2 number: 42 }
+        current_squid: "slicelet-0"
+        new_assignment: [
+          { slice: { } resources: ["slicelet-0"]
+            generation: { incarnation: 2 number: 42 } }
+        ]
+      } },
+      { increment_primary_load: { bytes_key: "a" value: 1 } },
+      { increment_primary_load: { bytes_key: "b" value: 1 } },
+      { increment_primary_load: { bytes_key: "c" value: 1 } },
+      { increment_primary_load: { bytes_key: "d" value: 1 } },
+      { increment_primary_load: { bytes_key: "e" value: 1 } },
+      { increment_primary_load: { bytes_key: "f" value: 1 } },
+      { increment_primary_load: { bytes_key: "g" value: 1 } },
+      { increment_primary_load: { bytes_key: "h" value: 1 } },
+      { advance_clock: { } },
+      { check_attributed_loads: {
+        debug_msg: "Check the assigned Slice's CDF and load"
+        expected_size: 1
+        expected_slice_info: [
+          { slice: { }
+            top_slice_keys: ["a", "b", "c", "d", "e", "f", "g", "h"]
+            approximate_primary_load: 8.0
+            expected_load_distribution: {
+              max_error_fraction: 0.02
+              points: [
+                { key: "b" cumulative_load_fraction: 0.25 },
+                { key: "d" cumulative_load_fraction: 0.5 },
+                { key: "f" cumulative_load_fraction: 0.75 }
+              ]
+            }
+          }
+        ]
+      } },
+      { check_unattributed_load: {
+        debug_msg: "Check unattributed load has no CDF" expected_value: 0.0
+      } }
+    ]
+  },
+
+  # Test plan: Verify that a per-Slice budget of 1 completes exactly the first dyadic level, so the
+  # Slice reports only the median.
+  {
+    name: "Per-Slice budget 1 reports the median"
+    factory_parameter_opt: {
+      cdf_point_budget: 1 max_key_length_bytes: 64
+    }
+    actions: [
+      { change_assignment: {
+        generation: { incarnation: 2 number: 42 }
+        current_squid: "slicelet-0"
+        new_assignment: [
+          { slice: { } resources: ["slicelet-0"]
+            generation: { incarnation: 2 number: 42 } }
+        ]
+      } },
+      { increment_primary_load: { bytes_key: "a" value: 1 } },
+      { increment_primary_load: { bytes_key: "b" value: 1 } },
+      { increment_primary_load: { bytes_key: "c" value: 1 } },
+      { increment_primary_load: { bytes_key: "d" value: 1 } },
+      { increment_primary_load: { bytes_key: "e" value: 1 } },
+      { increment_primary_load: { bytes_key: "f" value: 1 } },
+      { increment_primary_load: { bytes_key: "g" value: 1 } },
+      { increment_primary_load: { bytes_key: "h" value: 1 } },
+      { advance_clock: { } },
+      { check_attributed_loads: {
+        debug_msg: "Check the assigned Slice's CDF"
+        expected_size: 1
+        expected_slice_info: [
+          { slice: { }
+            top_slice_keys: ["a", "b", "c", "d", "e", "f", "g", "h"]
+            approximate_primary_load: 8.0
+            expected_load_distribution: {
+              max_error_fraction: 0.02
+              points: [
+                { key: "d" cumulative_load_fraction: 0.5 }
+              ]
+            }
+          }
+        ]
+      } }
+    ]
+  },
+
+  # Test plan: Verify that a per-Slice budget of 2 reports only the median, since the second dyadic
+  # level (2 more points) would exceed the budget.
+  {
+    name: "Per-Slice budget 2 drops the incomplete second level"
+    factory_parameter_opt: {
+      cdf_point_budget: 2 max_key_length_bytes: 64
+    }
+    actions: [
+      { change_assignment: {
+        generation: { incarnation: 2 number: 42 }
+        current_squid: "slicelet-0"
+        new_assignment: [
+          { slice: { } resources: ["slicelet-0"]
+            generation: { incarnation: 2 number: 42 } }
+        ]
+      } },
+      { increment_primary_load: { bytes_key: "a" value: 1 } },
+      { increment_primary_load: { bytes_key: "b" value: 1 } },
+      { increment_primary_load: { bytes_key: "c" value: 1 } },
+      { increment_primary_load: { bytes_key: "d" value: 1 } },
+      { increment_primary_load: { bytes_key: "e" value: 1 } },
+      { increment_primary_load: { bytes_key: "f" value: 1 } },
+      { increment_primary_load: { bytes_key: "g" value: 1 } },
+      { increment_primary_load: { bytes_key: "h" value: 1 } },
+      { advance_clock: { } },
+      { check_attributed_loads: {
+        debug_msg: "Check the assigned Slice's CDF"
+        expected_size: 1
+        expected_slice_info: [
+          { slice: { }
+            top_slice_keys: ["a", "b", "c", "d", "e", "f", "g", "h"]
+            approximate_primary_load: 8.0
+            expected_load_distribution: {
+              max_error_fraction: 0.02
+              points: [
+                { key: "d" cumulative_load_fraction: 0.5 }
+              ]
+            }
+          }
+        ]
+      } }
+    ]
+  },
+
+  # Test plan: Verify that a per-Slice budget of 7 completes exactly three dyadic levels, so the
+  # Slice reports quantiles 1/8 through 7/8.
+  {
+    name: "Per-Slice budget 7 reports three complete levels"
+    factory_parameter_opt: {
+      cdf_point_budget: 7 max_key_length_bytes: 64
+    }
+    actions: [
+      { change_assignment: {
+        generation: { incarnation: 2 number: 42 }
+        current_squid: "slicelet-0"
+        new_assignment: [
+          { slice: { } resources: ["slicelet-0"]
+            generation: { incarnation: 2 number: 42 } }
+        ]
+      } },
+      { increment_primary_load: { bytes_key: "a" value: 1 } },
+      { increment_primary_load: { bytes_key: "b" value: 1 } },
+      { increment_primary_load: { bytes_key: "c" value: 1 } },
+      { increment_primary_load: { bytes_key: "d" value: 1 } },
+      { increment_primary_load: { bytes_key: "e" value: 1 } },
+      { increment_primary_load: { bytes_key: "f" value: 1 } },
+      { increment_primary_load: { bytes_key: "g" value: 1 } },
+      { increment_primary_load: { bytes_key: "h" value: 1 } },
+      { advance_clock: { } },
+      { check_attributed_loads: {
+        debug_msg: "Check the assigned Slice's CDF"
+        expected_size: 1
+        expected_slice_info: [
+          { slice: { }
+            top_slice_keys: ["a", "b", "c", "d", "e", "f", "g", "h"]
+            approximate_primary_load: 8.0
+            expected_load_distribution: {
+              max_error_fraction: 0.02
+              points: [
+                { key: "a" cumulative_load_fraction: 0.125 },
+                { key: "b" cumulative_load_fraction: 0.25 },
+                { key: "c" cumulative_load_fraction: 0.375 },
+                { key: "d" cumulative_load_fraction: 0.5 },
+                { key: "e" cumulative_load_fraction: 0.625 },
+                { key: "f" cumulative_load_fraction: 0.75 },
+                { key: "g" cumulative_load_fraction: 0.875 }
+              ]
+            }
+          }
+        ]
+      } }
+    ]
+  },
+
+  # Test plan: Verify that a per-Slice budget of 8 reports the same 7 points as a budget of 7, since
+  # the fourth dyadic level (8 more points) would exceed the budget.
+  {
+    name: "Per-Slice budget 8 drops the incomplete fourth level"
+    factory_parameter_opt: {
+      cdf_point_budget: 8 max_key_length_bytes: 64
+    }
+    actions: [
+      { change_assignment: {
+        generation: { incarnation: 2 number: 42 }
+        current_squid: "slicelet-0"
+        new_assignment: [
+          { slice: { } resources: ["slicelet-0"]
+            generation: { incarnation: 2 number: 42 } }
+        ]
+      } },
+      { increment_primary_load: { bytes_key: "a" value: 1 } },
+      { increment_primary_load: { bytes_key: "b" value: 1 } },
+      { increment_primary_load: { bytes_key: "c" value: 1 } },
+      { increment_primary_load: { bytes_key: "d" value: 1 } },
+      { increment_primary_load: { bytes_key: "e" value: 1 } },
+      { increment_primary_load: { bytes_key: "f" value: 1 } },
+      { increment_primary_load: { bytes_key: "g" value: 1 } },
+      { increment_primary_load: { bytes_key: "h" value: 1 } },
+      { advance_clock: { } },
+      { check_attributed_loads: {
+        debug_msg: "Check the assigned Slice's CDF"
+        expected_size: 1
+        expected_slice_info: [
+          { slice: { }
+            top_slice_keys: ["a", "b", "c", "d", "e", "f", "g", "h"]
+            approximate_primary_load: 8.0
+            expected_load_distribution: {
+              max_error_fraction: 0.02
+              points: [
+                { key: "a" cumulative_load_fraction: 0.125 },
+                { key: "b" cumulative_load_fraction: 0.25 },
+                { key: "c" cumulative_load_fraction: 0.375 },
+                { key: "d" cumulative_load_fraction: 0.5 },
+                { key: "e" cumulative_load_fraction: 0.625 },
+                { key: "f" cumulative_load_fraction: 0.75 },
+                { key: "g" cumulative_load_fraction: 0.875 }
+              ]
+            }
+          }
+        ]
+      } }
+    ]
+  },
+
+  # Test plan: Verify that the CDF reflects time-decayed load.
+  {
+    name: "CDF reflects time-decayed load"
+    factory_parameter_opt: {
+      cdf_point_budget: 3 max_key_length_bytes: 64
+    }
+    actions: [
+      { change_assignment: {
+        generation: { incarnation: 2 number: 42 }
+        current_squid: "slicelet-0"
+        new_assignment: [
+          { slice: { } resources: ["slicelet-0"]
+            generation: { incarnation: 2 number: 42 } }
+        ]
+      } },
+      { increment_primary_load: { bytes_key: "a" value: 8 } },
+      { advance_clock: { seconds: 120 } },
+      # Older observations lose weight relative to newer ones. After one 120-second half-life, load
+      # 8 at a contributes as much as newly recorded load 4 at z, so a's cumulative fraction is 1/2
+      # rather than the undecayed 2/3.
+      { increment_primary_load: { bytes_key: "z" value: 4 } },
+      { advance_clock: { } },
+      { check_attributed_loads: {
+        debug_msg: "Old and new observations have equal decayed contributions"
+        expected_size: 1
+        expected_slice_info: [
+          { slice: { }
+            top_slice_keys: ["a", "z"]
+            expected_load_distribution: {
+              max_error_fraction: 0.02
+              points: [
+                { key: "a" cumulative_load_fraction: 0.5 },
+                { key: "z" cumulative_load_fraction: 1.0 } # While budget is 3 we have only 2 keys.
+              ]
+            }
+          }
+        ]
+      } }
+    ]
+  },
+
+  # Test plan: Report CDFs for two assigned Slices with equal load, and confirm the budget is split
+  # evenly.
+  {
+    name: "Budget is split evenly across equal-load Slices"
+    factory_parameter_opt: {
+      cdf_point_budget: 4 max_key_length_bytes: 64
+    }
+    actions: [
+      { change_assignment: {
+        generation: { incarnation: 2 number: 42 }
+        current_squid: "slicelet-0"
+        new_assignment: [
+          { slice: { high_exclusive: "m" } resources: ["slicelet-0"]
+            generation: { incarnation: 2 number: 42 } },
+          { slice: { low_inclusive: "m" } resources: ["slicelet-0"]
+            generation: { incarnation: 2 number: 42 } }
+        ]
+      } },
+      # For the first Slice:
+      { increment_primary_load: { bytes_key: "a" value: 1 } },
+      { increment_primary_load: { bytes_key: "b" value: 1 } },
+      { increment_primary_load: { bytes_key: "c" value: 1 } },
+      { increment_primary_load: { bytes_key: "d" value: 1 } },
+      # For the second Slice:
+      { increment_primary_load: { bytes_key: "n" value: 1 } },
+      { increment_primary_load: { bytes_key: "o" value: 1 } },
+      { increment_primary_load: { bytes_key: "p" value: 1 } },
+      { increment_primary_load: { bytes_key: "q" value: 1 } },
+      { advance_clock: { } },
+      { check_attributed_loads: {
+        debug_msg: "Check per-Slice CDFs"
+        expected_size: 2
+        expected_slice_info: [
+          { slice: { high_exclusive: "m" }
+            top_slice_keys: ["a", "b", "c", "d"]
+            approximate_primary_load: 4.0
+            expected_load_distribution: {
+              max_error_fraction: 0.02
+              points: [
+                { key: "b" cumulative_load_fraction: 0.5 }
+              ]
+            }
+          },
+          { slice: { low_inclusive: "m" }
+            top_slice_keys: ["n", "o", "p", "q"]
+            approximate_primary_load: 4.0
+            expected_load_distribution: {
+              max_error_fraction: 0.02
+              points: [
+                { key: "o" cumulative_load_fraction: 0.5 }
+              ]
+            }
+          }
+        ]
+      } },
+      { check_unattributed_load: {
+        debug_msg: "Check unattributed load has no CDF" expected_value: 0.0
+      } }
+    ]
+  },
+
+  # Test plan: Report CDFs for two assigned slices with uneven load, and confirm that the point
+  # budget is allocated proportionally to load.
+  {
+    name: "Budget is allocated proportionally to load"
+    factory_parameter_opt: {
+      cdf_point_budget: 4 max_key_length_bytes: 64
+    }
+    actions: [
+      { change_assignment: {
+        generation: { incarnation: 2 number: 42 }
+        current_squid: "slicelet-0"
+        new_assignment: [
+          { slice: { high_exclusive: "m" } resources: ["slicelet-0"]
+            generation: { incarnation: 2 number: 42 } },
+          { slice: { low_inclusive: "m" } resources: ["slicelet-0"]
+            generation: { incarnation: 2 number: 42 } }
+        ]
+      } },
+      # For the first Slice:
+      { increment_primary_load: { bytes_key: "a" value: 4 } },
+      # For the second Slice:
+      { increment_primary_load: { bytes_key: "n" value: 3 } },
+      { increment_primary_load: { bytes_key: "o" value: 3 } },
+      { increment_primary_load: { bytes_key: "p" value: 3 } },
+      { increment_primary_load: { bytes_key: "q" value: 3 } },
+      { advance_clock: { } },
+      { check_attributed_loads: {
+        debug_msg: "Check per-Slice CDF points are 1:3"
+        expected_size: 2
+        expected_slice_info: [
+          { slice: { high_exclusive: "m" }
+            top_slice_keys: ["a"]
+            approximate_primary_load: 4.0
+            expected_load_distribution: {
+              max_error_fraction: 0.02
+              points: [
+                { key: "a" cumulative_load_fraction: 1.0 }
+              ]
+            }
+          },
+          { slice: { low_inclusive: "m" }
+            top_slice_keys: ["n", "o", "p", "q"]
+            approximate_primary_load: 12.0
+            expected_load_distribution: {
+              max_error_fraction: 0.02
+              points: [
+                { key: "n" cumulative_load_fraction: 0.25 },
+                { key: "o" cumulative_load_fraction: 0.5 },
+                { key: "p" cumulative_load_fraction: 0.75 }
+              ]
+            }
+          }
+        ]
+      } },
+      { check_unattributed_load: {
+        debug_msg: "Check unattributed load has no CDF" expected_value: 0.0
+      } }
+    ]
+  },
+
+  # Test plan: Confirm that the CDF point budget is an upper bound and need not be fully used.
+  # With loads 8 and 4 and budget 5, the Slices report 3 and 1 points, respectively.
+  {
+    name: "Multiple assigned Slices may not fully use the budget"
+    factory_parameter_opt: {
+      cdf_point_budget: 5 max_key_length_bytes: 64
+    }
+    actions: [
+      { change_assignment: {
+        generation: { incarnation: 2 number: 42 }
+        current_squid: "slicelet-0"
+        new_assignment: [
+          { slice: { high_exclusive: "m" } resources: ["slicelet-0"]
+            generation: { incarnation: 2 number: 42 } },
+          { slice: { low_inclusive: "m" } resources: ["slicelet-0"]
+            generation: { incarnation: 2 number: 42 } }
+        ]
+      } },
+      { increment_primary_load: { bytes_key: "a" value: 2 } },
+      { increment_primary_load: { bytes_key: "b" value: 2 } },
+      { increment_primary_load: { bytes_key: "c" value: 2 } },
+      { increment_primary_load: { bytes_key: "d" value: 2 } },
+      { increment_primary_load: { bytes_key: "n" value: 4 } },
+      { advance_clock: { } },
+      { check_attributed_loads: {
+        debug_msg: "Check per-Slice CDFs"
+        expected_size: 2
+        expected_slice_info: [
+          { slice: { high_exclusive: "m" }
+            top_slice_keys: ["a", "b", "c", "d"]
+            approximate_primary_load: 8.0
+            expected_load_distribution: {
+              max_error_fraction: 0.02
+              points: [
+                { key: "a" cumulative_load_fraction: 0.25 },
+                { key: "b" cumulative_load_fraction: 0.5 },
+                { key: "c" cumulative_load_fraction: 0.75 }
+              ]
+            }
+          },
+          { slice: { low_inclusive: "m" }
+            top_slice_keys: ["n"]
+            approximate_primary_load: 4.0
+            expected_load_distribution: {
+              max_error_fraction: 0.02
+              points: [
+                { key: "n" cumulative_load_fraction: 1.0 }
+              ]
+            }
+          }
+        ]
+      } },
+      { check_unattributed_load: {
+        debug_msg: "Check unattributed load has no CDF" expected_value: 0.0
+      } }
+    ]
+  },
+
+  # Test plan: Verify that the loaded Slices proportionally share the whole budget, and some
+  # cold Slice can receive no budget; and that unattributed load does not reduce the budget.
+  # available to attributed Slices.
+  {
+    name: "Cold and unattributed load can receive no budget"
+    factory_parameter_opt: {
+      cdf_point_budget: 3 max_key_length_bytes: 64
+    }
+    actions: [
+      { change_assignment: {
+        generation: { incarnation: 2 number: 42 }
+        current_squid: "slicelet-0"
+        new_assignment: [
+          { slice: { high_exclusive: "m" } resources: ["slicelet-0"]
+            generation: { incarnation: 2 number: 42 } },
+          { slice: { low_inclusive: "m" high_exclusive: "z" } resources: ["slicelet-0"]
+            generation: { incarnation: 2 number: 42 } },
+          { slice: { low_inclusive: "z" } resources: ["slicelet-1"]
+            generation: { incarnation: 2 number: 42 } }
+        ]
+      } },
+      { increment_primary_load: { bytes_key: "n" value: 1 } },
+      { increment_primary_load: { bytes_key: "o" value: 1 } },
+      { increment_primary_load: { bytes_key: "p" value: 1 } },
+      { increment_primary_load: { bytes_key: "q" value: 1 } },
+      { increment_primary_load: { bytes_key: "z" value: 100 } },
+      { advance_clock: { } },
+      { check_attributed_loads: {
+        debug_msg: "Check per-Slice CDFs"
+        expected_size: 2
+        expected_slice_info: [
+          { slice: { high_exclusive: "m" }
+            approximate_primary_load: 0.0
+          },
+          # All budgets go to [m, z) with 100 load.
+          { slice: { low_inclusive: "m" high_exclusive: "z" }
+            approximate_primary_load: 4.0
+            expected_load_distribution: {
+              max_error_fraction: 0.02
+              points: [
+                { key: "n" cumulative_load_fraction: 0.25 },
+                { key: "o" cumulative_load_fraction: 0.5 },
+                { key: "p" cumulative_load_fraction: 0.75 }
+              ]
+            }
+          }
+        ]
+      } },
+      { check_unattributed_load: {
+        debug_msg: "Check unattributed load has no CDF" expected_value: 100.0
+      } }
+    ]
+  },
+
+  # Test plan: Verify that leftover budget can be given to a Slice whose proportional share is below
+  # one point.
+  {
+    name: "Leftover budget gives a sub-point Slice one point"
+    factory_parameter_opt: {
+      cdf_point_budget: 2 max_key_length_bytes: 64
+    }
+    actions: [
+      { change_assignment: {
+        generation: { incarnation: 2 number: 42 }
+        current_squid: "slicelet-0"
+        new_assignment: [
+          { slice: { high_exclusive: "m" } resources: ["slicelet-0"]
+            generation: { incarnation: 2 number: 42 } },
+          { slice: { low_inclusive: "m" } resources: ["slicelet-0"]
+            generation: { incarnation: 2 number: 42 } }
+        ]
+      } },
+      # With Slices of loads 1 and 3 and budget 2, the hotter Slice's share rounds down to
+      # one point, and the leftover point goes to the colder Slice.
+      { increment_primary_load: { bytes_key: "a" value: 1 } },
+      { increment_primary_load: { bytes_key: "n" value: 3 } },
+      { advance_clock: { } },
+      { check_attributed_loads: {
+        debug_msg: "Check per-Slice CDFs"
+        expected_size: 2
+        expected_slice_info: [
+          { slice: { high_exclusive: "m" }
+            top_slice_keys: ["a"]
+            approximate_primary_load: 1.0
+            expected_load_distribution: {
+              max_error_fraction: 0.02
+              points: [
+                { key: "a" cumulative_load_fraction: 1.0 }
+              ]
+            }
+          },
+          { slice: { low_inclusive: "m" }
+            top_slice_keys: ["n"]
+            approximate_primary_load: 3.0
+            expected_load_distribution: {
+              max_error_fraction: 0.02
+              points: [
+                { key: "n" cumulative_load_fraction: 1.0 }
+              ]
+            }
+          }
+        ]
+      } },
+      { check_unattributed_load: {
+        debug_msg: "Check unattributed load has no CDF" expected_value: 0.0
+      } }
+    ]
+  },
+
+  # Test plan: Verify that leftover budget is given out one point at a time in descending load
+  # order, regardless of Slice order.
+  {
+    name: "Leftover budget goes to the hottest sub-point Slices first"
+    factory_parameter_opt: {
+      cdf_point_budget: 2 max_key_length_bytes: 64
+    }
+    actions: [
+      { change_assignment: {
+        generation: { incarnation: 2 number: 42 }
+        current_squid: "slicelet-0"
+        new_assignment: [
+          { slice: { high_exclusive: "m" } resources: ["slicelet-0"]
+            generation: { incarnation: 2 number: 42 } },
+          { slice: { low_inclusive: "m" high_exclusive: "z" } resources: ["slicelet-0"]
+            generation: { incarnation: 2 number: 42 } },
+          { slice: { low_inclusive: "z" } resources: ["slicelet-0"]
+            generation: { incarnation: 2 number: 42 } }
+        ]
+      } },
+      # With loads a=1, n=2, z=5 and budget 2, z's share rounds down to one point, the leftover
+      # point goes to n, and a receives nothing.
+      { increment_primary_load: { bytes_key: "a" value: 1 } },
+      { increment_primary_load: { bytes_key: "n" value: 2 } },
+      { increment_primary_load: { bytes_key: "z" value: 5 } },
+      { advance_clock: { } },
+      { check_attributed_loads: {
+        debug_msg: "Check per-Slice CDFs"
+        expected_size: 3
+        expected_slice_info: [
+          { slice: { high_exclusive: "m" }
+            top_slice_keys: ["a"]
+            approximate_primary_load: 1.0
+          },
+          { slice: { low_inclusive: "m" high_exclusive: "z" }
+            top_slice_keys: ["n"]
+            approximate_primary_load: 2.0
+            expected_load_distribution: {
+              max_error_fraction: 0.02
+              points: [
+                { key: "n" cumulative_load_fraction: 1.0 }
+              ]
+            }
+          },
+          { slice: { low_inclusive: "z" }
+            top_slice_keys: ["z"]
+            approximate_primary_load: 5.0
+            expected_load_distribution: {
+              max_error_fraction: 0.02
+              points: [
+                { key: "z" cumulative_load_fraction: 1.0 }
+              ]
+            }
+          }
+        ]
+      } },
+      { check_unattributed_load: {
+        debug_msg: "Check unattributed load has no CDF" expected_value: 0.0
+      } }
+    ]
+  },
+
+  # Test plan: Confirm that the reported CDF does not have duplicate keys: quantiles selecting the
+  # same key collapse to one point, so the budget is an upper bound.
+  {
+    name: "Quantiles selecting the same key produce one point"
+    factory_parameter_opt: {
+      cdf_point_budget: 7 max_key_length_bytes: 64
+    }
+    actions: [
+      { change_assignment: {
+        generation: { incarnation: 2 number: 42 }
+        current_squid: "slicelet-0"
+        new_assignment: [
+          { slice: { } resources: ["slicelet-0"]
+            generation: { incarnation: 2 number: 42 } }
+        ]
+      } },
+      # Loads a=8, b=4, c=3, d=1 translate to cumulative fractions a->1/2, b->3/4, c->15/16, d->1.
+      # The seven sorted quantiles 1/8, 1/4, 3/8, 1/2, 5/8, 3/4, 7/8 select keys a,a,a,a,b,b,c.
+      # Deduplication leaves (a, 1/2), (b, 3/4), (c, 15/16); no quantile selects d.
+      { increment_primary_load: { bytes_key: "a" value: 8 } },
+      { increment_primary_load: { bytes_key: "b" value: 4 } },
+      { increment_primary_load: { bytes_key: "c" value: 3 } },
+      { increment_primary_load: { bytes_key: "d" value: 1 } },
+      { advance_clock: { } },
+      { check_attributed_loads: {
+        debug_msg: "Check per-Slice CDFs"
+        expected_size: 1
+        expected_slice_info: [
+          { slice: { }
+            top_slice_keys: ["a", "b", "c", "d"]
+            approximate_primary_load: 16.0
+            expected_load_distribution: {
+              max_error_fraction: 0.02
+              points: [
+                { key: "a" cumulative_load_fraction: 0.5 },
+                { key: "b" cumulative_load_fraction: 0.75 },
+                { key: "c" cumulative_load_fraction: 0.9375 }
+              ]
+            }
+          }
+        ]
+      } },
+      { check_unattributed_load: {
+        debug_msg: "Check unattributed load has no CDF" expected_value: 0.0
+      } }
+    ]
+  },
+
+  # Test plan: Confirm that keys exceeding the length limit are omitted from the CDF and top keys
+  # but still count toward the primary load. Shorter keys remain unchanged.
+  {
+    name: "Keys respect the length limit"
+    factory_parameter_opt: {
+      cdf_point_budget: 7 max_key_length_bytes: 4
+    }
+    actions: [
+      { change_assignment: {
+        generation: { incarnation: 2 number: 42 }
+        current_squid: "slicelet-0"
+        new_assignment: [
+          { slice: { } resources: ["slicelet-0"]
+            generation: { incarnation: 2 number: 42 } }
+        ]
+      } },
+      { increment_primary_load: { bytes_key: "abcdef" value: 2 } }, # A key that is too long
+      { increment_primary_load: { bytes_key: "abef" value: 1 } }, # An exact-length key
+      { increment_primary_load: { bytes_key: "xy" value: 1 } }, # A shorter key
+      { advance_clock: { } },
+      { check_attributed_loads: {
+        debug_msg: "Check per-Slice CDFs"
+        expected_size: 1
+        expected_slice_info: [
+          { slice: { }
+            top_slice_keys: ["abef", "xy"]
+            approximate_primary_load: 4.0
+            expected_load_distribution: {
+              max_error_fraction: 0.02
+              points: [
+                { key: "abef" cumulative_load_fraction: 0.5 },
+                { key: "xy" cumulative_load_fraction: 1.0 }
+              ]
+            }
+          }
+        ]
+      } },
+      { check_unattributed_load: {
+        debug_msg: "Check unattributed load has no CDF" expected_value: 0.0
+      } }
+    ]
+  },
+
+  # Test plan: Confirm that a newer assignment with unchanged Slice boundaries and replica count
+  # preserves the recorded CDF, total load, and top keys without new observations.
+  {
+    name: "An unchanged assignment preserves the CDF"
+    factory_parameter_opt: {
+      cdf_point_budget: 7 max_key_length_bytes: 2
+    }
+    actions: [
+      { change_assignment: {
+        generation: { incarnation: 2 number: 42 }
+        current_squid: "slicelet-0"
+        new_assignment: [
+          { slice: { } resources: ["slicelet-0"]
+            generation: { incarnation: 2 number: 42 } }
+        ]
+      } },
+      { increment_primary_load: { bytes_key: "ab" value: 8 } },
+      { increment_primary_load: { bytes_key: "xy" value: 8 } },
+      { advance_clock: { } },
+      { check_attributed_loads: {
+        debug_msg: "Initial CDF"
+        expected_size: 1
+        expected_slice_info: [
+          { slice: { }
+            top_slice_keys: ["ab", "xy"]
+            approximate_primary_load: 16.0
+            expected_load_distribution: {
+              max_error_fraction: 0.02
+              points: [
+                { key: "ab" cumulative_load_fraction: 0.5 },
+                { key: "xy" cumulative_load_fraction: 1.0 }
+              ]
+            }
+          }
+        ]
+      } },
+      { change_assignment: {
+        generation: { incarnation: 2 number: 43 }
+        current_squid: "slicelet-0"
+        new_assignment: [
+          { slice: { } resources: ["slicelet-0"]
+            generation: { incarnation: 2 number: 43 } }
+        ]
+      } },
+      { check_attributed_loads: {
+        debug_msg: "Unchanged Slice retains its observations"
+        expected_size: 1
+        expected_slice_info: [
+          { slice: { }
+            top_slice_keys: ["ab", "xy"]
+            approximate_primary_load: 16.0
+            expected_load_distribution: {
+              max_error_fraction: 0.02
+              # The previously incremented load is preserved in load report.
+              points: [
+                { key: "ab" cumulative_load_fraction: 0.5 },
+                { key: "xy" cumulative_load_fraction: 1.0 }
+              ]
+            }
+          }
+        ]
+      } },
+      { check_unattributed_load: {
+        debug_msg: "All observations were attributed" expected_value: 0.0
+      } }
+    ]
+  },
+  # Test plan: Confirm that a newly assigned Slice starts with a fresh CDF.
+  {
+    name: "A newly assigned Slice starts fresh"
+    factory_parameter_opt: {
+      cdf_point_budget: 7 max_key_length_bytes: 2
+    }
+    actions: [
+      { change_assignment: {
+        generation: { incarnation: 2 number: 42 }
+        current_squid: "slicelet-0"
+        new_assignment: [
+          { slice: { } resources: ["slicelet-0"]
+            generation: { incarnation: 2 number: 42 } }
+        ]
+      } },
+      { increment_primary_load: { bytes_key: "ab" value: 8 } },
+      { increment_primary_load: { bytes_key: "xy" value: 8 } },
+      { advance_clock: { } },
+      { check_attributed_loads: {
+        debug_msg: "Initial CDF"
+        expected_size: 1
+        expected_slice_info: [
+          { slice: { }
+            top_slice_keys: ["ab", "xy"]
+            approximate_primary_load: 16.0
+            expected_load_distribution: {
+              max_error_fraction: 0.02
+              points: [
+                { key: "ab" cumulative_load_fraction: 0.5 },
+                { key: "xy" cumulative_load_fraction: 1.0 }
+              ]
+            }
+          }
+        ]
+      } },
+      { change_assignment: {
+        generation: { incarnation: 2 number: 43 }
+        current_squid: "slicelet-0"
+        new_assignment: [
+          { slice: { high_exclusive: "abcd" } resources: ["slicelet-1"]
+            generation: { incarnation: 2 number: 43 } },
+          { slice: { low_inclusive: "abcd" } resources: ["slicelet-0"]
+            generation: { incarnation: 2 number: 43 } }
+        ]
+      } },
+      { increment_primary_load: { bytes_key: "ac" value: 16 } },
+      { advance_clock: { } },
+      { check_attributed_loads: {
+        debug_msg: "The new Slice starts a fresh CDF"
+        expected_size: 1
+        expected_slice_info: [
+          { slice: { low_inclusive: "abcd" }
+            top_slice_keys: ["ac"]
+            approximate_primary_load: 16.0
+            expected_load_distribution: {
+              max_error_fraction: 0.02
+              points: [
+                # After the slice split, the load information from ab and xy is forgotten.
+                { key: "ac" cumulative_load_fraction: 1.0 }
+              ]
+            }
+          }
+        ]
+      } },
+      { check_unattributed_load: {
+        debug_msg: "All observations were attributed" expected_value: 0.0
+      } }
+    ]
+  },
+
+  # Test plan: Confirm that changing the replica count clears the CDF.
+  {
+    name: "A replica-count change reseeds load and starts a fresh CDF"
+    factory_parameter_opt: {
+      cdf_point_budget: 7 max_key_length_bytes: 2
+    }
+    actions: [
+      { change_assignment: {
+        generation: { incarnation: 2 number: 42 }
+        current_squid: "slicelet-0"
+        new_assignment: [
+          { slice: { } resources: ["slicelet-0"]
+            generation: { incarnation: 2 number: 42 } }
+        ]
+      } },
+      { increment_primary_load: { bytes_key: "ab" value: 8 } },
+      { increment_primary_load: { bytes_key: "xy" value: 8 } },
+      { advance_clock: { } },
+      { check_attributed_loads: {
+        debug_msg: "Initial CDF"
+        expected_size: 1
+        expected_slice_info: [
+          { slice: { }
+            top_slice_keys: ["ab", "xy"]
+            approximate_primary_load: 16.0
+            expected_load_distribution: {
+              max_error_fraction: 0.02
+              points: [
+                { key: "ab" cumulative_load_fraction: 0.5 },
+                { key: "xy" cumulative_load_fraction: 1.0 }
+              ]
+            }
+          }
+        ]
+      } },
+      { change_assignment: {
+        generation: { incarnation: 2 number: 43 }
+        current_squid: "slicelet-0"
+        new_assignment: [
+          { slice: { } resources: ["slicelet-0", "slicelet-1"]
+            generation: { incarnation: 2 number: 43 }
+            primary_rate_load_opt: 48.0 }
+        ]
+      } },
+      { check_attributed_loads: {
+        debug_msg: "Changing the replica count clears hot keys and the CDF"
+        expected_size: 1
+        expected_loads: [
+          { slice: { }
+            primary_rate_load: 24.0
+            window_low_inclusive_seconds: 1
+            window_high_exclusive_seconds: 1
+            num_replicas: 2
+          }
+        ]
+      } },
+      { check_unattributed_load: {
+        debug_msg: "All observations were attributed" expected_value: 0.0
+      } }
+    ]
+  }
+]

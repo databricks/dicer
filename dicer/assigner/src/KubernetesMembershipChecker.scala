@@ -58,9 +58,7 @@ import com.databricks.dicer.external.ResourceAddress
  *  - Number of pods in the response.
  *  - Whether this assigner's UUID is present among the pod UIDs in the response.
  *
- * For some use cases, such as the [[ConsistentHashingPreferredAssignerDriver]], the checker runs
- * for the lifetime of the owning process. However, for other use cases, such as the
- * [[TargetMigrator]], the checker is created and torn down while the process keeps running, so
+ * [[TargetMigrator]] creates and tears down checkers while the process keeps running, so
  * [[stopAsync]] is provided for graceful termination.
  *
  * INVARIANTS:

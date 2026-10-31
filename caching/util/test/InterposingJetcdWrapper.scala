@@ -41,6 +41,10 @@ final class InterposingJetcdWrapper private (
   @GuardedBy("lock")
   private var getFailureOpt: Option[Throwable] = None
 
+  /** Failure for [[commit()]] operations. */
+  @GuardedBy("lock")
+  private var commitFailureOpt: Option[Throwable] = None
+
   /** Synchronous throw for [[get()]] operations, simulating a jetcd shutdown race. */
   @GuardedBy("lock")
   private var getSynchronousThrowOpt: Option[Throwable] = None
@@ -85,6 +89,24 @@ final class InterposingJetcdWrapper private (
   /** Stops failing gets. */
   def stopFailingGets(): Unit = withLock(lock) {
     getFailureOpt = None
+  }
+
+  /**
+   * Registers an exception that will be yielded by all subsequent [[JetcdWrapper.commit()]]
+   * requests until [[stopFailingCommits()]] is called. Commits can't fail while they are blocked
+   * (see [[setBlockCommits()]]).
+   */
+  @throws[IllegalStateException]("if commits are blocked")
+  def startFailingCommits(throwable: Throwable): Unit = withLock(lock) {
+    if (blockCommits) {
+      throw new IllegalStateException("Commits can't fail while they are blocked")
+    }
+    commitFailureOpt = Some(throwable)
+  }
+
+  /** Stops failing commits. */
+  def stopFailingCommits(): Unit = withLock(lock) {
+    commitFailureOpt = None
   }
 
   /**
@@ -160,13 +182,18 @@ final class InterposingJetcdWrapper private (
    * Sets the commit blocking behavior according to `blockCommits`. If `blockCommits` is true, then
    * all future [[commit()]] calls will be blocked (and can be executed one-by-one using
    * [[runEarliestBlockedCommit()]]). Otherwise, all currently blocked commit operations will be
-   * executed and future [[commit()]] calls will be allowed to proceed.
+   * executed and future [[commit()]] calls will be allowed to proceed. Commits can't be blocked
+   * while they are failing (see [[startFailingCommits()]]).
    *
    * Note that this does not wait for the completion of the blocked commit operations. If this is
    * desired, the caller should use [[runEarliestBlockedCommit()]] repeatedly until all blocked are
    * executed.
    */
+  @throws[IllegalStateException]("if `blockCommits` is true while commits are failing")
   def setBlockCommits(blockCommits: Boolean): Unit = withLock(lock) {
+    if (blockCommits && commitFailureOpt.isDefined) {
+      throw new IllegalStateException("Commits can't be blocked while they are failing")
+    }
     this.blockCommits = blockCommits
     if (!blockCommits) {
       // Release all the pending commit ops.
@@ -202,7 +229,15 @@ final class InterposingJetcdWrapper private (
       }
       javaFuture
     } else {
-      delegate.commit(ifs, thens, elses)
+      commitFailureOpt match {
+        case Some(commitFailure: Throwable) =>
+          logger.info(s"Injecting commit failure $commitFailure")
+          val future: CompletableFuture[TxnResponse] = new CompletableFuture[TxnResponse]()
+          future.completeExceptionally(commitFailure)
+          future
+        case None =>
+          delegate.commit(ifs, thens, elses)
+      }
     }
   }
 

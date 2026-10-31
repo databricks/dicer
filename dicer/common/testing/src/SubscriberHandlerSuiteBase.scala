@@ -19,7 +19,6 @@ import com.databricks.caching.util.{
 import com.databricks.caching.util.TestUtils.TestName
 import com.databricks.dicer.common.{
   Assignment,
-  AssignmentConsistencyMode,
   ClerkData,
   ClientRequest,
   ClientResponse,
@@ -61,6 +60,20 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
 
   /** Timeout to request for watch requests. */
   protected val TIMEOUT: FiniteDuration = 1.minute
+
+  // As defined above, the default client watch RPC timeout in this test is 1 minute, so the
+  // expected server-side watch processing timeout without jitter is 55 seconds. A jitter ratio
+  // of 40% gives +/-20%, or +/-11 seconds. However, in this case, since the client watch RPC
+  // timeout is sufficiently large, this could push the server-side timeout beyond the client's
+  // watch RPC timeout. We therefore cap the jitter at +/-2.5 seconds, giving watch processing
+  // timeout bounds of [52.5, 57.5] seconds. See SubscriberHandler.getWatchProcessingTimeout
+  // for more details on how this calculation is done.
+
+  /** Minimum processing timeout with jitter for requests using this suite's TIMEOUT. */
+  protected final def getMinWatchRequestTimeoutWithJitter: FiniteDuration = 52.5.seconds
+
+  /** Maximum processing timeout with jitter for requests using this suite's TIMEOUT. */
+  protected final def getMaxWatchRequestTimeoutWithJitter: FiniteDuration = 57.5.seconds
 
   /**
    * Poll interval to use when asserting metrics values. Longer than default to avoid frequent
@@ -153,7 +166,6 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
       assignerServiceInfoOpt = None
     ).commit(
       isFrozen = false,
-      AssignmentConsistencyMode.Affinity,
       generation
     )
   }
@@ -279,9 +291,9 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
 
   /**
    * Tests two subscribers with overlapping lifetimes watching assignment via a
-   * [[SubscriberHandler]]. Validates that metrics tracking recent subscribers are updated as
-   * expected throughout, and that subscribers are informed when fresh assignments are received by
-   * the handler:
+   * [[com.databricks.dicer.common.SubscriberHandler]]. Validates that metrics tracking recent
+   * subscribers are updated as expected throughout, and that subscribers are informed when fresh
+   * assignments are received by the handler:
    *
    *  - Attaches the first subscriber, which has knowledge of no prior assignment.
    *  - Attaches the second subscriber, which has knowledge of the assignment at generation 42.
@@ -372,7 +384,7 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
     // known assignment has not advanced. Drain to ensure fut2's timeout is registered before
     // advancing time.
     driver.waitForSubscriberHandler(testTarget, handleWatchCount)
-    driver.advanceTime(TIMEOUT)
+    driver.advanceTime(getMaxWatchRequestTimeoutWithJitter)
     val response2: ClientResponse =
       ClientResponse.fromProto(TestUtils.awaitResult(fut2, Duration.Inf))
     assert(response2.syncState == SyncAssignmentState.KnownGeneration(generation))
@@ -1023,7 +1035,7 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
       redirectOpt = None
     )
     driver.waitForSubscriberHandler(target, expectedWatchCount = 1)
-    driver.advanceTime(TIMEOUT)
+    driver.advanceTime(getMaxWatchRequestTimeoutWithJitter)
     val responseP: ClientResponseP = TestUtils.awaitResult(fut, Duration.Inf)
     assert(
       ClientResponse.fromProto(responseP).syncState ==
@@ -1194,8 +1206,25 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
     // Verify that the future should not be completed.
     assertResult(false)(fut.isCompleted)
 
+    val lowerBound: FiniteDuration = getMinWatchRequestTimeoutWithJitter
+    val upperBound: FiniteDuration = getMaxWatchRequestTimeoutWithJitter
+
+    // With jitter, watch request cancellation is expected to occur within [52.5, 57.5] seconds
+    // after the request was received, including any time spent queued. This is the correct
+    // cancellation window.
+    //
+    // If queue delay were ignored, cancellation would be expected to occur within
+    // [queueDelay + 52.5s, queueDelay + 57.5s]. This is the incorrect cancellation window.
+    //
+    // To deterministically verify that the timeout accounts for queue delay, choose a delay that
+    // keeps these windows from overlapping. At the upper bound of the correct cancellation window,
+    // a correct implementation must have timed out the watch request, while an implementation that
+    // ignores queue delay must still have the request pending.
+    val queueDelay: FiniteDuration = upperBound - lowerBound + 1.second
+    // Ensure the request hasn't expired before we unblock the SEC.
+    assert(queueDelay < lowerBound)
+
     // Simulate queue delay by advancing time before the sequential executor can run.
-    val queueDelay: FiniteDuration = 2.seconds
     driver.advanceTime(queueDelay)
     // Unblock the sequential executor and verify the future is not completed.
     driver.unblockSequentialExecutor()
@@ -1208,20 +1237,86 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
     TestUtils.shamefullyAwait200msForNonEventInAsyncTest()
     assertResult(false)(fut.isCompleted)
 
-    // Advance the clock by less than the remaining processing timeout. The future should remain
+    // Advance to just before the earliest cancellation timeout. The future should remain
     // uncompleted.
-    val processingTimeout: FiniteDuration =
-      WatchServerHelper.getWatchProcessingTimeout(request.timeout)
-    val remainingTimeout: FiniteDuration = processingTimeout - queueDelay
-    driver.advanceTime(remainingTimeout - 1.seconds)
+    val beforeLowerBound: FiniteDuration = lowerBound - 1.millisecond
+    driver.advanceTime(beforeLowerBound - queueDelay)
     TestUtils.shamefullyAwait200msForNonEventInAsyncTest()
     assertResult(false)(fut.isCompleted)
 
-    // Now advance by 1 second to exceed the expected processing timeout (assuming the queue delay
-    // is taken into account). The future should now complete.
-    driver.advanceTime(1.second)
+    // Now advance to the latest cancellation timeout (assuming queue delay is taken into account).
+    // The future should now complete. If queue delay were ignored, the future would remain pending
+    // because even the earliest possible cancellation timeout that excludes queue delay would be
+    // later.
+    driver.advanceTime(upperBound - beforeLowerBound)
     val response = ClientResponse.fromProto(TestUtils.awaitResult(fut, Duration.Inf))
     // The request hit the processing timeout and should return just the known generation.
     assert(response.syncState == SyncAssignmentState.KnownGeneration(generation))
+  }
+
+  gridTest(
+    "Assigner's server side watch processing timeouts stay within the configured jitter bounds"
+  )(
+    Seq[(FiniteDuration, FiniteDuration, FiniteDuration)](
+      (1.second, 0.4.seconds, 0.6.seconds),
+      (2.seconds, 0.8.seconds, 1.2.seconds),
+      (3.seconds, 1.2.seconds, 1.8.seconds),
+      (4.seconds, 1.6.seconds, 2.4.seconds),
+      (5.seconds, 2.seconds, 3.seconds),
+      (5.01.seconds, 2.004.seconds, 3.006.seconds),
+      (6.seconds, 2.4.seconds, 3.6.seconds),
+      (7.seconds, 2.8.seconds, 4.2.seconds),
+      (8.seconds, 3.2.seconds, 4.8.seconds),
+      (9.seconds, 3.6.seconds, 5.4.seconds),
+      (10.seconds, 4.seconds, 6.seconds),
+      (10.01.seconds, 4.008.seconds, 6.012.seconds),
+      (17.5.seconds, 10.seconds, 15.seconds),
+      (20.seconds, 12.5.seconds, 17.5.seconds),
+      (35.seconds, 27.5.seconds, 32.5.seconds),
+      (60.seconds, 52.5.seconds, 57.5.seconds)
+    )
+  ) { testCase: (FiniteDuration, FiniteDuration, FiniteDuration) =>
+    // Test plan: Start five watch requests together at the exact same time and verify that the
+    // random jitter applied when the Assigner determines each watch request's cancellation time
+    // stays within the configured jitter bounds. Do this by verifying none of the watch requests
+    // complete before the lower jitter bound and all complete by the upper jitter bound
+    // (i.e. [processingTimeoutWithoutJitter - jitter, processingTimeoutWithoutJitter + jitter]).
+
+    val (
+      clientWatchRpcTimeout,
+      expectedServerSideWatchProcessingTimeoutLowerBound,
+      expectedServerSideWatchProcessingTimeoutUpperBound
+    ): (FiniteDuration, FiniteDuration, FiniteDuration) = testCase
+
+    val driver: SubscriberHandlerHarness = createDriver(Location.Assigner, target)
+    val responses: Seq[Future[ClientResponseP]] = (0 until 5).map { index: Int =>
+      val request: ClientRequest =
+        createClientRequest(
+          Generation.EMPTY,
+          createSliceletData(s"pod$index"),
+          s"pod$index"
+        ).copy(timeout = clientWatchRpcTimeout)
+      driver.handleWatch(request, redirectOpt = None)
+    }
+    // Ensure all requests have reached the handler before advancing the subprocess clock.
+    driver.waitForSubscriberHandler(target, expectedWatchCount = responses.size)
+
+    // Advance to just before the earliest allowed timeout.
+    val beforeLowerBound
+        : FiniteDuration = expectedServerSideWatchProcessingTimeoutLowerBound - 1.millisecond
+    driver.advanceTime(beforeLowerBound)
+
+    // Sleep briefly to allow any asynchronous callbacks needed for the handler to process
+    // the request and update the future to run.
+    TestUtils.shamefullyAwait200msForNonEventInAsyncTest()
+    assert(responses.forall(response => !response.isCompleted))
+
+    // Advance to the latest allowed timeout and wait for the response callbacks to finish.
+    driver.advanceTime(expectedServerSideWatchProcessingTimeoutUpperBound - beforeLowerBound)
+    for (responseFuture <- responses) {
+      val response: ClientResponseP = TestUtils.awaitResult(responseFuture, Duration.Inf)
+      val clientResponse: ClientResponse = ClientResponse.fromProto(response)
+      assert(clientResponse.syncState == SyncAssignmentState.KnownGeneration(Generation.EMPTY))
+    }
   }
 }

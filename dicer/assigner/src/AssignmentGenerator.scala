@@ -181,8 +181,13 @@ class AssignmentGenerator(
     }
 
     event match {
-      case Event.TerminationSignalFromKubernetes(resourceUuid) =>
-        handleTerminationSignalFromKubernetes(tickerTime, instant, outputBuilder, resourceUuid)
+      case Event.InformClusterManagerResources(terminatingUuids: Set[UUID]) =>
+        handleClusterManagerTerminatingResources(
+          tickerTime,
+          instant,
+          outputBuilder,
+          terminatingUuids
+        )
       case Event.WatchRequest(request) =>
         handleWatchRequest(tickerTime, instant, outputBuilder, request)
       case Event.AssignmentWriteComplete(result, contextOpt) =>
@@ -559,13 +564,13 @@ class AssignmentGenerator(
     // which declare the start and end of a key of death scenario, respectively.
   }
 
-  /** Handles termination signal from Kubernetes. */
-  private def handleTerminationSignalFromKubernetes(
+  /** Handles a new full set of resources terminating in the cluster manager. */
+  private def handleClusterManagerTerminatingResources(
       tickerTime: TickerTime,
       instant: Instant,
       outputBuilder: StateMachineOutput.Builder[DriverAction],
-      resourceUuid: UUID): Unit = {
-    val event = HealthWatcher.Event.PodTerminatingFromKubernetes(resourceUuid)
+      terminatingUuids: Set[UUID]): Unit = {
+    val event = HealthWatcher.Event.InformClusterManagerResources(terminatingUuids)
     handleHealthWatcherOutput(
       tickerTime,
       instant,
@@ -1196,10 +1201,12 @@ object AssignmentGenerator {
     case class AssignmentReceived(assignment: Assignment) extends Event
 
     /**
-     * Informs the generator that a termination signal was received from Kubernetes for a given
-     * resourceUuid.
+     * Informs the generator of the full set of resource UUIDs which the cluster manager is
+     * terminating.
+     *
+     * Events of this type must be delivered in order, i.e., later calls contain more recent state.
      */
-    case class TerminationSignalFromKubernetes(resourceUuid: UUID) extends Event
+    case class InformClusterManagerResources(terminatingUuids: Set[UUID]) extends Event
 
     /** Informs the generator that it should stop generating assignments. */
     case class Shutdown() extends Event

@@ -25,7 +25,6 @@ import com.databricks.dicer.client.TestClientUtils.{
 import com.databricks.dicer.common.SliceletData.KeyLoad
 import com.databricks.dicer.common.{
   Assignment,
-  AssignmentConsistencyMode,
   Generation,
   Incarnation,
   ProposedAssignment,
@@ -34,15 +33,12 @@ import com.databricks.dicer.common.{
   SliceWithResources,
   SliceletData
 }
-import com.databricks.dicer.common.testing.{SliceTestUtils}
 import com.databricks.dicer.external.{Slice, SliceKey, Target}
 import com.databricks.dicer.friend.{SliceMap, Squid}
 import com.databricks.dicer.friend.SliceMap.GapEntry
-import com.databricks.dicer.client.SliceletLoadAccumulator.forTest.getSliceKeyLoadDistributionMetric
 import com.databricks.dicer.common.test.SimpleDiffAssignmentP.SimpleSliceAssignmentP
 import com.databricks.dicer.common.test.SliceletLoadAccumulatorTestDataP
 import com.databricks.dicer.common.test.SliceletLoadAccumulatorTestDataP.ActionP.Action
-import com.databricks.dicer.common.test.SliceletLoadAccumulatorTestDataP.IncrementPrimaryLoadP.IncrementByKey
 import com.databricks.dicer.common.test.SliceletLoadAccumulatorTestDataP.{
   CheckAttributedLoadsP,
   CheckUnattributedLoadP,
@@ -89,38 +85,17 @@ class SliceletLoadAccumulatorSuite extends DatabricksTest with TestName {
     for (actionProto <- validCase.actions) {
       actionProto.action match {
         case Action.IncrementPrimaryLoad(proto) =>
-          val key: SliceKey = proto.incrementByKey match {
-            case IncrementByKey.Key(key) => SliceTestUtils.toSliceKey(key)
-            case IncrementByKey.BytesKey(bytes) => SliceKey.fromRawBytes(bytes)
-            case IncrementByKey.Empty => SliceKey.MIN // Default to MIN if no key is specified
-          }
+          // Default to MIN if no key is specified.
+          val key: SliceKey = proto.bytesKey.map(SliceKey.fromRawBytes).getOrElse(SliceKey.MIN)
           accumulator.incrementPrimaryRateBy(key, proto.getValue)
 
-        case Action.UpdateMetrics(_) =>
-          accumulator.updateMetrics()
-
-        case Action.HistogramBucketCheck(proto) =>
-          val debugMsg: String =
-            "Debugging hint: " + proto.debugMsg.getOrElse(fail("expected debug message"))
-          val bucketIndex: Int = proto.getBucketIndex
-          require(bucketIndex >= 0 && bucketIndex <= 255)
-          val bucketLeLabel: String = bucketIndex match {
-            case 255 => "+Inf"
-            case _ => ((bucketIndex + 1).toDouble / 256.0).toString
-          }
-          val expectedCount: Long = proto.getExpected
-          assert(
-            getSliceKeyLoadDistributionMetric(bucketLeLabel, target) == expectedCount,
-            debugMsg
-          )
-
-        case Action.AdvanceClock(_) =>
-          fakeClock.advanceBy(1.second)
+        case Action.AdvanceClock(proto) =>
+          // The default advance time is 1 second.
+          fakeClock.advanceBy(proto.seconds.getOrElse(1).toLong.seconds)
 
         case Action.ChangeAssignment(proto) =>
           val assignment: Assignment = createAssignment(
             generation = Generation.fromProto(proto.getGeneration),
-            consistencyMode = AssignmentConsistencyMode.Affinity,
             assignerServiceInfoOpt = None,
             entries = proto.newAssignment.map((proto: SimpleSliceAssignmentP) => {
               val sliceWithResources: SliceWithResources = SliceWithResources(
@@ -291,7 +266,7 @@ class SliceletLoadAccumulatorSuite extends DatabricksTest with TestName {
       val target = Target(getNextUniqueTargetName)
       val fakeClock = new FakeTypedClock
       val accumulator =
-        new SliceletLoadAccumulator(fakeClock, target, new SliceletMetrics(target))
+        new SliceletLoadAccumulator(fakeClock, new SliceletMetrics(target))
       val testName: String =
         validCase.name.getOrElse(fail("expected test name for valid case"))
       val startTime: Instant = fakeClock.instant()
@@ -303,62 +278,6 @@ class SliceletLoadAccumulatorSuite extends DatabricksTest with TestName {
           fail(s"expected no exception for test case $testName, but got ${e.getMessage}")
       }
     }
-  }
-
-  test("SliceKey load distribution tracking is thread-safe") {
-    // Test plan: Verify that the accumulator's tracking of the distribution of load over SliceKeys
-    // is thread-safe. Verify this by issuing many concurrent calls to `incrementPrimaryRateBy` and
-    // `updateMetrics` and checking that in the end the Prometheus histogram exactly matches the
-    // results of the workload.
-    import SliceletLoadAccumulator.forTest.getSliceKeyLoadDistributionMetric
-    val target = Target(getSafeName)
-    val accumulator =
-      new SliceletLoadAccumulator(new FakeTypedClock, target, new SliceletMetrics(target))
-
-    // Setup: Use randomness in the test, but log the seed, so that test failures can be repro'd.
-    val seed: Long = Random.nextLong()
-    logger.info(s"Creating RNG with seed $seed")
-    val rng = new Random(seed)
-
-    // Setup: Execute 10k concurrent requests using 8 threads on random SliceKeys. Record the bucket
-    // counts ourselves to check that the counts match at the end of the test.
-    val NUM_REQUESTS: Int = 10000
-    val ec = ExecutorUtil.createContextPropagatingExecutionContext(getSafeName + "-Executor", 8)
-    val randomSliceKeyMSBs = new Array[Byte](NUM_REQUESTS)
-    rng.nextBytes(randomSliceKeyMSBs)
-    val expectedCounts = new Array[Long](256)
-    for (sliceKeyMsb <- randomSliceKeyMSBs) {
-      expectedCounts(sliceKeyMsb.toInt & 0xFF) += 1
-    }
-    val futures: Seq[Future[Unit]] = randomSliceKeyMSBs
-      .flatMap(
-        sliceKeyMsb =>
-          // Schedule 2 tasks on the executor: 1 for incrementing the rate for the key, and the
-          // other for calling `updateMetrics`.
-          Seq(Future {
-            accumulator.incrementPrimaryRateBy((sliceKeyMsb.toLong & 0XFFL) << 56, value = 1)
-          }(ec), Future {
-            accumulator.updateMetrics()
-          }(ec))
-      )
-
-    // Setup: Wait until all futures have completed, then perform one last call to update metrics.
-    TestUtils.awaitResult(Future.sequence(futures)(implicitly, ec), Inf)
-    accumulator.updateMetrics()
-
-    // Verify: Counts in the Prometheus metric match expectations.
-    var cumulativeCount: Long = 0
-    for (i <- 0 until 255) {
-      cumulativeCount += expectedCounts(i)
-      assert(
-        getSliceKeyLoadDistributionMetric(
-          ((i + 1).toDouble / 256.0).toString,
-          target
-        ) == cumulativeCount.toDouble
-      )
-    }
-    cumulativeCount += expectedCounts(255)
-    assert(getSliceKeyLoadDistributionMetric("+Inf", target) == cumulativeCount)
   }
 
   test("SliceletLoadAccumulator is thread-safe") {
@@ -386,7 +305,7 @@ class SliceletLoadAccumulatorSuite extends DatabricksTest with TestName {
     // so we just need to ensure that every time we call `onAssignmentChanged`, we pass the
     // currentSquid.
     val accumulator =
-      new SliceletLoadAccumulator(RealtimeTypedClock, target, new SliceletMetrics(target))
+      new SliceletLoadAccumulator(RealtimeTypedClock, new SliceletMetrics(target))
 
     // Setup: create a random array with 1000 unique generation numbers.
     // Ensure generations are unique to avoid non-deterministic behavior when multiple assignments
@@ -410,7 +329,6 @@ class SliceletLoadAccumulatorSuite extends DatabricksTest with TestName {
         assignerServiceInfoOpt = None
       ).commit(
         isFrozen = false,
-        consistencyMode = AssignmentConsistencyMode.Affinity,
         generation = generation
       )
     }
@@ -418,8 +336,7 @@ class SliceletLoadAccumulatorSuite extends DatabricksTest with TestName {
     // Setup: concurrently executes all methods:
     //  - reports load on the current Squid,
     //  - updates the assignment,
-    //  - reads load,
-    //  - updates metrics.
+    //  - reads load.
     val futures: Seq[Future[Unit]] = (1 to generations.length * 100).map { i =>
       Future {
         // Try to report load on various keys
@@ -427,9 +344,6 @@ class SliceletLoadAccumulatorSuite extends DatabricksTest with TestName {
         if (i % 100 == 0) {
           val assignment = randomAssignments(i / 100 - 1)
           accumulator.onAssignmentChanged(currentSquid, assignment)
-        } else if (i % 100 == 33) {
-          // Periodically update metrics to exercise the metrics path
-          accumulator.updateMetrics()
         } else if (i % 100 == 66) {
           // Periodically read load to exercise the read path
           accumulator.readLoad()

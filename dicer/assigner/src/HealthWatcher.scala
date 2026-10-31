@@ -22,11 +22,11 @@ import com.databricks.dicer.assigner.HealthWatcher.Event.AssignmentSyncObserved.
   GenerationObserved
 }
 import com.databricks.dicer.assigner.HealthWatcher.{
+  ALL_STATUS_NAMES,
   DriverAction,
   Event,
-  HealthSignal,
   HealthStatus,
-  ResourceHealth,
+  ResourceIncarnationHealth,
   State,
   StaticConfig,
   isReliableSource
@@ -98,10 +98,12 @@ import com.databricks.dicer.friend.Squid
  */
 object HealthWatcher {
 
+  import com.databricks.dicer.assigner.HealthWatcher.HealthStatus.IncarnationStatus
+
   /**
    * REQUIRES: `initialHealthReportDelayPeriod` is positive
    * REQUIRES: `unhealthyTimeoutPeriod` is positive
-   * REQUIRES: `terminatingTimeoutPeriod` is positive
+   * REQUIRES: `terminatingRetentionWindow` is positive
    * REQUIRES: `notReadyTimeoutPeriod` is positive
    *
    * Static configuration (i.e., based on DbConf; does not vary per target) for the HealthWatcher.
@@ -124,10 +126,12 @@ object HealthWatcher {
    *                                       yet observed".
    * @param unhealthyTimeoutPeriod   when a heartbeat is not received from a resource within this
    *                                 period, it is assumed to be unhealthy.
-   * @param terminatingTimeoutPeriod we remove the HealthStatus for a pod in Terminating state after
-   *                                 this period, since the pod is no longer active. See the
-   *                                 documentation [[HealthConf.terminatingTimeoutPeriod]] for more
-   *                                 details.
+   * @param terminatingRetentionWindow we remove the incarnation health for a pod whose Slicelet
+   *                                 reports Terminating after this period, since the pod is no
+   *                                 longer active. This does not expire cluster-manager termination
+   *                                 information, which lasts until the manager reports its removal.
+   *                                 See the documentation
+   *                                 [[HealthConf.terminatingRetentionWindow]] for more details.
    * @param notReadyTimeoutPeriod    flapping protection timeout for the NotReady state. A resource
    *                                 in NotReady will not be allowed to transition to Running until
    *                                 it has not received a NotReady heartbeat for at least this
@@ -137,11 +141,11 @@ object HealthWatcher {
   case class StaticConfig(
       initialHealthReportDelayPeriod: FiniteDuration,
       unhealthyTimeoutPeriod: FiniteDuration,
-      terminatingTimeoutPeriod: FiniteDuration,
+      terminatingRetentionWindow: FiniteDuration,
       notReadyTimeoutPeriod: FiniteDuration) {
     require(initialHealthReportDelayPeriod > Duration.Zero)
     require(unhealthyTimeoutPeriod > Duration.Zero)
-    require(terminatingTimeoutPeriod > Duration.Zero)
+    require(terminatingRetentionWindow > Duration.Zero)
     require(notReadyTimeoutPeriod > Duration.Zero)
   }
 
@@ -157,10 +161,10 @@ object HealthWatcher {
         extends Event
 
     /**
-     * Informs the health watcher of a Slicelet state update from Kubernetes. Kubernetes state
-     * updates only include the resource's UUID.
+     * Informs the health watcher of the UUIDs of all resources which the cluster manager is
+     * terminating.
      */
-    case class PodTerminatingFromKubernetes(resourceUUID: UUID) extends Event
+    case class InformClusterManagerResources(terminatingUuids: Set[UUID]) extends Event
 
     /**
      * Informs the health watcher that we've observed an assignment synchronization. The
@@ -229,113 +233,97 @@ object HealthWatcher {
       StaticConfig(
         conf.initialHealthReportDelayPeriod,
         conf.unhealthyTimeoutPeriod,
-        conf.terminatingTimeoutPeriod,
+        conf.terminatingRetentionWindow,
         conf.notReadyTimeoutPeriod
       )
     }
   }
 
   /**
-   * An input health signal about a resource.
-   */
-  private sealed trait HealthSignal
-  private object HealthSignal {
-
-    /** Indicates that the resource incarnation is in `sliceletState`. */
-    case class ResourceIncarnationState(sliceletState: SliceletState) extends HealthSignal
-
-    /** Indicates that the entire resource is being deleted, including all of its incarnations. */
-    case object ResourceTerminating extends HealthSignal
-  }
-
-  /**
-   * The health status of a resource, as computed by the [[HealthWatcher]].
+   * Resource health statuses perceived by the HealthWatcher.
    *
-   * [[NotReady]] embeds the flapping-protection timeout; all other states are singletons.
+   * In our model, resources have "incarnations". An incarnation is an instance of the resource, and
+   * while a resource may have multiple incarnations, only one may exist at any time.
+   *
+   * Slicelet reports determine the latest incarnation's [[IncarnationStatus]].
+   * A cluster-manager termination report overrides that status with
+   * [[HealthStatus.ResourceTerminating]] for every incarnation of the resource.
    */
   private sealed trait HealthStatus {
 
     /** Canonical name used for metrics labels and logging. */
-    def statusName: String
+    def name: String
 
+    /** Returns whether `other` is of the same type as this status. */
+    final def isSameType(other: HealthStatus): Boolean = (this, other) match {
+      case (
+          _: IncarnationStatus.NotReady,
+          _: IncarnationStatus.NotReady
+          ) =>
+        // Disregard `lastReportTime`.
+        true
+      case _ => this == other
+    }
+
+    override def toString: String = name
   }
 
   private object HealthStatus {
 
-    /**
-     * Assigner-computed state for a brand-new resource whose first heartbeat was NOT_READY.
-     * Unlike [[NotReady]], Starting carries no flapping protection timer: a RUNNING heartbeat
-     * from a Starting resource transitions it immediately to Running.
-     */
-    case object Starting extends HealthStatus {
-      override def statusName: String = "Starting"
-    }
+    /** Health status of a resource incarnation as computed from Slicelet reports. */
+    sealed trait IncarnationStatus extends HealthStatus
 
-    /**
-     * NotReady status, with flapping protection timeout.
-     *
-     * Two [[NotReady]] instances compare equal (via [[equals]]) regardless of their
-     * [[lastReportTime]] values. This makes it possible to test whether a status is [[NotReady]]
-     * using `==` without caring about the specific timeout value. All [[NotReady]] instances
-     * share the same [[hashCode]] for consistency with [[equals]].
-     *
-     * @param lastReportTime The time at which the resource last reported a NotReady heartbeat.
-     */
-    class NotReady(private[HealthWatcher] val lastReportTime: TickerTime) extends HealthStatus {
-      override def statusName: String = "NotReady"
+    object IncarnationStatus {
 
-      /** Returns true if `other` is a [[NotReady]] instance, regardless of [[lastReportTime]]. */
-      override def equals(other: Any): Boolean = other match {
-        case _: NotReady => true
-        case _ => false
+      /**
+       * Assigner-computed state for a brand-new resource whose first heartbeat was NOT_READY.
+       * Unlike [[NotReady]], Starting carries no flapping protection timer: a RUNNING heartbeat
+       * from a Starting resource transitions it immediately to Running.
+       */
+      case object Starting extends IncarnationStatus {
+        override def name: String = "Starting"
       }
 
-      /** Hash on the class so all instances return the same hashCode. */
-      override def hashCode(): Int = classOf[NotReady].hashCode()
+      /**
+       * NotReady status, with flapping protection timeout.
+       *
+       * @param lastReportTime The time at which the resource last reported a NotReady heartbeat.
+       */
+      class NotReady(private[HealthWatcher] val lastReportTime: TickerTime)
+          extends IncarnationStatus {
+        override def name: String = "NotReady"
 
-      override def toString: String = s"NotReady(lastReportTime=$lastReportTime)"
+        override def toString: String = s"NotReady(lastReportTime=$lastReportTime)"
+      }
+
+      /** The resource is up and capable of doing work. */
+      case object Running extends IncarnationStatus {
+        override def name: String = "Running"
+      }
+
+      /**
+       * The current resource incarnation is shutting down. Considered unhealthy, but the same
+       * resource may become healthy again later with a new incarnation.
+       */
+      case object Terminating extends IncarnationStatus {
+        override def name: String = "ResourceIncarnationTerminating"
+      }
     }
 
-    /** The resource is up and capable of doing work. */
-    case object Running extends HealthStatus {
-      override def statusName: String = "Running"
-    }
-
-    /**
-     * The current resource incarnation is shutting down. Considered unhealthy, but the same
-     * resource may become healthy again later with a new incarnation.
-     */
-    case object ResourceIncarnationTerminating extends HealthStatus {
-      override def statusName: String = "ResourceIncarnationTerminating"
-    }
-
-    /**
-     * The whole resource is shutting down. In our model, a resource isn't capable of restarting
-     * like an incarnation: resources are only added and removed. Thus, unlike
-     * [[ResourceIncarnationTerminating]], this is considered a terminal state for the resource.
-     */
+    /** The cluster manager reports that the entire resource is terminating. */
     case object ResourceTerminating extends HealthStatus {
-      override def statusName: String = "ResourceTerminating"
+      override def name: String = "ResourceTerminating"
     }
-
-    /**
-     * Canonical instances of all [[HealthStatus]] kinds, used for metric label enumeration.
-     * A [[NotReady]] sentinel represents the NotReady status. Map lookups against this set work
-     * correctly because [[NotReady.equals]] ignores [[NotReady.lastReportTime]].
-     */
-    val values: Set[HealthStatus] =
-      Set(
-        Starting,
-        new NotReady(TickerTime.ofNanos(0)),
-        Running,
-        ResourceIncarnationTerminating,
-        ResourceTerminating
-      )
-
   }
 
-  /** Canonical names of all [[HealthStatus]] variants, used for metric label enumeration. */
-  val ALL_STATUS_NAMES: Seq[String] = HealthStatus.values.toSeq.map(_.statusName)
+  /** Canonical names of all effective health statuses, used for metric label enumeration. */
+  val ALL_STATUS_NAMES: Seq[String] = Seq(
+    IncarnationStatus.Starting,
+    new IncarnationStatus.NotReady(TickerTime.ofNanos(0)),
+    IncarnationStatus.Running,
+    IncarnationStatus.Terminating,
+    HealthStatus.ResourceTerminating
+  ).map((_: HealthStatus).name)
 
   /**
    * Factory for [[HealthWatcher]]s. Used to do dependency injection of a health watcher in tests
@@ -378,276 +366,139 @@ object HealthWatcher {
   }
 
   /**
-   * An object to keep track of health status related information for a resource. `expiryTime` is
-   * the time at which the HealthStatus will be removed.
+   * Tracks Slicelet-derived health for one resource incarnation.
    *
-   * Callers should use [[getComputedHealthStatus]] to get the resource's latest [[HealthStatus]].
-   * Changes to this status are made through [[update]], which incorporates the latest signals and
-   * applies state transition rules to handle reordered messages and prevent flapping. The status
-   * derived from the most recent resource incarnation report alone (before those rules are applied)
-   * is exposed separately via [[getLastKnownResourceIncarnationStatusForDebug]] for debugging.
-   *
-   * @param resource                 A SQUID or UUID identifying the resource.
+   * @param resource                 The resource incarnation tracked by this entry.
    * @param observeSliceletReadiness whether to use the Slicelet's reported readiness state to set
    *                                 its status in health reports, or mask its reported state to
    *                                 Running from the NOT_READY state. When true, a Running resource
    *                                 that reports NOT_READY moves to NotReady; when false it stays
    *                                 Running (masked).
    * @param config                   static configuration for the HealthWatcher.
-   * @param logger                   logger used to record notable lifecycle events for the
-   *                                 resource.
    */
-  private class ResourceHealth(
-      private var resource: Either[Squid, UUID],
+  private class ResourceIncarnationHealth(
+      val resource: Squid,
       observeSliceletReadiness: Boolean,
-      config: StaticConfig,
-      logger: PrefixLogger)
+      config: StaticConfig)
       extends IntrusiveMinHeapElement[TickerTime] {
 
-    /**
-     * See [[getComputedHealthStatus]]. See [[updateHealthStatus]] for the state transition rules.
-     */
-    private var computedStatus: HealthStatus = HealthStatus.Starting
+    /** See [[getIncarnationStatus]]. See [[update]] for the state transition rules. */
+    private var incarnationStatus: IncarnationStatus =
+      IncarnationStatus.Starting
 
-    /** See [[getLastKnownResourceIncarnationStatusForDebug]]. */
-    private var lastKnownResourceIncarnationStatusForDebug: HealthStatus = HealthStatus.Starting
+    /** The latest Slicelet report, if one has been received, retained for debugging. */
+    private var latestSliceletStateOpt: Option[SliceletState] = None
 
     /** The first time we learned this resource is terminating from a Slicelet. */
     private var learnedTerminatingFromSliceletTimeOpt: Option[TickerTime] = None
 
-    /** The first time we learned this resource is terminating from Kubernetes. */
-    private var learnedTerminatingFromKubernetesTimeOpt: Option[TickerTime] = None
-
-    /** Return SQUID for the resource. */
-    def getResourceSquidOpt: Option[Squid] = resource match {
-      case Left(squid) => Option(squid)
-      case _ => None
-    }
-
-    /** Returns resource UUID. */
-    def getResourceUuid: UUID = resource match {
-      case Right(uuid: UUID) => uuid
-      case Left(squid: Squid) => squid.resourceUuid
-    }
-
     /**
-     * Update the resource with a potentially new health status derived from `signal`. This method
-     * also updates the resource's expiry time.
+     * Updates this resource incarnation from a Slicelet report.
      *
-     * @param now         the current time.
-     * @param newResource the SQUID or UUID identifying the resource in this update.
-     * @param signal      the health signal observed about the resource.
+     * @param now           the current time.
+     * @param sliceletState the state reported by the Slicelet.
      * @return true if there is a change in health status of the resource.
      */
-    def update(now: TickerTime, newResource: Either[Squid, UUID], signal: HealthSignal): Boolean = {
-      val changed: Boolean = (resource, newResource) match {
-        case (Left(oldSquid), Left(newSquid)) =>
-          // We already have a SQUID, we should only update the health status if the SQUID is the
-          // same or more recent. Signals from a SQUID with an older timestamp are from a prior
-          // resource incarnation, which should not affect our belief about the current
-          // incarnation's health. The basis of this comparison is the Slicelet's wall clock time,
-          // which is unideal but should work in practice. Container restarts take so long that
-          // newer incarnations should have higher creation times even with a bit of clock skew.
-          val cmp: Int = newSquid.creationTime.compareTo(oldSquid.creationTime)
-          if (cmp >= 0) {
-            resource = Left(newSquid)
-            if (cmp > 0) {
-              // We've identified a new resource incarnation. Reset our belief about the resource's
-              // health to `Starting` to prepare for the incoming signal unless the entire resource
-              // is already terminating, which is a terminal status across all incarnations.
-              computedStatus match {
-                case HealthStatus.ResourceTerminating =>
-                  logger.info(s"Ignoring new incarnation for terminating resource $resource")
-
-                case HealthStatus.Starting | HealthStatus.Running | _: HealthStatus.NotReady |
-                    HealthStatus.ResourceIncarnationTerminating =>
-                  computedStatus = HealthStatus.Starting
-                  lastKnownResourceIncarnationStatusForDebug = HealthStatus.Starting
-                  learnedTerminatingFromSliceletTimeOpt = None
-              }
-            }
-
-            // If the SQUID has changed, even if health status has not, we should report change in
-            // health.
-            updateHealthStatus(signal, now) || newSquid != oldSquid
-          } else {
-            false
-          }
-
-        case (Left(_), Right(_)) =>
-          // We already have a SQUID, the new update does not have a SQUID, so the resource remains
-          // the same.
-          updateHealthStatus(signal, now)
-
-        case (Right(_), Left(squid)) =>
-          // The HealthStatus now has a SQUID, we assume the SQUID represents the most recent
-          // incarnation of the resource.
-          resource = Left(squid)
-          updateHealthStatus(signal, now)
-
-          // We unconditionally report a change here, since we have a new SQUID.
-          true
-        case (Right(_), Right(_)) =>
-          // The HealthStatus still does not have a SQUID. The resource remains same.
-          updateHealthStatus(signal, now)
+    def update(now: TickerTime, sliceletState: SliceletState): Boolean = {
+      if (sliceletState == SliceletState.Terminating &&
+        this.learnedTerminatingFromSliceletTimeOpt.isEmpty) {
+        this.learnedTerminatingFromSliceletTimeOpt = Some(now)
       }
 
-      // Record the first time we learn this resource is terminating from either Slicelet or
-      // Kubernetes.
-      //
-      // This runs after the match above so that a new resource incarnation, which resets the
-      // resource's health and clears the Slicelet terminating time, does not discard a terminating
-      // signal that belongs to the newly-observed incarnation.
-      signal match {
-        case HealthSignal.ResourceIncarnationState(SliceletState.Terminating) =>
-          if (learnedTerminatingFromSliceletTimeOpt.isEmpty) {
-            learnedTerminatingFromSliceletTimeOpt = Some(now)
-          }
-        case HealthSignal.ResourceTerminating =>
-          if (learnedTerminatingFromKubernetesTimeOpt.isEmpty) {
-            learnedTerminatingFromKubernetesTimeOpt = Some(now)
-          }
-        case _ => ()
-      }
+      this.latestSliceletStateOpt = Some(sliceletState)
 
-      changed
-    }
-
-    /**
-     * Returns the [[HealthWatcher]]-computed health status. See class doc for why the computed
-     * health status may differ from the Slicelet's reported state.
-     */
-    def getComputedHealthStatus: HealthStatus = computedStatus
-
-    /**
-     * Returns the [[HealthStatus]] derived from the most recent resource incarnation report alone,
-     * without applying any state transition rules. This may differ from [[getComputedHealthStatus]]
-     * and is intended only for debugging.
-     */
-    def getLastKnownResourceIncarnationStatusForDebug: HealthStatus =
-      lastKnownResourceIncarnationStatusForDebug
-
-    /** Returns the first time we learned this resource is terminating from a Slicelet, if any. */
-    def getLearnedTerminatingFromSliceletTimeOpt: Option[TickerTime] =
-      learnedTerminatingFromSliceletTimeOpt
-
-    /** Returns the first time we learned this resource is terminating from Kubernetes, if any. */
-    def getLearnedTerminatingFromKubernetesTimeOpt: Option[TickerTime] =
-      learnedTerminatingFromKubernetesTimeOpt
-
-    def expiryTime: TickerTime = getPriority
-
-    override def toString: String =
-      s"$resource => ${computedStatus.statusName}, expiryTime=$expiryTime"
-
-    /**
-     * Update the HealthStatus of the resource after being informed of `signal`, and refresh its
-     * expiry time. Implements the "state transitions rules" referenced in the class doc.
-     *
-     * Return true if the computed status has changed.
-     */
-    private def updateHealthStatus(signal: HealthSignal, now: TickerTime): Boolean = {
-      // If this a signal about resource incarnation state, retain it for debugging regardless of
-      // the outcome of applying our state transition rules.
-      signal match {
-        case incarnationState: HealthSignal.ResourceIncarnationState =>
-          lastKnownResourceIncarnationStatusForDebug = incarnationState.sliceletState match {
-            case SliceletState.NotReady => new HealthStatus.NotReady(now)
-            case SliceletState.Running => HealthStatus.Running
-            case SliceletState.Terminating => HealthStatus.ResourceIncarnationTerminating
-          }
-
-        case HealthSignal.ResourceTerminating =>
-        // Not a Slicelet report. Ignore.
-      }
-
-      computedStatus match {
-        case HealthStatus.Running | HealthStatus.Starting | _: HealthStatus.NotReady =>
-          // A terminating signal (incarnation or whole resource) extends the expiry by the (longer)
-          // terminating timeout, which is set to more than Kubernetes' default termination grace
-          // period (30s) to mask heartbeats that might arrive before it's forcefully terminated.
-          // Any other signal uses the unhealthy timeout.
-          val expiryTime: TickerTime = signal match {
-            case HealthSignal.ResourceTerminating => now + config.terminatingTimeoutPeriod
-            case HealthSignal.ResourceIncarnationState(SliceletState.Terminating) =>
-              now + config.terminatingTimeoutPeriod
-            case _ => now + config.unhealthyTimeoutPeriod
+      this.incarnationStatus match {
+        case IncarnationStatus.Running | IncarnationStatus.Starting |
+            _: IncarnationStatus.NotReady =>
+          val expiryTime: TickerTime = sliceletState match {
+            case SliceletState.Terminating =>
+              now + this.config.terminatingRetentionWindow
+            case _ => now + this.config.unhealthyTimeoutPeriod
           }
           setPriority(expiryTime)
 
         // Avoid calling `setPriority` if the resource is already terminating, which would cause the
         // expiry time to go backwards if we got an out-of-order non-terminating signal.
-        case HealthStatus.ResourceIncarnationTerminating | HealthStatus.ResourceTerminating =>
+        case IncarnationStatus.Terminating =>
       }
 
-      val newComputedStatus: HealthStatus = signal match {
-        case HealthSignal.ResourceTerminating =>
-          // Resource deletion dominates any prior status and survives new incarnations, so the
-          // resulting status is `ResourceTerminating` regardless of the prior status.
-          HealthStatus.ResourceTerminating
+      val newStatus: IncarnationStatus =
+        (this.incarnationStatus, sliceletState) match {
+          case (_, SliceletState.Terminating) =>
+            IncarnationStatus.Terminating
 
-        case HealthSignal.ResourceIncarnationState(sliceletState: SliceletState) =>
-          (computedStatus, sliceletState) match {
-            // `Starting` is the initial state for every new resource (and every new resource
-            // incarnation). `SliceletState.NotReady` reports keep the resource in
-            // `Starting`, so a subsequent `SliceletState.Running` heartbeat transitions immediately
-            // to `Running`.
-            case (HealthStatus.Starting, SliceletState.NotReady) => HealthStatus.Starting
+          // `Starting` is the initial state for every new resource incarnation.
+          // `SliceletState.NotReady` reports keep the resource in `Starting`, while a
+          // `SliceletState.Running` report transitions immediately to `Running`.
+          case (IncarnationStatus.Starting, SliceletState.NotReady) =>
+            IncarnationStatus.Starting
 
-            case (HealthStatus.Starting, SliceletState.Running) => HealthStatus.Running
-            case (HealthStatus.Starting, SliceletState.Terminating) =>
-              HealthStatus.ResourceIncarnationTerminating
+          case (IncarnationStatus.Starting, SliceletState.Running) =>
+            IncarnationStatus.Running
 
-            case (_: HealthStatus.NotReady, SliceletState.NotReady) =>
-              // Heartbeat while in NotReady: extend the flapping protection timeout.
-              new HealthStatus.NotReady(now)
-            case (notReadyStatus: HealthStatus.NotReady, SliceletState.Running) =>
-              // Only allow transition to Running if the NotReady flapping protection period has
-              // elapsed. This prevents rapid Running <-> NotReady flapping when the Slicelet's
-              // readiness is observed.
-              if (now >= notReadyStatus.lastReportTime + config.notReadyTimeoutPeriod) {
-                HealthStatus.Running
-              } else {
-                computedStatus
-              }
-            case (_: HealthStatus.NotReady, SliceletState.Terminating) =>
-              HealthStatus.ResourceIncarnationTerminating
+          case (_: IncarnationStatus.NotReady, SliceletState.NotReady) =>
+            // Heartbeat while in NotReady: extend the flapping protection timeout.
+            new IncarnationStatus.NotReady(now)
+          case (notReadyStatus: IncarnationStatus.NotReady, SliceletState.Running) =>
+            // Only allow transition to Running if the NotReady flapping protection period has
+            // elapsed. This prevents rapid Running <-> NotReady flapping when the Slicelet's
+            // readiness is observed.
+            if (now >= notReadyStatus.lastReportTime + this.config.notReadyTimeoutPeriod) {
+              IncarnationStatus.Running
+            } else {
+              notReadyStatus
+            }
 
-            case (HealthStatus.Running, SliceletState.NotReady) =>
-              // Transition to NotReady in response to a NOT_READY report. When the Slicelet's
-              // readiness is not observed, this outcome is masked back to Running below.
-              new HealthStatus.NotReady(now)
-            case (HealthStatus.Running, SliceletState.Running) => HealthStatus.Running
-            case (HealthStatus.Running, SliceletState.Terminating) =>
-              HealthStatus.ResourceIncarnationTerminating
+          case (IncarnationStatus.Running, SliceletState.NotReady) =>
+            // Transition to NotReady in response to a NOT_READY report. When the Slicelet's
+            // readiness is not observed, this outcome is masked back to Running below.
+            new IncarnationStatus.NotReady(now)
+          case (IncarnationStatus.Running, SliceletState.Running) =>
+            IncarnationStatus.Running
 
-            // If the resource is already terminating, no signal about the resource incarnation
-            // state changes our belief about its status. State changes on new resource incarnations
-            // are enacted by [[update]] when it observes a newer SQUID.
-            case (HealthStatus.ResourceIncarnationTerminating, _) =>
-              HealthStatus.ResourceIncarnationTerminating
-            case (HealthStatus.ResourceTerminating, _) => HealthStatus.ResourceTerminating
-          }
-      }
+          // If the resource is already terminating, no signal about the resource incarnation
+          // state changes our belief about its status. Note that this does not indicate that the
+          // resource itself is terminating.
+          case (IncarnationStatus.Terminating, _) =>
+            IncarnationStatus.Terminating
+        }
 
       // If configured, the HealthWatcher will mask the health status outcome of the state machine
       // with a different status. Namely, a NotReady or Starting outcome from the state machine is
       // masked to Running. This masking can be enabled for targets where the Slicelet readiness
       // probe may be unreliable (e.g., where a Slicelet never transitions out of NotReady). When
       // masking is active, the NotReady flapping protection is a no-op because
-      // maskedNewComputedStatus is never NotReady or Starting.
-      val maskedNewComputedStatus: HealthStatus = newComputedStatus match {
-        case (_: HealthStatus.NotReady) | HealthStatus.Starting if !observeSliceletReadiness =>
-          HealthStatus.Running
+      // maskedNewStatus is never NotReady or Starting.
+      val maskedNewStatus: IncarnationStatus = newStatus match {
+        case (_: IncarnationStatus.NotReady) | IncarnationStatus.Starting
+            if !this.observeSliceletReadiness =>
+          IncarnationStatus.Running
         case _ =>
-          newComputedStatus
+          newStatus
       }
 
-      val changed: Boolean = maskedNewComputedStatus != computedStatus
-      computedStatus = maskedNewComputedStatus
+      val changed: Boolean = !maskedNewStatus.isSameType(this.incarnationStatus)
+      this.incarnationStatus = maskedNewStatus
       changed
     }
 
+    /** Returns the incarnation health status computed by the [[HealthWatcher]]. */
+    def getIncarnationStatus: IncarnationStatus = this.incarnationStatus
+
+    /** Returns the latest Slicelet report, if one has been received, for debugging. */
+    def getLatestSliceletStateOpt: Option[SliceletState] = this.latestSliceletStateOpt
+
+    /** Returns the first time we learned this resource is terminating from a Slicelet, if any. */
+    def getLearnedTerminatingFromSliceletTimeOpt: Option[TickerTime] =
+      this.learnedTerminatingFromSliceletTimeOpt
+
+    def expiryTime: TickerTime = getPriority
+
+    /** Removes this entry before replacing it with a newer incarnation. */
+    def removeFromHeap(): Unit = remove()
+
+    override def toString: String =
+      s"${this.resource} => ${this.incarnationStatus}, expiryTime=$expiryTime"
   }
 
   /**
@@ -666,6 +517,9 @@ class HealthWatcher(
     config: StaticConfig,
     healthWatcherTargetConfig: HealthWatcherTargetConfig)
     extends StateMachine[Event, DriverAction] {
+
+  import com.databricks.dicer.assigner.HealthWatcher.HealthStatus.IncarnationStatus
+
   type Output = StateMachineOutput[DriverAction]
 
   private val logger = PrefixLogger.create(
@@ -676,11 +530,28 @@ class HealthWatcher(
   private val observeSliceletReadiness: Boolean =
     healthWatcherTargetConfig.observeSliceletReadiness
 
-  /** The health status of each resource, keyed by resource. */
-  private val healthByUuid = new mutable.HashMap[UUID, ResourceHealth]
+  /**
+   * The health status of the latest known incarnation of each resource, keyed by the resource UUID.
+   */
+  private val incarnationHealthByUuid = new mutable.HashMap[UUID, ResourceIncarnationHealth]
 
   /** The health status of each resource, prioritized by minimum `expiryTime`. */
-  private val healthByExpiry = new IntrusiveMinHeap[TickerTime, ResourceHealth]
+  private val incarnationHealthByExpiry =
+    new IntrusiveMinHeap[TickerTime, ResourceIncarnationHealth]
+
+  /**
+   * The resource UUIDs the cluster manager is attempt to terminate. The value for each entry
+   * is the time at which we were first informed of this from the cluster manager, retained just for
+   * monitoring and debugging.
+   *
+   * There are no invariants between the resources tracked here and the incarnations tracked above.
+   * Information from the cluster manager is treated as an optimization, so a HealthWatcher will
+   * emit health reports even if it hasn't received anything from the cluster manager. This means
+   * it's possible for a resource to be excluded from the assignment due to a cluster manager
+   * report, and then become re-added if a new Assigner takes over the target but fails to hear from
+   * the cluster manager while that resource is alive and its Slicelet is delivering heartbeats.
+   */
+  private var clusterManagerTerminatingResources: Map[UUID, TickerTime] = Map.empty
 
   /**
    * The highest Generation observed from a reliable source. Used for judging whether an assignment
@@ -705,17 +576,9 @@ class HealthWatcher(
   override def onEvent(tickerTime: TickerTime, instant: Instant, event: Event): Output = {
     event match {
       case Event.SliceletStateFromSlicelet(resource, sliceletState) =>
-        informHealthStatus(
-          tickerTime,
-          Left(resource),
-          HealthSignal.ResourceIncarnationState(sliceletState)
-        )
-      case Event.PodTerminatingFromKubernetes(resourceUuid) =>
-        informHealthStatus(
-          tickerTime,
-          Right(resourceUuid),
-          HealthSignal.ResourceTerminating
-        )
+        informHealthStatus(tickerTime, resource, sliceletState)
+      case Event.InformClusterManagerResources(terminatingUuids: Set[UUID]) =>
+        setClusterManagerTerminatingResources(tickerTime, terminatingUuids)
       case assignmentSyncObserved: Event.AssignmentSyncObserved =>
         handleAssignmentSyncObserved(assignmentSyncObserved)
     }
@@ -730,25 +593,25 @@ class HealthWatcher(
     // Remove any expired resources from the health map. Note: onAdvance is the only place
     // where resources are expired, by design, so that expiry events are reliably turned into
     // crash events without races with status updates.
-    while (healthByExpiry.peek.exists { health: ResourceHealth =>
+    while (incarnationHealthByExpiry.peek.exists { health: ResourceIncarnationHealth =>
         health.expiryTime <= tickerTime
       }) {
       dirty = true
-      val resourceHealth: ResourceHealth = healthByExpiry.pop()
-      healthByUuid.remove(resourceHealth.getResourceUuid)
+      val resourceHealth: ResourceIncarnationHealth = incarnationHealthByExpiry.pop()
+      incarnationHealthByUuid.remove(resourceHealth.resource.resourceUuid)
       // A Running resource whose heartbeat expired is considered crashed (i.e. the last thing we
       // knew about this resource was that it was running, but we haven't received any heartbeats
       // in so long that it is now considered expired). A resource that expires from the NotReady
       // state is not considered crashed: such a resource has already been removed from the
       // assignment and is no longer manipulating keys, so its expiry is unlikely to be caused by
       // a key of death.
-      if (resourceHealth.getComputedHealthStatus == HealthStatus.Running) {
+      if (getHealthStatus(resourceHealth) == IncarnationStatus.Running) {
         newlyCrashedCount += 1
       }
       TargetMetrics.recordHealthWatcherResourceExpirationStats(
         target,
         resourceHealth.getLearnedTerminatingFromSliceletTimeOpt,
-        resourceHealth.getLearnedTerminatingFromKubernetesTimeOpt
+        clusterManagerTerminatingResources.get(resourceHealth.resource.resourceUuid)
       )
       logger.info(s"Removed expired resource: $resourceHealth")
     }
@@ -788,7 +651,8 @@ class HealthWatcher(
               // `isReliableSource`).
 
               // Bootstrap the health by incorporating assigned resources in the latest assignment
-              // into `healthByUuid` and transitioning the State into Started, so the HealthWatcher
+              // into `incarnationHealthByUuid` and transitioning the State into Started, so the
+              // HealthWatcher
               // will start to generate health reports in the following recursive onAdvance() call
               // and the assigned resources can possibly be used in the health report.
               val assignedResources: Set[Squid] = latestAssignment.assignedResources
@@ -809,31 +673,15 @@ class HealthWatcher(
               // We've learned a set of reliably fresh assigned resources. Any explicit health
               // signals we've received are treated as authoritative, and the rest of the assigned
               // resources are considered last known healthy as of the watcher start time.
+              logger.info(
+                s"Bootstrapping health from assignment generation $highestReliableGeneration."
+              )
               for (entry <- assignedResourcesByUuid) {
                 val (uuid, squid): (UUID, Squid) = entry
-                if (!healthByUuid.contains(uuid)) {
-                  val resourceHealth =
-                    new ResourceHealth(
-                      Left(squid),
-                      observeSliceletReadiness,
-                      config,
-                      logger
-                    )
+                if (!incarnationHealthByUuid.contains(uuid)) {
                   // Treat each bootstrapped assignment resource as a Slicelet reporting Running:
                   // these resources are considered last known healthy as of the watcher start time.
-                  resourceHealth.update(
-                    startTime,
-                    Left(squid),
-                    HealthSignal.ResourceIncarnationState(SliceletState.Running)
-                  )
-                  healthByUuid.put(uuid, resourceHealth)
-                  healthByExpiry.push(resourceHealth)
-                  dirty = true
-                  logger.info(
-                    s"Health status for '$squid' bootstrapped to Running, " +
-                    s"status expires at: ${resourceHealth.expiryTime}"
-                  )
-                  logger.debug(makeHealthSummary(Some(tickerTime)))
+                  informHealthStatus(startTime, squid, SliceletState.Running)
                 }
               }
               this.state = State.Started
@@ -849,7 +697,8 @@ class HealthWatcher(
       case State.Started =>
         // Whether or not we're emitting a report in this round, we want to be called back the next
         // time a resource expires.
-        val nextExpiryTime = healthByExpiry.peek.map(_.expiryTime).getOrElse(TickerTime.MAX)
+        val nextExpiryTime =
+          incarnationHealthByExpiry.peek.map(_.expiryTime).getOrElse(TickerTime.MAX)
         if (dirty) {
           dirty = false
 
@@ -874,67 +723,73 @@ class HealthWatcher(
    * Iterates over all tracked resources, records per-status metrics, and computes the set of
    * [[Squid]]s that are currently healthy (Running).
    *
-   * We expect all [[ResourceHealth]] entries to have a [[Squid]], so entries without one are
-   * excluded from the returned set (but still counted in metrics).
+   * Cluster-manager termination is applied here as a final mask over incarnation health.
    */
   private def computeHealthySet(): Set[Squid] = {
-    val resourcesPerStatusReported: mutable.Map[HealthStatus, Int] = mutable.Map.empty
-    val resourcesPerStatusComputed: mutable.Map[HealthStatus, Int] = mutable.Map.empty
-    val healthy: mutable.Set[Squid] = mutable.Set.empty
-    // Collect the resources whose computed status is different from the reported one.
+    // Store the resource counts per status name for metrics.
+    val resourcesPerStatusReported: mutable.Map[String, Int] = mutable.Map.empty
+    val resourcesPerStatusComputed: mutable.Map[String, Int] = mutable.Map.empty
+
+    // Collect the resources whose computed status differs from its last reported incarnation
+    // state. Not all types of mismatches indicate a problem. For example, we expect a mismatch
+    // if the cluster manager informs us that the entire resource is terminating (which we cannot
+    // discover from a Slicelet alone). We also expect a mismatch if a Slicelet's reports flap
+    // between Running and NotReady while the computed status remains NotReady.
+    // Each tuple contains the resource, reported state name, and computed status name.
     val mismatches: mutable.Buffer[(Squid, String, String)] = mutable.Buffer.empty
 
-    for (entry <- healthByUuid) {
-      val (_, resourceHealth): (UUID, ResourceHealth) = entry
-      val reportedStatus: HealthStatus =
-        resourceHealth.getLastKnownResourceIncarnationStatusForDebug
-      val computedStatus: HealthStatus = resourceHealth.getComputedHealthStatus
+    val healthy: mutable.Set[Squid] = mutable.Set.empty
+    for (entry <- incarnationHealthByUuid) {
+      val (_, resourceHealth): (UUID, ResourceIncarnationHealth) = entry
+      val reportedStatusName: String = resourceHealth.getLatestSliceletStateOpt match {
+        case Some(SliceletState.NotReady) => "NotReady"
+        case Some(SliceletState.Running) => IncarnationStatus.Running.name
+        case Some(SliceletState.Terminating) =>
+          IncarnationStatus.Terminating.name
+        case None => IncarnationStatus.Starting.name
+      }
+      val status: HealthStatus = getHealthStatus(resourceHealth)
+      val statusName: String = status.name
 
-      // Count health statuses reported by Slicelets and HealthWatcher-computed statuses.
-      resourcesPerStatusReported(reportedStatus) =
-        resourcesPerStatusReported.getOrElse(reportedStatus, 0) + 1
-      resourcesPerStatusComputed(computedStatus) =
-        resourcesPerStatusComputed.getOrElse(computedStatus, 0) + 1
+      // Count states last reported by Slicelets and HealthWatcher-computed statuses.
+      resourcesPerStatusReported(reportedStatusName) =
+        resourcesPerStatusReported.getOrElse(reportedStatusName, 0) + 1
+      resourcesPerStatusComputed(statusName) =
+        resourcesPerStatusComputed.getOrElse(statusName, 0) + 1
 
-      // Record if the unmasked health status reported by Slicelet differs from the computed
+      // Record if the unmasked state reported by Slicelet differs from the computed
       // status.
       // Note: a resource with Starting status will always have a mismatch, since Starting
       // is a HealthWatcher-assigned status with no corresponding SliceletState.
-      // Note: a resource without a Squid is skipped, because there is no Slicelet-reported
-      // incarnation status to compare against yet.
-      if (reportedStatus != computedStatus) {
-        for (squid: Squid <- resourceHealth.getResourceSquidOpt) {
-          mismatches += ((squid, reportedStatus.statusName, computedStatus.statusName))
-          logger.info(
-            s"HealthStatus mask applied: reported ${reportedStatus.statusName}, " +
-            s"computed as ${computedStatus.statusName}",
-            every = 10.seconds
-          )
-        }
+      val squid: Squid = resourceHealth.resource
+      if (reportedStatusName != statusName) {
+        mismatches += ((squid, reportedStatusName, statusName))
+        logger.info(
+          s"HealthStatus mask applied: reported $reportedStatusName, " +
+          s"computed as $statusName",
+          every = 10.seconds
+        )
       }
 
-      for (squid: Squid <- resourceHealth.getResourceSquidOpt) {
-        if (computedStatus == HealthStatus.Running) {
-          healthy += squid
-        }
+      if (status == IncarnationStatus.Running) {
+        healthy += squid
       }
     }
     val allResources: Iterable[Squid] =
-      healthByUuid.values.flatMap((_: ResourceHealth).getResourceSquidOpt)
+      incarnationHealthByUuid.values.map((_: ResourceIncarnationHealth).resource)
     TargetMetrics.incrementHealthStatusComputedDiffersFromReported(
       target,
       allResources = allResources,
       mismatches = mismatches
     )
 
-    // Iterate through all HealthStatus instances and report the podset size metrics, so that
-    // any HealthStatus not present in a report will be set to 0.
-    for (status: HealthStatus <- HealthStatus.values) {
+    // Report every canonical label so statuses absent from this report are reset to zero.
+    for (statusName: String <- ALL_STATUS_NAMES) {
       TargetMetrics.setPodSetSize(
         target,
-        statusName = status.statusName,
-        reportedCount = resourcesPerStatusReported.getOrElse(status, 0),
-        computedCount = resourcesPerStatusComputed.getOrElse(status, 0)
+        statusName = statusName,
+        reportedCount = resourcesPerStatusReported.getOrElse(statusName, 0),
+        computedCount = resourcesPerStatusComputed.getOrElse(statusName, 0)
       )
     }
 
@@ -981,63 +836,140 @@ class HealthWatcher(
   }
 
   /**
-   * Informs the watcher of a health signal about `resource`. Caller should subsequently call
-   * `onAdvance` to determine if any action is required.
+   * Updates the terminating resources known by the cluster manager to `terminatingUuids`, retaining
+   * the time each resource was first reported terminating while it remains in the set.
+   */
+  private def setClusterManagerTerminatingResources(
+      now: TickerTime,
+      terminatingUuids: Set[UUID]): Unit = {
+    if (terminatingUuids == this.clusterManagerTerminatingResources.keySet) {
+      return
+    }
+    val removedUuids: Set[UUID] =
+      clusterManagerTerminatingResources.keySet -- terminatingUuids
+
+    for (resourceUuid: UUID <- removedUuids) {
+      logger.info(
+        s"Cluster manager no longer reports resource '$resourceUuid' as terminating at $now"
+      )
+    }
+
+    // Retain the timestamp at which we first learned about the terminating resource for
+    // monitoring. The state machine does not guarantee monotonic ticker readings, so `now` may be
+    // earlier than a retained timestamp, which is fine.
+    val newTerminatingResources = Map.newBuilder[UUID, TickerTime]
+    for (resourceUuid: UUID <- terminatingUuids) {
+      val knownTerminatingTimeOpt: Option[TickerTime] =
+        clusterManagerTerminatingResources.get(resourceUuid)
+      val terminatingTime: TickerTime = knownTerminatingTimeOpt match {
+        case Some(knownTerminatingTime: TickerTime) =>
+          knownTerminatingTime
+        case None =>
+          logger.info(s"Cluster manager reported resource '$resourceUuid' as terminating at $now")
+          now
+      }
+      newTerminatingResources += (resourceUuid -> terminatingTime)
+    }
+    clusterManagerTerminatingResources = newTerminatingResources.result()
+
+    // Trigger a recomputation of the healthy set if it may have changed.
+    this.dirty = true
+  }
+
+  /** Returns the health status after applying the cluster-manager resource-level mask. */
+  private def getHealthStatus(resourceHealth: ResourceIncarnationHealth): HealthStatus = {
+    if (clusterManagerTerminatingResources.contains(resourceHealth.resource.resourceUuid)) {
+      HealthStatus.ResourceTerminating
+    } else {
+      resourceHealth.getIncarnationStatus
+    }
+  }
+
+  /**
+   * Informs the watcher of a Slicelet state report. Caller should subsequently call `onAdvance`.
    *
    * @param now          the current time.
-   * @param resource     the SQUID or UUID identifying the resource.
-   * @param healthSignal the health signal observed about the resource.
+   * @param resource     the resource incarnation reporting state.
+   * @param sliceletState the state reported by the Slicelet.
    */
   private def informHealthStatus(
       now: TickerTime,
-      resource: Either[Squid, UUID],
-      healthSignal: HealthSignal
+      resource: Squid,
+      sliceletState: SliceletState
   ): Unit = {
-    val resourceUuid = resource match {
-      case Left(squid: Squid) => squid.resourceUuid
-      case Right(uuid: UUID) => uuid
+    val resourceUuid: UUID = resource.resourceUuid
+
+    // Just update the known incarnation health if one exists and the report is for the same
+    // incarnation.
+    val existingHealthOpt: Option[ResourceIncarnationHealth] =
+      incarnationHealthByUuid.get(resourceUuid) match {
+        case Some(existingHealth: ResourceIncarnationHealth) =>
+          // We order incarnations of the same resource by their creation time, which is
+          // wall-clock based. This is unideal, but container restarts take so long in practice that
+          // newer incarnations will usually have higher creation times.
+          val incarnationComparison: Int =
+            resource.creationTime.compareTo(existingHealth.resource.creationTime)
+          if (incarnationComparison == 0) {
+            // A pod keeps its address for its lifetime, and a container restart changes the
+            // creation time. Retain the original address for the same UUID and creation time.
+            Some(existingHealth)
+          } else if (incarnationComparison > 0) {
+            // New incarnation exists for this resource, so discard the old one. We'll create a new
+            // one below.
+            incarnationHealthByUuid.remove(resourceUuid)
+            existingHealth.removeFromHeap()
+            None
+          } else {
+            // This is a signal for an old incarnation, so just ignore it.
+            logger.info(
+              s"Ignoring $sliceletState signal from old incarnation (current incarnation: " +
+              s"${existingHealth.resource}, old incarnation: $resource)"
+            )
+            return
+          }
+        case None =>
+          // Unknown resource, create a new one.
+          None
+      }
+
+    // Get the incarnation health to update and whether the incarnation changed (which is
+    // trivially true when the entire resource is new).
+    val (incarnationHealth, incarnationChanged): (ResourceIncarnationHealth, Boolean) =
+      existingHealthOpt match {
+        case Some(existingHealth: ResourceIncarnationHealth) =>
+          (existingHealth, false)
+        case None =>
+          val newIncarnationHealth =
+            new ResourceIncarnationHealth(resource, observeSliceletReadiness, config)
+          (newIncarnationHealth, true)
+      }
+
+    val previousStatus: IncarnationStatus = incarnationHealth.getIncarnationStatus
+    val incarnationStatusChanged: Boolean = incarnationHealth.update(now, sliceletState)
+    val changed: Boolean = incarnationChanged || incarnationStatusChanged
+    dirty |= changed
+
+    if (incarnationChanged) {
+      logger.info(
+        s"Health status for new resource incarnation '$resource' initialized to " +
+        s"${incarnationHealth.getIncarnationStatus}"
+      )
+
+      // Add the new incarnation to our tracking data structures. The `update` above sets the heap
+      // priority before adding it to the heap (reversing the order would be safe but cost an
+      // extra heapify).
+      incarnationHealthByExpiry.push(incarnationHealth)
+      incarnationHealthByUuid.put(resourceUuid, incarnationHealth)
+    } else if (incarnationStatusChanged) {
+      logger.info(
+        s"Health status for resource '$resource' changed from $previousStatus to " +
+        s"${incarnationHealth.getIncarnationStatus}"
+      )
     }
 
-    val existingHealthStatusOpt: Option[ResourceHealth] = healthByUuid.get(resourceUuid)
-    logger.info(
-      s"Informed of health signal for '$resourceUuid': " +
-      s"$healthSignal (existing $existingHealthStatusOpt)",
-      30.seconds
-    )
-
-    // Determine whether the status has changed for `resource`.
-    dirty |= (existingHealthStatusOpt match {
-      case Some(existingHealthStatus: ResourceHealth) =>
-        val previousStatus: HealthStatus =
-          existingHealthStatus.getComputedHealthStatus
-        if (existingHealthStatus.update(now, resource, healthSignal)) {
-          logger.info(
-            s"Health status changed for '$resourceUuid' from ${previousStatus.statusName} to " +
-            s"${existingHealthStatus.getComputedHealthStatus.statusName}"
-          )
-          logger.debug(makeHealthSummary(Some(now)))
-          true
-        } else {
-          false
-        }
-      case None =>
-        val resourceHealth =
-          new ResourceHealth(
-            resource,
-            observeSliceletReadiness,
-            config,
-            logger
-          )
-        resourceHealth.update(now, resource, healthSignal)
-        healthByUuid.put(resourceUuid, resourceHealth)
-        healthByExpiry.push(resourceHealth)
-        logger.info(
-          s"Health status for '$resourceUuid' initialized to " +
-          s"${resourceHealth.getComputedHealthStatus.statusName}"
-        )
-        logger.debug(makeHealthSummary(Some(now)))
-        true
-    })
+    if (changed) {
+      logger.debug(makeHealthSummary(Some(now)))
+    }
   }
 
   /**
@@ -1058,10 +990,10 @@ class HealthWatcher(
     // summary. If that's no longer true one day, we can reduce the bulk by filtering the table to
     // show only some subset of the resources (perhaps the X most near expiry, and the Y furthest
     // from expiry).
-    for (expiryEntry: ResourceHealth <- healthByExpiry.unorderedIterator()) {
+    for (expiryEntry: ResourceIncarnationHealth <- incarnationHealthByExpiry.unorderedIterator()) {
       val expiryTime: TickerTime = expiryEntry.expiryTime
-      val healthStatus: HealthStatus = expiryEntry.getComputedHealthStatus
-      val uuid: UUID = expiryEntry.getResourceUuid
+      val healthStatusName: String = getHealthStatus(expiryEntry).name
+      val uuid: UUID = expiryEntry.resource.resourceUuid
       val formattedOffset: String = nowOpt match {
         case Some(now: TickerTime) =>
           val expiryOffset: FiniteDuration = expiryTime - now
@@ -1071,7 +1003,7 @@ class HealthWatcher(
       }
       table.appendRow(
         uuid.toString,
-        healthStatus.statusName,
+        healthStatusName,
         s"$expiryTime $formattedOffset"
       )
     }
@@ -1084,20 +1016,22 @@ class HealthWatcher(
     /** Checks the invariants of HealthWatcher. */
     @throws[AssertionError]("If HealthWatcher has any invariant broken.")
     def checkInvariants(now: TickerTime): Unit = {
-      healthByExpiry.forTest.checkInvariants()
+      incarnationHealthByExpiry.forTest.checkInvariants()
 
-      // `healthByUuid` is well-formed.
+      // `incarnationHealthByUuid` is well-formed.
       var resourceCountInMap: Int = 0
-      for (uuidWithHealth <- healthByUuid) {
-        val (uuid, resourceHealth): (UUID, ResourceHealth) = uuidWithHealth
-        iassert(resourceHealth.getResourceUuid == uuid)
+      for (uuidWithHealth <- incarnationHealthByUuid) {
+        val (uuid, resourceIncarnationHealth): (UUID, ResourceIncarnationHealth) = uuidWithHealth
+        iassert(resourceIncarnationHealth.resource.resourceUuid == uuid)
         resourceCountInMap += 1
       }
 
-      // `healthByUuid` and `healthByExpiry` are kept in sync.
-      iassert(resourceCountInMap == healthByExpiry.size)
-      for (resourceHealthInHeap: ResourceHealth <- healthByExpiry.forTest.copyContents()) {
-        val resourceHealthInMap: ResourceHealth = healthByUuid(resourceHealthInHeap.getResourceUuid)
+      // `incarnationHealthByUuid` and `incarnationHealthByExpiry` are kept in sync.
+      iassert(resourceCountInMap == incarnationHealthByExpiry.size)
+      for (resourceHealthInHeap: ResourceIncarnationHealth <- incarnationHealthByExpiry.forTest
+          .copyContents()) {
+        val resourceHealthInMap: ResourceIncarnationHealth =
+          incarnationHealthByUuid(resourceHealthInHeap.resource.resourceUuid)
         iassert(resourceHealthInHeap.eq(resourceHealthInMap))
         iassert(resourceHealthInHeap.expiryTime > now)
       }

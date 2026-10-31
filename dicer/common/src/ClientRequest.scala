@@ -234,7 +234,7 @@ object SliceletData {
       topKeys: Seq[KeyLoad],
       numReplicas: Int,
       loadDistributionOpt: Option[LoadDistribution] = None) {
-    LoadMeasurement.requireValidLoadMeasurement(primaryRateLoad)
+    MetricMeasurement.requireValidMeasurement(primaryRateLoad)
     require(
       windowHighExclusive.compareTo(windowLowInclusive) >= 0,
       s"High exclusive time must be >= low inclusive time: " +
@@ -323,7 +323,7 @@ object SliceletData {
    *                                      time-weighted load is greater than or equal to this value.
    */
   case class KeyLoad(key: SliceKey, underestimatedPrimaryRateLoad: Double) {
-    LoadMeasurement.requireValidLoadMeasurement(underestimatedPrimaryRateLoad)
+    MetricMeasurement.requireValidMeasurement(underestimatedPrimaryRateLoad)
 
     private[common] def toProto: SliceletDataP.KeyLoadP = {
       new SliceletDataP.KeyLoadP(
