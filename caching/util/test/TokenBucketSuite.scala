@@ -116,6 +116,28 @@ class TokenBucketSuite extends DatabricksTest {
     assert(!bucket.tryAcquire(1))
   }
 
+  test("Get available token count") {
+    // Test plan: Verify that the available token count reports only immediately acquirable
+    // tokens.
+
+    // The bucket refills 1 token every 500 ms.
+    val fakeClock: FakeTypedClock = new FakeTypedClock()
+    val bucket: TokenBucket =
+      TokenBucket.create(
+        capacityInSecondsOfRate = 5,
+        rate = 2,
+        initTime = fakeClock.tickerTime()
+      )
+
+    assertResult(10)(bucket.getAvailableTokenCount)
+    assert(bucket.tryAcquire(7))
+    assertResult(3)(bucket.getAvailableTokenCount)
+
+    fakeClock.advanceBy(500.millis)
+    bucket.refill(fakeClock.tickerTime())
+    assertResult(4)(bucket.getAvailableTokenCount)
+  }
+
   test("Consecutive attempts to acquire tokens") {
     // Test plan: Send consecutive requests to acquire tokens, and verify that the request only
     // succeeds when there are sufficient tokens in the bucket. Verify across small bucket and

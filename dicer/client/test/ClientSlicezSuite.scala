@@ -271,17 +271,17 @@ class ClientSlicezSuite extends DatabricksTest with TestName {
       InternalClientConfig(
         SliceLookupConfig(
           ClientType.Clerk,
-          watchAddress = ClientSlicezTestUtils.WATCH_ADDRESS,
-          tlsOptionsOpt = None,
           ClientSlicezTestUtils.TARGET,
           clientIdOpt = Some(TEST_CLIENT_UUID),
           watchStubCacheTime = 20.seconds,
-          watchFromDataPlane = false,
           alternativeTargetOpt = None,
-          enableRateLimiting = false,
-          sourceIpOpt = None
+          enableRateLimiting = false
         ),
-        subscriberDebugName = subscriberDebugName
+        subscriberDebugName = subscriberDebugName,
+        watchAddress = ClientSlicezTestUtils.WATCH_ADDRESS,
+        tlsOptionsOpt = None,
+        watchFromDataPlane = false,
+        sourceIpOpt = None
       )
     val protoLogger: DicerClientProtoLogger = DicerClientProtoLogger.create(
       clientType = ClientType.Clerk,

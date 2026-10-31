@@ -3,13 +3,17 @@ load("//bazel/rules/rust:rules_rust.bzl", "rust_library", "rust_test")
 rust_library(
     name = "metrics",
     srcs = ["src/lib.rs"],
-    crate_name = "universe_raf_metrics",
+    crate_name = "raf_metrics",
     visibility = ["//visibility:public"],
-    deps = ["@crates//:prometheus-client"],
+    deps = [
+        "//wrappers/rust/metrics/registry",
+        "@crates//:prometheus-client",
+    ],
 )
 
 rust_test(
     name = "metrics_test",
+    timeout = "short",
     testonly = True,
     srcs = ["tests/metrics_test.rs"],
     deps = [

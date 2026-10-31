@@ -11,17 +11,15 @@ End-to-end shape:
    `proto_library` target, runs `buffa_codegen --single-file lib.rs ...` and
    then compiles that lib.rs via rules_rust's `rustc_compile_action`.
 2. Each step propagates a `BuffaProtoInfo` provider with the generated
-   `dep_variant_info` and a `package_info` file mapping the generated crate
-   name to the proto packages it covers.
-3. Downstream proto_library aspects read the deps' `package_info` files to
-   build an `--extern-path` map so dep types are referenced via
-   `::<dep_crate>::<pkg>` instead of being regenerated.
+   `dep_variant_info` and a `package_info` file recording the proto files
+   and exact Rust type paths owned by the crate.
+3. Downstream proto_library aspects pass the deps' `package_info` files to
+   `buffa_codegen` via `--deps-info`, which builds `CodeGenConfig::extern_paths`
+   from them so dependency types use their owning crate without capturing types
+   from other files in the same or nested packages.
 4. `_rust_buffa_library` is a thin rule that re-exports the aspect's
    `BuffaProtoInfo` providers for its `proto` attribute, making the
    generated crate consumable as a normal `rust_library` dep.
-
-Mirrors `rules_rust_prost`'s shape; the cross-crate stitching protocol uses
-the same package_info / deps_info pattern.
 """
 
 load("@rules_rust//rust:defs.bzl", "rust_common")
@@ -36,7 +34,7 @@ BuffaProtoInfo = provider(
     doc = "Per-proto_library buffa codegen + compile output.",
     fields = {
         "dep_variant_info": "rust_common.dep_variant_info wrapping the generated rlib.",
-        "package_info": "File mapping this crate name to its proto packages.",
+        "package_info": "Manifest of owned proto files and exact Rust type paths.",
         "transitive_package_infos": "depset[File] of package_info for this crate and all transitive proto deps.",
     },
 )
@@ -137,7 +135,7 @@ def _run_buffa_codegen(
     """
     prefix = "{}.{}".format(ctx.label.name, crate_name)
     lib_rs = ctx.actions.declare_file("{}.buffa.lib.rs".format(prefix))
-    package_info = ctx.actions.declare_file("{}.buffa_package_info".format(prefix))
+    package_info = ctx.actions.declare_file("{}.buffa_package_info.json".format(prefix))
 
     # deps_info contains one package_info path per transitive proto dependency.
     transitive_pkg_infos = depset(
@@ -157,6 +155,13 @@ def _run_buffa_codegen(
     args.add("--crate-name", crate_name)
     args.add("--package-info-output", package_info)
     args.add("--deps-info", deps_info)
+
+    # Only this proto_library's own files. buffa_codegen fails if any other input
+    # file is not owned by a dep's package_info or excluded below.
+    args.add_all(
+        [_proto_virtual_import_path(src, proto_info) for src in proto_info.direct_sources],
+        before_each = "--file-to-generate",
+    )
 
     # Never generate the well-known types: buffa_codegen auto-injects the
     # `.google.protobuf = ::buffa_types::google::protobuf` extern path instead

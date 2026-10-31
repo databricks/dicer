@@ -23,7 +23,6 @@ import com.databricks.caching.util.{
 import com.databricks.dicer.assigner.Store.WriteAssignmentResult
 import com.databricks.dicer.common.testing.SliceTestUtils.{createRandomProposal, createTestSquid}
 import com.databricks.dicer.common.{
-  AssignmentConsistencyMode,
   Assignment,
   Generation,
   Incarnation,
@@ -137,7 +136,6 @@ abstract class CommonStoreSuiteBase extends DatabricksTest with TestName {
       assignment1 == proposal1
         .commit(
           isFrozen = false,
-          AssignmentConsistencyMode.Affinity,
           assignment1.generation
         )
     )
@@ -149,7 +147,6 @@ abstract class CommonStoreSuiteBase extends DatabricksTest with TestName {
       assignment2 == proposal2
         .commit(
           isFrozen = true,
-          AssignmentConsistencyMode.Affinity,
           assignment2.generation
         )
     )
@@ -178,7 +175,6 @@ abstract class CommonStoreSuiteBase extends DatabricksTest with TestName {
       assignment1 == proposal1
         .commit(
           isFrozen = true,
-          AssignmentConsistencyMode.Affinity,
           assignment1.generation
         )
     )
@@ -194,7 +190,6 @@ abstract class CommonStoreSuiteBase extends DatabricksTest with TestName {
       assignment2 == proposal2
         .commit(
           isFrozen = false,
-          AssignmentConsistencyMode.Affinity,
           assignment2.generation
         )
     )
@@ -230,7 +225,6 @@ abstract class CommonStoreSuiteBase extends DatabricksTest with TestName {
       )
       val expectedCommittedAssignment: Assignment = proposal.commit(
         isFrozen = false,
-        AssignmentConsistencyMode.Affinity,
         storeCommittedAssignment.generation
       )
 
@@ -314,7 +308,6 @@ abstract class CommonStoreSuiteBase extends DatabricksTest with TestName {
         createProposal(predecessorOpt = None)
           .commit(
             isFrozen = false,
-            AssignmentConsistencyMode.Affinity,
             previousGen
           )
       val proposedAssignment =
@@ -351,7 +344,6 @@ abstract class CommonStoreSuiteBase extends DatabricksTest with TestName {
       assignment2 == proposedAssignment2
         .commit(
           isFrozen = false,
-          AssignmentConsistencyMode.Affinity,
           assignment2.generation
         )
     )
@@ -485,7 +477,6 @@ abstract class CommonStoreSuiteBase extends DatabricksTest with TestName {
         assignment ==
         proposal.commit(
           shouldFreeze,
-          AssignmentConsistencyMode.Affinity,
           assignment.generation
         )
       )
@@ -533,7 +524,6 @@ abstract class CommonStoreSuiteBase extends DatabricksTest with TestName {
     val assignment2: Assignment =
       createProposal(predecessorOpt = None).commit(
         isFrozen = false,
-        AssignmentConsistencyMode.Affinity,
         assignment1.generation.copy(number = assignment1.generation.number.value - 1)
       )
     store.informAssignment(target, assignment2)
@@ -542,7 +532,6 @@ abstract class CommonStoreSuiteBase extends DatabricksTest with TestName {
     val assignment3: Assignment =
       createProposal(predecessorOpt = None).commit(
         isFrozen = false,
-        AssignmentConsistencyMode.Affinity,
         assignment1.generation.copy(number = assignment1.generation.number.value + 1)
       )
     store.informAssignment(target, assignment3)
@@ -584,7 +573,6 @@ abstract class CommonStoreSuiteBase extends DatabricksTest with TestName {
         createProposal(predecessorOpt = None)
           .commit(
             isFrozen = false,
-            AssignmentConsistencyMode.Affinity,
             newGeneration
           )
 
@@ -605,7 +593,6 @@ abstract class CommonStoreSuiteBase extends DatabricksTest with TestName {
     val proposal1 = createProposal(predecessorOpt = None)
     val assignment1 = proposal1.commit(
       isFrozen = true,
-      AssignmentConsistencyMode.Affinity,
       Generation(
         store.storeIncarnation,
         Instant.now().toEpochMilli

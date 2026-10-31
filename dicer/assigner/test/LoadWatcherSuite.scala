@@ -34,7 +34,7 @@ import com.databricks.dicer.common.testing.SliceTestUtils.{
   toSquid,
   `∞`
 }
-import com.databricks.dicer.common.{AssignmentConsistencyMode, Assignment, SliceAssignment}
+import com.databricks.dicer.common.{Assignment, SliceAssignment}
 import com.databricks.dicer.external.{
   HighSliceKey,
   InfinitySliceKey,
@@ -256,7 +256,6 @@ class LoadWatcherSuite extends DatabricksTest {
     )
     val assignment: Assignment = createAssignment(
       12,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       (slice @@ 12 -> Seq("pod0")).clearPrimaryRateLoad()
     )
@@ -424,7 +423,6 @@ class LoadWatcherSuite extends DatabricksTest {
     // Create an assignment with two Slices and no historical load data.
     val assignment: Assignment = createAssignment(
       generation = 2 ## 42,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       (("" -- "fili") @@ (2 ## 42) -> Seq("pod0")).clearPrimaryRateLoad(),
       ("fili".andGreater @@ (2 ## 42) -> Seq("pod1")).clearPrimaryRateLoad()
@@ -494,7 +492,6 @@ class LoadWatcherSuite extends DatabricksTest {
     )
     val assignment: Assignment = createAssignment(
       42,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       (("" -- "fili") @@ 42 -> Seq("pod0")).withPrimaryRateLoad(10),
       ("fili".andGreater @@ 42 -> Seq("pod0")).withPrimaryRateLoad(20)
@@ -640,7 +637,6 @@ class LoadWatcherSuite extends DatabricksTest {
     )
     val assignment: Assignment = createAssignment(
       42,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       ("" -- "fili") @@ 42 -> Seq("pod0"),
       "fili".andGreater @@ 42 -> Seq("pod0")
@@ -726,7 +722,6 @@ class LoadWatcherSuite extends DatabricksTest {
     )
     val assignment: Assignment = createAssignment(
       42,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       (("" -- "fili") @@ 42 -> Seq("pod0")).clearPrimaryRateLoad(),
       ("fili".andGreater @@ 42 -> Seq("pod0")).clearPrimaryRateLoad()
@@ -855,7 +850,6 @@ class LoadWatcherSuite extends DatabricksTest {
     )
     val assignment1: Assignment = createAssignment(
       42,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       (("" -- "fili") @@ 42 -> Seq("pod0")).withPrimaryRateLoad(11),
       ("fili".andGreater @@ 42 -> Seq("pod0")).withPrimaryRateLoad(12)
@@ -899,7 +893,6 @@ class LoadWatcherSuite extends DatabricksTest {
     watcher.now += maxAge - 1.minute
     val assignment2: Assignment = createAssignment(
       43,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       ("" -- "kili") @@ 43 -> Seq("pod0"),
       "kili".andGreater @@ 43 -> Seq("pod0")
@@ -988,7 +981,6 @@ class LoadWatcherSuite extends DatabricksTest {
     // Create an assignment with two Slices and no historical load data.
     val assignment: Assignment = createAssignment(
       12,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       ("".andGreater @@ 12 -> Seq("pod0")).clearPrimaryRateLoad()
     )
@@ -1102,7 +1094,6 @@ class LoadWatcherSuite extends DatabricksTest {
     )
     val assignment: Assignment = createAssignment(
       42,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       "".andGreater @@ 42 -> Seq("pod0")
     )
@@ -1151,7 +1142,6 @@ class LoadWatcherSuite extends DatabricksTest {
     )
     val assignment: Assignment = createAssignment(
       42,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       "".andGreater @@ 42 -> Seq("pod0")
     )
@@ -1224,7 +1214,6 @@ class LoadWatcherSuite extends DatabricksTest {
     val rightSlice: Slice = Slice(hotKey.successor(), InfinitySliceKey)
     val assignment: Assignment = createAssignment(
       generation = 12,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       (leftSlice @@ 12 -> Seq("pod0")).clearPrimaryRateLoad(),
       (singleKeySlice @@ 12 -> Seq("pod0")).clearPrimaryRateLoad(),
@@ -1305,7 +1294,6 @@ class LoadWatcherSuite extends DatabricksTest {
     )
     val assignment: Assignment = createAssignment(
       12,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       (slice @@ 12 -> Seq("pod0")).clearPrimaryRateLoad()
     )
@@ -1635,7 +1623,6 @@ class LoadWatcherSuite extends DatabricksTest {
         )
         val assignment: Assignment = createAssignment(
           12,
-          AssignmentConsistencyMode.Affinity,
           assignerServiceInfoOpt = None,
           (slice @@ 12 -> Seq("pod0")).clearPrimaryRateLoad(),
           (remainderSlice @@ 12 -> Seq("pod1")).withPrimaryRateLoad(7.0)
@@ -1697,7 +1684,6 @@ class LoadWatcherSuite extends DatabricksTest {
     )
     val assignment: Assignment = createAssignment(
       12,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       (slice @@ 12 -> Seq("pod0", "pod1")).clearPrimaryRateLoad()
     )
@@ -1910,7 +1896,6 @@ class LoadWatcherSuite extends DatabricksTest {
 
       val assignment: Assignment = createAssignment(
         generation = 2 ## 42,
-        AssignmentConsistencyMode.Affinity,
         assignerServiceInfoOpt = None,
         sliceAssignmentsBuilder.result()
       )
@@ -2001,7 +1986,6 @@ class LoadWatcherSuite extends DatabricksTest {
 
     val assignment: Assignment = createAssignment(
       generation = 2 ## 42,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       (("" -- "dori") @@ (2 ## 42) -> Seq("pod0")).clearPrimaryRateLoad(),
       (("dori" -- "fili") @@ (2 ## 42) -> Seq("pod1")).clearPrimaryRateLoad(),
@@ -2066,7 +2050,6 @@ class LoadWatcherSuite extends DatabricksTest {
 
     val assignment: Assignment = createAssignment(
       generation = 2 ## 42,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       (("" -- "fili") @@ (2 ## 42) -> Seq("pod0", "pod1", "pod2")).clearPrimaryRateLoad(),
       (("fili" -- ∞) @@ (2 ## 42) -> Seq("pod1", "pod2")).clearPrimaryRateLoad()
@@ -2184,7 +2167,6 @@ class LoadWatcherSuite extends DatabricksTest {
 
     val assignment: Assignment = createAssignment(
       generation = 2 ## 42,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       (Slice.FULL @@ (2 ## 42) -> Seq("pod0", "pod1")).clearPrimaryRateLoad()
     )
@@ -2520,7 +2502,6 @@ class LoadWatcherSuite extends DatabricksTest {
 
       val assignment: Assignment = createAssignment(
         generation = 2 ## 42,
-        AssignmentConsistencyMode.Affinity,
         assignerServiceInfoOpt = None,
         sliceAssignmentsBuilder.result()
       )
@@ -2561,7 +2542,6 @@ class LoadWatcherSuite extends DatabricksTest {
     )
     val assignment: Assignment = createAssignment(
       generation = 2 ## 42,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       (Slice.FULL @@ (2 ## 42) -> Seq("pod0", "pod1")).clearPrimaryRateLoad()
     )
@@ -2616,7 +2596,6 @@ class LoadWatcherSuite extends DatabricksTest {
 
     val assignment: Assignment = createAssignment(
       generation = 2 ## 42,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       (Slice.FULL @@ (2 ## 42) -> Seq("pod1", "pod2", "pod3")).clearPrimaryRateLoad()
     )
@@ -2818,7 +2797,6 @@ class LoadWatcherSuite extends DatabricksTest {
     val assignment: Assignment =
       createAssignment(
         generation = 2 ## 42,
-        AssignmentConsistencyMode.Affinity,
         assignerServiceInfoOpt = None,
         sliceAssignments
       )

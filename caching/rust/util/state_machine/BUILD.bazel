@@ -1,0 +1,24 @@
+load("//bazel/rules/rust:rules_rust.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "state_machine_lib",
+    srcs = ["src/lib.rs"],
+    crate_name = "caching_rust_util_state_machine",
+    visibility = ["//caching:all_caching"],
+    deps = [
+        "//caching/rust/util:util_lib",
+        "@crates//:tokio",
+    ],
+)
+
+rust_test(
+    name = "state_machine_test",
+    srcs = ["tests/state_machine_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":state_machine_lib",
+        "//caching/rust/util/testing:testing_lib",
+        "@crates//:futures-util",
+        "@crates//:tokio",
+    ],
+)

@@ -94,7 +94,6 @@ class GossipSuite extends DatabricksTest with TestName {
     )
     proposedAssignment.commit(
       isFrozen = true,
-      AssignmentConsistencyMode.Affinity,
       generation
     )
   }

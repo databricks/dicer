@@ -278,7 +278,6 @@ class DiffAssignmentSuite extends DatabricksTest {
     for (_ <- 0 until 100) { // 100 trials.
       // Randomly create the data fields for `DiffAssignment`.
       val isFrozen: Boolean = Random.nextBoolean()
-      val consistencyMode = AssignmentConsistencyMode.Affinity
       val useFullDiff: Boolean = Random.nextBoolean()
       val incarnationValue: Long =
         if (useFullDiff) {
@@ -300,7 +299,6 @@ class DiffAssignmentSuite extends DatabricksTest {
       val diffAssignment =
         DiffAssignment(
           isFrozen,
-          consistencyMode,
           generation,
           sliceMap,
           assignerServiceInfoOpt

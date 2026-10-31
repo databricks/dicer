@@ -53,7 +53,6 @@ get_assignment_view_proto_test_cases: [
         timestamp_str: "1970-01-01T00:10:39Z"
       }
       is_frozen: false
-      consistency_mode: "Affinity"
       resources: [
         {
           address: "Pod0"
@@ -107,7 +106,6 @@ get_assignment_view_proto_test_cases: [
         timestamp_str: "1970-01-01T00:10:39Z"
       }
       is_frozen: false
-      consistency_mode: "Affinity"
       resources: [
         {
           address: "Pod0"
@@ -157,7 +155,6 @@ get_assignment_view_proto_test_cases: [
         timestamp_str: "1970-01-01T00:10:39Z"
       }
       is_frozen: false
-      consistency_mode: "Affinity"
       resources: [
         {
           address: "Pod0"
@@ -213,7 +210,6 @@ get_assignment_view_proto_test_cases: [
         timestamp_str: "1970-01-01T00:00:00.100Z"
       }
       is_frozen: false
-      consistency_mode: "Affinity"
       resources: [
         {
           address: "r0"
@@ -274,7 +270,6 @@ get_assignment_view_proto_test_cases: [
         timestamp_str: "1970-01-01T00:10:39Z"
       }
       is_frozen: false
-      consistency_mode: "Affinity"
       resources: [
         {
           address: "Pod0"

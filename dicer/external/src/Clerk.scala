@@ -1,3 +1,4 @@
+// LINT.IfChange
 package com.databricks.dicer.external
 
 import java.net.URI
@@ -96,3 +97,5 @@ object Clerk {
     new Clerk[Stub](clerkImpl)
   }
 }
+// LINT.ThenChange(dicer/external/javaapi/src/Clerk.java)
+// LINT.ThenChange(dicer/rust/external/clerk/src/clerk.rs)

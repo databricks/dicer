@@ -101,7 +101,7 @@ object TargetConfigReader {
    *                       scope, in which case default configs are used.
    * @note `new java.io.File` only throws if a null path argument is provided.
    */
-  private[assigner] def readScopeConfigMapFromDirectories(
+  def readScopeConfigMapFromDirectories(
       configScopeOpt: Option[ClusterConfigScope],
       targetConfigDirectory: File,
       advancedTargetConfigDirectory: File): Map[TargetName, InternalTargetConfig] = {
@@ -149,7 +149,7 @@ object TargetConfigReader {
    *
    * @note `new java.io.File` only throws if a null path argument is provided.
    */
-  private[assigner] def readFullConfigMapFromDirectories(
+  def readFullConfigMapFromDirectories(
       targetConfigDirectory: File,
       advancedTargetConfigDirectory: File): Map[TargetName, TargetDefaultAndOverride] = {
     val fullConfigMap: Map[TargetName, TargetDefaultAndOverride] = readConfigMap(
@@ -169,7 +169,7 @@ object TargetConfigReader {
    * Returns the map of [[Target]] name to owning team from the configs in `targetConfigDirectory`.
    * It is also used in the `dicer/tools` to generate owner team name mappings.
    */
-  private[dicer] def readConfigOwners(targetConfigDirectory: File): Map[TargetName, String] =
+  def readConfigOwners(targetConfigDirectory: File): Map[TargetName, String] =
     readTargetConfigProtos(TargetConfigP, targetConfigDirectory)
       .mapValues(_.getOwnerTeamName)
       .toMap

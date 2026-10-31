@@ -32,7 +32,6 @@ import com.databricks.caching.util.{
   WhereAmIHelper
 }
 import com.databricks.common.util.ShutdownHookManager
-import com.databricks.dicer.client.SliceletImpl.SLICELET_LOAD_ACCUMULATOR_UPDATE_METRICS_INTERVAL
 import com.databricks.dicer.client.featurerollouts.DicerClientFeatureRolloutFlag
 import com.databricks.dicer.common.WatchServerHelper.WATCH_RPC_TIMEOUT
 import com.databricks.dicer.common.{
@@ -100,13 +99,6 @@ private[dicer] class SliceletImpl private (
   /** Lower bound on the latest generation known to the listener. */
   @GuardedBy("listenerSec")
   private var listenerGenerationLowerBound = Generation.EMPTY
-
-  /** Handle for the background task which updates Prometheus metrics. */
-  private val backgroundUpdateMetricsHandle: Cancellable = sec.scheduleRepeating(
-    "updateMetrics",
-    interval = SLICELET_LOAD_ACCUMULATOR_UPDATE_METRICS_INTERVAL,
-    () => loadAccumulator.updateMetrics()
-  )
 
   /**
    * Create a handle that can be used to track ownership of a key during an in-progress operation.
@@ -179,7 +171,8 @@ private[dicer] class SliceletImpl private (
     lookup.start(sliceletUuid, resourceAddress)
     logger.info(
       s"Started Slicelet ($sliceletUuid) with address = $resourceAddress communicating with " +
-      s"${sliceLookupConfig.watchAddress}. Watch requests handled on port ${server.activePort()}."
+      s"${config.watchStubManagerConfig.watchAddress}. Watch requests handled on port " +
+      s"${server.activePort()}."
     )
   }
 
@@ -280,7 +273,7 @@ private[dicer] class SliceletImpl private (
      */
     def stop(): Unit = {
       lookup.forTest.stop()
-      stopMetricsAndServer()
+      stopServer()
       logger.info(s"Stopped Slicelet (terminating state set, heartbeats may continue)")
     }
 
@@ -298,16 +291,16 @@ private[dicer] class SliceletImpl private (
      */
     private[dicer] def cancel(): Unit = {
       lookup.forTest.cancel()
-      stopMetricsAndServer()
+      stopServer()
       logger.info(s"Fully stopped Slicelet (SliceLookup connection cancelled)")
     }
 
-    // Cancels background metric updates and stops the Slicelet RPC server asynchronously.
+    // Stops the Slicelet RPC server asynchronously.
+    //
     // Synchronously stopping the server was measured to take about 2s in tests, causing test
     // times for suites making use of many Slicelets to balloon significantly. We avoid this by
     // stopping the server asynchronously instead.
-    private def stopMetricsAndServer(): Unit = {
-      backgroundUpdateMetricsHandle.cancel(Status.CANCELLED)
+    private def stopServer(): Unit = {
       server.stopAsync()
     }
   }
@@ -317,9 +310,6 @@ private[dicer] class SliceletImpl private (
 private[dicer] object SliceletImpl {
 
   private val logger = PrefixLogger.create(this.getClass, "")
-
-  /** Interval with which to regularly update load accumulator metrics. */
-  private val SLICELET_LOAD_ACCUMULATOR_UPDATE_METRICS_INTERVAL: FiniteDuration = 5.seconds
 
   /**
    * Used to enforce that only a single `SliceletImpl` instance is created per process, except in
@@ -421,14 +411,11 @@ private[dicer] object SliceletImpl {
       }
 
     val sliceLookupConfig: SliceLookupConfig = SliceLookupConfig(
-      ClientType.Slicelet,
-      assignerWatchAddress,
-      sliceletConf.getDicerClientTlsOptions,
-      target,
+      clientType = ClientType.Slicelet,
+      target = target,
       clientIdOpt = Some(uuid),
-      SliceLookupConfig.DEFAULT_WATCH_STUB_CACHE_TIME,
-      sliceletConf.watchFromDataPlane,
-      alternativeTargetOpt,
+      watchStubCacheTime = SliceLookupConfig.DEFAULT_WATCH_STUB_CACHE_TIME,
+      alternativeTargetOpt = alternativeTargetOpt,
       watchRpcTimeout = sliceletConf.watchRpcTimeoutOverrideOpt.getOrElse(WATCH_RPC_TIMEOUT),
       // The conf override, when set, takes precedence over the rollout flag, so that a service can
       // force rate limiting on or off regardless of the rollout.
@@ -437,11 +424,17 @@ private[dicer] object SliceletImpl {
           DicerClientFeatureRolloutFlag.SLICELET_WATCH_RATE_LIMITING_FLAG_NAME,
           target
         )
-      ),
-      sourceIpOpt = None
+      )
     )
     val config: InternalClientConfig =
-      InternalClientConfig(sliceLookupConfig, subscriberDebugName = sliceletDebugName)
+      InternalClientConfig(
+        sliceLookupConfig,
+        subscriberDebugName = sliceletDebugName,
+        watchAddress = assignerWatchAddress,
+        tlsOptionsOpt = sliceletConf.getDicerClientTlsOptions,
+        watchFromDataPlane = sliceletConf.watchFromDataPlane,
+        sourceIpOpt = None
+      )
 
     // Create a service builder on which the SliceLookup can register a watch handler.
     val serviceBuilder: GenericRpcServiceBuilder = GenericRpcServiceBuilder.create()
@@ -450,7 +443,10 @@ private[dicer] object SliceletImpl {
     val protoLogger: DicerClientProtoLogger = DicerClientProtoLogger.create(
       clientType = sliceLookupConfig.clientType,
       conf = sliceletConf,
-      ownerName = sliceletDebugName
+      // We deliberately don't use `sliceletDebugName` as the owner name, because it includes the IP
+      // address of the current pod, and therefore would lead to excessive application-level metric
+      // label cardinality.
+      ownerName = target.name
     )
 
     // The readiness provider runs on a separate thread from the main Slicelet thread because
@@ -458,9 +454,8 @@ private[dicer] object SliceletImpl {
     // non-blocking call, but there is no guarantee it will remain non-blocking. We don't want to
     // risk blocking the main Slicelet thread, which handles assignment updates and client requests.
     val readinessProviderSec: SequentialExecutionContext = {
-      // Include host name for thread pool name uniqueness and debugging efficiency.
       SequentialExecutionContext.createWithDedicatedPool(
-        name = s"Slicelet-ReadinessProvider-$hostName",
+        name = "Slicelet-ReadinessProvider",
         alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
       )
     }
@@ -476,7 +471,7 @@ private[dicer] object SliceletImpl {
 
     // Accumulates load observed by this Slicelet.
     val metrics = new SliceletMetrics(target)
-    val loadAccumulator = new SliceletLoadAccumulator(sec.getClock, target, metrics)
+    val loadAccumulator = new SliceletLoadAccumulator(sec.getClock, metrics)
     val keyCardinalityEstimator = new SliceletKeyCardinalityEstimator(sec.getClock)
     val lookup =
       new SliceletSliceLookup(
@@ -504,7 +499,7 @@ private[dicer] object SliceletImpl {
       rateLimitingStrategyOpt = None
     )
 
-    new SliceletImpl(
+    val slicelet = new SliceletImpl(
       sec,
       sliceletConf,
       config,
@@ -516,6 +511,8 @@ private[dicer] object SliceletImpl {
       keyCardinalityEstimator,
       lookup
     )
+
+    slicelet
   }
 
   /**

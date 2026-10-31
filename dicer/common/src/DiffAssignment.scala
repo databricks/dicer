@@ -20,7 +20,6 @@ import scala.util.control.NonFatal
 /**
  * REQUIRES:
  *  - For assignments in the "loose" incarnation, the map must be full (diffs not permitted).
- *  - For assignments in the "loose" incarnation, `consistencyMode` must not be `Strong`.
  *  - For partial maps, the diff generation ([[DiffAssignmentSliceMap.Partial.diffGeneration]]) must
  *    be in the same incarnation as `generation`, which is the generation of the assignment, and
  *    must also be less than or equal to `generation`.
@@ -32,8 +31,6 @@ import scala.util.control.NonFatal
  * protocols and storage so that only changed Slices need to be conveyed or stored.
  *
  * @param isFrozen        Whether the assignment is frozen (see [[Assignment.isFrozen]]).
- * @param consistencyMode The consistency mode to use for the the assignment (see
- *                        [[Assignment.consistencyMode]]).
  * @param generation      The generation of the assignment.
  * @param sliceMap        Either a "full" or "partial" mapping from Slices to assigned resources.
  * @param assignerServiceInfoOpt The service info of the Assigner that generated the assignment
@@ -43,17 +40,11 @@ import scala.util.control.NonFatal
  */
 case class DiffAssignment(
     isFrozen: Boolean,
-    consistencyMode: AssignmentConsistencyMode,
     generation: Generation,
     sliceMap: DiffAssignmentSliceMap,
     assignerServiceInfoOpt: Option[AssignerServiceInfo]
 ) {
   require(generation != Generation.EMPTY, "Assignment must have non-empty generation.")
-  require(
-    consistencyMode != AssignmentConsistencyMode.Strong
-    || generation.incarnation.isNonLoose,
-    "Consistent assignment cannot be in the loose incarnation."
-  )
   sliceMap match {
     case DiffAssignmentSliceMap
           .Partial(
@@ -308,10 +299,8 @@ object DiffAssignment {
             None
         }
     }
-    // TODO(<internal bug>) support strongly consistent assignments
     DiffAssignment(
       proto.getIsFrozen,
-      AssignmentConsistencyMode.Affinity,
       assignmentGeneration,
       sliceMap,
       assignerServiceInfoOpt

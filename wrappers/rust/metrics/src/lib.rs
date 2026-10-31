@@ -1,8 +1,9 @@
 //! Macros for defining Prometheus metrics. The metrics are initialized and registered lazily.
 
-use std::sync::{LazyLock, Mutex, MutexGuard};
+use std::sync::MutexGuard;
 
 use prometheus_client::registry::{Metric, Registry};
+use raf_metrics_registry::PROMETHEUS_REGISTRY;
 
 /// Defines a static Prometheus counter that is registered on first use.
 ///
@@ -243,10 +244,6 @@ macro_rules! metric {
             });
     };
 }
-
-/// Registry shared by every metric declared through this crate's macros.
-static PROMETHEUS_REGISTRY: LazyLock<Mutex<Registry>> =
-    LazyLock::new(|| Mutex::new(Registry::default()));
 
 #[doc(hidden)]
 /// Implementation details required by macros expanded in dependent crates.

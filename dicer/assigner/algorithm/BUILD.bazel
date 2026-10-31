@@ -5,14 +5,13 @@ package(
 )
 
 scala_library(
-    name = "load_map",
-    srcs = ["src/LoadMap.scala"],
+    name = "metric_map",
+    srcs = ["src/MetricMap.scala"],
     deps = [
         "//dicer/assigner:slice_key_math",
-        "//dicer/common:load_measurement",
+        "//dicer/common:metric_measurement",
         "//dicer/common:slice_helper",
         "//dicer/common:slicekey_helper",
-        "//dicer/external:conf",
         "//dicer/external:external_common",
         "//dicer/friend:slice_map",
     ],
@@ -33,13 +32,13 @@ scala_library(
     ],
     exports = ["//dicer/assigner/config:internal_target_config"],
     deps = [
-        ":load_map",
+        ":metric_map",
         "//caching/util:assert_macros",
         "//caching/util:intrusive_min_heap",
         "//caching/util:prefix_logger",
         "//dicer/assigner/config:internal_target_config",
         "//dicer/common:assignment_core",
-        "//dicer/common:load_measurement",
+        "//dicer/common:metric_measurement",
         "//dicer/common:slice_helper",
         "//dicer/common:slicekey_helper",
         "//dicer/common:target_helper",
@@ -57,18 +56,20 @@ scala_library(
     testonly = True,
     deps = [
         ":algorithm",
-        ":load_map",
+        ":metric_map",
         "//caching/util:fake_typed_clock",
         "//caching/util:metric_utils",
         "//caching/util:prefix_logger",
         "//caching/util:sequential_execution_context",
         "//caching/util:test_util",
+        "//dicer/assigner/config/testing:config_test_utils",
         "//dicer/assigner/config:internal_target_config",
         "//dicer/common/testing:test_common",
         "//dicer/common:assignment_core",
         "//dicer/common:generation",
         "//dicer/common:target_helper",
         "//dicer/external:conf",
+        "//dicer/external:external_common",
         "//dicer/friend:slice_map",
         "//dicer/friend:squid",
         "//wrappers/util:async_test_helpers",
@@ -82,7 +83,7 @@ scala_test(
     deps = [
         ":algorithm",
         ":algorithm_test_base",
-        ":load_map",
+        ":metric_map",
         "//caching/util:fake_typed_clock",
         "//caching/util:prefix_logger",
         "//caching/util:sequential_execution_context",
@@ -109,7 +110,7 @@ scala_test(
     deps = [
         ":algorithm",
         ":algorithm_test_base",
-        ":load_map",
+        ":metric_map",
         "//caching/util:fake_typed_clock",
         "//caching/util:sequential_execution_context",
         "//caching/util:test_util",
@@ -138,7 +139,7 @@ scala_test(
     deps = [
         ":algorithm",
         ":algorithm_test_base",
-        ":load_map",
+        ":metric_map",
         "//caching/util:fake_typed_clock",
         "//caching/util:test_utils",
         "//caching/util:unix_time_version",
@@ -168,7 +169,7 @@ scala_test(
     deps = [
         ":algorithm",
         ":algorithm_test_base",
-        ":load_map",
+        ":metric_map",
         "//caching/util:ascii_table",
         "//caching/util:fake_typed_clock",
         "//caching/util:prefix_logger",
@@ -191,18 +192,26 @@ scala_test(
 )
 
 scala_test(
-    name = "load_map_test",
-    srcs = ["test/LoadMapSuite.scala"],
+    name = "metric_map_test",
+    srcs = ["test/MetricMapSuite.scala"],
     timeout = "short",
     deps = [
-        ":load_map",
-        "//caching/util:test_util",
+        ":metric_map",
+        "//caching/util:test_utils",
         "//dicer/common/testing:test_common",
         "//dicer/common:slicekey_helper",
-        "//dicer/external:conf",
         "//dicer/external:external_common",
+        "//dicer/friend:slice_map",
+        "//wrappers/rpc:rich_scalapb",
         "//wrappers/util:async_test_helpers",
         "//wrappers/util:databricks-test",
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_code_findbugs_jsr305",
+        "@maven//:com_google_guava_guava",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
     ],
 )
 
@@ -212,7 +221,7 @@ scala_test(
     timeout = "short",
     deps = [
         ":algorithm",
-        ":load_map",
+        ":metric_map",
         "//caching/util:fake_typed_clock",
         "//caching/util:unix_time_version",
         "//dicer/assigner/config/testing:config_test_utils",
@@ -221,12 +230,14 @@ scala_test(
         "//dicer/common:assignment_core",
         "//dicer/common:generation",
         "//dicer/common:slicekey_helper",
-        "//dicer/external:conf",
         "//dicer/external:external_common",
         "//dicer/friend:slice_map",
         "//dicer/friend:squid",
+        "//wrappers/logging",
         "//wrappers/util:async_test_helpers",
         "//wrappers/util:databricks-test",
+        "@maven//:com_typesafe_scala_logging_scala_logging_2_12",
+        "@maven//:org_scala_lang_scala_reflect",
     ],
 )
 

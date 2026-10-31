@@ -357,7 +357,11 @@ case class AssignerTargetSlicezData(
    * internal config. Used by both the ZPage HTML and DPage JSON representations.
    */
   private def namedTargetConfig: NamedInternalTargetConfig =
-    NamedInternalTargetConfig(TargetName.forTarget(getTarget), targetConfig.internalTargetConfig)
+    NamedInternalTargetConfig(
+      TargetName.forTarget(getTarget),
+      targetConfig.internalTargetConfig,
+      overrides = Map.empty
+    )
 }
 
 object AssignerTargetSlicezData {
@@ -460,30 +464,25 @@ object ConsistentHashingState {
 /**
  * All preferred-assigner data surfaced on the Assigner debug page: the elected preferred-assigner
  * value (common to every driver), the consistent-hashing election snapshot (present only while the
- * consistent-hashing driver is active), and the migration mode in effect. TODO(<internal bug>): collapse
- * back to just the elected preferred-assigner value once the migration to consistent-hashing PA is
- * complete and we no longer need a split view with the etcd preferred-assigner.
+ * consistent-hashing driver is active). TODO(<internal bug>): since the migration to consistent-hashing PA
+ * is no longer in progress, remove the consistent-hashing election snapshot.
  *
  * @param preferredAssignerValue the elected preferred-assigner value, shown for every driver.
  * @param consistentHashingStateOpt the consistent-hashing election snapshot, or `None` when the
  *                                  consistent-hashing driver is not active (the etcd-backed and
  *                                  disabled drivers).
- * @param migrationMode the preferred-assigner migration mode in effect.
  */
 private[assigner] case class PreferredAssignerSlicezData(
     preferredAssignerValue: PreferredAssignerValue,
-    consistentHashingStateOpt: Option[ConsistentHashingState],
-    migrationMode: MigrationMode)
+    consistentHashingStateOpt: Option[ConsistentHashingState])
 
 /**
  * Class that contains the assigner information and the Slicez data for all targets.
  *
  * @param preferredAssignerSlicezData the elected preferred-assigner value plus the
- *                                    consistent-hashing snapshot and migration mode for the debug
- *                                    page. TODO(<internal bug>): collapse back to just the elected
- *                                    preferred-assigner value once the migration to
- *                                    consistent-hashing PA is complete and we no longer need a
- *                                    split view with the etcd preferred-assigner.
+ *                                    consistent-hashing snapshot for the debug page.
+ *                                    TODO(<internal bug>): remove the consistent-hashing
+ *                                    election snapshot.
  */
 case class AssignerSlicezData(
     assignerInfo: AssignerInfo,
@@ -507,12 +506,8 @@ case class AssignerSlicezData(
         ),
         h3("Preferred Assigner State"),
         renderPreferredAssignerState,
-        // TODO(<internal bug>): remove the Migration Mode and Consistent Hash based Preferred Assigner
-        // sections (and all their supporting code in this file and the view proto) once the
-        // migration to consistent-hashing PA is complete and we no longer need a split view
-        // with the etcd preferred-assigner.
-        h4("Migration Mode"),
-        renderMigrationMode,
+        // TODO(<internal bug>): remove the Consistent Hash based Preferred Assigner section
+        // (and all its supporting code in this file and the view proto).
         h4("Consistent Hash based Preferred Assigner"),
         renderConsistentHashingState,
         h3("Subscriber Information"),
@@ -576,8 +571,7 @@ case class AssignerSlicezData(
         td.toViewProto
       },
       consistentHashing = preferredAssignerSlicezData.consistentHashingStateOpt
-        .map(consistentHashingStateToViewProto),
-      migrationMode = Some(migrationModeToProto(preferredAssignerSlicezData.migrationMode))
+        .map(consistentHashingStateToViewProto)
     )
   }
 
@@ -655,14 +649,6 @@ case class AssignerSlicezData(
     table(cls := "assigner-table")(rows: _*)
   }
 
-  /** Renders the current migration mode as an HTML table (ZPage only). */
-  private def renderMigrationMode: TypedTag[String] = {
-    val mode: MigrationMode = preferredAssignerSlicezData.migrationMode
-    table(cls := "assigner-table")(
-      tr(th("Mode"), td(AssignerSlicezData.migrationModeDisplayName(mode)))
-    )
-  }
-
   /**
    * Renders the consistent-hashing preferred-assigner state as an HTML table (ZPage only),
    * or a placeholder when the driver view carries no consistent-hashing snapshot
@@ -714,21 +700,6 @@ case class AssignerSlicezData(
       k8SConnectionHealth = Some(state.k8sConnectionHealth.toProto)
     )
   }
-
-  /**
-   * Converts a [[MigrationMode]] to its proto for DPage serialization.
-   */
-  private def migrationModeToProto(
-      mode: MigrationMode): AssignerSliceViewP.PreferredAssignerMigrationModeP = {
-    mode match {
-      case MigrationMode.ShadowMode =>
-        AssignerSliceViewP.PreferredAssignerMigrationModeP.SHADOW
-      case MigrationMode.ConsistentHashingNominatedEtcdReadMode =>
-        AssignerSliceViewP.PreferredAssignerMigrationModeP.CH_NOMINATED_ETCD_READ
-      case MigrationMode.ConsistentHashingPrimaryEtcdWritesMode =>
-        AssignerSliceViewP.PreferredAssignerMigrationModeP.CH_PRIMARY_ETCD_WRITE
-    }
-  }
 }
 
 object AssignerSlicezData {
@@ -749,23 +720,6 @@ object AssignerSlicezData {
       action: String,
       preferredAssignerUuidOpt: Option[String],
       generation: Generation)
-
-  /**
-   * Returns a short human-readable description of the migration mode for the ZPage migration
-   * mode table.
-   *
-   * TODO(<internal bug>): remove once the migration to consistent-hashing PA is complete and we no
-   * longer need a split view with the etcd preferred-assigner.
-   */
-  private[assigner] def migrationModeDisplayName(mode: MigrationMode): String = {
-    mode match {
-      case MigrationMode.ShadowMode => "Shadow (etcd authoritative)"
-      case MigrationMode.ConsistentHashingNominatedEtcdReadMode =>
-        "Consistent-hashing nominates / etcd reads"
-      case MigrationMode.ConsistentHashingPrimaryEtcdWritesMode =>
-        "Consistent-hashing primary / etcd writes"
-    }
-  }
 
   /** Builds the [[AssignerInfoViewP]] (UUID + URI) for the given assigner. */
   private[assigner] def assignerInfoToViewProto(info: AssignerInfo): AssignerInfoViewP = {

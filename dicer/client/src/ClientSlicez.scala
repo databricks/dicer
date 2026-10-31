@@ -420,7 +420,7 @@ private[client] case class ClientTargetSlicezData(
     squidOpt: Option[Squid],
     unattributedLoadBySliceOpt: Option[Map[Slice, Double]],
     subscriberDebugName: String,
-    watchAddress: URI,
+    watchAddress: String,
     watchAddressUsedSince: Instant,
     lastSuccessfulHeartbeat: Instant,
     clientClusterOpt: Option[String])
@@ -483,7 +483,7 @@ private[client] case class ClientTargetSlicezData(
       backgroundColor := TARGET_DATA_BACKGROUND_COLOR,
       targetCell,
       td(subscriberDebugName),
-      td(watchAddress.toString),
+      td(watchAddress),
       td(watchAddressUsedSince.toString),
       td(lastSuccessfulHeartbeat.toString),
       td(collapsedUnattributedLoadTable)
@@ -563,7 +563,7 @@ private[client] case class ClientTargetSlicezData(
       clientInfo = Some(
         ClientInfoViewP(
           subscriberDebugName = Some(subscriberDebugName),
-          watchAddress = Some(watchAddress.toString),
+          watchAddress = Some(watchAddress),
           watchAddressUsedSince = Some(watchAddressUsedSince.toString),
           lastSuccessfulHeartbeat = Some(lastSuccessfulHeartbeat.toString),
           squidAddress = squidOpt.map { squid: Squid =>

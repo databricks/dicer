@@ -26,6 +26,9 @@ object ErrorCode {
    */
   case object INTERNAL_ERROR extends ErrorCode
 
+  /** The operation was canceled by the caller. */
+  case object CANCELLED extends ErrorCode
+
   /**
    * The operation is rejected because of request rate limit, for example rate limiting applied to
    * users, workspaces, IP addresses, etc.

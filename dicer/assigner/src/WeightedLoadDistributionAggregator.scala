@@ -6,7 +6,7 @@ import scala.collection.mutable.ArrayBuffer
 import scala.concurrent.duration.{Duration, FiniteDuration}
 
 import com.databricks.caching.util.AssertMacros.iassert
-import com.databricks.dicer.common.LoadMeasurement
+import com.databricks.dicer.common.MetricMeasurement
 import com.databricks.dicer.common.SliceletData.LoadDistribution
 import com.databricks.dicer.common.SliceletData.LoadDistribution.CdfPoint
 import com.databricks.dicer.external.{HighSliceKey, Slice, SliceKey}
@@ -61,7 +61,7 @@ private[assigner] class WeightedLoadDistributionAggregator(slice: Slice, halfLif
     "if load is not valid, age is negative, or a distribution point is outside the slice"
   )
   def addDistribution(age: FiniteDuration, load: Double, distribution: LoadDistribution): Unit = {
-    LoadMeasurement.requireValidLoadMeasurement(load)
+    MetricMeasurement.requireValidMeasurement(load)
     require(age >= Duration.Zero, s"age must be non-negative: $age")
     // LoadDistribution guarantees ascending keys, so checking the endpoints is sufficient.
     require(

@@ -1,7 +1,5 @@
 package com.databricks.dicer.assigner
 
-import java.util.UUID
-
 import scala.concurrent.duration._
 
 import io.grpc.Status
@@ -22,7 +20,6 @@ object PreferredAssignerMetrics {
     case object STANDBY_WITHOUT_PREFERRED extends MonitoredAssignerRole
     case object STANDBY extends MonitoredAssignerRole
     case object STARTUP extends MonitoredAssignerRole
-    case object INELIGIBLE extends MonitoredAssignerRole
 
     /** All cases of [[MonitoredAssignerRole]], for callers that need to iterate over them. */
     val values: Vector[MonitoredAssignerRole] = Vector(
@@ -30,8 +27,7 @@ object PreferredAssignerMetrics {
       PREFERRED_BECAUSE_PA_DISABLED,
       STANDBY_WITHOUT_PREFERRED,
       STANDBY,
-      STARTUP,
-      INELIGIBLE
+      STARTUP
     )
   }
 
@@ -56,9 +52,7 @@ object PreferredAssignerMetrics {
 
   /**
    * Identifies the source of the value a write proposes (which is independent of who is doing
-   * the writing — the writer is always this pod). Used to label the [[writeCounter]] metric so
-   * operators can observe the effect of the staged etcd → consistent-hashing migration on
-   * the values being proposed.
+   * the writing — the writer is always this pod). Used to label the [[writeCounter]] metric.
    */
   private[assigner] sealed abstract class ValueSource(val labelValue: String)
 
@@ -66,13 +60,6 @@ object PreferredAssignerMetrics {
 
     /** The proposed value is the writing assigner's own identity. */
     case object Self extends ValueSource("self")
-
-    /**
-     * The proposed value comes from an external pick source (see
-     * `EtcdPreferredAssignerDriver.updateExternalPick`). Includes the case where the external
-     * pick happens to be this assigner.
-     */
-    case object ExternalPick extends ValueSource("externalPick")
 
     /** The proposed value is "no preferred assigner" (i.e. an abdication). */
     case object NoAssigner extends ValueSource("noAssigner")
@@ -128,32 +115,6 @@ object PreferredAssignerMetrics {
     .help("The approximate latest known store incarnation of the preferred assigner.")
     .register()
 
-  /**
-   * A gauge metric with a role label for the consistent-hashing preferred assigner protocol,
-   * 1 if the pod has the specified role and 0/empty otherwise. Updated exclusively by the
-   * [[ConsistentHashingPreferredAssignerDriver]].
-   */
-  private val chAssignerRoleGauge: Gauge = Gauge
-    .build()
-    .name("dicer_assigner_ch_preferred_assigner_role_gauge")
-    .help("The role of the assigner as determined by the consistent-hashing protocol.")
-    .labelNames("role")
-    .register()
-
-  /**
-   * Counter incremented every time the [[ConsistentHashingPreferredAssignerDriver]] outcome
-   * changes.
-   */
-  private val consistentHashingPreferredAssignerSwitchesCounter: Counter = Counter
-    .build()
-    .name("dicer_assigner_consistent_hashing_preferred_assigner_switches_total")
-    .help(
-      "Number of times the consistent-hashing preferred-assigner driver has elected a " +
-      "different preferred assigner than the previously-published one (including " +
-      "transitions to and from 'no preferred assigner known')."
-    )
-    .register()
-
   /** Histogram for tracking write latency of preferred assigner operations. */
   private val writeLatencyHistogram: CachingLatencyHistogram =
     CachingLatencyHistogram(
@@ -161,65 +122,11 @@ object PreferredAssignerMetrics {
       extraLabelNames = Seq("outcome")
     )
 
-  /**
-   * Label value used on [[consistentHashingVsEtcdAgreementGauge]] during the Phase 2.1
-   * dual-driver rollout.
-   */
-  private[assigner] val CONSISTENT_HASHING_VS_ETCD_AGREEMENT_MODE_PHASE_2_1: String = "phase21"
-
-  /**
-   * Label value used on [[consistentHashingVsEtcdAgreementGauge]] during the Phase 2.2
-   * consistent-hashing-primary rollout.
-   */
-  private[assigner] val CONSISTENT_HASHING_VS_ETCD_AGREEMENT_MODE_PHASE_2_2: String = "phase22"
-
-  /**
-   * Gauge tracking whether the consistent-hashing pick agrees with the etcd-backed
-   * authoritative preferred-assigner value (1 = agree, 0 = disagree). Labeled so that
-   * Prometheus scrapes no samples until [[setConsistentHashingVsEtcdAgreement]] is first
-   * called — this avoids emitting a misleading default-zero (interpreted as "disagree") before
-   * either inner driver has published a value, and keeps the gauge absent in modes where
-   * consistent hashing does not drive selection (shadow mode).
-   */
-  private val consistentHashingVsEtcdAgreementGauge: Gauge = Gauge
-    .build()
-    .name("dicer_assigner_preferred_assigner_consistent_hashing_vs_etcd_agreement_gauge")
-    .help(
-      "Whether the consistent-hashing pick agrees with the etcd-backed authoritative " +
-      "preferred-assigner value (1 = agree, 0 = disagree). Emitted during the Phase 2.1 " +
-      "(dual-driver) and Phase 2.2 (consistent-hashing-primary) rollouts; the `mode` label " +
-      "distinguishes them."
-    )
-    .labelNames("mode")
-    .register()
-
-  /**
-   * Counter incremented every time the consistent-hashing pick disagrees with the etcd-backed
-   * authoritative pick.
-   */
-  private val consistentHashingVsEtcdDisagreementCounter: Counter = Counter
-    .build()
-    .name("dicer_assigner_preferred_assigner_consistent_hashing_vs_etcd_disagreement_total")
-    .help(
-      "Number of times the consistent-hashing pick disagreed with the etcd-backed " +
-      "authoritative preferred-assigner value. Emitted during the Phase 2.1 (dual-driver) " +
-      "and Phase 2.2 (consistent-hashing-primary) rollouts; the `mode` label distinguishes them."
-    )
-    .labelNames("mode")
-    .register()
-
   /** Sets the assigner role gauge to be `role`. */
   def setAssignerRoleGauge(role: MonitoredAssignerRole): Unit = {
     for (enumValue: MonitoredAssignerRole <- MonitoredAssignerRole.values) {
       // Reset the gauge to 0 for other roles.
       assignerRoleGauge.labels(enumValue.toString).set(if (enumValue == role) 1 else 0)
-    }
-  }
-
-  /** Sets the consistent-hashing assigner role gauge to `role`. */
-  def setChAssignerRoleGauge(role: MonitoredAssignerRole): Unit = {
-    for (enumValue: MonitoredAssignerRole <- MonitoredAssignerRole.values) {
-      chAssignerRoleGauge.labels(enumValue.toString).set(if (enumValue == role) 1 else 0)
     }
   }
 
@@ -263,41 +170,4 @@ object PreferredAssignerMetrics {
     writeCounter.labels(valueSource.labelValue).inc()
   }
 
-  /**
-   * Increments the consistent-hashing preferred-assigner switches counter. Called by the
-   * [[ConsistentHashingPreferredAssignerDriver]] when its elected preferred-assigner UUID
-   * changes from the previously-published value.
-   */
-  private[assigner] def recordConsistentHashingPreferredAssignerSwitch(): Unit = {
-    consistentHashingPreferredAssignerSwitchesCounter.inc()
-  }
-
-  /**
-   * Updates the gauge to reflect whether the consistent-hashing pick UUID matches the etcd-backed
-   * authoritative pick UUID. Two `None` values are treated as agreement (both report no preferred
-   * assigner known). The caller supplies the phase label (`modeLabel`) identifying which rollout
-   * the sample belongs to, since the gauge and counter are emitted in both consistent-hashing
-   * modes.
-   */
-  private[assigner] def setConsistentHashingVsEtcdAgreement(
-      modeLabel: String,
-      consistentHashingPickUuidOpt: Option[UUID],
-      etcdPickUuidOpt: Option[UUID]): Unit = {
-    val agree: Boolean = consistentHashingPickUuidOpt == etcdPickUuidOpt
-    consistentHashingVsEtcdAgreementGauge
-      .labels(modeLabel)
-      .set(if (agree) 1.0 else 0.0)
-    if (!agree) {
-      consistentHashingVsEtcdDisagreementCounter
-        .labels(modeLabel)
-        .inc()
-    }
-  }
-
-  /** Test-only: clears the agreement gauge so tests are not order-dependent. */
-  private[assigner] object forTest {
-    def clearConsistentHashingVsEtcdAgreement(): Unit = {
-      consistentHashingVsEtcdAgreementGauge.clear()
-    }
-  }
 }

@@ -1,4 +1,4 @@
-use universe_infra_lib_rust::{KubernetesCluster, Region, FROM_EMBEDDED};
+use infra_lib_rust::{KubernetesCluster, Region, FROM_EMBEDDED};
 
 #[test]
 fn test_get_kubernetes_cluster_by_uri_returns_known_cluster() {

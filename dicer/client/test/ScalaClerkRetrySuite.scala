@@ -13,10 +13,10 @@ class ScalaClerkRetrySuite extends ClerkRetrySuiteBase {
   override protected def createClerkHarness(target: Target, slicelet: Slicelet): ScalaClerkHarness =
     ScalaClerkHarness.create(testEnv.createClerk(slicelet))
 
-  override protected def getNextStubForKeyCallCountTrackerOpt(
+  override protected def getNextStubForKeyCallCountTracker(
       target: Target,
-      resourceType: String): Option[MetricUtils.ChangeTracker[Double]] =
-    Some(MetricUtils.ChangeTracker[Double] { () =>
+      resourceType: String): MetricUtils.ChangeTracker[Double] =
+    MetricUtils.ChangeTracker[Double] { () =>
       MetricUtils.getMetricValue(
         CollectorRegistry.defaultRegistry,
         "dicer_clerk_getnextstubforkey_call_count_total",
@@ -25,15 +25,15 @@ class ScalaClerkRetrySuite extends ClerkRetrySuiteBase {
           "resourceType" -> resourceType
         )
       )
-    })
+    }
 
-  override protected def getPickedResourceCountTrackerOpt(
-      target: Target): Option[MetricUtils.ChangeTracker[Double]] =
-    Some(MetricUtils.ChangeTracker[Double] { () =>
+  override protected def getPickedResourceCountTracker(
+      target: Target): MetricUtils.ChangeTracker[Double] =
+    MetricUtils.ChangeTracker[Double] { () =>
       MetricUtils.getMetricValuesSum(
         CollectorRegistry.defaultRegistry,
         "dicer_clerk_getnextstubforkey_picked_resource_count_histogram_sum",
         Map("targetName" -> target.getTargetNameLabel)
       )
-    })
+    }
 }

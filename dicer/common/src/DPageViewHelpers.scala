@@ -120,7 +120,6 @@ object DPageViewHelpers {
         AssignmentViewP(
           generation = Some(generationToViewProto(assignment.generation)),
           isFrozen = Some(assignment.isFrozen),
-          consistencyMode = Some(assignment.consistencyMode.toString),
           resources = resourcesList,
           slices = slicesList
         )

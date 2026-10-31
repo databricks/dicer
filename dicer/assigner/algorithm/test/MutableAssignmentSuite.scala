@@ -21,13 +21,7 @@ import com.databricks.dicer.common.testing.SliceTestUtils.{
   toSquidWithValue,
   ∞
 }
-import com.databricks.dicer.common.{
-  Assignment,
-  AssignmentConsistencyMode,
-  Generation,
-  SliceWithResources,
-  SubsliceAnnotation
-}
+import com.databricks.dicer.common.{Assignment, Generation, SliceWithResources, SubsliceAnnotation}
 import com.databricks.dicer.common.testing.{SliceTestUtils}
 import com.databricks.dicer.external.SliceKey
 import com.databricks.dicer.friend.SliceMap
@@ -62,7 +56,6 @@ class MutableAssignmentSuite extends DatabricksTest {
     val generation: Generation = SliceTestUtils.createLooseGeneration(clock.instant().toEpochMilli)
     val predecessor: Assignment = createAssignment(
       generation,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       ("" -- 10) @@ generation -> Seq("resource0"),
       (10 -- 20) @@ generation -> Seq("resource1"),
@@ -144,7 +137,6 @@ class MutableAssignmentSuite extends DatabricksTest {
       SliceTestUtils.createLooseGeneration(clock.instant().toEpochMilli)
     val predecessor: Assignment = createAssignment(
       generation,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       ("" -- 10) @@ generation -> Seq("resource0", "resource1"),
       (10 -- ∞) @@ generation -> Seq("resource2")
@@ -268,7 +260,6 @@ class MutableAssignmentSuite extends DatabricksTest {
       SliceTestUtils.createLooseGeneration(clock.instant().toEpochMilli)
     val predecessor: Assignment = createAssignment(
       generation,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       ("" -- 10) @@ generation -> Seq("resource0", "resource1"),
       (10 -- ∞) @@ generation -> Seq("resource1", "resource2")
@@ -377,7 +368,6 @@ class MutableAssignmentSuite extends DatabricksTest {
     val generation: Generation = SliceTestUtils.createLooseGeneration(clock.instant().toEpochMilli)
     val predecessor: Assignment = createAssignment(
       generation,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       ("" -- ∞) @@ generation -> Seq(
         "resource0",
@@ -422,7 +412,6 @@ class MutableAssignmentSuite extends DatabricksTest {
       SliceTestUtils.createLooseGeneration(clock.instant().toEpochMilli)
     val predecessor: Assignment = createAssignment(
       generation,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       // slice0 has 3 replicas on resource0, resource1, resource2
       ("" -- 10) @@ generation -> Seq("resource0", "resource1", "resource2"),
@@ -551,7 +540,6 @@ class MutableAssignmentSuite extends DatabricksTest {
       SliceTestUtils.createLooseGeneration(generationNow.number.value - 2.minute.toMillis)
     val predecessor: Assignment = createAssignment(
       generationNow,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       // ["", 10) and [10, 20) are the slices to be merged.
       ("" -- 10) @@ generationNow -> Seq("resource0", "resource2", "resourceUnhealthy") | Map(
@@ -635,7 +623,6 @@ class MutableAssignmentSuite extends DatabricksTest {
     val generation = SliceTestUtils.createLooseGeneration(clock.instant().toEpochMilli)
     val predecessor: Assignment = createAssignment(
       generation,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       "".andGreater @@ generation -> Seq("pod0", "pod1")
     )
@@ -729,7 +716,6 @@ class MutableAssignmentSuite extends DatabricksTest {
     val generation: Generation = SliceTestUtils.createLooseGeneration(clock.instant().toEpochMilli)
     val predecessor: Assignment = createAssignment(
       generation,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       ("" -- 10) @@ generation -> Seq("resource0"),
       (10 -- 20) @@ generation -> Seq("resource1", "resource2"),

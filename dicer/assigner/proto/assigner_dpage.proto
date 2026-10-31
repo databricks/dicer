@@ -115,26 +115,6 @@ message AssignerTargetViewP {
 
 // Top-level response for the Assigner DPage endpoint.
 message AssignerSliceViewP {
-  // Migration mode for the preferred-assigner election during the staged etcd ->
-  // consistent-hashing migration. Nested and unprefixed per <internal link> since it is used
-  // only here.
-  // (-- TODO(<internal bug>): Remove this enum once the migration to consistent-hashing PA
-  // is complete and there is no longer a split view with the etcd
-  // preferred-assigner. --)
-  enum PreferredAssignerMigrationModeP {
-    // Default value; used when the migration mode is unset or unknown.
-    PREFERRED_ASSIGNER_MIGRATION_MODE_P_UNSPECIFIED = 0;
-    // Shadow mode: the consistent-hashing driver runs alongside etcd but etcd is
-    // authoritative.
-    SHADOW = 1;
-    // CH nominates / etcd reads: the consistent-hashing driver writes its pick to
-    // etcd; etcd remains authoritative for reads.
-    CH_NOMINATED_ETCD_READ = 2;
-    // CH primary / etcd write: the consistent-hashing driver is authoritative for the
-    // actual preferred assigner pick; its pick is still written to etcd for durability, but etcd is
-    // no longer read back.
-    CH_PRIMARY_ETCD_WRITE = 3;
-  }
   // Identity of this Assigner instance.
   optional AssignerInfoViewP assigner_info = 1;
   // Current preferred assigner state as seen by this Assigner.
@@ -147,10 +127,8 @@ message AssignerSliceViewP {
   // complete and we no longer need a split view with the etcd
   // preferred-assigner. --)
   optional ConsistentHashingStateViewP consistent_hashing = 4;
-  // Current migration mode for the preferred-assigner election; present only when
-  // the migration driver is active.
-  // (-- TODO(<internal bug>): Remove once the migration to consistent-hashing PA is
-  // complete and we no longer need a split view with the etcd
-  // preferred-assigner. --)
-  optional PreferredAssignerMigrationModeP migration_mode = 5;
+  // Field 5 previously held migration_mode (bool), but is now unused as the migration is no longer
+  // in progress.
+  reserved 5;
+  reserved "migration_mode";
 }

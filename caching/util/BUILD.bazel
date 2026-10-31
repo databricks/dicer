@@ -42,6 +42,7 @@ scala_library(
 scala_macro_library(
     name = "assert_macros",
     srcs = ["src/AssertMacros.scala"],
+    runtime_deps = ["@maven//:org_scala_lang_scala_library"],
     visibility = ["//caching:all_caching"],
     deps = [
         "@maven//:org_scala_lang_scala_library",
@@ -242,8 +243,6 @@ scala_test(
         "@com_google_protobuf_protobuf_java",
         "@maven//:com_google_code_findbugs_jsr305",
         "@maven//:com_google_guava_guava",
-        "@maven//:io_etcd_jetcd_core",
-        "@maven//:io_etcd_jetcd_grpc",
         "@scala_proto_rules_grpc_api",
         "@scala_proto_rules_grpc_netty",
         "@scala_proto_rules_grpc_stub",
@@ -284,15 +283,9 @@ scala_test(
 )
 
 scala_library(
-    name = "config_provider_trait",
-    srcs = ["src/SafeConfigProvider.scala"],
+    name = "json_serializable_config",
+    srcs = ["src/JsonSerializableConfig.scala"],
     visibility = ["//caching:all_caching"],
-    deps = [
-        ":config_scope",
-        ":safe_config_util",
-        "//wrappers/conf:core",
-        "//wrappers/conf:location",
-    ],
 )
 
 scala_library(
@@ -351,6 +344,27 @@ scala_library(
     deps = [
         ":assert_macros",
         "@maven//:com_google_code_findbugs_jsr305",
+    ],
+)
+
+scala_test(
+    name = "ewma_amplifier_test",
+    srcs = ["test/EwmaAmplifierSuite.scala"],
+    data = ["//caching/util/test/data"],
+    timeout = "short",
+    deps = [
+        ":ewma_amplifier",
+        ":test_utils",
+        "//caching/util/test/proto:test_data_proto_scala_lib",
+        "//wrappers/util:async_test_helpers",
+        "//wrappers/util:databricks-test",
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_code_findbugs_jsr305",
+        "@maven//:com_google_guava_guava",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
     ],
 )
 
@@ -1160,6 +1174,7 @@ scala_test(
 scala_library(
     name = "config_scope",
     srcs = ["src/ConfigScope.scala"],
+    visibility = ["//caching:all_caching"],
     deps = [
         ":rfc1123",
         "//caching/external/proto:config_scope_specification",
@@ -1631,6 +1646,7 @@ scala_library(
         "src/EtcdClientLatencyHistogram.scala",
         "src/EtcdKeyValueMapper.scala",
         "src/EtcdWatcher.scala",
+        "src/JetcdStatusUtils.scala",
     ],
     deps = [
         ":assert_macros",

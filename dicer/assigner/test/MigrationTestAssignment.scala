@@ -24,7 +24,6 @@ import com.databricks.dicer.common.testing.SliceTestUtils.{
 }
 import com.databricks.dicer.common.{
   Assignment,
-  AssignmentConsistencyMode,
   Generation,
   SliceAssignment,
   SliceMapHelper,
@@ -224,7 +223,6 @@ class MigrationTestAssignment(resourceAssignments: Seq[TestResourceAssignment]) 
     (
       Assignment(
         isFrozen = false,
-        AssignmentConsistencyMode.Affinity,
         generation,
         SliceMapHelper.ofSliceAssignments(sliceAssignmentsBuilder.result()),
         assignerServiceInfoOpt = None

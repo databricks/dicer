@@ -1,0 +1,45 @@
+load("//bazel/rules/rust:rules_rust.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "tls",
+    srcs = ["src/lib.rs"],
+    crate_name = "raf_tls",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@crates//:rustls",
+        "@crates//:rustls-pki-types",
+        "@crates//:thiserror",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "tls_test",
+    timeout = "short",
+    testonly = True,
+    srcs = ["tests/tls_test.rs"],
+    deps = [
+        ":tls",
+        "//wrappers/rust/tls/testing/test_tls_options",
+        "//wrappers/rust/tls/testing/test_tls_options/testing:test_identity",
+        "//wrappers/rust/tls/testing/test_util",
+        "@crates//:rustls",
+        "@crates//:rustls-pki-types",
+        "@crates//:tempfile",
+        "@crates//:tokio",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "tls_native_roots_test",
+    timeout = "short",
+    testonly = True,
+    srcs = ["tests/tls_native_roots_test.rs"],
+    deps = [
+        ":tls",
+        "//wrappers/rust/tls/testing/test_tls_options",
+        "//wrappers/rust/tls/testing/test_util",
+        "@crates//:tokio",
+    ],
+)

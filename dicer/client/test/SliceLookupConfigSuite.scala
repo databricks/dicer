@@ -1,7 +1,5 @@
 package com.databricks.dicer.client
 
-import java.io.File
-import java.net.{InetAddress, URI}
 import java.util.UUID
 
 import scala.collection.mutable
@@ -11,8 +9,6 @@ import com.databricks.caching.util.{KubernetesClusterUri, RegionUri, WhereAmITes
 import com.databricks.conf.trusted.LocationConfTestUtils
 import com.databricks.dicer.common.ClientType
 import com.databricks.dicer.external.{AppTarget, Target}
-import com.databricks.rpc.testing.TestTLSOptions
-import com.databricks.rpc.tls.TLSOptions
 import com.databricks.testing.DatabricksTest
 
 class SliceLookupConfigSuite extends DatabricksTest {
@@ -28,35 +24,34 @@ class SliceLookupConfigSuite extends DatabricksTest {
   /** A fixed client UUID, for the variant that differs from the base config in `clientIdOpt`. */
   private val TEST_CLIENT_UUID: UUID = UUID.fromString("00000000-0000-0000-0000-000000000001")
 
+  /** An alternative target, for the variant that differs in `alternativeTargetOpt`. */
+  private val TEST_ALTERNATIVE_TARGET: AppTarget =
+    Target.createAppTarget("alt-target", instanceId = "alt-instance") match {
+      case appTarget: AppTarget => appTarget
+      case other => throw new IllegalStateException(s"expected an AppTarget, got $other")
+    }
+
   /** Builds a config for `target`, with each field overridable to derive one-field variants. */
   private def createConfig(
       target: Target,
       clientType: ClientType = ClientType.Clerk,
-      watchAddress: URI = URI.create("https://localhost:8080"),
-      tlsOptionsOpt: Option[TLSOptions] = None,
       clientIdOpt: Option[UUID] = None,
       watchStubCacheTime: FiniteDuration = 5.minutes,
-      watchFromDataPlane: Boolean = false,
       alternativeTargetOpt: Option[AppTarget] = None,
       watchRpcTimeout: FiniteDuration = 5.seconds,
       minRetryDelay: FiniteDuration = 1.second,
       maxRetryDelay: FiniteDuration = 10.seconds,
-      enableRateLimiting: Boolean = false,
-      sourceIpOpt: Option[InetAddress] = None): SliceLookupConfig =
+      enableRateLimiting: Boolean = false): SliceLookupConfig =
     SliceLookupConfig(
       clientType = clientType,
-      watchAddress = watchAddress,
-      tlsOptionsOpt = tlsOptionsOpt,
       target = target,
       clientIdOpt = clientIdOpt,
       watchStubCacheTime = watchStubCacheTime,
-      watchFromDataPlane = watchFromDataPlane,
       alternativeTargetOpt = alternativeTargetOpt,
       watchRpcTimeout = watchRpcTimeout,
       minRetryDelay = minRetryDelay,
       maxRetryDelay = maxRetryDelay,
-      enableRateLimiting = enableRateLimiting,
-      sourceIpOpt = sourceIpOpt
+      enableRateLimiting = enableRateLimiting
     )
 
   /**
@@ -169,29 +164,22 @@ class SliceLookupConfigSuite extends DatabricksTest {
     // base. `target` is included here rather than being covered by the cache's target-level tests
     // because equals is a property of the config alone.
 
-    // Setup: Build a base config and the TLS options one of the variants needs.
+    // Setup: Build a base config to derive one-field variants from.
     val target: Target = Target("differing-fields-test")
     val baseConfig: SliceLookupConfig = createConfig(target)
-
-    val keystore: File = new File(TestTLSOptions.clientKeystorePath)
-    val truststore: File = new File(TestTLSOptions.clientTruststorePath)
-    val tlsOptions: TLSOptions =
-      TLSOptions.builder.addKeyManager(keystore, keystore).addTrustManager(truststore).build()
 
     // Setup: Derive one variant per field, each differing from `baseConfig` in exactly that field.
     val variedConfigs: List[(String, SliceLookupConfig)] = List(
       "clientType" -> createConfig(target, clientType = ClientType.Slicelet),
-      "watchAddress" -> createConfig(target, watchAddress = URI.create("https://other:9090")),
-      "tlsOptionsOpt" -> createConfig(target, tlsOptionsOpt = Some(tlsOptions)),
       "target" -> createConfig(Target("differing-fields-test-other")),
       "clientIdOpt" -> createConfig(target, clientIdOpt = Some(TEST_CLIENT_UUID)),
       "watchStubCacheTime" -> createConfig(target, watchStubCacheTime = 10.minutes),
-      "watchFromDataPlane" -> createConfig(target, watchFromDataPlane = true),
+      "alternativeTargetOpt" ->
+      createConfig(target, alternativeTargetOpt = Some(TEST_ALTERNATIVE_TARGET)),
       "watchRpcTimeout" -> createConfig(target, watchRpcTimeout = 10.seconds),
       "minRetryDelay" -> createConfig(target, minRetryDelay = 2.seconds),
       "maxRetryDelay" -> createConfig(target, maxRetryDelay = 20.seconds),
-      "enableRateLimiting" -> createConfig(target, enableRateLimiting = true),
-      "sourceIpOpt" -> createConfig(target, sourceIpOpt = Some(InetAddress.getByName("10.4.5.6")))
+      "enableRateLimiting" -> createConfig(target, enableRateLimiting = true)
     )
 
     // Verify: Every variant is unequal to the base config.
@@ -274,47 +262,6 @@ class SliceLookupConfigSuite extends DatabricksTest {
     assertResult(Some("slicelet"))(configLabelMap.get(differingConfig))
   }
 
-  test("equals distinguishes configs that differ only in source IP so each binds its own lookup") {
-    // Test plan: Verify that `sourceIpOpt` distinguishes configs, so a Clerk binding a source
-    // address cannot share a cached SliceLookup (and therefore a watch connection) with one that
-    // binds a different address or none at all. Verify this by building three configs that
-    // differ only in `sourceIpOpt` and confirming they are unequal and coexist as three distinct
-    // map keys.
-
-    // Setup: Build an unbound config and two bound to different NIC addresses.
-    val target: Target = Target("source-ip-keys-test")
-    val unboundConfig: SliceLookupConfig = createConfig(target, sourceIpOpt = None)
-    val firstNicConfig: SliceLookupConfig =
-      createConfig(target, sourceIpOpt = Some(InetAddress.getByName("10.4.5.6")))
-    val secondNicConfig: SliceLookupConfig =
-      createConfig(target, sourceIpOpt = Some(InetAddress.getByName("10.7.8.9")))
-
-    // Verify: The three configs are pairwise unequal.
-    assert(unboundConfig != firstNicConfig, "an unbound config should not equal a bound one")
-    assert(unboundConfig != secondNicConfig, "an unbound config should not equal a bound one")
-    assert(firstNicConfig != secondNicConfig, "configs bound to different NICs should be unequal")
-
-    // Verify: Bound and unbound lookups use distinct channel names, including two different NICs.
-    assertResult("dicer-clerk-source-ip-keys-test")(unboundConfig.clientName)
-    assertResult("dicer-clerk-source-ip-keys-test-source-ip-10.4.5.6")(
-      firstNicConfig.clientName
-    )
-    assertResult("dicer-clerk-source-ip-keys-test-source-ip-10.7.8.9")(
-      secondNicConfig.clientName
-    )
-
-    // Verify: The three coexist as distinct keys rather than collapsing onto one.
-    val configLabelMap: mutable.Map[SliceLookupConfig, String] = mutable.Map.empty
-    configLabelMap.put(unboundConfig, "unbound")
-    configLabelMap.put(firstNicConfig, "first-nic")
-    configLabelMap.put(secondNicConfig, "second-nic")
-
-    assertResult(3)(configLabelMap.size)
-    assertResult(Some("unbound"))(configLabelMap.get(unboundConfig))
-    assertResult(Some("first-nic"))(configLabelMap.get(firstNicConfig))
-    assertResult(Some("second-nic"))(configLabelMap.get(secondNicConfig))
-  }
-
   test("toString names every field") {
     // Test plan: Verify that toString reports each field by name, since it is what logs and test
     // failure messages surface when a config is unexpected. Verify this by rendering a config with
@@ -326,11 +273,10 @@ class SliceLookupConfigSuite extends DatabricksTest {
 
     // Verify: The rendering names every field alongside its value.
     val expectedRendering: String =
-      "SliceLookupConfig(clientType=clerk, watchAddress=https://localhost:8080, " +
-      "tlsOptionsOpt=None, target=to-string-test, clientIdOpt=None, " +
-      "watchStubCacheTime=5 minutes, watchFromDataPlane=false, watchRpcTimeout=5 seconds, " +
-      "minRetryDelay=1 second, maxRetryDelay=10 seconds, enableRateLimiting=false, " +
-      "sourceIpOpt=None, alternativeTargetOpt=None, " +
+      "SliceLookupConfig(clientType=clerk, target=to-string-test, clientIdOpt=None, " +
+      "watchStubCacheTime=5 minutes, watchRpcTimeout=5 seconds, minRetryDelay=1 second, " +
+      "maxRetryDelay=10 seconds, enableRateLimiting=false, " +
+      "alternativeTargetOpt=None, " +
       s"clientClusterUriOpt=Some($TEST_CLUSTER_URI), clientRegionUriOpt=Some($TEST_REGION_URI))"
     assertResult(expectedRendering)(config.toString)
   }

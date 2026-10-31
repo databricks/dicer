@@ -1,0 +1,35 @@
+diff --git a/extensions/prost/private/prost.bzl b/extensions/prost/private/prost.bzl
+--- a/extensions/prost/private/prost.bzl
++++ b/extensions/prost/private/prost.bzl
+@@ -299,7 +299,7 @@
+     elif len(crate_name_overrides) == 1:
+         crate_name = crate_name_overrides[0]
+     else:
+-        crate_name = ctx.label.name.replace("-", "_").replace("/", "_")
++        crate_name = (ctx.label.package + "_" + ctx.label.name).replace("-", "_").replace("/", "_")
+ 
+     proto_info = target[ProtoInfo]
+ 
+@@ -402,6 +402,11 @@
+     proto_dep = ctx.attr.proto
+     rust_proto_info = proto_dep[ProstProtoInfo]
+     dep_variant_info = rust_proto_info.dep_variant_info
++    if ctx.attr.crate_name != dep_variant_info.crate_info.name:
++        fail("crate_name '{}' does not match generated crate name '{}'".format(
++            ctx.attr.crate_name,
++            dep_variant_info.crate_info.name,
++        ))
+     rust_generated_srcs = proto_dep[OutputGroupInfo].rust_generated_srcs
+     proto_descriptor_set = proto_dep[OutputGroupInfo].proto_descriptor_set
+ 
+@@ -436,6 +441,10 @@
+             aspects = [rust_prost_aspect],
+             mandatory = True,
+         ),
++        "crate_name": attr.string(
++            doc = "The expected crate name. Must match the crate name derived from the `proto` label.",
++            mandatory = True,
++        ),
+         "_collect_cc_coverage": attr.label(
+             default = Label("@rules_rust//util:collect_coverage"),
+             executable = True,

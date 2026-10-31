@@ -300,7 +300,6 @@ class ClientRequestSuite extends DatabricksTest {
     )
     val assignment: Assignment = SliceTestUtils.createAssignment(
       generation = generation,
-      consistencyMode = AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       entries = Vector(sliceAssignment)
     )

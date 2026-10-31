@@ -6,6 +6,7 @@ import scala.util.{Failure, Success, Try}
 
 import com.databricks.api.proto.dicer.assigner.config.{
   AdvancedTargetConfigFieldsP,
+  InternalDicerOverrideP,
   InternalDicerTargetConfigP,
   LoadWatcherConfigP,
   HealthWatcherConfigP,
@@ -23,7 +24,7 @@ import com.databricks.api.proto.dicer.external.{
   KeyReplicationConfigP
 }
 import com.databricks.api.proto.dicer.external.KeySensitivityConfigP.SliceKeySensitivityP
-import com.databricks.caching.util.JsonSerializableConfig
+import com.databricks.caching.util.{ConfigScope, JsonSerializableConfig}
 import com.databricks.dicer.common.SliceKeySensitivity
 import com.databricks.dicer.common.TargetName
 import com.databricks.dicer.assigner.config.InternalTargetConfig.{
@@ -782,17 +783,68 @@ object InternalTargetConfig {
  * Internal target configuration with the associated target name.
  *
  * @param targetName Name of sharded services for which this configuration applies.
- * @param config Configuration for the target.
+ * @param config     Configuration represented by SAFE's top-level target and advanced config
+ *                   fields, including scope-specific overrides.
+ * @param overrides  Fully resolved configurations for this target, keyed by cluster or instance
+ *                   scope. Entries do not inherit fields from `config`.
  */
-case class NamedInternalTargetConfig(targetName: TargetName, config: InternalTargetConfig)
+// TODO(<internal bug>): Update the `config` description once writers emit only the default config
+// in the top-level fields and assigners select scoped configs from `overrides`. It then
+// becomes the fallback when no scope matches.
+case class NamedInternalTargetConfig(
+    targetName: TargetName,
+    config: InternalTargetConfig,
+    overrides: Map[ConfigScope, InternalTargetConfig])
     extends JsonSerializableConfig {
   override def toJsonString: String =
     InternalTargetConfigJsonConverter.toJsonString(toProto)
 
-  /** Converts this instance to a [[InternalDicerTargetConfigP]] proto object. */
+  /**
+   * Converts the target name, top-level config, and resolved scoped configs to SAFE representation.
+   */
   // TODO(<internal bug>): Modify this function once key of death protection config is added to advanced
   // config.
   def toProto: InternalDicerTargetConfigP = {
+    // Get the proto representation of the top-level config.
+    val (targetConfigProto, advancedConfigProto): (
+        TargetConfigFieldsP,
+        AdvancedTargetConfigFieldsP
+    ) = toConfigProtos(config)
+
+    // Sort overrides so map iteration order does not change the serialized output.
+    val sortedOverrides: Seq[(ConfigScope, InternalTargetConfig)] =
+      overrides.toVector.sortBy { entry: (ConfigScope, InternalTargetConfig) =>
+        val (configScope, _): (ConfigScope, InternalTargetConfig) = entry
+        configScope
+      }
+
+    // Convert each override to its proto representation.
+    val overrideProtos: Seq[InternalDicerOverrideP] = sortedOverrides.map {
+      entry: (ConfigScope, InternalTargetConfig) =>
+        val (configScope, config): (ConfigScope, InternalTargetConfig) = entry
+        val (scopedTargetConfigProto, scopedAdvancedConfigProto): (
+            TargetConfigFieldsP,
+            AdvancedTargetConfigFieldsP
+        ) = toConfigProtos(config)
+        InternalDicerOverrideP(
+          overrideScope = Some(configScope.toProto),
+          targetConfig = Some(scopedTargetConfigProto),
+          advancedConfig = Some(scopedAdvancedConfigProto)
+        )
+    }
+
+    InternalDicerTargetConfigP(
+      target = Some(targetName.value),
+      targetConfig = Some(targetConfigProto),
+      advancedConfig = Some(advancedConfigProto),
+      overrides = overrideProtos
+    )
+  }
+
+  /** Converts one fully resolved target configuration to its SAFE config fields. */
+  private def toConfigProtos(
+      config: InternalTargetConfig
+  ): (TargetConfigFieldsP, AdvancedTargetConfigFieldsP) = {
 
     // If the current key replication config equals the default config, we output an empty
     // KeyReplicationConfigP proto to avoid updating the dynamic config for customers who don't
@@ -880,19 +932,19 @@ case class NamedInternalTargetConfig(targetName: TargetName, config: InternalTar
       useAlternativeTarget = useAlternativeTargetOpt,
       replicationThresholdOverride = replicationThresholdOverrideOpt
     )
-    InternalDicerTargetConfigP(
-      target = Some(targetName.value),
-      targetConfig = Some(targetConfigProto),
-      advancedConfig = Some(advancedConfigProto)
-    )
+    (targetConfigProto, advancedConfigProto)
   }
 }
+
 object NamedInternalTargetConfig {
 
   /**
-   * Factory method that creates an InternalTargetConfig from a Json string, typically coming from
-   * SAFE flags.
+   * Parses a target's top-level and fully resolved scoped configurations from JSON, typically from
+   * SAFE flags. Legacy payloads without scoped configurations produce an empty overrides map.
    */
+  @throws[IllegalArgumentException](
+    "if the JSON, target name, config fields, or scopes are invalid, or scopes are duplicated"
+  )
   def fromJsonString(jsonString: String): NamedInternalTargetConfig = {
     val proto: InternalDicerTargetConfigP = Try[InternalDicerTargetConfigP](
       InternalTargetConfigJsonConverter.fromJsonString(jsonString)
@@ -905,8 +957,19 @@ object NamedInternalTargetConfig {
       case Success(parsedProto) =>
         parsedProto
     }
-    val targetName = TargetName(proto.getTarget)
-    val config: InternalTargetConfig = fromProtos(proto.getTargetConfig, proto.getAdvancedConfig)
-    NamedInternalTargetConfig(targetName, config)
+    val targetName: TargetName = TargetName(proto.getTarget)
+    val config: InternalTargetConfig =
+      fromProtos(proto.getTargetConfig, proto.getAdvancedConfig)
+    val overrides: Map[ConfigScope, InternalTargetConfig] =
+      proto.overrides.map { overrideProto: InternalDicerOverrideP =>
+        ConfigScope.fromProto(overrideProto.getOverrideScope) ->
+        fromProtos(overrideProto.getTargetConfig, overrideProto.getAdvancedConfig)
+      }.toMap
+    if (overrides.size != proto.overrides.size) {
+      throw new IllegalArgumentException(
+        "Overrides cannot contain duplicate scopes."
+      )
+    }
+    NamedInternalTargetConfig(targetName, config, overrides)
   }
 }

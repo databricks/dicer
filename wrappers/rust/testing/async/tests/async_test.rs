@@ -2,8 +2,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use raf_testing_async::eventually;
 use tokio::time::sleep;
-use universe_raf_testing_async::eventually;
 
 #[tokio::test(start_paused = true)]
 async fn succeeds_after_retry() {

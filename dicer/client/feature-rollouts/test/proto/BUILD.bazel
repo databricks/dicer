@@ -1,3 +1,4 @@
+load("//bazel/rules/rust:rules_rust.bzl", "rust_buffa_library", "rust_prost_library")
 load("@rules_proto//proto:defs.bzl", "proto_library")
 load("@rules_scala//scala_proto:scala_proto.bzl", "scala_proto_library")
 
@@ -17,4 +18,21 @@ scala_proto_library(
     testonly = True,
     visibility = ["//dicer:internal"],
     deps = [":test_data_proto"],
+)
+
+rust_prost_library(
+    name = "test_data_proto_prost_lib",
+    crate_name = "dicer_client_feature_rollouts_test_proto_test_data_proto",
+    proto = ":test_data_proto",
+    testonly = True,
+    visibility = ["//dicer:internal"],
+)
+
+rust_buffa_library(
+    name = "test_data_proto_buffa_lib",
+    crate_name = "dicer_client_feature_rollouts_test_proto_test_data_proto_buffa",
+    proto = ":test_data_proto",
+    testonly = True,
+    text = True,
+    visibility = ["//dicer:internal"],
 )

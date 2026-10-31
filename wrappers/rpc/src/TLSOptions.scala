@@ -8,14 +8,12 @@ import io.grpc.TlsChannelCredentials
 import io.grpc.TlsServerCredentials
 
 /**
- * Minimal TLSOptions implementation.
+ * Transport-independent TLS configuration. Uses gRPC's native TLS API (TlsChannelCredentials and
+ * TlsServerCredentials) to configure client/server credentials.
  *
  * Many call sites provide "keystore/truststore" paths. Here they are interpreted as PEM files:
  * - keystore: certificate chain + private key (may be a single combined PEM)
  * - truststore: trusted certificates (PEM)
- *
- * This implementation uses gRPC's native TLS API (TlsChannelCredentials and TlsServerCredentials)
- * for transport-independent TLS configuration.
  */
 final case class TLSOptions private (
     private val keyManagerCertChainOpt: Option[File],

@@ -4,6 +4,7 @@ import javax.annotation.concurrent.ThreadSafe
 
 import com.databricks.dicer.client.{SliceKeyHandleImpl, SliceletImpl}
 
+// LINT.IfChange
 /**
  * The class that allows a server to be assigned keys by Dicer. Clerks route requests to it.
  */
@@ -114,7 +115,10 @@ object Slicelet {
     }
   }
 }
+// LINT.ThenChange(dicer/external/javaapi/src/Slicelet.java)
+// LINT.ThenChange(dicer/rust/external/slicelet/src/slicelet.rs)
 
+// LINT.IfChange
 /**
  * A handle represents an in-progress operation where the Slicelet wants to track ownership of a
  * key. It can call [[isAssignedContinuously]] before externalizing any results. [[close]] must be
@@ -213,3 +217,4 @@ final class SliceKeyHandle private[external] (impl: SliceKeyHandleImpl) extends 
   /** Marks the end of the pending operation represented by this handle. */
   override def close(): Unit = impl.close()
 }
+// LINT.ThenChange(dicer/rust/external/slicelet/src/slicelet.rs)

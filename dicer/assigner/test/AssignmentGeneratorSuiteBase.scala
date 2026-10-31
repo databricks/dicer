@@ -68,7 +68,6 @@ import com.databricks.dicer.common.Assignment.{AssignmentValueCellConsumer, Diff
 import com.databricks.dicer.common.{
   AssignerServiceInfo,
   Assignment,
-  AssignmentConsistencyMode,
   ClientRequest,
   ClerkData,
   Generation,
@@ -236,7 +235,6 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
       )
       proposal.commit(
         isFrozen = false,
-        AssignmentConsistencyMode.Affinity,
         Generation(storeIncarnation, time.toEpochMilli)
       )
     }
@@ -363,7 +361,6 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
       assignerServiceInfoOpt = None
     ).commit(
       isFrozen = false,
-      consistencyMode = AssignmentConsistencyMode.Affinity,
       generation = Generation(store.storeIncarnation, number = 42)
     )
 
@@ -458,7 +455,6 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
       assignerServiceInfoOpt = None
     ).commit(
       isFrozen = false,
-      consistencyMode = AssignmentConsistencyMode.Affinity,
       generation =
         Generation(store.storeIncarnation, number = staleAssignment.generation.number.value + 1)
     )
@@ -607,7 +603,7 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
       Configs.parseMap(
         "databricks.dicer.assigner.unhealthyTimeoutPeriodSeconds" ->
         UNHEALTHY_TIMEOUT_PERIOD.toSeconds,
-        "databricks.dicer.assigner.terminatingTimeoutPeriod" ->
+        "databricks.dicer.assigner.terminatingRetentionWindowSecs" ->
         TERMINATING_TIMEOUT_PERIOD.toSeconds
       )
     )
@@ -672,7 +668,7 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
         HealthWatcher.StaticConfig(
           initialHealthReportDelayPeriod = INITIAL_HEALTH_REPORT_DELAY_PERIOD,
           unhealthyTimeoutPeriod = UNHEALTHY_TIMEOUT_PERIOD,
-          terminatingTimeoutPeriod = TERMINATING_TIMEOUT_PERIOD,
+          terminatingRetentionWindow = TERMINATING_TIMEOUT_PERIOD,
           notReadyTimeoutPeriod = NOT_READY_TIMEOUT_PERIOD
         ),
         targetConfig.healthWatcherConfig
@@ -1539,7 +1535,6 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
       assignerServiceInfoOpt = None
     ).commit(
       isFrozen = false,
-      AssignmentConsistencyMode.Affinity,
       Generation(Incarnation.MIN, 42)
     )
     val occFailureOutput: Output = generator.forTest.onEvent(
@@ -1632,7 +1627,6 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
       assignerServiceInfoOpt = None
     ).commit(
       isFrozen = false,
-      AssignmentConsistencyMode.Affinity,
       Generation(createGeneratorConfig().storeIncarnation, 42)
     )
     val occFailureOutput: Output = generator.forTest.onEvent(
@@ -1720,7 +1714,6 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
     val assignment1: Assignment =
       proposal1.commit(
         isFrozen = false,
-        AssignmentConsistencyMode.Affinity,
         Generation(generatorConfig.storeIncarnation, 10)
       )
     generator.forTest.onEvent(
@@ -1772,7 +1765,6 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
             .Committed(
               proposal2.commit(
                 isFrozen = false,
-                AssignmentConsistencyMode.Affinity,
                 Generation(generatorConfig.storeIncarnation, 11)
               )
             )
@@ -2409,7 +2401,6 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
           Store.WriteAssignmentResult.Committed(
             proposal1.commit(
               isFrozen = false,
-              AssignmentConsistencyMode.Affinity,
               Generation(generatorConfig.storeIncarnation, 42)
             )
           )
@@ -2509,7 +2500,6 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
           Store.WriteAssignmentResult.Committed(
             proposal2.commit(
               isFrozen = false,
-              AssignmentConsistencyMode.Affinity,
               Generation(generatorConfig.storeIncarnation, 47)
             )
           )
@@ -2651,7 +2641,6 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
             .Committed(
               proposal1.commit(
                 isFrozen = false,
-                AssignmentConsistencyMode.Affinity,
                 Generation(generatorConfig.storeIncarnation, 10)
               )
             )
@@ -2710,7 +2699,6 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
             .Committed(
               proposal2.commit(
                 isFrozen = false,
-                AssignmentConsistencyMode.Affinity,
                 Generation(generatorConfig.storeIncarnation, 11)
               )
             )
@@ -2871,10 +2859,10 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
     assertResult(expected = 3)(assignment2.assignedResources.size)
     awaitGeneratorTargetSlicezData(driver, assignment2)
 
-    // Simulate a pod removal.
-    fakeKubernetesTargetWatcherFactory.simulateTerminationSignal(
+    // Report the terminating-resource snapshot.
+    fakeKubernetesTargetWatcherFactory.simulateTerminatingResources(
       kubernetesWatchTarget,
-      resource(0).resourceUuid
+      Set(resource(0).resourceUuid)
     )
 
     // Obtain the latest assignment. This new assignment generation should trigger the update of
@@ -3024,9 +3012,9 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
     // via a Slicelet TERMINATING report (-> ResourceIncarnationTerminating). resource 4 remains
     // Running.
     sec.advanceBySync(1.second)
-    fakeKubernetesTargetWatcherFactory.simulateTerminationSignal(
+    fakeKubernetesTargetWatcherFactory.simulateTerminatingResources(
       kubernetesWatchTarget1,
-      resource(0).resourceUuid
+      Set(resource(0).resourceUuid)
     )
     driver1.onWatchRequest(
       createSliceletRequest(
@@ -3146,11 +3134,11 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
     val assignment1: Assignment = awaitNewerAssignment(driver, Generation.EMPTY)
     assert(assignment1.assignedResources == Set(resource(0), resource(1)))
 
-    // Now deliver a termination signal for resource 0.
+    // Now report resource 0 as terminating.
     sec.advanceBySync(1.second)
-    fakeKubernetesTargetWatcherFactory.simulateTerminationSignal(
+    fakeKubernetesTargetWatcherFactory.simulateTerminatingResources(
       kubernetesWatchTarget,
-      resource(0).resourceUuid
+      Set(resource(0).resourceUuid)
     )
     // Verify a new assignment is generated with resource 0 removed.
     val assignment2: Assignment = awaitNewerAssignment(driver, assignment1.generation)
@@ -3239,11 +3227,11 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
       )
     )
 
-    // Now deliver a termination signal for resource 0.
+    // Now report resource 0 as terminating.
     sec.advanceBySync(1.second)
-    fakeKubernetesTargetWatcherFactory.simulateTerminationSignal(
+    fakeKubernetesTargetWatcherFactory.simulateTerminatingResources(
       kubernetesWatchTarget,
-      resource(0).resourceUuid
+      Set(resource(0).resourceUuid)
     )
     // Verify that the generator reacts to the termination signal by removing resource 0 from the
     // assignment.
@@ -3281,7 +3269,6 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
       assignerServiceInfoOpt = None
     ).commit(
       isFrozen = false,
-      AssignmentConsistencyMode.Affinity,
       Generation(priorIncarnation, 42)
     )
     driver.onWatchRequest(
@@ -3501,7 +3488,6 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
       assignerServiceInfoOpt = None
     ).commit(
       isFrozen = false,
-      AssignmentConsistencyMode.Affinity,
       Generation(higherIncarnation, 42)
     )
 
@@ -3545,7 +3531,6 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
           Store.WriteAssignmentResult.Committed(
             initialWriteRequest.proposal.commit(
               isFrozen = false,
-              AssignmentConsistencyMode.Affinity,
               Generation(config.storeIncarnation, 42)
             )
           )
@@ -3568,7 +3553,6 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
       assignerServiceInfoOpt = None
     ).commit(
       isFrozen = false,
-      AssignmentConsistencyMode.Affinity,
       Generation(higherIncarnation, 42)
     )
     val watchOutput: Output =
@@ -3929,7 +3913,6 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
     // Get the assignment from the proposal to make sure what was committed was what we wrote.
     val newAssignment = proposedAssignment.commit(
       isFrozen = false,
-      AssignmentConsistencyMode.Affinity,
       Generation(incarnation, sec.getClock.instant().toEpochMilli)
     )
     TestUtils.awaitResult(
@@ -4004,7 +3987,6 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
       assignerServiceInfoOpt = None
     ).commit(
       isFrozen = false,
-      AssignmentConsistencyMode.Affinity,
       Generation(incarnation, sec.getClock.instant().toEpochMilli)
     )
     driver.onWatchRequest(
@@ -4066,7 +4048,6 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
     Seq(
       createAssignment(
         generation,
-        AssignmentConsistencyMode.Affinity,
         assignerServiceInfoOpt = None,
         Seq(
           SliceAssignment(
@@ -4091,7 +4072,6 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
       ),
       createAssignment(
         generation,
-        AssignmentConsistencyMode.Affinity,
         assignerServiceInfoOpt = None,
         Seq(
           SliceAssignment(
@@ -4116,7 +4096,6 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
       ),
       createAssignment(
         generation,
-        AssignmentConsistencyMode.Affinity,
         assignerServiceInfoOpt = None,
         Seq(
           SliceAssignment(
@@ -4259,7 +4238,6 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
     // Create an input assignment that is load balanced.
     val asn: Assignment = createAssignment(
       generation,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       Seq(
         SliceAssignment(
@@ -4664,7 +4642,6 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
       Assignment(
         // Suppress assignments generation by the generator itself that may disrupt the test.
         isFrozen = true,
-        AssignmentConsistencyMode.Affinity,
         Generation(incarnation, generationNumber),
         SliceMapHelper.ofSliceAssignments(sliceAssignmentsBuilder.result()),
         assignerServiceInfoOpt = None

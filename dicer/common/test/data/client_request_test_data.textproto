@@ -19,7 +19,6 @@ invalid_cases: [
               resource_uuid_low: -6785983130110965961
             }
           ]
-          is_consistent: false
           slice_assignments: [
             {
               slice: { low_inclusive: "" }
@@ -50,7 +49,6 @@ invalid_cases: [
               resource_uuid_low: -6785983130110965961
             }
           ]
-          is_consistent: false
           slice_assignments: [
             {
               slice: { low_inclusive: "" }
@@ -84,7 +82,6 @@ invalid_cases: [
               resource_uuid_low: -6785983130110965961
             }
           ]
-          is_consistent: false
           slice_assignments: [
             {
               slice: { low_inclusive: "" }
@@ -118,7 +115,6 @@ invalid_cases: [
               resource_uuid_low: -6785983130110965961
             }
           ]
-          is_consistent: false
           slice_assignments: [
             {
               slice: { low_inclusive: "" }
@@ -152,7 +148,6 @@ invalid_cases: [
               resource_uuid_low: -6785983130110965961
             }
           ]
-          is_consistent: false
           slice_assignments: [
             {
               slice: { low_inclusive: "" }
@@ -186,7 +181,6 @@ invalid_cases: [
               resource_uuid_low: -6785983130110965961
             }
           ]
-          is_consistent: false
           slice_assignments: [
             {
               slice: { low_inclusive: "" }
@@ -220,7 +214,6 @@ invalid_cases: [
               resource_uuid_low: -6785983130110965961
             }
           ]
-          is_consistent: false
           slice_assignments: [
             {
               slice: { low_inclusive: "" }
@@ -254,7 +247,6 @@ invalid_cases: [
               resource_uuid_low: -6785983130110965961
             }
           ]
-          is_consistent: false
           slice_assignments: [
             {
               slice: { low_inclusive: "" }
@@ -288,7 +280,6 @@ invalid_cases: [
               resource_uuid_low: -6785983130110965961
             }
           ]
-          is_consistent: false
           slice_assignments: [
             {
               slice: { low_inclusive: "" }
@@ -322,7 +313,6 @@ invalid_cases: [
               resource_uuid_low: -6785983130110965961
             }
           ]
-          is_consistent: false
           slice_assignments: [
             {
               slice: { low_inclusive: "" }
@@ -357,7 +347,6 @@ invalid_cases: [
               resource_uuid_low: -6785983130110965961
             }
           ]
-          is_consistent: false
           slice_assignments: [
             {
               slice: { low_inclusive: "" }
@@ -495,7 +484,6 @@ round_tripping_cases: [
             resource_uuid_low: -6209998268546655401
           }
         ]
-        is_consistent: false
         slice_assignments: [
           {
             slice: { low_inclusive: "" high_exclusive: "Dori" }
@@ -578,7 +566,6 @@ round_tripping_cases: [
             resource_uuid_low: -6209998268546655401
           }
         ]
-        is_consistent: false
         slice_assignments: [
           {
             slice: { low_inclusive: "" high_exclusive: "Dori" }
@@ -647,7 +634,6 @@ round_tripping_cases: [
             resource_uuid_low: -6209998268546655401
           }
         ]
-        is_consistent: false
         slice_assignments: [
           {
             slice: { low_inclusive: "" high_exclusive: "Dori" }
@@ -726,7 +712,6 @@ round_tripping_cases: [
             resource_uuid_low: -6209998268546655401
           }
         ]
-        is_consistent: false
         slice_assignments: [
           {
             slice: { low_inclusive: "" high_exclusive: "Dori" }

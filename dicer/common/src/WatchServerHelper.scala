@@ -84,24 +84,6 @@ object WatchServerHelper {
   }
 
   /**
-   * The timeout on the server side so that the Watch RPC is "returned" rather than timed out. We
-   * want to return the RPC with an empty message (no assignment) rather than let it time out since
-   * a DEADLINE_EXCEEDED shows up as an error and can be confusing. Also, this model allows us to
-   * return the known generation number for sync purposes.
-   */
-  def getWatchProcessingTimeout(clientWatchRpcTimeout: FiniteDuration): FiniteDuration = {
-    // The duration before the actual deadline when the client RPC times out so that we can time
-    // out at the server.
-    val shortDurationBeforeTimeout: FiniteDuration = 5.seconds
-    if (clientWatchRpcTimeout > shortDurationBeforeTimeout) {
-      clientWatchRpcTimeout - shortDurationBeforeTimeout
-    } else {
-      // Time is less than the short duration - just allow part of it as budget, e.g., 50%.
-      clientWatchRpcTimeout / 2
-    }
-  }
-
-  /**
    * Configures and creates a unary RPC server for the Assignment Watch API, which is exported by
    * both the Dicer Assigner and Slicelets.
    *

@@ -61,14 +61,9 @@ object SubsliceAnnotationsMap {
   /**
    * Creates a [[SubsliceAnnotationsMap]] for the given `assignment` and `resource`.
    *
-   * For assignments using the `Strong` [[AssignmentConsistencyMode]], the key is guaranteed to have
-   * been continuously assigned to the specific Slicelet incarnation given by `resource`, and no
+   * The key is guaranteed to have been continuously assigned to some Slicelet with
+   * `resource.resourceAddress`, an address which may be recycled across Slicelet incarnations, and
    * "divergent" assignments are possible per the discussion at [[Incarnation.isLoose]].
-   *
-   * For assignments using the `Affinity` [[AssignmentConsistencyMode]], the key is guaranteed to
-   * have been continuously assigned to some Slicelet with `resource.resourceAddress`, an address
-   * which may be recycled across Slicelet incarnations, and "divergent" assignments are possible
-   * per the discussion at [[Incarnation.isLoose]].
    */
   def apply(assignment: Assignment, resource: Squid): SubsliceAnnotationsMap = {
     val builder = Vector.newBuilder[SliceWithAnnotations]

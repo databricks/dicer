@@ -186,9 +186,6 @@ abstract class ClerkMetricsSuiteBase extends DatabricksTest with TestName {
     assertResult(0.0)(getNextStubForKeyCallCount(defaultTarget, factoryContext, "assigned"))
     assertResult(0.0)(getNextStubForKeyCallCount(defaultTarget, factoryContext, "fallback"))
     assertResult(0.0)(getNextStubForKeyCallCount(defaultTarget, factoryContext, "randomAssigned"))
-    assertResult(0.0)(
-      getNextStubForKeyCallCount(defaultTarget, factoryContext, "assignedAfterTokenReset")
-    )
 
     // Setup: Record a distinct number of calls per resource type.
     val clerkMetrics = new ClerkMetrics(defaultTarget, factoryContext)
@@ -199,17 +196,11 @@ abstract class ClerkMetricsSuiteBase extends DatabricksTest with TestName {
     for (_ <- 0 until 3) {
       clerkMetrics.incrementGetNextStubForKeyCallCount(ResourceType.RandomAssignedResource)
     }
-    for (_ <- 0 until 4) {
-      clerkMetrics.incrementGetNextStubForKeyCallCount(ResourceType.AssignedResourceAfterTokenReset)
-    }
 
     // Verify: Each resource type's counter reflects exactly its own calls.
     assertResult(1.0)(getNextStubForKeyCallCount(defaultTarget, factoryContext, "assigned"))
     assertResult(2.0)(getNextStubForKeyCallCount(defaultTarget, factoryContext, "fallback"))
     assertResult(3.0)(getNextStubForKeyCallCount(defaultTarget, factoryContext, "randomAssigned"))
-    assertResult(4.0)(
-      getNextStubForKeyCallCount(defaultTarget, factoryContext, "assignedAfterTokenReset")
-    )
   }
 
   test(

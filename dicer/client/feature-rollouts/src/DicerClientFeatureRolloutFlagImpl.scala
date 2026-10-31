@@ -143,6 +143,10 @@ private[dicer] object DicerClientFeatureRolloutFlagImpl {
    * corresponding alert(s) and returns an [[DicerClientFeatureRolloutFlag]] that always returns
    * false.
    */
+  @throws[IllegalArgumentException](
+    "if the config directory for the current environment does not exist or is not a directory."
+  )
+  @throws[IllegalArgumentException]("if any `.textproto` file in that directory is malformed.")
   private[dicer] def create(): DicerClientFeatureRolloutFlag = {
     val envOpt: Option[String] = WhereAmIHelper.getEnvironment
     val regionUriOpt: Option[String] = WhereAmIHelper.getRegionUri

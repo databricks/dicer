@@ -40,7 +40,6 @@ import com.databricks.dicer.common.testing.SliceTestUtils.{
 }
 import com.databricks.dicer.common.{
   Assignment,
-  AssignmentConsistencyMode,
   ClerkSubscriberSlicezData,
   Generation,
   ProposedAssignment,
@@ -80,7 +79,6 @@ class AssignerSlicezSuite extends DatabricksTest {
     val generation: Generation = SliceTestUtils.createLooseGeneration(42)
     proposedAsn1.commit(
       isFrozen = false,
-      AssignmentConsistencyMode.Affinity,
       generation
     )
   }
@@ -324,8 +322,7 @@ class AssignerSlicezSuite extends DatabricksTest {
         FAKE_ASSIGNER_INFO,
         PreferredAssignerSlicezData(
           PreferredAssignerValue.ModeDisabled(GENERATION),
-          consistentHashingStateOpt = None,
-          migrationMode = MigrationMode.ShadowMode
+          consistentHashingStateOpt = None
         ),
         allTargetsData
       )
@@ -356,8 +353,7 @@ class AssignerSlicezSuite extends DatabricksTest {
         FAKE_ASSIGNER_INFO,
         PreferredAssignerSlicezData(
           mode,
-          consistentHashingStateOpt = None,
-          migrationMode = MigrationMode.ShadowMode
+          consistentHashingStateOpt = None
         ),
         Seq()
       )
@@ -429,8 +425,7 @@ class AssignerSlicezSuite extends DatabricksTest {
         FAKE_ASSIGNER_INFO,
         PreferredAssignerSlicezData(
           PreferredAssignerValue.ModeDisabled(GENERATION),
-          consistentHashingStateOpt = None,
-          migrationMode = MigrationMode.ShadowMode
+          consistentHashingStateOpt = None
         ),
         Seq(targetSlicezData)
       )
@@ -457,8 +452,7 @@ class AssignerSlicezSuite extends DatabricksTest {
         FAKE_ASSIGNER_INFO,
         PreferredAssignerSlicezData(
           PreferredAssignerValue.ModeDisabled(GENERATION),
-          consistentHashingStateOpt = None,
-          migrationMode = MigrationMode.ShadowMode
+          consistentHashingStateOpt = None
         ),
         Seq.empty
       )
@@ -479,8 +473,7 @@ class AssignerSlicezSuite extends DatabricksTest {
         FAKE_ASSIGNER_INFO,
         PreferredAssignerSlicezData(
           PreferredAssignerValue.ModeDisabled(GENERATION),
-          consistentHashingStateOpt = None,
-          migrationMode = MigrationMode.ShadowMode
+          consistentHashingStateOpt = None
         ),
         Seq.empty
       )
@@ -500,8 +493,7 @@ class AssignerSlicezSuite extends DatabricksTest {
       FAKE_ASSIGNER_INFO,
       PreferredAssignerSlicezData(
         PreferredAssignerValue.SomeAssigner(FAKE_ASSIGNER_INFO, GENERATION),
-        consistentHashingStateOpt = None,
-        migrationMode = MigrationMode.ShadowMode
+        consistentHashingStateOpt = None
       ),
       Seq.empty
     )
@@ -523,8 +515,7 @@ class AssignerSlicezSuite extends DatabricksTest {
       FAKE_ASSIGNER_INFO,
       PreferredAssignerSlicezData(
         PreferredAssignerValue.SomeAssigner(otherAssignerInfo, GENERATION),
-        consistentHashingStateOpt = None,
-        migrationMode = MigrationMode.ShadowMode
+        consistentHashingStateOpt = None
       ),
       Seq.empty
     )
@@ -545,8 +536,7 @@ class AssignerSlicezSuite extends DatabricksTest {
         FAKE_ASSIGNER_INFO,
         PreferredAssignerSlicezData(
           PreferredAssignerValue.NoAssigner(GENERATION),
-          consistentHashingStateOpt = None,
-          migrationMode = MigrationMode.ShadowMode
+          consistentHashingStateOpt = None
         ),
         Seq.empty
       )
@@ -579,8 +569,7 @@ class AssignerSlicezSuite extends DatabricksTest {
         FAKE_ASSIGNER_INFO,
         PreferredAssignerSlicezData(
           PreferredAssignerValue.ModeDisabled(GENERATION),
-          consistentHashingStateOpt = None,
-          migrationMode = MigrationMode.ShadowMode
+          consistentHashingStateOpt = None
         ),
         Seq(td)
       )
@@ -603,8 +592,7 @@ class AssignerSlicezSuite extends DatabricksTest {
         FAKE_ASSIGNER_INFO,
         PreferredAssignerSlicezData(
           PreferredAssignerValue.NoAssigner(GENERATION),
-          consistentHashingStateOpt = None,
-          migrationMode = MigrationMode.ShadowMode
+          consistentHashingStateOpt = None
         ),
         Seq.empty
       )
@@ -639,8 +627,7 @@ class AssignerSlicezSuite extends DatabricksTest {
       FAKE_ASSIGNER_INFO,
       PreferredAssignerSlicezData(
         PreferredAssignerValue.NoAssigner(GENERATION),
-        consistentHashingStateOpt = Some(chState),
-        migrationMode = MigrationMode.ShadowMode
+        consistentHashingStateOpt = Some(chState)
       ),
       Seq.empty
     )
@@ -685,8 +672,7 @@ class AssignerSlicezSuite extends DatabricksTest {
       FAKE_ASSIGNER_INFO,
       PreferredAssignerSlicezData(
         PreferredAssignerValue.NoAssigner(GENERATION),
-        consistentHashingStateOpt = None,
-        migrationMode = MigrationMode.ShadowMode
+        consistentHashingStateOpt = None
       ),
       Seq.empty
     )
@@ -698,59 +684,6 @@ class AssignerSlicezSuite extends DatabricksTest {
     assert(viewProto.consistentHashing.isEmpty)
   }
 
-  test("Migration mode renders as HTML and view proto when populated") {
-    // Test plan: Verify that an AssignerSlicezData carrying a migration mode renders the mode's
-    // display name on the ZPage HTML and emits the corresponding PreferredAssignerMigrationModeP
-    // on the view proto. Iterates over every mode in `MigrationMode.values` so the proto/display
-    // mapping can't silently drop a mode: a new mode without an expected-proto entry fails loudly
-    // here.
-    val expectedProtoByMode
-        : Map[MigrationMode, AssignerSliceViewP.PreferredAssignerMigrationModeP] =
-      Map(
-        MigrationMode.ShadowMode ->
-        AssignerSliceViewP.PreferredAssignerMigrationModeP.SHADOW,
-        MigrationMode.ConsistentHashingNominatedEtcdReadMode ->
-        AssignerSliceViewP.PreferredAssignerMigrationModeP.CH_NOMINATED_ETCD_READ,
-        MigrationMode.ConsistentHashingPrimaryEtcdWritesMode ->
-        AssignerSliceViewP.PreferredAssignerMigrationModeP.CH_PRIMARY_ETCD_WRITE
-      )
-    val expectedDisplayNameByMode: Map[MigrationMode, String] =
-      Map(
-        MigrationMode.ShadowMode -> "Shadow (etcd authoritative)",
-        MigrationMode.ConsistentHashingNominatedEtcdReadMode ->
-        "Consistent-hashing nominates / etcd reads",
-        MigrationMode.ConsistentHashingPrimaryEtcdWritesMode ->
-        "Consistent-hashing primary / etcd writes"
-      )
-    for (mode <- MigrationMode.values) {
-      val data: AssignerSlicezData = AssignerSlicezData(
-        FAKE_ASSIGNER_INFO,
-        PreferredAssignerSlicezData(
-          PreferredAssignerValue.NoAssigner(GENERATION),
-          consistentHashingStateOpt = None,
-          migrationMode = mode
-        ),
-        Seq.empty
-      )
-      val html: String = data.getHtml.render
-      val displayName: String =
-        expectedDisplayNameByMode.getOrElse(
-          mode,
-          fail(s"No expected display name for mode ${mode.name}; add one to keep coverage")
-        )
-      withClue(s"mode ${mode.name}: ") {
-        assert(html.contains("<h4>Migration Mode</h4>"))
-        assert(html.contains(s"<th>Mode</th><td>$displayName</td>"))
-        val expectedProto: AssignerSliceViewP.PreferredAssignerMigrationModeP =
-          expectedProtoByMode.getOrElse(
-            mode,
-            fail(s"No expected proto for mode ${mode.name}; add one to keep coverage")
-          )
-        assertResult(Some(expectedProto))(data.toViewProto.migrationMode)
-      }
-    }
-  }
-
   test("toJson returns valid JSON containing expected fields") {
     // Test plan: Verify that toJson produces a JSON string containing the expected assigner
     // info and preferred assigner state fields. Do this by creating AssignerSlicezData with
@@ -760,8 +693,7 @@ class AssignerSlicezSuite extends DatabricksTest {
         FAKE_ASSIGNER_INFO,
         PreferredAssignerSlicezData(
           PreferredAssignerValue.ModeDisabled(GENERATION),
-          consistentHashingStateOpt = None,
-          migrationMode = MigrationMode.ShadowMode
+          consistentHashingStateOpt = None
         ),
         Seq.empty
       )
@@ -936,6 +868,6 @@ class AssignerSlicezSuite extends DatabricksTest {
       ),
       assignerServiceInfoOpt = None
     )
-    proposedAsn.commit(isFrozen = false, AssignmentConsistencyMode.Affinity, GENERATION)
+    proposedAsn.commit(isFrozen = false, GENERATION)
   }
 }

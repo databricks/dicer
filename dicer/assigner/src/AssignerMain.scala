@@ -18,7 +18,6 @@ import com.databricks.caching.util.{
   Severity,
   WhereAmIHelper
 }
-import com.databricks.conf.Config
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
 import com.databricks.dicer.assigner.config.{
   InternalTargetConfigMap,
@@ -33,21 +32,8 @@ import com.databricks.dicer.common.{
   Incarnation
 }
 
-/**
- * The Assigner's main logic as a class so tests can drive the real [[DatabricksMain]] bootstrap via
- * constructor injection. The production entry point is the [[AssignerMain]] singleton.
- *
- * @param rawConfigOverrideOpt overrides the process-wide config; production passes `None`.
- * @param confFactory builds the Assigner config from the resolved [[Config]]; production passes a
- *                    plain [[DicerAssignerConf]] and tests pass one with test SSL args.
- * @param localClusterApiClientFactory produces clients for the Kubernetes API server in the local
- *                                    cluster.
- */
-private[assigner] class AssignerMainBase(
-    rawConfigOverrideOpt: Option[Config],
-    confFactory: Config => DicerAssignerConf,
-    localClusterApiClientFactory: KubernetesApiClientFactory)
-    extends DatabricksMain(Project.DicerAssigner, rawConfigOpt = rawConfigOverrideOpt) {
+/** The production Dicer Assigner entry point. */
+object AssignerMain extends DatabricksMain(Project.DicerAssigner) {
 
   private val prefixLogger = PrefixLogger.create(this.getClass, "")
 
@@ -93,11 +79,11 @@ private[assigner] class AssignerMainBase(
    *   `databricks.dicer.assigner.preferredAssigner.etcd.endpoints`. The process will exit with a
    *   code depending on the result of the initialization.
    */
-  override final def wrappedMain(args: Array[String]): Unit = {
-    val conf: DicerAssignerConf = confFactory(rawConfig)
+  override def wrappedMain(args: Array[String]): Unit = {
+    val conf = new DicerAssignerConf(rawConfig)
     wrappedMainInternal(
       conf,
-      localClusterApiClientFactory,
+      localClusterApiClientFactory = KubernetesApiClientFactory.localCluster(),
       lingerAfterFinish = BOOTSTRAPPER_LINGER_AFTER_FINISH
     ) match {
       case Left(_: Assigner) =>
@@ -281,28 +267,20 @@ private[assigner] class AssignerMainBase(
     )
   }
 
-  /** Test-only access to the otherwise-private boot internals (used by `AssignerMainSuite`). */
+  /** Test-only access to the otherwise-private boot internals. */
   private[assigner] object staticForTest {
 
     /** Runs the configured execution mode without lingering after bootstrapper completion. */
     def wrappedMainInternal(
         conf: DicerAssignerConf,
         localClusterApiClientFactory: KubernetesApiClientFactory): Either[Assigner, Int] =
-      AssignerMainBase.this.wrappedMainInternal(
+      AssignerMain.wrappedMainInternal(
         conf,
         localClusterApiClientFactory,
         lingerAfterFinish = Duration.Zero
       )
   }
 }
-
-/** The production Dicer Assigner entry point. */
-object AssignerMain
-    extends AssignerMainBase(
-      rawConfigOverrideOpt = None,
-      confFactory = config => new DicerAssignerConf(config),
-      localClusterApiClientFactory = KubernetesApiClientFactory.localCluster()
-    )
 
 /**
  * The availability of the Assigner's service info at startup.

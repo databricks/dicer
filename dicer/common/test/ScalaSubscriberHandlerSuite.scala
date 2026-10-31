@@ -8,6 +8,7 @@ import javax.annotation.concurrent.GuardedBy
 
 import scala.concurrent.{Future, Promise}
 import scala.concurrent.duration._
+import scala.util.Random
 
 import com.databricks.api.proto.dicer.common.ClientResponseP
 import com.databricks.caching.util.{FakeSequentialExecutionContext, Lock, MetricUtils, TestUtils}
@@ -114,13 +115,15 @@ class ScalaSubscriberHandlerSuite extends SubscriberHandlerSuiteBase {
       handlerTarget: Target): SubscriberHandlerHarness = {
     val sec = FakeSequentialExecutionContext.create(getSafeName)
     val cell = new AssignmentValueCell
-    val handler = new SubscriberHandler(
+    val random: Random = TestUtils.newRandomWithLoggedSeed()
+    val handler = SubscriberHandler.forTestStatic.create(
       sec,
       handlerTarget,
       getSuggestedClerkRpcTimeoutFn = () => TIMEOUT,
       suggestedSliceletRpcTimeout = TIMEOUT,
       handlerLocation,
-      maxSubscribersPromptedForAssignmentRecovery = 0
+      maxSubscribersPromptedForAssignmentRecovery = 0,
+      random = random
     )
     new ScalaDriver(sec, handler, cell)
   }
@@ -177,22 +180,25 @@ class ScalaSubscriberHandlerSuite extends SubscriberHandlerSuiteBase {
      *                                                    to quickly sync their assignment, when the
      *                                                    subscribers know a newer assignment,
      *                                                    defaulted to 0, which disables the bound.
+     * @param random the random number generator for processing timeout jitter.
      */
     @throws[IllegalArgumentException]("if maxSubscribersPromptedForAssignmentRecovery is negative")
     def apply(
         handlerTarget: Target = target,
         handlerLocation: Location = Location.Assigner,
-        maxSubscribersPromptedForAssignmentRecovery: Int = 0
+        maxSubscribersPromptedForAssignmentRecovery: Int = 0,
+        random: Random = TestUtils.newRandomWithLoggedSeed()
     ): TestState = {
       val sec = FakeSequentialExecutionContext.create(getSafeName)
       val cell = new AssignmentValueCell
-      val handler = new SubscriberHandler(
+      val handler = SubscriberHandler.forTestStatic.create(
         sec,
         handlerTarget,
         getSuggestedClerkRpcTimeoutFn = () => TIMEOUT,
         suggestedSliceletRpcTimeout = TIMEOUT,
         handlerLocation,
-        maxSubscribersPromptedForAssignmentRecovery
+        maxSubscribersPromptedForAssignmentRecovery,
+        random = random
       )
       TestState(sec, cell, handler)
     }
@@ -683,7 +689,6 @@ class ScalaSubscriberHandlerSuite extends SubscriberHandlerSuiteBase {
 
     val assignment: Assignment = createAssignment(
       50,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       ("" -- 0) @@ 20 -> Seq("pod0"),
       (0 -- ∞) @@ 50 -> Seq("pod1")
@@ -730,7 +735,6 @@ class ScalaSubscriberHandlerSuite extends SubscriberHandlerSuiteBase {
     val state = TestState()
     val assignment: Assignment = createAssignment(
       50,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       ("" -- ∞) @@ 50 -> Seq("pod0")
     )
@@ -743,7 +747,7 @@ class ScalaSubscriberHandlerSuite extends SubscriberHandlerSuiteBase {
       state.cell
     )
     state.drainSec()
-    state.sec.getClock.advanceBy(TIMEOUT)
+    state.sec.getClock.advanceBy(getMaxWatchRequestTimeoutWithJitter)
     val response: ClientResponse =
       ClientResponse.fromProto(TestUtils.awaitResult(fut, Duration.Inf))
     state.drainSec()

@@ -1,0 +1,15 @@
+load("//bazel/rules/rust:rules_rust.bzl", "rust_library")
+
+rust_library(
+    name = "test_util",
+    testonly = True,
+    srcs = ["src/lib.rs"],
+    crate_name = "raf_tls_test_util",
+    visibility = ["//wrappers/rust/tls:__pkg__"],
+    deps = [
+        "//wrappers/rust/tls",
+        "@crates//:tokio",
+        "@crates//:tonic",
+        "@crates//:tonic-health",
+    ],
+)

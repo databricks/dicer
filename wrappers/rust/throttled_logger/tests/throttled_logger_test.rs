@@ -3,12 +3,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
 
+use common_logging_throttled_logger_rust::event_every_n_sec;
 use tracing::field::{Field, FieldSet};
 use tracing::metadata::Kind;
 use tracing::span::{Attributes, Record};
 use tracing::subscriber::DefaultGuard;
 use tracing::{Event, Id, Level, Metadata};
-use universe_common_logging_throttled_logger_rust::event_every_n_sec;
 
 /// A single event captured by [`TestSubscriber`].
 struct LoggedEvent {

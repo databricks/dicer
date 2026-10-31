@@ -4,23 +4,20 @@ import scala.collection.mutable
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
-import javax.annotation.concurrent.{GuardedBy, ThreadSafe}
+import javax.annotation.concurrent.ThreadSafe
 
 import com.databricks.caching.util.{EwmaCounter, LossyEwmaCounter, TypedClock}
 import com.databricks.dicer.client.SliceletLoadAccumulator.{
   HALF_LIFE_SECONDS,
   SliceAccumulator,
-  SliceKeyLoadDistributionHistogram,
   TOP_KEYS_ERROR,
   TOP_KEYS_MINIMUM_LOAD_FRACTION,
   TOP_KEYS_SUPPORT
 }
 import com.databricks.dicer.common.{Assignment, Generation, SliceAssignment, SliceletData}
-import com.databricks.dicer.common.TargetHelper.TargetOps
-import com.databricks.dicer.external.{Slice, SliceKey, Target}
+import com.databricks.dicer.external.{Slice, SliceKey}
 import com.databricks.dicer.friend.{SliceMap, Squid}
 import com.databricks.dicer.friend.SliceMap.GapEntry
-import io.prometheus.client.Counter
 
 import com.databricks.caching.util.AssertMacros.iassert
 import com.databricks.dicer.common.SliceletData.KeyLoad
@@ -52,10 +49,7 @@ import com.databricks.dicer.common.SliceMapHelper.SLICE_ASSIGNMENT_ACCESSOR
  *    before reassigning Slices.
  */
 @ThreadSafe
-private[dicer] class SliceletLoadAccumulator(
-    clock: TypedClock,
-    target: Target,
-    metrics: SliceletMetrics) {
+private[dicer] class SliceletLoadAccumulator(clock: TypedClock, metrics: SliceletMetrics) {
 
   import SliceletLoadAccumulator.AssignmentAccumulator
 
@@ -95,14 +89,12 @@ private[dicer] class SliceletLoadAccumulator(
    */
   private val unattributedAccumulator: SliceAccumulator = createUnattributedAccumulator()
 
-  /** Records the distribution of load over SliceKeys. */
-  private val loadDistributionHistogram = new SliceKeyLoadDistributionHistogram(target)
-
   /**
    * Increments the primary rate load metric and the corresponding Prometheus metrics for `key`.
    * `value` should be positive: negative or zero values are ignored.
    */
   def incrementPrimaryRateBy(key: SliceKey, value: Int): Unit = {
+    metrics.onLoadIncrement()
     if (value <= 0) {
       // Ignore zero or negative values.
       return
@@ -121,9 +113,6 @@ private[dicer] class SliceletLoadAccumulator(
         unattributedAccumulator.incrementBy(clock.instant(), key, value)
         metrics.incrementUnattributedLoadBy(value)
     }
-
-    // Update the SliceKey load distribution histogram.
-    loadDistributionHistogram.observe(key, value)
   }
 
   /**
@@ -194,13 +183,6 @@ private[dicer] class SliceletLoadAccumulator(
     }
     unattributedLoad = filterKeysAboveThreshold(unattributedLoad)
     (attributedLoads.toVector, unattributedLoad)
-  }
-
-  /**
-   * Updates Prometheus metrics. Should be called regularly to keep metrics fresh (e.g. every 5s).
-   */
-  def updateMetrics(): Unit = {
-    loadDistributionHistogram.updateMetrics()
   }
 
   /**
@@ -474,134 +456,5 @@ private[client] object SliceletLoadAccumulator {
       SliceMap.createFromOrderedDisjointEntries(Vector.empty, SLICE_ACCUMULATOR_ACCESSOR),
       Generation.EMPTY
     )
-  }
-
-  /**
-   * A wrapper over a Prometheus histogram which efficiently captures the distribution of load over
-   * the key space. Histogram buckets evenly divide the range [0, 1] into 256 segments, and
-   * SliceKeys are mapped to buckets according to their most-significant-byte (i.e. SliceKeys with
-   * MSB == i map to the ith bucket (SliceKey.MIN is mapped to the 0th bucket)). The 0th bucket is
-   * given an "le" label in Prometheus of 1/256, and the 255th (last) bucket has le="+Inf" (i.e.
-   * there is no le=1.0 bucket, since otherwise the "+Inf" bucket would always show up empty).
-   *
-   *   Note: Due to the above scheme, the histogram "le" labels should be interpreted as strictly
-   *   less than and not less than or equal, since SliceKeys with MSB == N fall into the Nth bucket
-   *   with le=(N+1)/256. We nonetheless favor this mapping since it avoids the 0th bucket from
-   *   being twice the size of all other buckets.
-   *
-   * In order to show the distribution of load (and not the frequency of the SliceKeys themselves)
-   * SliceKey observations are weighted by their load values, so a SliceKey with a load value L
-   * contributes a weight of L to the corresponding bucket (unlike a typical histogram, which would
-   * record a count of 1 for the observation).
-   *
-   * This data structure is designed to be highly performant so that it can be called on the hot
-   * path (i.e. each time load is reported for a SliceKey). To do that, the expensive work of
-   * updating the Prometheus histogram is deferred until the user calls `updateMetrics`, which
-   * should be called asynchronously and sufficiently frequent so as to keep the Prometheus
-   * histogram updated (e.g. every 5s).
-   */
-  @ThreadSafe
-  private class SliceKeyLoadDistributionHistogram(target: Target) {
-    import SliceKeyLoadDistributionHistogram.{UNSIGNED_BYTE_MAX_VALUE, backingHistogram}
-
-    /** Cached Prometheus counters which are the buckets of the backing histogram. */
-    private val prometheusBuckets: Array[Counter.Child] = {
-      val countersBuilder = mutable.ArrayBuilder.make[Counter.Child]
-      countersBuilder.sizeHint(UNSIGNED_BYTE_MAX_VALUE + 1)
-      for (i <- 0 until UNSIGNED_BYTE_MAX_VALUE + 1) {
-        val leLabelValue: String =
-          if (i == UNSIGNED_BYTE_MAX_VALUE) "+Inf"
-          else ((i + 1).toDouble / (UNSIGNED_BYTE_MAX_VALUE + 1)).toString
-        countersBuilder += backingHistogram.labels(
-          leLabelValue,
-          target.getTargetClusterLabel,
-          target.getTargetNameLabel,
-          target.getTargetInstanceIdLabel
-        )
-      }
-      countersBuilder.result()
-    }
-
-    /** Lock used to guard the locally tracked bucket counters. */
-    private val lock = new ReentrantLock()
-
-    /** The bucket counters that we track locally, updated on [[observe()]]. */
-    @GuardedBy("lock")
-    private var localBuckets = new Array[Long](UNSIGNED_BYTE_MAX_VALUE + 1)
-
-    /** Records the `load` for the `key` in the histogram. See class comments for details. */
-    def observe(key: SliceKey, load: Int): Unit = withLock(lock) {
-      if (key.bytes.size() > 0) {
-        localBuckets(key.bytes.byteAt(0) & UNSIGNED_BYTE_MAX_VALUE) += load
-      } else {
-        localBuckets(0) += load
-      }
-    }
-
-    /**
-     * IMPORTANT: The user must call this method frequently enough such that the backing histogram
-     * is reasonably up-to-date when scraped (e.g. call every 5s).
-     *
-     * Updates the backing Prometheus histogram.
-     *
-     * Note: We intentionally avoid acquiring the lock in this method, since we want to avoid
-     * blocking requests on the hot path (which need the lock to update the local bucket counters)
-     * on updating all of the Prometheus histogram buckets.
-     */
-    def updateMetrics(): Unit = {
-      // Get the current bucket counts under the lock, then update the backing histogram outside the
-      // lock to minimize impact to the hot path.
-      val bucketWeightsSnapshot: Array[Long] = swapBuckets()
-      var cumulativeLoad: Long = 0
-      for (entry <- prometheusBuckets.zip(bucketWeightsSnapshot)) {
-        val (bucket, weight): (Counter.Child, Long) = entry
-        cumulativeLoad += weight
-        bucket.inc(cumulativeLoad)
-      }
-    }
-
-    /** Swaps out the current locally tracked bucket counters for fresh ones under the lock. */
-    private def swapBuckets(): Array[Long] = {
-      val newBucketWeights = new Array[Long](UNSIGNED_BYTE_MAX_VALUE + 1)
-      withLock(lock) {
-        val ret = localBuckets
-        localBuckets = newBucketWeights
-        ret
-      }
-    }
-  }
-
-  private object SliceKeyLoadDistributionHistogram {
-    // The maximum value of an unsigned byte, which is used to determine the number of
-    // buckets in the histogram (this value + 1) and the range of the "le" labels.
-    private val UNSIGNED_BYTE_MAX_VALUE: Int = 0xFF
-
-    // Backing histogram to which the locally tracked counters are sync'd.
-    @SuppressWarnings(
-      Array(
-        "BadMethodCall-PrometheusCounterNamingConvention",
-        "reason: Renaming existing prod metric would break dashboards and alerts"
-      )
-    )
-    val backingHistogram: Counter = Counter
-      .build()
-      .name("dicer_slicelet_slicekey_load_distribution_bucket_total")
-      .help("Distribution of load across the key space.")
-      .labelNames("le", "targetCluster", "targetName", "targetInstanceId")
-      .register()
-  }
-
-  object forTest {
-
-    def getSliceKeyLoadDistributionMetric(leLabelValue: String, target: Target): Double = {
-      SliceKeyLoadDistributionHistogram.backingHistogram
-        .labels(
-          leLabelValue,
-          target.getTargetClusterLabel,
-          target.getTargetNameLabel,
-          target.getTargetInstanceIdLabel
-        )
-        .get()
-    }
   }
 }

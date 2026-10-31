@@ -12,13 +12,7 @@ import com.databricks.caching.util.{
   ValueStreamCallback
 }
 import com.databricks.dicer.common.Assignment.AssignmentValueCell
-import com.databricks.dicer.common.{
-  AssignmentConsistencyMode,
-  Assignment,
-  Generation,
-  Incarnation,
-  ProposedAssignment
-}
+import com.databricks.dicer.common.{Assignment, Generation, Incarnation, ProposedAssignment}
 import com.databricks.dicer.external.Target
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import java.time.Instant
@@ -153,7 +147,6 @@ class InMemoryStore private (sec: SequentialExecutionContext, val storeIncarnati
         val assignment: Assignment =
           proposal.commit(
             isFrozen = shouldFreeze,
-            AssignmentConsistencyMode.Affinity,
             generation
           )
         // We already log the formatted assignment in the generator, so we don't do it again here
