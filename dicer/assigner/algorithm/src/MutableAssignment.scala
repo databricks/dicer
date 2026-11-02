@@ -506,7 +506,7 @@ private[assigner] class MutableAssignment(
         val finiteSplitKey: SliceKey = split.splitKey.asFinite
         val slice1 = Slice(slice.lowInclusive, finiteSplitKey)
         val slice2 = Slice(finiteSplitKey, slice.highExclusive)
-        val primaryRateLoadPrefix: Double = split.prefixApportionedLoad
+        val primaryRateLoadPrefix: Double = split.prefixApportionedValue
         val primaryRateLoadSuffix: Double = existingLoad - primaryRateLoadPrefix
 
         // Remove the existing slice and maintains all data structures associated with it.

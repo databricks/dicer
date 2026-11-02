@@ -19,6 +19,7 @@ import com.databricks.caching.util.MetricUtils.ChangeTracker
 import com.databricks.dicer.common.{
   ClerkData,
   ClientRequest,
+  ClientType,
   Generation,
   SliceletData,
   SliceletState,
@@ -39,7 +40,7 @@ import com.databricks.dicer.assigner.conf.DicerAssignerConf
 import com.databricks.dicer.external.{Slicelet, Target}
 import com.databricks.dicer.assigner.TargetMetrics.GeneratorShutdownReason
 import com.databricks.dicer.common.TargetHelper.TargetOps
-import com.databricks.dicer.client.WatchStubManager
+import com.databricks.dicer.client.{WatchStubManager, WatchStubManagerConfig}
 import com.databricks.dicer.common.testing.SliceTestUtils.createTestSquid
 import com.databricks.rpc.testing.TestSslArguments
 import com.databricks.rpc.tls.TLSOptionsMigration
@@ -94,11 +95,14 @@ class AssignerInactiveTargetGcSuite extends DatabricksTest with TestName {
 
   /** Manages the creation of watch stubs for this test suite. */
   private val watchStubManager = new WatchStubManager(
-    clientName = "dicer-assigner",
-    defaultWatchAddress = URI.create(s"http://localhost:${testEnv.getAssignerPort}"),
-    tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
-    watchFromDataPlane = false,
-    sourceIpOpt = None
+    WatchStubManagerConfig(
+      clientType = ClientType.Slicelet,
+      targetName = "assigner-generator-clustertype2-test",
+      watchAddress = URI.create(s"http://localhost:${testEnv.getAssignerPort}"),
+      tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
+      watchFromDataPlane = false,
+      sourceIpOpt = None
+    )
   )
 
   /** RPC stub for sending Watch requests to the Assigner.  */

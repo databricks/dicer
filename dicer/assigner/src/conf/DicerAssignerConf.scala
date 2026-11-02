@@ -18,7 +18,6 @@ import com.databricks.caching.util.{
 }
 import com.databricks.conf.trusted.{LocationConf, ProjectConfByName}
 import com.databricks.conf.{Config, ConfigParser, DbConf}
-import com.databricks.dicer.assigner.MigrationMode
 import com.databricks.dicer.assigner.conf.DicerAssignerConf.{logger, ExecutionMode}
 import com.databricks.dicer.assigner.config.TargetMigrationConfig
 import com.databricks.dicer.common.{CommonSslConf, Incarnation, WatchServerConf}
@@ -57,17 +56,12 @@ trait HealthConf extends DbConf {
     configure[Long]("databricks.dicer.assigner.unhealthyTimeoutPeriodSeconds", 30).seconds
 
   /**
-   * Timeout for Terminating state in HealthWatcher. Once this expires, Dicer forgets about the
-   * pod entirely. We set this to 6 hours (21600s) because some pods may never receive a SIGTERM
-   * (e.g. due to a kubelet bug or network partition) and remain alive long after Kubernetes has
-   * marked them as Terminating. Forgetting about such a pod too early would cause Dicer to lose
-   * track of an active resource, which can lead to incorrect assignment decisions.
-   *
-   * For the same reason, if this value is set to less than the Kubernetes termination grace period,
-   * a pod that is still sending heartbeats may be forgotten and then re-admitted as healthy.
+   * Retention window after which terminating resource incarnations are removed from HealthWatcher.
+   * A large value reduces the risk of a late, reordered healthy heartbeat reviving an
+   * already-terminating resource incarnation.
    */
-  val terminatingTimeoutPeriod: FiniteDuration =
-    configure[Long]("databricks.dicer.assigner.terminatingTimeoutPeriod", 21600).seconds
+  val terminatingRetentionWindow: FiniteDuration =
+    configure[Long]("databricks.dicer.assigner.terminatingRetentionWindowSecs", 5 * 60).seconds
 
   /**
    * Flapping protection timeout for the NotReady state in HealthWatcher. A Slicelet in the NotReady
@@ -332,26 +326,6 @@ trait PreferredAssignerConf extends DbConf {
    */
   val preferredAssignerEtcdSslEnabled: Boolean =
     configure("databricks.dicer.assigner.preferredAssigner.etcd.sslEnabled", true)
-
-  /**
-   * Selects which [[MigrationMode]] the Assigner uses to stage the migration of the
-   * preferred-assigner driver from the etcd-backed driver to the consistent-hashing driver.
-   * The wire value is the mode's [[MigrationMode.name]].
-   *
-   * @throws com.databricks.conf.ConfigParseException at startup if the conf value is not a
-   *         known mode name. The framework's message names the offending wire value; the
-   *         attached cause is an [[IllegalArgumentException]] whose message lists every known
-   *         mode and is rendered into the assigner's startup log via the standard chained
-   *         stack trace.
-   */
-  val preferredAssignerMigrationMode: MigrationMode = configure[MigrationMode](
-    propertyName = "databricks.dicer.assigner.preferredAssigner.migrationMode",
-    defaultValue = MigrationMode.ShadowMode,
-    parser = new ConfigParser[MigrationMode] {
-      override def parse(mapper: DatabricksObjectMapper, json: String): MigrationMode =
-        MigrationMode.fromName(mapper.readValue[String](json))
-    }
-  )
 }
 
 /**

@@ -382,8 +382,8 @@ class InternalDicerTestEnvironment private (
   }
 
   /**
-   * Clears SAFE configs; Note that this does not reset the serving config by itself, previously
-   * served configs may still be served depending on the config provider.
+   * Clears dynamic configs; Note that this does not reset the serving config by itself,
+   * previously served configs may still be served depending on the config provider.
    */
   def clearDynamicConfigs(): Unit = {
     assignerConf.clearDynamicConfigs()
@@ -462,7 +462,6 @@ class InternalDicerTestEnvironment private (
         designatedDicerAssignerRpcPort = Some(previousPort),
         preferredAssignerDriverConfig = oldConfig.preferredAssignerDriverConfig,
         targetMigratorOpt = oldConfig.targetMigratorOpt,
-        membershipCheckerFactoryOpt = oldConfig.membershipCheckerFactoryOpt,
         preferredAssignerDriverFactoryOverride = oldConfig.preferredAssignerDriverFactoryOverride,
         assignerServiceInfoOpt = oldConfig.assignerServiceInfoOpt
       )

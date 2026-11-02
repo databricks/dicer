@@ -16,7 +16,7 @@ import com.databricks.caching.util.WhereAmITestUtils
 import com.databricks.conf.trusted.LocationConfTestUtils
 import com.databricks.dicer.common.ClientType
 import com.databricks.dicer.common.TargetHelper.TargetOps
-import com.databricks.dicer.external.Target
+import com.databricks.dicer.external.{AppTarget, Target}
 import com.databricks.rpc.testing.TestTLSOptions
 import com.databricks.rpc.tls.TLSOptions
 import com.databricks.testing.DatabricksTest
@@ -75,27 +75,31 @@ class SliceLookupCacheSuite extends DatabricksTest with TestName {
       maxRetryDelay: FiniteDuration = 10.seconds,
       enableRateLimiting: Boolean = false,
       sourceIpOpt: Option[InetAddress] = None,
+      alternativeTargetOpt: Option[AppTarget] = None,
       kubernetesClusterUri: String = ""): InternalClientConfig = {
     val sliceLookupConfig: SliceLookupConfig = WhereAmITestUtils.withLocationConfSingleton(
       LocationConfTestUtils.newTestLocationConf(kubernetesClusterUri = kubernetesClusterUri)
     ) {
       SliceLookupConfig(
         clientType = clientType,
-        watchAddress = watchAddress,
-        tlsOptionsOpt = tlsOptionsOpt,
         target = target,
         clientIdOpt = clientIdOpt,
         watchStubCacheTime = watchStubCacheTime,
-        watchFromDataPlane = watchFromDataPlane,
-        alternativeTargetOpt = None,
+        alternativeTargetOpt = alternativeTargetOpt,
         watchRpcTimeout = watchRpcTimeout,
         minRetryDelay = minRetryDelay,
         maxRetryDelay = maxRetryDelay,
-        enableRateLimiting = enableRateLimiting,
-        sourceIpOpt = sourceIpOpt
+        enableRateLimiting = enableRateLimiting
       )
     }
-    InternalClientConfig(sliceLookupConfig, subscriberDebugName = s"test-lookup-${target.name}")
+    InternalClientConfig(
+      sliceLookupConfig,
+      subscriberDebugName = s"test-lookup-${target.name}",
+      watchAddress = watchAddress,
+      tlsOptionsOpt = tlsOptionsOpt,
+      watchFromDataPlane = watchFromDataPlane,
+      sourceIpOpt = sourceIpOpt
+    )
   }
 
   /** Creates a SliceLookup using SliceLookup.createUnstarted. */
@@ -145,7 +149,7 @@ class SliceLookupCacheSuite extends DatabricksTest with TestName {
       getCacheTargetHitMetricValue(target, configMatched = false)
 
     val lookup: SliceLookup =
-      cache.getOrElseCreate(config.sliceLookupConfig, createSliceLookup(config))
+      cache.getOrElseCreate(config, createSliceLookup(config))
 
     // Read each metric after the call.
     val numSliceLookupsAfter: Int = getNumSliceLookupsMetricValue(target, clientType)
@@ -268,6 +272,24 @@ class SliceLookupCacheSuite extends DatabricksTest with TestName {
     assert(lookup2 eq lookup2Again, "target2 lookup should return the same instance")
   }
 
+  test("getOrElseCreate reuses lookup for configs differing only in subscriberDebugName") {
+    // Test plan: Verify that clients differing only in subscriberDebugName share the same cached
+    // SliceLookup instance and record a config match rather than creating another lookup.
+
+    val cache = new SliceLookupCache
+    val config: InternalClientConfig = createTestConfig(Target(getSafeName))
+    val configWithDifferentDebugName: InternalClientConfig =
+      config.copy(subscriberDebugName = "another-subscriber")
+
+    val lookup: SliceLookup = verifyGetOrElseCreate(cache, config, CacheOutcome.TargetMiss)
+    val lookupWithDifferentDebugName: SliceLookup =
+      verifyGetOrElseCreate(cache, configWithDifferentDebugName, CacheOutcome.TargetHitSameConfig)
+    assert(
+      lookup eq lookupWithDifferentDebugName,
+      "configs differing only in subscriberDebugName should share the same lookup"
+    )
+  }
+
   test("getOrElseCreate creates new lookup for same target with different client UUID") {
     // Test plan: Verify that the same target with different clientIdOpt values results in a cache
     // miss and a new SliceLookup being created.
@@ -372,8 +394,8 @@ class SliceLookupCacheSuite extends DatabricksTest with TestName {
     assert(lookup3 eq lookup3Again, "config3 lookup should return the same instance")
   }
 
-  test("getOrElseCreate treats each differing SliceLookupConfig field as a config mismatch") {
-    // Test plan: Verify that varying each field of SliceLookupConfig results in a config mismatch
+  test("getOrElseCreate treats differing cache key fields as a config mismatch") {
+    // Test plan: Verify that varying each field used in the cache key results in a config mismatch
     // and a new SliceLookup being created. Verify that these distinct configs coexist in the
     // cache (i.e. each distinct config is its own entry and none evicts another). Using one shared
     // cache, (1) look up every variation and verify each is a config mismatch, and (2) look up
@@ -384,13 +406,19 @@ class SliceLookupCacheSuite extends DatabricksTest with TestName {
     // mismatch. The other three are omitted because they are `Option`s, and each require a test
     // that exercises `None` alongside two variants. The base config leaves the sender cluster URI
     // unset, so the `clientClusterUriOpt` variation supplies one to differ from it.
+    // `subscriberDebugName` is excluded from the key and tested separately above.
 
+    // Setup: Create a shared cache, a base config, and an alternative AppTarget for the same name.
     val cache = new SliceLookupCache
     val target: Target = Target(getSafeName)
     val baseConfig: InternalClientConfig = createTestConfig(target)
+    val alternativeTarget: AppTarget =
+      Target.createAppTarget(target.name, "alternative-instance") match {
+        case appTarget: AppTarget => appTarget
+        case _: Target => throw new IllegalStateException("Expected an AppTarget")
+      }
 
-    // Setup: Derive one config per field, each whose SliceLookupConfig differs from `baseConfig`'s
-    // in exactly that field.
+    // Setup: Derive one config per field, each differing from `baseConfig` in exactly that field.
     val variedConfigs: List[(String, InternalClientConfig)] = List(
       "clientType" -> createTestConfig(target, clientType = ClientType.Slicelet),
       "watchAddress" ->
@@ -401,16 +429,20 @@ class SliceLookupCacheSuite extends DatabricksTest with TestName {
       "minRetryDelay" -> createTestConfig(target, minRetryDelay = 2.seconds),
       "maxRetryDelay" -> createTestConfig(target, maxRetryDelay = 20.seconds),
       "enableRateLimiting" -> createTestConfig(target, enableRateLimiting = true),
+      "alternativeTargetOpt" -> createTestConfig(
+        target,
+        alternativeTargetOpt = Some(alternativeTarget)
+      ),
       "clientClusterUriOpt" -> createTestConfig(target, kubernetesClusterUri = TEST_CLUSTER_URI)
     )
 
     val baseLookup: SliceLookup = verifyGetOrElseCreate(cache, baseConfig, CacheOutcome.TargetMiss)
 
-    // The SliceLookup returned by the `getOrElseCreate` call of each SliceLookupConfig variation,
+    // The SliceLookup returned by the `getOrElseCreate` call of each config variation,
     // keyed by the name of the field being varied.
     val seenLookups: mutable.Map[String, SliceLookup] = mutable.Map.empty
 
-    // First Pass: verify every variation is a config mismatch that create its own SliceLookup.
+    // Verify: Each variation is a config mismatch that creates its own SliceLookup.
     variedConfigs.foreach {
       case (fieldName: String, variedConfig: InternalClientConfig) =>
         val variedLookup: SliceLookup =
@@ -422,7 +454,7 @@ class SliceLookupCacheSuite extends DatabricksTest with TestName {
         seenLookups.put(fieldName, variedLookup)
     }
 
-    // Second Pass: verify every variation returns the same instance as the first pass.
+    // Verify: Looking up each variation again returns the same instance as the first pass.
     variedConfigs.foreach {
       case (fieldName: String, variedConfig: InternalClientConfig) =>
         val variedLookupAgain: SliceLookup =

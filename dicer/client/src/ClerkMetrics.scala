@@ -75,17 +75,8 @@ private[dicer] class ClerkMetrics(target: Target, factoryContext: ClerkFactoryCo
         factoryContext,
         ResourceType.RandomAssignedResource.label
       )
-  private val getNextStubForKeyCallCountAssignedResourceAfterTokenResetChild: SafeCounter.Child =
-    ClerkMetrics.getNextStubForKeyCallCount
-      .labels(
-        target.getTargetClusterLabel,
-        target.getTargetNameLabel,
-        target.getTargetInstanceIdLabel,
-        factoryContext,
-        ResourceType.AssignedResourceAfterTokenReset.label
-      )
 
-  // Memoize the histogram child for the number of assigned resources picked so far at each
+  // Memoize the histogram child for the number of resources picked so far at each
   // `getNextStubForKey` call for the given (`target`, `factoryContext`).
   private val getNextStubForKeyPickedResourceCountHistogramChild: Histogram.Child =
     ClerkMetrics.getNextStubForKeyPickedResourceCountHistogram
@@ -127,15 +118,13 @@ private[dicer] class ClerkMetrics(target: Target, factoryContext: ClerkFactoryCo
       case ResourceType.FallbackResource => getNextStubForKeyCallCountFallbackResourceChild.inc()
       case ResourceType.RandomAssignedResource =>
         getNextStubForKeyCallCountRandomAssignedResourceChild.inc()
-      case ResourceType.AssignedResourceAfterTokenReset =>
-        getNextStubForKeyCallCountAssignedResourceAfterTokenResetChild.inc()
     }
   }
 
   /**
-   * Observes the number of assigned resources picked so far at a getNextStubForKey call.
+   * Observes the number of resources picked so far at a getNextStubForKey call.
    *
-   * @param pickedResourceCount the number of assigned resources picked so far.
+   * @param pickedResourceCount the number of resources picked so far.
    */
   def observeGetNextStubForKeyPickedResourceCount(pickedResourceCount: Int): Unit = {
     getNextStubForKeyPickedResourceCountHistogramChild.observe(pickedResourceCount.toDouble)
@@ -179,11 +168,6 @@ object ClerkMetrics {
     case object RandomAssignedResource extends ResourceType {
       val label: String = "randomAssigned"
     }
-
-    /** A pick of an assigned resource made after the token was reset. */
-    case object AssignedResourceAfterTokenReset extends ResourceType {
-      val label: String = "assignedAfterTokenReset"
-    }
   }
 
   private val getStubForKeyCallCount: SafeCounter = SafeCounter.create(
@@ -218,19 +202,15 @@ object ClerkMetrics {
     )
   )
 
-  // Note 1: This histogram observes every `getNextStubForKey` picked resource count, which will
-  // inflate the histogram towards 1. For example, if at the time of recording this metric,
-  // `RetryTokenImpl.pickedResourceIndices.size == 5`, the samples observed so far would've been
-  // [1, 2, 3, 4]. Ideally, only the last pick gets reported, but that information is unknown at
-  // the Clerk's layer.
-  // Note 2: The size of `RetryTokenImpl.pickedResourceIndices` is limited by
-  // `MAX_PICKED_ASSIGNED_RESOURCES` which inherently becomes the ceiling for the observed values.
+  // The histogram observes every `getNextStubForKey` picked resource count, which will inflate the
+  // histogram distribution towards 1. For example, if at the time of recording this metric,
+  // `RetryTokenImpl.pickedResources.size == 5`, the samples observed so far would've been
+  // [1, 2, 3, 4]. Ideally, only the successful attempt's pickedResources get reported, but that
+  // information is unknown at the Clerk's layer.
   private val getNextStubForKeyPickedResourceCountHistogram: Histogram = Histogram
     .build()
     .name("dicer_clerk_getnextstubforkey_picked_resource_count_histogram")
-    .help(
-      "The number of assigned resources picked so far at a getNextStubForKey call."
-    )
+    .help("The number of resources picked so far at a getNextStubForKey call.")
     .labelNames("targetCluster", "targetName", "targetInstanceId", "factoryContext")
     .buckets(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0)
     .register()

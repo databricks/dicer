@@ -87,16 +87,10 @@ class SliceLookup private (
   /**
    * Manages the creation of watch stubs for the SliceLookup.
    *
-   * Note: If this is a data plane client, `sliceLookupConfig.watchAddress` is the address of
+   * Note: If this is a data plane client, `watchStubManagerConfig.watchAddress` is the address of
    * the s2sproxy which forwards our watch requests.
    */
-  private val watchStubManager = new WatchStubManager(
-    clientName = sliceLookupConfig.clientName,
-    defaultWatchAddress = sliceLookupConfig.watchAddress,
-    tlsOptionsOpt = sliceLookupConfig.tlsOptionsOpt,
-    watchFromDataPlane = sliceLookupConfig.watchFromDataPlane,
-    sourceIpOpt = sliceLookupConfig.sourceIpOpt
-  )
+  private val watchStubManager = new WatchStubManager(config.watchStubManagerConfig)
 
   /**
    * Supplies [[SubscriberData]] to include in watch requests. Set when [[start()]] is called.
@@ -129,7 +123,7 @@ class SliceLookup private (
 
   /**
    * The last address on which we issued the watch RPC, or None if we used
-   * `sliceLookupConfig.watchAddress`. Used for Slicez.
+   * `watchStubManagerConfig.watchAddress`. Used for Slicez.
    */
   @GuardedBy("sec")
   private var lastWatchAddress: Option[URI] = None
@@ -160,7 +154,7 @@ class SliceLookup private (
 
   /** The handler that receives the watch calls from remote clients. */
   private val handler =
-    new SubscriberHandler(
+    SubscriberHandler.create(
       sec,
       sliceLookupConfig.target,
       // TODO(<internal bug>): Figure out whether the suggested RPC timeout should be set to the value
@@ -223,7 +217,8 @@ class SliceLookup private (
 
         // Display either the URI to which the last watch request was sent (when set) or the
         // configured watch address.
-        val watchAddress: URI = lastWatchAddress.getOrElse(sliceLookupConfig.watchAddress)
+        val watchAddress: String =
+          lastWatchAddress.getOrElse(config.watchStubManagerConfig.watchAddress).toString
 
         // Slicez holds the client cluster URI as a `String` for its cross-cluster/region indicator.
         val slicezClientClusterOpt: Option[String] =
@@ -379,8 +374,8 @@ class SliceLookup private (
                 lastWatchAddress = None
                 lastWatchAddressUsedSince = sec.getClock.instant()
               }
-              // Creates a stub to the default watch address (sliceLookupConfig.watchAddress) that
-              // was provided when the WatchStubManager was instantiated.
+              // Creates a stub to the default watch address (watchStubManagerConfig.watchAddress)
+              // that was provided when the WatchStubManager was instantiated.
               watchStubManager.createWatchStub(
                 redirectAddressOpt = None,
                 target = sliceLookupConfig.target,

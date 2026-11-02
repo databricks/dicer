@@ -1,0 +1,805 @@
+# proto-file: caching/util/test/proto/test_data.proto
+# proto-message: QuantileSummariesTestDataP
+
+valid_cases: [
+  {
+    test_case_name: "empty summary"
+    # Test plan: Verify that querying an empty summary returns an empty result regardless of how
+    # many quantiles are batched together.
+    actions: [
+      { assert_query_equals: { quantiles: [0.0, 0.5, 1.0] expected_results: [] } }
+    ]
+  },
+  {
+    test_case_name: "empty queried quantiles"
+    # Test plan: Verify that querying an empty sequence of quantiles on a non-empty quantile
+    # summaries will correctly return an empty result sequence.
+    actions: [
+      { insert: { value: 30 weight: 1.0 } },
+      { assert_query_equals: { quantiles: [] expected_results: [] } }
+    ]
+  },
+  {
+    test_case_name: "single observation"
+    # Test plan: Verify that every quantile resolves to the sole inserted value when the summary
+    # contains exactly one observation. Verify this by inserting a single (value, weight) pair
+    # and batched-querying at q = 0, 0.5, 1.
+    actions: [
+      { insert: { value: 42 weight: 2.5 } },
+      { assert_query_equals: {
+        quantiles: [0.0, 0.5, 1.0]
+        expected_results: [
+          { value: 42 cumulative_weight_fraction: 1.0 },
+          { value: 42 cumulative_weight_fraction: 1.0 },
+          { value: 42 cumulative_weight_fraction: 1.0 }
+        ]
+      } }
+    ]
+  },
+  {
+    test_case_name: "inserts and querying in arbitrary order"
+    # Test plan: Verify that the results are unaffected by the order of insertion and by the order
+    # of quantiles in the query. Verify this by inserting four equally weighted observations in
+    # non-monotonic order, then issuing two batched queries, one with ascending input quantiles
+    # and one with the same quantiles shuffled, and verify the returned sequence matches the
+    # input quantile order in each case.
+    actions: [
+      { insert: { value: 30 weight: 1.0 } },
+      { insert: { value: 10 weight: 1.0 } },
+      { insert: { value: 40 weight: 1.0 } },
+      { insert: { value: 20 weight: 1.0 } },
+      # Ascending input quantiles.
+      { assert_query_equals: {
+        quantiles: [0.0, 0.25, 0.5, 0.75, 1.0]
+        expected_results: [
+          { value: 10 cumulative_weight_fraction: 0.25 },
+          { value: 10 cumulative_weight_fraction: 0.25 },
+          { value: 20 cumulative_weight_fraction: 0.5 },
+          { value: 30 cumulative_weight_fraction: 0.75 },
+          { value: 40 cumulative_weight_fraction: 1.0 }
+        ]
+      } },
+      # Same expected results, with input quantiles shuffled. Returned pairs follow the input
+      # order, so the shuffle pattern must be reflected in `expected_results`.
+      { assert_query_equals: {
+        quantiles: [0.5, 1.0, 0.0, 0.75, 0.25]
+        expected_results: [
+          { value: 20 cumulative_weight_fraction: 0.5 },
+          { value: 40 cumulative_weight_fraction: 1.0 },
+          { value: 10 cumulative_weight_fraction: 0.25 },
+          { value: 30 cumulative_weight_fraction: 0.75 },
+          { value: 10 cumulative_weight_fraction: 0.25 }
+        ]
+      } }
+    ]
+  },
+  {
+    test_case_name: "uneven weighted observations"
+    # Test plan: Verify that a heavily-weighted middle observation absorbs the surrounding
+    # quantile range. Verify this by inserting three observations where the middle value carries
+    # 70% of the total weight, then batched-querying boundary quantiles and asserting that every
+    # interior quantile in [0.2, 0.9] lands on the heavy value.
+    actions: [
+      { insert: { value: 1 weight: 2.0 } },
+      { insert: { value: 5 weight: 7.0 } },
+      { insert: { value: 9 weight: 1.0 } },
+      { assert_query_equals: {
+        quantiles: [0.0, 0.2, 0.5, 0.9, 1.0]
+        expected_results: [
+          { value: 1 cumulative_weight_fraction: 0.2 },
+          { value: 1 cumulative_weight_fraction: 0.2 },
+          { value: 5 cumulative_weight_fraction: 0.9 },
+          { value: 5 cumulative_weight_fraction: 0.9 },
+          { value: 9 cumulative_weight_fraction: 1.0 }
+        ]
+      } }
+    ]
+  },
+  {
+    test_case_name: "skewed distribution"
+    # Test plan: Verify that when ~99.8% of the total weight is concentrated at a single value,
+    # queries across the interior all resolve to that heavy value while q = 0 and q = 1 still
+    # return the actual boundary observations. Verify this by inserting three observations with
+    # a single dominant weight (v=1 w=1, v=100 w=998, v=200 w=1; total W = 1000) and
+    # batched-querying a spread of quantiles.
+    actions: [
+      { insert: { value: 1 weight: 1.0 } },
+      { insert: { value: 100 weight: 998.0 } },
+      { insert: { value: 200 weight: 1.0 } },
+      { assert_query_within_error_bound: { quantiles: [0.0, 0.001, 0.002, 0.5, 0.999, 1.0] } }
+    ]
+  },
+  {
+    test_case_name: "duplicate values accumulate weight"
+    # Test plan: Verify that insert() can accumulate weights for duplicated value correctly.
+    actions: [
+      { insert: { value: 2 weight: 3.0 } },
+      { insert: { value: 5 weight: 1.0 } },
+      { insert: { value: 2 weight: 2.0 } },
+      { insert: { value: 8 weight: 4.0 } },
+      { insert: { value: 5 weight: 2.0 } },
+      # Value 2 has total weight 5.0, value 5 has total weight 3.0, so the p50 quantile should
+      # be 5.0. Total W = 12; cumulative weight at value 5 is 8, so the CDF there is 8/12.
+      { assert_query_equals: {
+        quantiles: [0.5]
+        expected_results: [
+          { value: 5 cumulative_weight_fraction: 0.6666666666666666 }
+        ]
+      } }
+    ]
+  },
+  {
+    test_case_name: "insert treats zero weight as a no-op"
+    # Test plan: Verify that inserting a zero weight adds no observation. Verify this by wrapping a
+    # zero-weight insert between two real observations and confirming the quantiles resolve only to
+    # the two real values, as if the zero-weight insert never happened.
+    actions: [
+      { insert: { value: 10 weight: 2.0 } },
+      { insert: { value: 20 weight: 0.0 } },
+      { insert: { value: 30 weight: 2.0 } },
+      # Only 10 (w=2) and 30 (w=2) exist; total W = 4. Cumulative: 10 -> 2, 30 -> 4.
+      { assert_query_equals: {
+        quantiles: [0.0, 0.5, 1.0]
+        expected_results: [
+          { value: 10 cumulative_weight_fraction: 0.5 },
+          { value: 10 cumulative_weight_fraction: 0.5 },
+          { value: 30 cumulative_weight_fraction: 1.0 }
+        ]
+      } }
+    ]
+  },
+  {
+    test_case_name: "rescale by zero factor zeroes all weights"
+    # Test plan: Verify that rescaling by a factor of 0 is allowed and makes every weight to 0,
+    # after which `query` falls back to returning the minimum tracked value paired with 0.0 for
+    # every quantile (the same degenerate-total behavior as an underflow to zero).
+    actions: [
+      { insert: { value: 100 weight: 1.0 } },
+      { insert: { value: 200 weight: 1.0 } },
+      { insert: { value: 300 weight: 1.0 } },
+      { rescale: { factor: 0.0 } },
+      { assert_query_equals: {
+        quantiles: [0.0, 0.5, 1.0]
+        expected_results: [
+          { value: 100 cumulative_weight_fraction: 0.0 },
+          { value: 100 cumulative_weight_fraction: 0.0 },
+          { value: 100 cumulative_weight_fraction: 0.0 }
+        ]
+      } }
+    ]
+  },
+  {
+    test_case_name: "rescale preserves quantiles of existing data"
+    # Test plan: Verify that `rescale` uniformly scales every existing observation's weight so
+    # quantile answers for the data already inserted are unchanged, and that subsequent inserts
+    # mix correctly with the rescaled weights. Verify this by inserting four equal-weight
+    # observations, recording baseline quantiles, calling `rescale` with a shrink factor
+    # (re-asserting the same quantiles), and finally inserting a heavy new observation whose weight
+    # equals the entire rescaled total -- then asserting that the upper quantiles shift to the new
+    # heavy value while the lower quantiles stay on the pre-rescale observations.
+    actions: [
+      { insert: { value: 10 weight: 1.0 } },
+      { insert: { value: 20 weight: 1.0 } },
+      { insert: { value: 30 weight: 1.0 } },
+      { insert: { value: 40 weight: 1.0 } },
+      # Baseline quantiles before rescaling.
+      { assert_query_equals: {
+        quantiles: [0.25, 0.5, 0.75, 1.0]
+        expected_results: [
+          { value: 10 cumulative_weight_fraction: 0.25 },
+          { value: 20 cumulative_weight_fraction: 0.5 },
+          { value: 30 cumulative_weight_fraction: 0.75 },
+          { value: 40 cumulative_weight_fraction: 1.0 }
+        ]
+      } },
+      # Shrink: all weights * 0.5 (total weight 4 -> 2). Quantiles unchanged.
+      { rescale: { factor: 0.5 } },
+      { assert_query_equals: {
+        quantiles: [0.25, 0.5, 0.75, 1.0]
+        expected_results: [
+          { value: 10 cumulative_weight_fraction: 0.25 },
+          { value: 20 cumulative_weight_fraction: 0.5 },
+          { value: 30 cumulative_weight_fraction: 0.75 },
+          { value: 40 cumulative_weight_fraction: 1.0 }
+        ]
+      } },
+      # After the shrink, insert value 50 with weight 2.0 -- equal to the entire rescaled total
+      # (4 * 0.5 = 2.0) -- so the new total weight is 4.0 with the upper half concentrated at 50.
+      # Resulting weights: 10->0.5, 20->0.5, 30->0.5, 40->0.5, 50->2.0. Cumulative: 0.5, 1, 1.5, 2, 4.
+      { insert: { value: 50 weight: 2.0 } },
+      # rank 0.25*4=1 -> 20, rank 0.5*4=2 -> 40, rank 0.75*4=3 -> 50, rank 1.0*4=4 -> 50.
+      { assert_query_equals: {
+        quantiles: [0.25, 0.5, 0.75, 1.0]
+        expected_results: [
+          { value: 20 cumulative_weight_fraction: 0.25 },
+          { value: 40 cumulative_weight_fraction: 0.5 },
+          { value: 50 cumulative_weight_fraction: 1.0 },
+          { value: 50 cumulative_weight_fraction: 1.0 }
+        ]
+      } }
+    ]
+  },
+  {
+    test_case_name: "rescale lets future inserts dominate prior observations"
+    # Test plan: Verify that rescaling existing weights downward lets a subsequent normal-weight
+    # insert dominate the distribution. Verify this by inserting a single observation with a
+    # very large weight, rescaling all weights by a tiny factor so the prior observation's
+    # weight shrinks to ~1, then inserting a second observation with a median weight that
+    # eclipses the shrunken previous weight, then almost every quantile should resolve to the
+    # second observation.
+    # A tiny relative_error keeps the sketch's epsilon-shift far below the boundary at q = 0.02, so
+    # the sketch returns the same exact answers as the oracle and both are checked exactly.
+    quantile_summaries: { relative_error: 1.0e-9 }
+    actions: [
+      # Step 1: prior observation with a very large weight.
+      { insert: { value: 10 weight: 1000.0 } },
+      # Step 2: rescale all weights by 0.001 -> value 10 now carries weight 1.0.
+      { rescale: { factor: 0.001 } },
+      # Step 3: new observation with a median weight. Its 99.0 dwarfs the rescaled 1.0.
+      { insert: { value: 20 weight: 99.0 } },
+      # Weights are now 10 -> 1, 20 -> 99 (total W = 100); cumulative 10 -> 1, 20 -> 100. Only
+      # q <= 0.01 resolves to 10; every larger quantile resolves to the dominant 20.
+      { assert_query_equals: {
+        quantiles: [0.0, 0.01, 0.02, 0.5, 1.0]
+        expected_results: [
+          { value: 10 cumulative_weight_fraction: 0.01 },
+          { value: 10 cumulative_weight_fraction: 0.01 },
+          { value: 20 cumulative_weight_fraction: 1.0 },
+          { value: 20 cumulative_weight_fraction: 1.0 },
+          { value: 20 cumulative_weight_fraction: 1.0 }
+        ]
+      } }
+    ]
+  },
+  {
+    test_case_name: "near-zero weights after rescale are ignored"
+    # Test plan: Verify that observations rescaled to near-zero weight are ignored by `query`
+    # once a normal-weight value is present. Verify this by inserting three values, rescaling
+    # their weights by a tiny factor (~1.0e-300), confirming the three still resolve to distinct
+    # values while they are the only data, then inserting a smaller value with a normal weight
+    # and querying q = 1.0 five times, asserting every call returns the smaller dominant value.
+    actions: [
+      { insert: { value: 100 weight: 1.0 } },
+      { insert: { value: 200 weight: 1.0 } },
+      { insert: { value: 300 weight: 1.0 } },
+      # Shrink every existing weight to ~1.0e-300, small enough that adding one to a normal weight
+      # is a no-op in f64.
+      { rescale: { factor: 1.0e-300 } },
+      { assert_query_equals: {
+        quantiles: [0.0, 0.5, 1.0]
+        expected_results: [
+          { value: 100 cumulative_weight_fraction: 0.3333333333333333 },
+          { value: 200 cumulative_weight_fraction: 0.6666666666666666 },
+          { value: 300 cumulative_weight_fraction: 1.0 }
+        ]
+      } },
+      # A smaller value with a normal weight; its 1.0 dominates the ~1e-300 weights above.
+      { insert: { value: 50 weight: 1.0 } },
+      # Query q = 1.0 five times; every call returns the dominant value 50, never one of the
+      # near-zero values (which collide on the same cumulative rank and would otherwise overwrite it).
+      { assert_query_equals: {
+        quantiles: [1.0, 1.0, 1.0, 1.0, 1.0]
+        expected_results: [
+          { value: 50 cumulative_weight_fraction: 1.0 },
+          { value: 50 cumulative_weight_fraction: 1.0 },
+          { value: 50 cumulative_weight_fraction: 1.0 },
+          { value: 50 cumulative_weight_fraction: 1.0 },
+          { value: 50 cumulative_weight_fraction: 1.0 }
+        ]
+      } }
+    ]
+  },
+  {
+    test_case_name: "all weights underflow to zero after repeated rescale"
+    # Test plan: Verify that when repeated `rescale` underflows every weight to exactly 0.0,
+    # `query` does not fail but returns the minimum tracked value paired with 0.0 for every
+    # quantile (the same degenerate-total behavior as `rescale` by a zero factor).
+    actions: [
+      { insert: { value: 100 weight: 1.0 } },
+      { insert: { value: 200 weight: 1.0 } },
+      { insert: { value: 300 weight: 1.0 } },
+      # The 2 rescales underflows weights to exactly 0.0.
+      { rescale: { factor: 1.0e-300 } },
+      { rescale: { factor: 1.0e-300 } },
+      { assert_query_equals: {
+        quantiles: [0.0, 0.5, 1.0]
+        expected_results: [
+          { value: 100 cumulative_weight_fraction: 0.0 },
+          { value: 100 cumulative_weight_fraction: 0.0 },
+          { value: 100 cumulative_weight_fraction: 0.0 }
+        ]
+      } }
+    ]
+  },
+  {
+    test_case_name: "cumulative fractions track coverage upper edge"
+    # Test plan: Verify that `query` returns each value paired with the upper edge of that
+    # value's cumulative-weight coverage range. Verify this by inserting three observations with
+    # unequal weights so the CDF jumps 0.2 -> 0.8 -> 1.0, then batched-querying quantiles just below
+    # and just above each boundary and asserting that the returned value and fraction flip together:
+    # the fraction stays constant inside a value's coverage and snaps to the new upper edge as the
+    # next value takes over.
+    #
+    # A very tiny relative_error allows us to use exact `expected_results` to assert the results
+    # and makes the test more convincing.
+    quantile_summaries: { relative_error: 1.0e-9 }
+    actions: [
+      # Cumulative weights: 10 -> 1, 20 -> 4, 30 -> 5 (total W = 5).
+      # Cumulative fractions (CDF):  10 -> 0.2,  20 -> 0.8,  30 -> 1.0.
+      { insert: { value: 10 weight: 1.0 } },
+      { insert: { value: 20 weight: 3.0 } },
+      { insert: { value: 30 weight: 1.0 } },
+      # The returned value/fraction flip together exactly at each boundary: 0.20 -> 0.21 flips
+      # 10/0.2 to 20/0.8, and 0.80 -> 0.81 flips 20/0.8 to 30/1.0.
+      { assert_query_equals: {
+        quantiles: [0.19, 0.20, 0.21, 0.50, 0.79, 0.80, 0.81, 1.00]
+        expected_results: [
+          { value: 10 cumulative_weight_fraction: 0.2 },
+          { value: 10 cumulative_weight_fraction: 0.2 },
+          { value: 20 cumulative_weight_fraction: 0.8 },
+          { value: 20 cumulative_weight_fraction: 0.8 },
+          { value: 20 cumulative_weight_fraction: 0.8 },
+          { value: 20 cumulative_weight_fraction: 0.8 },
+          { value: 30 cumulative_weight_fraction: 1.0 },
+          { value: 30 cumulative_weight_fraction: 1.0 }
+        ]
+      } }
+    ]
+  },
+  {
+    test_case_name: "with large ascending values the summary stays within error bound"
+    # Test plan: Verify the error bound holds when the stream has far more distinct values than the
+    # sketch can retain. Insert 10000 ascending values (0, 1, 2, ...) at uniform weight, then check
+    # a spread of quantiles.
+    quantile_summaries: { relative_error: 0.01 }
+    actions: [
+      { insert_many: {
+        value_distribution: { linear: { start: 0 step: 1 } }
+        weight_distribution: { linear: { start: 1 } }
+        num_inserts: 10000
+      } },
+      { assert_sample_count_at_most: { max_count: 1000 } },
+      { assert_query_within_error_bound: {
+        quantiles: [0.0, 0.01, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99, 1.0]
+        expected_relative_error: 0.01
+      } }
+    ]
+  },
+  {
+    test_case_name: "descending stream stays within error bound"
+    # Test plan: Verify that with a purely descending stream where every insert after the first is a
+    # new minimum, QuantileSummaries can still return results within error bound.
+    quantile_summaries: { relative_error: 0.01 }
+    actions: [
+      { insert_many: {
+        value_distribution: { linear: { start: 4999 step: -1 } }
+        weight_distribution: { linear: { start: 1 } }
+        num_inserts: 5000
+      } },
+      { assert_sample_count_at_most: { max_count: 1000 } },
+      { assert_query_within_error_bound: {
+        quantiles: [0.0, 0.01, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99, 1.0]
+        expected_relative_error: 0.01
+      } }
+    ]
+  },
+  {
+    test_case_name: "shuffled and weighted stream stays within error bound"
+    # Test plan: Verify accuracy does not depend on arrival order of values or the uniformity of
+    # weights. Insert 5000 random values in [0, 5000) with random weights in [1, 14), then check a
+    # spread of quantiles.
+    quantile_summaries: { relative_error: 0.01 }
+    actions: [
+      { insert_many: {
+        value_distribution: { random: { min: 0 max: 5000 } }
+        weight_distribution: { random: { min: 1 max: 14 } }
+        num_inserts: 5000
+      } },
+      { assert_sample_count_at_most: { max_count: 1000 } },
+      { assert_query_within_error_bound: {
+        quantiles: [0.0, 0.01, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99, 1.0]
+        expected_relative_error: 0.01
+      } }
+    ]
+  },
+  {
+    test_case_name: "exponentially weighted stream stays within error bound"
+    # Test plan: Verify accuracy when weights span a large dynamic range. Insert 5000 ascending
+    # values whose weight grows exponentially (1.003 ^ i, spanning ~1 to ~3e6), then check
+    # a spread of quantiles.
+    quantile_summaries: { relative_error: 0.01 }
+    actions: [
+      { insert_many: {
+        value_distribution: { linear: { start: 0 step: 1 } }
+        weight_distribution: { exponential: { start: 1 multiplier: 1.003 } }
+        num_inserts: 5000
+      } },
+      { assert_sample_count_at_most: { max_count: 1000 } },
+      { assert_query_within_error_bound: {
+        quantiles: [0.0, 0.01, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99, 1.0]
+        expected_relative_error: 0.01
+      } }
+    ]
+  },
+  {
+    test_case_name: "memory stays bounded under a long stream"
+    # Test plan: Verify compression keeps memory bounded no matter how long the stream is. Insert
+    # 50000 distinct values and confirm the retained stat count stays at or below the derived bound
+    # (~ 10 / 0.01 = 1000). The exact oracle ignores assert_sample_count_at_most.
+    quantile_summaries: { relative_error: 0.01 }
+    actions: [
+      { insert_many: {
+        value_distribution: { linear: { start: 0 step: 1 } }
+        weight_distribution: { linear: { start: 1 } }
+        num_inserts: 50000
+      } },
+      { assert_sample_count_at_most: { max_count: 1000 } }
+    ]
+  },
+  {
+    test_case_name: "large relative error keeps only a handful of stats and stays within "
+        "the error bound"
+    # Test plan: Verify a large relative error shrinks the sketch to a handful of stats while still
+    # honoring the error bound. Insert 10000 values at relative_error 0.5 (derived bound
+    # ~ 10 / 0.5 = 20), then confirm the retained count stays at or below 20 and that q = 0 and
+    # q = 1 remain within bound. The exact oracle ignores assert_sample_count_at_most.
+    quantile_summaries: { relative_error: 0.5 }
+    actions: [
+      { insert_many: {
+        value_distribution: { linear: { start: 0 step: 1 } }
+        weight_distribution: { linear: { start: 1 } }
+        num_inserts: 10000
+      } },
+      { assert_sample_count_at_most: { max_count: 20 } },
+      { assert_query_within_error_bound: {
+        quantiles: [0.0, 1.0]
+        expected_relative_error: 0.5
+      } }
+    ]
+  },
+  {
+    test_case_name: "rescale preserves the error bound on a compressed sketch"
+    # Test plan: Verify rescaling a compressed sketch keeps its answers within bound, since scaling
+    # every stored weight uniformly cannot move a quantile. Build a compressed sketch, check the
+    # bound, rescale all weights by 0.5, and check the same quantiles again (the exact distribution
+    # scales by the same factor, so the bound is unchanged). Also confirm the retained stat count
+    # stays at or below the derived bound (~ 10 / 0.01 = 1000); the exact oracle ignores
+    # assert_sample_count_at_most.
+    quantile_summaries: { relative_error: 0.01 }
+    actions: [
+      { insert_many: {
+        value_distribution: { linear: { start: 0 step: 1 } }
+        weight_distribution: { linear: { start: 2 } }
+        num_inserts: 2000
+      } },
+      { assert_sample_count_at_most: { max_count: 1000 } },
+      { assert_query_within_error_bound: {
+        quantiles: [0.0, 0.01, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99, 1.0]
+        expected_relative_error: 0.01
+      } },
+      { rescale: { factor: 0.5 } },
+      { assert_query_within_error_bound: {
+        quantiles: [0.0, 0.01, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99, 1.0]
+        expected_relative_error: 0.01
+      } }
+    ]
+  },
+  {
+    test_case_name: "sample_count_upper_bound caps retained stats and halves them once exceeded"
+    # Test plan: Verify the user-specified sample_count_upper_bound can cap memory usage. With a
+    # tiny relative error and a small sample_count_upper_bound, the sample_count_upper_bound will
+    # be respected even if it is not sufficient to satisfy the tiny relative error. Set the upper
+    # bound to 10, then insert 10 distinct values to fill exactly to the bound with no compression,
+    # then insert one more, verify the compression immediately halves the retained stats to 5.
+    quantile_summaries: { relative_error: 0.001 sample_count_upper_bound: 10 }
+    actions: [
+      { insert_many: {
+        value_distribution: { linear: { start: 0 step: 1 } }
+        weight_distribution: { linear: { start: 1 } }
+        num_inserts: 10
+      } },
+      { assert_sample_count_at_most: { max_count: 10 } },
+      { insert: { value: 10 weight: 1 } },
+      { assert_sample_count_at_most: { max_count: 5 } },
+      # This must be a force compression, due to the small relative error and the small upper bound.
+      { assert_force_merged: { } }
+    ]
+  },
+  {
+    test_case_name: "min and max values are always kept by QuantileSummaries"
+    # Test plan: Verify the smallest and largest values are always retained even when the sketch is
+    # so memory-constrained that its force-compress fallback fires and drops most samples. Use a
+    # tiny relative error with a small upper bound so compression is forced, insert 2000 distinct
+    # values, then confirm querying the 0.0 and 1.0 quantiles still returns the exact min and
+    # max.
+    quantile_summaries: { relative_error: 1.0e-10 sample_count_upper_bound: 500 }
+    actions: [
+      { insert_many: {
+        value_distribution: { linear: { start: 1 step: 1 } }
+        weight_distribution: { linear: { start: 1 } }
+        num_inserts: 2000
+      } },
+      { assert_sample_count_at_most: { max_count: 500 } },
+      { assert_force_merged: { } },
+      { assert_query_equals: {
+        quantiles: [0.0, 1.0]
+        expected_results: [
+          { value: 1 cumulative_weight_fraction: 0.0005 },
+          { value: 2000 cumulative_weight_fraction: 1.0 }
+        ]
+      } }
+    ]
+  },
+  # Test plan: The following 3 test cases verify that a degenerate upper bound of 0, 1 or 2 neither
+  # fails nor drops the min and max values. Verify this by creating a summary with sample counter
+  # being 0, 1, or 2, inserting 100 values, and verify the min and the max are always kept.
+  {
+    test_case_name: "sample count upper bound of 0 still keeps min and max"
+    quantile_summaries: { relative_error: 1.0e-10 sample_count_upper_bound: 0 }
+    actions: [
+      { insert_many: {
+        value_distribution: { linear: { start: 1 step: 1 } }
+        weight_distribution: { linear: { start: 1 } }
+        num_inserts: 100
+      } },
+      { assert_sample_count_at_most: { max_count: 2 } },
+      { assert_force_merged: { } },
+      { assert_query_equals: {
+        quantiles: [0.0, 1.0]
+        expected_results: [
+          { value: 1 cumulative_weight_fraction: 0.01 },
+          { value: 100 cumulative_weight_fraction: 1.0 }
+        ]
+      } }
+    ]
+  },
+  {
+    test_case_name: "sample count upper bound of 1 still keeps min and max"
+    quantile_summaries: { relative_error: 1.0e-10 sample_count_upper_bound: 1 }
+    actions: [
+      { insert_many: {
+        value_distribution: { linear: { start: 1 step: 1 } }
+        weight_distribution: { linear: { start: 1 } }
+        num_inserts: 100
+      } },
+      { assert_sample_count_at_most: { max_count: 2 } },
+      { assert_force_merged: { } },
+      { assert_query_equals: {
+        quantiles: [0.0, 1.0]
+        expected_results: [
+          { value: 1 cumulative_weight_fraction: 0.01 },
+          { value: 100 cumulative_weight_fraction: 1.0 }
+        ]
+      } }
+    ]
+  },
+  {
+    test_case_name: "sample count upper bound of 2 still keeps min and max"
+    quantile_summaries: { relative_error: 1.0e-10 sample_count_upper_bound: 2 }
+    actions: [
+      { insert_many: {
+        value_distribution: { linear: { start: 1 step: 1 } }
+        weight_distribution: { linear: { start: 1 } }
+        num_inserts: 100
+      } },
+      { assert_sample_count_at_most: { max_count: 2 } },
+      { assert_force_merged: { } },
+      { assert_query_equals: {
+        quantiles: [0.0, 1.0]
+        expected_results: [
+          { value: 1 cumulative_weight_fraction: 0.01 },
+          { value: 100 cumulative_weight_fraction: 1.0 }
+        ]
+      } }
+    ]
+  },
+  {
+    test_case_name: "force compression fires under a pathological insertion order"
+    # Test plan: Verify the sketch's force-compress fallback fires under a pathological insertion
+    # order even when the memory upper bound is relatively large. Do this by inserting sequences of
+    # values that provides more and more "fine-grained" details to the QuantileSummaries, which
+    # makes the combined uncertainly of neighbors relatively large and cannot be gracefully
+    # compressed. Finally confirm the fallback fired (assert_force_merged) and that, although force
+    # compression gives up the configured 0.1 guarantee, answers still stay within a widened 0.15
+    # band.
+    quantile_summaries: { relative_error: 0.1 sample_count_upper_bound: 2000 }
+    actions: [
+      { insert: { value: 0 weight: 1 } },
+      { insert: { value: 150000 weight: 1 } },
+      # Each inser_many action will insert values with smaller and smaller steps. This is what makes
+      # the combined uncertainty of neighbors large. num_inserts is set to make the value range
+      # falls in [0, 150000].
+      { insert_many: {
+        value_distribution: { linear: { start: 2048 step: 2048 } }
+        weight_distribution: { linear: { start: 1 } }
+        num_inserts: 73
+      } },
+      { assert_sample_count_at_most: { max_count: 100 } },
+      { insert_many: {
+        value_distribution: { linear: { start: 1024 step: 1024 } }
+        weight_distribution: { linear: { start: 1 } }
+        num_inserts: 146
+      } },
+      { assert_sample_count_at_most: { max_count: 100 } },
+      { insert_many: {
+        value_distribution: { linear: { start: 512 step: 512 } }
+        weight_distribution: { linear: { start: 1 } }
+        num_inserts: 292
+      } },
+      { assert_sample_count_at_most: { max_count: 100 } },
+      { insert_many: {
+        value_distribution: { linear: { start: 256 step: 256 } }
+        weight_distribution: { linear: { start: 1 } }
+        num_inserts: 585
+      } },
+      { assert_sample_count_at_most: { max_count: 100 } },
+      { insert_many: {
+        value_distribution: { linear: { start: 128 step: 128 } }
+        weight_distribution: { linear: { start: 1 } }
+        num_inserts: 1171
+      } },
+      { assert_sample_count_at_most: { max_count: 100 } },
+      { insert_many: {
+        value_distribution: { linear: { start: 64 step: 64 } }
+        weight_distribution: { linear: { start: 1 } }
+        num_inserts: 2343
+      } },
+      { assert_sample_count_at_most: { max_count: 100 } },
+      { insert_many: {
+        value_distribution: { linear: { start: 32 step: 32 } }
+        weight_distribution: { linear: { start: 1 } }
+        num_inserts: 4687
+      } },
+      { assert_sample_count_at_most: { max_count: 100 } },
+      { insert_many: {
+        value_distribution: { linear: { start: 16 step: 16 } }
+        weight_distribution: { linear: { start: 1 } }
+        num_inserts: 9374
+      } },
+      { assert_sample_count_at_most: { max_count: 100 } },
+      { insert_many: {
+        value_distribution: { linear: { start: 8 step: 8 } }
+        weight_distribution: { linear: { start: 1 } }
+        num_inserts: 18749
+      } },
+      { assert_sample_count_at_most: { max_count: 100 } },
+      { insert_many: {
+        value_distribution: { linear: { start: 4 step: 4 } }
+        weight_distribution: { linear: { start: 1 } }
+        num_inserts: 37499
+      } },
+      { assert_sample_count_at_most: { max_count: 100 } },
+      { insert_many: {
+        value_distribution: { linear: { start: 2 step: 2 } }
+        weight_distribution: { linear: { start: 1 } }
+        num_inserts: 74999
+      } },
+      { assert_sample_count_at_most: { max_count: 100 } },
+      { insert_many: {
+        value_distribution: { linear: { start: 1 step: 1 } }
+        weight_distribution: { linear: { start: 1 } }
+        num_inserts: 149999
+      } },
+      { assert_sample_count_at_most: { max_count: 100 } },
+      { assert_query_within_error_bound: {
+        quantiles: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+        expected_relative_error: 0.15
+      } },
+      { assert_force_merged: { } }
+    ]
+  }
+]
+
+invalid_cases: [
+  {
+    test_case_name: "insert rejects negative weight"
+    # Test plan: Verify that insert() rejects a negative weight.
+    actions: [
+      { insert: { value: 1 weight: -1.0 } }
+    ]
+    error_message_opt: "weight must be strictly non-negative and finite"
+  },
+  {
+    test_case_name: "query rejects quantile outside unit interval"
+    # Test plan: Verify that query() rejects a quantile greater than 1.
+    actions: [
+      { insert: { value: 1 weight: 1.0 } },
+      { assert_query_equals: { quantiles: [1.5] } }
+    ]
+    error_message_opt: "quantile must be in [0, 1]"
+  },
+  {
+    test_case_name: "query rejects quantile outside unit interval"
+    # Test plan: Verify that query() rejects a quantile less than 0.
+    actions: [
+      { insert: { value: 1 weight: 1.0 } },
+      { assert_query_equals: { quantiles: [-1.0] } }
+    ]
+    error_message_opt: "quantile must be in [0, 1]"
+  },
+  {
+    test_case_name: "rescale rejects negative factor"
+    # Test plan: Verify that rescale() rejects a negative factor.
+    actions: [
+      { insert: { value: 1 weight: 1.0 } },
+      { rescale: { factor: -1.0 } }
+    ]
+    error_message_opt: "factor must be in [0, 1]"
+  },
+  {
+    test_case_name: "rescale rejects factor above 1"
+    # Test plan: Verify that rescale() rejects a factor greater than 1.
+    actions: [
+      { insert: { value: 1 weight: 1.0 } },
+      { rescale: { factor: 2.0 } }
+    ]
+    error_message_opt: "factor must be in [0, 1]"
+  },
+
+  # The cases below validate the sketch's `new(relative_error)` construction. They have no actions,
+  # so they only apply to the sketch; the exact oracle takes no relative_error and skips them.
+  {
+    test_case_name: "new rejects relative_error of 0"
+    # Test plan: Verify the constructor rejects a relative error of 0, which would demand exact
+    # answers and make the error bound meaningless.
+    quantile_summaries: { relative_error: 0.0 }
+    error_message_opt: "relative_error must be in (0, 1)"
+  },
+  {
+    test_case_name: "new rejects relative_error of 1"
+    # Test plan: Verify the constructor rejects a relative error of 1, which carries no accuracy
+    # information.
+    quantile_summaries: { relative_error: 1.0 }
+    error_message_opt: "relative_error must be in (0, 1)"
+  },
+  {
+    test_case_name: "new rejects relative_error above 1"
+    # Test plan: Verify the constructor rejects a relative error greater than 1.
+    quantile_summaries: { relative_error: 2.0 }
+    error_message_opt: "relative_error must be in (0, 1)"
+  },
+  {
+    test_case_name: "new rejects nan relative_error"
+    # Test plan: Verify the constructor rejects a NaN relative error.
+    quantile_summaries: { relative_error: nan }
+    error_message_opt: "relative_error must be in (0, 1)"
+  },
+  {
+    test_case_name: "new rejects inf relative_error"
+    # Test plan: Verify the constructor rejects an infinite relative error.
+    quantile_summaries: { relative_error: inf }
+    error_message_opt: "relative_error must be in (0, 1)"
+  },
+  {
+    test_case_name: "insert rejects nan weight"
+    # Test plan: Verify insert rejects a NaN weight.
+    actions: [
+      { insert: { value: 1 weight: nan } }
+    ]
+    error_message_opt: "weight must be strictly non-negative and finite"
+  },
+  {
+    test_case_name: "insert rejects inf weight"
+    # Test plan: Verify insert rejects an infinite weight.
+    actions: [
+      { insert: { value: 1 weight: inf } }
+    ]
+    error_message_opt: "weight must be strictly non-negative and finite"
+  },
+  {
+    test_case_name: "rescale rejects nan factor"
+    # Test plan: Verify rescale rejects a NaN factor.
+    actions: [
+      { rescale: { factor: nan } }
+    ]
+    error_message_opt: "factor must be in [0, 1]"
+  },
+  {
+    test_case_name: "rescale rejects inf factor"
+    # Test plan: Verify rescale rejects an infinite factor.
+    actions: [
+      { rescale: { factor: inf } }
+    ]
+    error_message_opt: "factor must be in [0, 1]"
+  }
+]

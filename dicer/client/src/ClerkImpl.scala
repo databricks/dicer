@@ -296,9 +296,9 @@ private[dicer] object ClerkImpl {
    * Creates the internal implementation of a [[Clerk]]. See [[Clerk.create()]] for details on the
    * external-facing parameters.
    *
-   * `sourceIpOpt` is part of the [[SliceLookupConfig]] cache key, so a Clerk that binds a source
-   * address never shares a [[SliceLookup]] (and therefore a connection) with one that does not, or
-   * with one bound to a different address.
+   * `sourceIpOpt` is part of the [[WatchStubManagerConfig]] half of the [[SliceLookupCache]] key,
+   * so a Clerk that binds a source address never shares a [[SliceLookup]] (and therefore a
+   * connection) with one that does not, or with one bound to a different address.
    *
    * @param sourceIpOpt Local (source) address to bind this Clerk's watch connection to, so it
    *                    egresses through the interface owning that address. `None` leaves the source
@@ -322,7 +322,8 @@ private[dicer] object ClerkImpl {
 
     val podName: String = InetAddress.getLocalHost.getHostName
     val clerkIndex: Int = assignNextClerkIndex()
-    val clerkDebugName = s"C$clerkIndex-$targetBestEffortFullyQualified-$podName"
+    val clerkDebugNamePrefix = s"C$clerkIndex-$targetBestEffortFullyQualified"
+    val clerkDebugName = s"$clerkDebugNamePrefix-$podName"
 
     Version.recordClientVersion(
       targetBestEffortFullyQualified,
@@ -332,13 +333,10 @@ private[dicer] object ClerkImpl {
 
     val config: InternalClientConfig = InternalClientConfig(
       SliceLookupConfig(
-        ClientType.Clerk,
-        watchAddress,
-        clerkConf.getDicerClientTlsOptions,
-        targetBestEffortFullyQualified,
+        clientType = ClientType.Clerk,
+        target = targetBestEffortFullyQualified,
         clientIdOpt = resolveClientUuid(clerkConf.clientUuidOpt, target),
-        SliceLookupConfig.DEFAULT_WATCH_STUB_CACHE_TIME,
-        watchFromDataPlane = false,
+        watchStubCacheTime = SliceLookupConfig.DEFAULT_WATCH_STUB_CACHE_TIME,
         // We currently have no way to automatically infer the alternativeTargetOpt for the
         // Clerk's target. This depends on support from DBNS, which will be the source-of-truth
         // for this information. Until that functionality is available, it is OK to leave
@@ -356,16 +354,24 @@ private[dicer] object ClerkImpl {
             DicerClientFeatureRolloutFlag.CLERK_WATCH_RATE_LIMITING_FLAG_NAME,
             targetBestEffortFullyQualified
           )
-        ),
-        sourceIpOpt = sourceIpOpt
+        )
       ),
-      subscriberDebugName = clerkDebugName
+      subscriberDebugName = clerkDebugName,
+      watchAddress = watchAddress,
+      tlsOptionsOpt = clerkConf.getDicerClientTlsOptions,
+      watchFromDataPlane = false,
+      sourceIpOpt = sourceIpOpt
     )
 
     createInternal(
       secPoolOpt = None,
-      protoLogger =
-        DicerClientProtoLogger.create(ClientType.Clerk, clerkConf, ownerName = clerkDebugName),
+      protoLogger = DicerClientProtoLogger.create(
+        ClientType.Clerk,
+        clerkConf,
+        // We don't want to use the full `clerkDebugName` here, because it would result in SEC names
+        // that exceed the 100 byte soft limit for metric label values.
+        ownerName = clerkDebugNamePrefix
+      ),
       config,
       clerkIndex,
       factoryContext = "clerk",
@@ -375,29 +381,38 @@ private[dicer] object ClerkImpl {
   }
 
   /**
-   * PRECONDITION: `target` must have the cluster URI populated.
-   *
-   * Creates a clerk that directly watches the Assigner from the data plane. This is for supporting
-   * internal-system and internal-system use cases specifically before the Rust Slicelet is able to
+   * Creates a Clerk that watches the Assigner directly.
    *
    * @param secPoolOpt If provided, the SEC pool to use for the clerk's async operations.
    *                   If None, a dedicated pool is created for this clerk.
+   * @param watchFromDataPlane Whether the Clerk is watching the Assigner from the data plane and
+   *                           therefore needs S2S proxy handling for redirected watch addresses.
+   * @param alternativeTargetOpt An optional AppTarget identity for `target`, used during target
+   *                             migration. Required while `use_alternative_target` is enabled,
+   *                             even after `target` becomes an AppTarget.
+   *
+   * PRECONDITION: Kubernetes targets must have the cluster URI populated.
    */
-  def createForDataPlaneDirectClerk[Stub <: AnyRef](
+  // TODO(<internal bug>): Remove once all internal-system and internal-system Clerks watch Slicelets.
+  def createForDirectClerk[Stub <: AnyRef](
       secPoolOpt: Option[SequentialExecutionContextPool],
       clerkConf: ClerkConf,
       target: Target,
       assignerAddress: URI,
+      watchFromDataPlane: Boolean,
+      alternativeTargetOpt: Option[AppTarget],
       stubFactory: ResourceAddress => Stub): ClerkImpl[Stub] = {
-    createForDataPlaneCommon(
+    createDirectClerkInternal(
       secPoolOpt,
       sharedProtoLoggerOpt = None,
       clerkConf,
       target,
       assignerAddress,
-      stubFactory,
       factoryContext = "dataPlaneDirectClerk",
-      reuseLookups = clerkConf.allowMultipleClerksShareLookupPerTarget
+      reuseLookups = clerkConf.allowMultipleClerksShareLookupPerTarget,
+      watchFromDataPlane = watchFromDataPlane,
+      alternativeTargetOpt = alternativeTargetOpt,
+      stubFactory
     )
   }
 
@@ -411,6 +426,7 @@ private[dicer] object ClerkImpl {
    *                    If None, a dedicated pool is created for this clerk.
    * @param protoLogger The shared proto logger.
    */
+  // TODO(<internal bug>): Remove once all internal-system and internal-system Clerks watch Slicelets.
   def createForMultiClerk[Stub <: AnyRef](
       secPoolOpt: Option[SequentialExecutionContextPool],
       protoLogger: DicerClientProtoLogger,
@@ -418,16 +434,18 @@ private[dicer] object ClerkImpl {
       target: Target,
       assignerAddress: URI,
       stubFactory: ResourceAddress => Stub): ClerkImpl[Stub] = {
-    createForDataPlaneCommon(
+    createDirectClerkInternal(
       secPoolOpt,
       sharedProtoLoggerOpt = Some(protoLogger),
       clerkConf,
       target,
       assignerAddress,
-      stubFactory,
       factoryContext = "multiClerk",
       // MultiClerk doesn't support lookup reuse, as it can arbitrarily stop Clerks.
-      reuseLookups = false
+      reuseLookups = false,
+      watchFromDataPlane = true,
+      alternativeTargetOpt = None,
+      stubFactory
     )
   }
 
@@ -453,18 +471,15 @@ private[dicer] object ClerkImpl {
 
     val podName: String = InetAddress.getLocalHost.getHostName
     val clerkIndex: Int = assignNextClerkIndex()
-    val clerkDebugName: String =
-      s"C-$targetBestEffortFullyQualified-$podName-sharded-stub-$clerkIndex"
+    val clerkDebugNamePrefix = s"C$clerkIndex-$targetBestEffortFullyQualified"
+    val clerkDebugName = s"$clerkDebugNamePrefix-$podName-sharded-stub"
 
     val config = InternalClientConfig(
       SliceLookupConfig(
-        ClientType.Clerk,
-        watchAddress,
-        tlsOptions,
-        targetBestEffortFullyQualified,
+        clientType = ClientType.Clerk,
+        target = targetBestEffortFullyQualified,
         clientIdOpt = resolveClientUuid(clientUuidOpt, target),
-        SliceLookupConfig.DEFAULT_WATCH_STUB_CACHE_TIME,
-        watchFromDataPlane = false,
+        watchStubCacheTime = SliceLookupConfig.DEFAULT_WATCH_STUB_CACHE_TIME,
         // We currently have no way to automatically infer the alternativeTargetOpt for the
         // Clerk's target. This depends on support from DBNS, which will be the source-of-truth
         // for this information. Until that functionality is available, it is OK to leave
@@ -478,15 +493,23 @@ private[dicer] object ClerkImpl {
         // TODO(<internal bug>): Resolve the clerk-watch-rate-limiting rollout flag here too. Unlike the
         // other Clerk entry points, this one is handed no DicerClientConf (see the spec on
         // DicerClientProtoLoggerConf), so it has nothing to query the flag on.
-        enableRateLimiting = false,
-        sourceIpOpt = None
+        enableRateLimiting = false
       ),
-      subscriberDebugName = clerkDebugName
+      subscriberDebugName = clerkDebugName,
+      watchAddress = watchAddress,
+      tlsOptionsOpt = tlsOptions,
+      watchFromDataPlane = false,
+      sourceIpOpt = None
     )
     createInternal(
       secPoolOpt = None,
-      protoLogger = DicerClientProtoLogger
-        .create(ClientType.Clerk, protoLoggerConf, ownerName = clerkDebugName),
+      protoLogger = DicerClientProtoLogger.create(
+        ClientType.Clerk,
+        protoLoggerConf,
+        // We don't want to use the full `clerkDebugName` here, because it would result in SEC names
+        // that exceed the 100 byte soft limit for metric label values.
+        ownerName = clerkDebugNamePrefix
+      ),
       config,
       clerkIndex,
       factoryContext = "shardedStub",
@@ -561,7 +584,7 @@ private[dicer] object ClerkImpl {
       // 4. The SEC used by the lookup will not be the same as the one used for this ClerkImpl, so
       //    ClerkImpl code must not depend on running in the same concurrency domain as the lookup.
       lookupCache.getOrElseCreate(
-        sliceLookupConfig,
+        config,
         createLookup(sec, config, protoLogger)
       )
     } else {
@@ -577,7 +600,9 @@ private[dicer] object ClerkImpl {
       stubFactory
     )
     clerk.start()
-    clerk.logger.info(s"Starting Clerk, awaiting assignment from ${sliceLookupConfig.watchAddress}")
+    clerk.logger.info(
+      s"Starting Clerk, awaiting assignment from ${config.watchStubManagerConfig.watchAddress}"
+    )
     clerk
   }
 
@@ -638,7 +663,7 @@ private[dicer] object ClerkImpl {
   }
 
   /**
-   * Create a Clerk for the data plane.
+   * Creates a Clerk that watches the Assigner directly.
    *
    * @param secPoolOpt      If provided, the SEC pool to use for the clerk's async operations.
    *                        If None, a dedicated pool is created for this clerk.
@@ -647,22 +672,31 @@ private[dicer] object ClerkImpl {
    * @param clerkConf       The Clerk configuration.
    * @param target          The target to create the Clerk for.
    * @param assignerAddress The address of the assigner to create the Clerk for.
-   * @param stubFactory     The factory to create the stub for the Clerk.
    * @param factoryContext Identifies the entry point used to create this Clerk, surfaced as a
    *                        label on Clerk metrics.
    * @param reuseLookups    If true, the [[SliceLookup]] instance for the given config is
    *                        reused from the cache. If false, a new [[SliceLookup]] instance
    *                        is created.
+   * @param watchFromDataPlane Whether the watch is coming from a data-plane client. When false,
+   *                           redirected watch addresses are contacted directly.
+   * @param alternativeTargetOpt An optional AppTarget identity for `target`, used while migrating
+   *                             a target from a KubernetesTarget to an AppTarget.
+   * @param stubFactory     The factory to create the stub for the Clerk.
+   *
+   * PRECONDITION: Kubernetes targets must have the cluster URI populated.
    */
-  private def createForDataPlaneCommon[Stub <: AnyRef](
+  // TODO(<internal bug>): Remove once all internal-system and internal-system Clerks watch Slicelets.
+  private def createDirectClerkInternal[Stub <: AnyRef](
       secPoolOpt: Option[SequentialExecutionContextPool],
       sharedProtoLoggerOpt: Option[DicerClientProtoLogger],
       clerkConf: ClerkConf,
       target: Target,
       assignerAddress: URI,
-      stubFactory: ResourceAddress => Stub,
       factoryContext: ClerkFactoryContext,
-      reuseLookups: Boolean): ClerkImpl[Stub] = {
+      reuseLookups: Boolean,
+      watchFromDataPlane: Boolean,
+      alternativeTargetOpt: Option[AppTarget],
+      stubFactory: ResourceAddress => Stub): ClerkImpl[Stub] = {
     target match {
       case kubernetesTarget: KubernetesTarget =>
         iassert(kubernetesTarget.clusterOpt.isDefined, "target must have the cluster URI populated")
@@ -674,31 +708,26 @@ private[dicer] object ClerkImpl {
 
     val podName: String = InetAddress.getLocalHost.getHostName
     val clerkIndex: Int = assignNextClerkIndex()
-    val clerkDebugName = s"C$clerkIndex-$target-$podName"
+    val clerkDebugNamePrefix = s"C$clerkIndex-$target"
+    val clerkDebugName = s"$clerkDebugNamePrefix-$podName"
 
     val protoLogger: DicerClientProtoLogger = sharedProtoLoggerOpt.getOrElse(
-      DicerClientProtoLogger.create(ClientType.Clerk, clerkConf, ownerName = clerkDebugName)
+      DicerClientProtoLogger.create(
+        ClientType.Clerk,
+        clerkConf,
+        // We don't want to use the full `clerkDebugName` here, because it would result in SEC names
+        // that exceed the 100 byte soft limit for metric label values.
+        ownerName = clerkDebugNamePrefix
+      )
     )
 
     val config = InternalClientConfig(
       SliceLookupConfig(
-        ClientType.Clerk,
-        assignerAddress,
-        clerkConf.getDicerClientTlsOptions,
-        target,
+        clientType = ClientType.Clerk,
+        target = target,
         clientIdOpt = resolveClientUuid(clerkConf.clientUuidOpt, target),
-        SliceLookupConfig.DEFAULT_WATCH_STUB_CACHE_TIME,
-        watchFromDataPlane = true,
-        // We currently have no way to automatically infer the alternativeTargetOpt for the
-        // Clerk's target. This depends on support from DBNS, which will be the source-of-truth
-        // for this information. Until that functionality is available, it is OK to leave
-        // alternativeTargetOpt unpopulated.
-        // - Slicelets handling Clerk requests without alternativeTargetOpt will just respond with
-        //   their current assignments.
-        // - Clerks directly watching the Assigner will be manually updated to populate the
-        //   alternativeTargetOpt as part of the AppTarget migration.
-        // TODO(<internal bug>): Populate alternativeTargetOpt for Direct Clerks
-        alternativeTargetOpt = None,
+        watchStubCacheTime = SliceLookupConfig.DEFAULT_WATCH_STUB_CACHE_TIME,
+        alternativeTargetOpt = alternativeTargetOpt,
         // The conf override, when set, takes precedence over the rollout flag, so that a service
         // can force rate limiting on or off regardless of the rollout.
         enableRateLimiting = clerkConf.enableRateLimitingOverrideOpt.getOrElse(
@@ -706,10 +735,13 @@ private[dicer] object ClerkImpl {
             DicerClientFeatureRolloutFlag.CLERK_WATCH_RATE_LIMITING_FLAG_NAME,
             target
           )
-        ),
-        sourceIpOpt = None
+        )
       ),
-      subscriberDebugName = clerkDebugName
+      subscriberDebugName = clerkDebugName,
+      watchAddress = assignerAddress,
+      tlsOptionsOpt = clerkConf.getDicerClientTlsOptions,
+      watchFromDataPlane = watchFromDataPlane,
+      sourceIpOpt = None
     )
 
     Version.recordClientVersion(target, AssignmentMetricsSource.Clerk, clerkConf.branch)

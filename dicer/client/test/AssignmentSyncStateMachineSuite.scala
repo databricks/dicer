@@ -29,7 +29,6 @@ import com.databricks.caching.util.TestUtils.{TestName, shamefullyAwait200msForN
 import com.databricks.dicer.client.AssignmentSyncStateMachine.{DriverAction, Event}
 import com.databricks.dicer.common.{
   Assignment,
-  AssignmentConsistencyMode,
   ClerkData,
   ClientRequest,
   ClientResponse,
@@ -78,7 +77,7 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     private val driver: AssignmentSyncStateMachineDriver = new AssignmentSyncStateMachineDriver(
       sec,
       new AssignmentSyncStateMachine(
-        InternalClientConfig(config, subscriberDebugName = "test-clerk"),
+        createInternalClientConfig(config),
         new Random
       ),
       recordAction,
@@ -174,14 +173,27 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
   private def createSliceLookupConfig(enableRateLimiting: Boolean): SliceLookupConfig = {
     SliceLookupConfig(
       ClientType.Clerk,
-      watchAddress = URI.create("fake-address"),
-      tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
       target,
       clientIdOpt = Some(TEST_CLIENT_UUID),
       watchStubCacheTime = 10.seconds,
-      watchFromDataPlane = false,
       alternativeTargetOpt = None,
-      enableRateLimiting = enableRateLimiting,
+      enableRateLimiting = enableRateLimiting
+    )
+  }
+
+  /**
+   * Wraps `sliceLookupConfig` in an [[InternalClientConfig]] with the test's fixed watch-connection
+   * parameters. The state machine only reads the watch address for a debug string (it never opens
+   * the connection), so a fake address suffices.
+   */
+  private def createInternalClientConfig(
+      sliceLookupConfig: SliceLookupConfig): InternalClientConfig = {
+    InternalClientConfig(
+      sliceLookupConfig,
+      subscriberDebugName = "test-clerk",
+      watchAddress = URI.create("fake-address"),
+      tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
+      watchFromDataPlane = false,
       sourceIpOpt = None
     )
   }
@@ -382,7 +394,6 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     val asnGeneration: Generation = 2 ## 6
     val assignment = createAssignment(
       asnGeneration,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       Slice.FULL @@ asnGeneration -> Seq("pod0")
     )
@@ -539,7 +550,6 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     val asnGeneration: Generation = 2 ## 6
     val assignment = createAssignment(
       asnGeneration,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       Slice.FULL @@ asnGeneration -> Seq("pod0")
     )
@@ -601,7 +611,7 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     val testDriver: TestStateMachineDriver[Event, DriverAction] =
       new TestStateMachineDriver(
         new AssignmentSyncStateMachine(
-          InternalClientConfig(config, subscriberDebugName = "test-clerk"),
+          createInternalClientConfig(config),
           new Random()
         )
       )
@@ -621,7 +631,6 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
       assignerServiceInfoOpt = None
     ).commit(
       isFrozen = false,
-      AssignmentConsistencyMode.Affinity,
       3 ## 42
     )
 
@@ -683,7 +692,6 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
       assignerServiceInfoOpt = None
     ).commit(
       isFrozen = false,
-      AssignmentConsistencyMode.Affinity,
       3 ## 43
     )
 
@@ -806,7 +814,7 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     val testDriver: TestStateMachineDriver[Event, DriverAction] =
       new TestStateMachineDriver(
         new AssignmentSyncStateMachine(
-          InternalClientConfig(config, subscriberDebugName = "test-clerk"),
+          createInternalClientConfig(config),
           new Random()
         )
       )
@@ -817,7 +825,6 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     val asnGeneration: Generation = 1 ## 0
     val assignment: Assignment = createAssignment(
       asnGeneration,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       Slice.FULL @@ asnGeneration -> Seq("pod1")
     )
@@ -1026,7 +1033,6 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     val asnGeneration: Generation = 1 ## 0
     val assignment: Assignment = createAssignment(
       asnGeneration,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       Slice.FULL @@ asnGeneration -> Seq("pod1")
     )
@@ -1091,7 +1097,7 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     val testDriver: TestStateMachineDriver[Event, DriverAction] =
       new TestStateMachineDriver(
         new AssignmentSyncStateMachine(
-          InternalClientConfig(config, subscriberDebugName = "test-clerk"),
+          createInternalClientConfig(config),
           new Random()
         )
       )
@@ -1102,7 +1108,6 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     val asnGeneration: Generation = 1 ## 0
     val assignment: Assignment = createAssignment(
       asnGeneration,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       Slice.FULL @@ asnGeneration -> Seq("pod1")
     )

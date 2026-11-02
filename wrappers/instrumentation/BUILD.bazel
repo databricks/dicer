@@ -23,6 +23,7 @@ scala_library(
 
 scala_test(
     name = "info_service_test",
+    timeout = "short",
     testonly = True,
     srcs = [
         "test/InfoServiceSuite.scala",

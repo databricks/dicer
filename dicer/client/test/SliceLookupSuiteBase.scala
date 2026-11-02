@@ -7,8 +7,9 @@ import java.nio.charset.StandardCharsets.UTF_8
 import java.time.Instant
 import java.util.{Base64, UUID}
 
-import com.databricks.api.proto.dicer.client.ClientTargetViewP
+import com.databricks.api.proto.dicer.client.{ClientInfoViewP, ClientTargetViewP}
 import com.databricks.api.proto.dicer.common.ClientResponseP
+import com.databricks.api.proto.dicer.dpage.{ClerkViewP, SliceletViewP}
 import com.databricks.rpc.RequestHeaders
 import io.grpc.Metadata
 import scala.concurrent.{Await, Future, Promise}
@@ -264,19 +265,19 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
       clientIdOpt: Option[UUID]): InternalClientConfig = {
     InternalClientConfig(
       SliceLookupConfig(
-        clientType,
-        watchAddress = watchAddress,
-        tlsOptionsOpt = if (useSsl) TestTLSOptions.clientTlsOptionsOpt else None,
-        testTarget,
+        clientType = clientType,
+        target = testTarget,
         clientIdOpt = clientIdOpt,
-        watchStubCacheTime,
-        watchRpcTimeout = LOW_RPC_TIMEOUT,
-        watchFromDataPlane = watchFromDataPlane,
+        watchStubCacheTime = watchStubCacheTime,
         alternativeTargetOpt = None,
-        enableRateLimiting = enableRateLimiting,
-        sourceIpOpt = None
+        watchRpcTimeout = LOW_RPC_TIMEOUT,
+        enableRateLimiting = enableRateLimiting
       ),
-      subscriberDebugName = subscriberDebugName
+      subscriberDebugName = subscriberDebugName,
+      watchAddress = watchAddress,
+      tlsOptionsOpt = if (useSsl) TestTLSOptions.clientTlsOptionsOpt else None,
+      watchFromDataPlane = watchFromDataPlane,
+      sourceIpOpt = None
     )
   }
 
@@ -334,6 +335,15 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
    * Returns zero if the metric has never been recorded with this set of label values.
    */
   protected def readPrometheusMetric(metricName: String, labels: Vector[(String, String)]): Double
+
+  /**
+   * Returns the sum of all metric series with the given name, containing the given labels, or zero
+   * if no series matches. Use this to read a metric whose other labels differ between the Scala and
+   * Rust clients.
+   */
+  protected def readPrometheusMetricSum(
+      metricName: String,
+      labels: Vector[(String, String)]): Double
 
   /**
    * The substring the `watchAddress` field in the SliceLookup's Slicez data is expected to
@@ -1162,14 +1172,14 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
     val assigner1 = multiAssignerTestEnv.testAssigners(0)
     val assigner2 = multiAssignerTestEnv.testAssigners(1)
 
+    val clientName: String = s"dicer-${ClientType.Clerk}-${target.name}"
     val watchChannelsCreatedTracker = ChangeTracker[Double](
       () =>
         readPrometheusMetric(
           "dicer_client_watch_channels_created_total",
-          labels = Vector("clientName" -> s"dicer-${ClientType.Clerk}-${target.name}")
+          labels = Vector("clientName" -> clientName)
         )
     )
-
     // Setup: connect to assigner2, which redirects to assigner1. Set an assignment on assigner1
     // so we can confirm the lookup followed the redirect.
     withLookup(assigner2) { (lookup: SliceLookupHarness, _: LoggingStreamCallback[Assignment]) =>
@@ -1182,6 +1192,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
 
       // Verify: exactly two watch channels were created (one at startup, one for the redirect).
       assert(watchChannelsCreatedTracker.totalChange() == 2)
+
     }
   }
 
@@ -1620,15 +1631,15 @@ private[client] object SliceLookupSuiteBase {
    * tests.
    */
   def clientTargetSlicezDataFromViewProto(proto: ClientTargetViewP): ClientTargetSlicezData = {
-    val clientInfoOpt = proto.clientInfo
+    val clientInfoOpt: Option[ClientInfoViewP] = proto.clientInfo
     val target: Target = TargetHelper.parse(proto.getTarget)
     // TODO(<internal bug>): translate remaining fields as the Rust implementation starts returning them.
     ClientTargetSlicezData(
       target = target,
-      sliceletsData = proto.slicelets.map { slicelet =>
+      sliceletsData = proto.slicelets.map { slicelet: SliceletViewP =>
         SliceletSubscriberSlicezData(slicelet.getDebugName, slicelet.getWatchAddress)
       },
-      clerksData = proto.clerks.map { clerk =>
+      clerksData = proto.clerks.map { clerk: ClerkViewP =>
         ClerkSubscriberSlicezData(clerk.getDebugName)
       },
       assignmentOpt = None,
@@ -1640,8 +1651,7 @@ private[client] object SliceLookupSuiteBase {
       subscriberDebugName = "",
       watchAddress = clientInfoOpt
         .flatMap(_.watchAddress)
-        .map(URI.create)
-        .getOrElse(URI.create("")),
+        .getOrElse(""),
       watchAddressUsedSince = clientInfoOpt
         .flatMap(_.watchAddressUsedSince)
         .map(Instant.parse)

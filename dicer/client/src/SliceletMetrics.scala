@@ -12,12 +12,19 @@ import com.databricks.dicer.client.SliceletMetrics.{locationInfoGauge, latestSta
  * We export the following metrics related to the load observed on a Slicelet:
  *  - total attributed load: total load for keys that are assigned to this Slicelet.
  *  - unattributed load: load for keys that are not assigned to this Slicelet.
+ *  - load increment calls: number of load-reporting calls, including nonpositive increments.
  *  - slice key handles created: number of SliceKeyHandles opened.
  *  - outstanding slice key handles: number of SliceKeyHandles opened but not yet closed.
  */
 class SliceletMetrics(target: Target) {
 
   // Memoize the child counters and gauges for the given target.
+  private val loadIncrementCallsChild: Counter.Child = SliceletMetrics.loadIncrementCalls
+    .labels(
+      target.getTargetClusterLabel,
+      target.getTargetNameLabel,
+      target.getTargetInstanceIdLabel
+    )
   private val sliceKeyHandlesCreatedChild: Counter.Child = SliceletMetrics.sliceKeyHandlesCreated
     .labels(
       target.getTargetClusterLabel,
@@ -43,6 +50,9 @@ class SliceletMetrics(target: Target) {
       target.getTargetNameLabel,
       target.getTargetInstanceIdLabel
     )
+
+  /** Records one load-reporting call, regardless of the increment's value or key assignment. */
+  def onLoadIncrement(): Unit = loadIncrementCallsChild.inc()
 
   /**
    * Records creation of a new handle by incrementing the
@@ -106,6 +116,13 @@ class SliceletMetrics(target: Target) {
 }
 
 object SliceletMetrics {
+
+  private val loadIncrementCalls = Counter
+    .build()
+    .name("dicer_slicelet_load_increment_calls_total")
+    .help("The number of load increment calls, including nonpositive increments")
+    .labelNames("targetCluster", "targetName", "targetInstanceId")
+    .register()
 
   @SuppressWarnings(
     Array(

@@ -3,6 +3,7 @@ syntax = "proto2";
 package dicer.test;
 
 import "dicer/common/proto/common.proto";
+import "dicer/friend/proto/friend.proto";
 
 import "scalapb.proto";
 
@@ -229,12 +230,8 @@ message GetClerkLatestGenerationResponseP {
 
 // The state of a retry token exchanged by the Scala and Rust test harnesses.
 message ClerkRetryTokenP {
-  optional GenerationP assignment_generation = 1;
-
-  // Indices into the slice's deterministically ordered assigned resources.
-  repeated int32 picked_resource_indices = 2;
-
-  optional bool fallback_picked = 3;
+  // The resources already picked, including the fallback resource.
+  repeated dicer.friend.SquidP picked_resources = 1;
 }
 
 // A request to call `get_next_stub_for_key` on a `Clerk`.

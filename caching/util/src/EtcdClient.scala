@@ -1059,7 +1059,7 @@ object EtcdClient {
         timeoutEcPool,
         s"etcd-client-timeout-${config.keyNamespace}"
       )
-    new EtcdClient(
+    createWithErrorTransform(
       new JetcdWrapperImpl(timeoutEc, createJetcdClient(etcdEndpoints, tlsOptionsOpt)),
       config
     )
@@ -1092,6 +1092,16 @@ object EtcdClient {
     tlsOptionsOpt.map(JetcdTLS.configureClient(_, client))
 
     client.build
+  }
+
+  /**
+   * Creates an [[EtcdClient]] that uses `untransformedJetcd` through a
+   * [[JetcdWrapperWithErrorTransform]], so the client only sees `grpc_shaded` status exceptions.
+   */
+  private def createWithErrorTransform(
+      untransformedJetcd: JetcdWrapper,
+      config: Config): EtcdClient = {
+    new EtcdClient(new JetcdWrapperWithErrorTransform(untransformedJetcd), config)
   }
 
   /**
@@ -1181,6 +1191,39 @@ object EtcdClient {
       // execute after the work successfully completes, it's a functional no-op.
       asyncWork.whenComplete { (_, _) =>
         cancellable.cancel()
+      }
+    }
+  }
+
+  /**
+   * [[JetcdWrapper]] that forwards to `delegate`, converting the jetcd status exceptions that
+   * `delegate` returns, delivers to watch listeners or throws to their `grpc_shaded` equivalents
+   * (see [[JetcdStatusUtils]]). It is separate from [[JetcdWrapperImpl]] so that failures
+   * injected into a test `delegate` are converted the same way.
+   */
+  private final class JetcdWrapperWithErrorTransform(delegate: JetcdWrapper) extends JetcdWrapper {
+
+    override def commit(
+        ifs: Seq[Cmp],
+        thens: Seq[Op],
+        elses: Seq[Op]): CompletableFuture[TxnResponse] = {
+      JetcdStatusUtils.toGrpcShadedExceptions {
+        JetcdStatusUtils.toGrpcShadedFailures(delegate.commit(ifs, thens, elses))
+      }
+    }
+
+    override def get(key: ByteSequence, option: GetOption): CompletableFuture[GetResponse] = {
+      JetcdStatusUtils.toGrpcShadedExceptions {
+        JetcdStatusUtils.toGrpcShadedFailures(delegate.get(key, option))
+      }
+    }
+
+    override def watch(
+        key: ByteSequence,
+        option: WatchOption,
+        listener: Listener): Watch.Watcher = {
+      JetcdStatusUtils.toGrpcShadedExceptions {
+        delegate.watch(key, option, JetcdStatusUtils.toGrpcShadedErrors(listener))
       }
     }
   }
@@ -1474,9 +1517,9 @@ object EtcdClient {
 
   private[util] object forTest {
 
-    /** Constructs [[EtcdClient]] from [[JetcdWrapper]]. */
+    /** Constructs [[EtcdClient]] from [[JetcdWrapper]], converting errors like `create` does. */
     def apply(jetcd: JetcdWrapper, config: Config): EtcdClient = {
-      new EtcdClient(jetcd, config)
+      createWithErrorTransform(jetcd, config)
     }
   }
 }

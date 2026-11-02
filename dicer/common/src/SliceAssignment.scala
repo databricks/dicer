@@ -113,7 +113,7 @@ import com.databricks.dicer.friend.Squid
  * history (i.e., the latest Slicelet only recently started receiving traffic for the corresponding
  * Slice).
  *
- * Invariants: See [[LoadMeasurement.requireValidLoadMeasurement]].
+ * Invariants: See [[MetricMeasurement.requireValidMeasurement]].
  */
 case class SliceAssignment(
     sliceWithResources: SliceWithResources,
@@ -235,7 +235,7 @@ case class SliceAssignment(
       )
     }
     for (primaryRateLoad: Double <- primaryRateLoadOpt) {
-      LoadMeasurement.requireValidLoadMeasurement(primaryRateLoad)
+      MetricMeasurement.requireValidMeasurement(primaryRateLoad)
     }
   }
 }

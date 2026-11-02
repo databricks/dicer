@@ -1,0 +1,26 @@
+load("//bazel/rules/rust:rules_rust.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "test_tls_options",
+    testonly = True,
+    srcs = ["src/lib.rs"],
+    crate_name = "raf_tls_test_tls_options",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//wrappers/rust/tls",
+        "//wrappers/rust/tls/testing/test_tls_options/testing:test_identity",
+        "@crates//:tempfile",
+    ],
+)
+
+rust_test(
+    name = "test_tls_options_test",
+    timeout = "short",
+    testonly = True,
+    srcs = ["tests/test_tls_options_test.rs"],
+    deps = [
+        ":test_tls_options",
+        "//wrappers/rust/tls",
+        "@crates//:tonic",
+    ],
+)

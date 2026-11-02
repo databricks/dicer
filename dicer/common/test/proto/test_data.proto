@@ -42,7 +42,8 @@ message SimpleDiffAssignmentP {
     optional string from_resource = 2;
   }
 
-  optional bool is_consistent = 1;
+  reserved 1;
+  reserved "is_consistent";
   optional GenerationP generation = 2;
 
   // OPTIONAL. If not specified, then this is a full diff.
@@ -349,10 +350,9 @@ message AssignmentTestDataP {
     optional SimpleDiffAssignmentP known_assignment = 1;
     optional SimpleDiffAssignmentP diff = 2;
 
-    oneof expected_failure {
-      DiffUnusedP expected_diff_unused = 3;
-      string expected_error = 4;
-    }
+    optional DiffUnusedP expected_diff_unused = 3;
+    reserved 4;
+    reserved "expected_error";
   }
 
   // Test case for converting an assignment to a diff with a higher diff generation, which should
@@ -521,45 +521,42 @@ message SliceletLoadAccumulatorTestDataP {
   message ValidCaseP {
     optional string name = 1; // Test name to aid debugging.
     repeated ActionP actions = 2; // The actions to perform in order.
+    // The optional factory parameters for load-distribution reporting. Being empty means the
+    // default parameters will be used: cdf_point_budget=0 and max_key_length_bytes=INT_MAX.
+    optional FactoryParameterP factory_parameter_opt = 3;
+  }
+
+  // The factory parameters for SliceletLoadAccumulator.
+  message FactoryParameterP {
+    optional int64 cdf_point_budget = 1; // The budget for the number of CDF points.
+    optional int64 max_key_length_bytes = 2; // The maximum length of the key in bytes.
   }
 
   message ActionP {
     oneof action {
       IncrementPrimaryLoadP increment_primary_load = 1;
-      UpdateMetricsP update_metrics = 2;
-      AssertHistogramBucketEqualsP histogram_bucket_check = 3;
       AdvanceClockP advance_clock = 4;
       ChangeAssignmentP change_assignment = 5;
       CheckUnattributedLoadP check_unattributed_load = 6;
       CheckAttributedLoadsP check_attributed_loads = 7;
     }
+
+    reserved 2, 3;
   }
 
-  // Increments the primary load for the given key by `value`. Key can be either an int64 or bytes.
-  // Empty indicates SliceKey.MIN. We allow int64 keys to simplify test data specification in
-  // histogram value checks.
+  // Increments the primary load for the given key by `value`. An omitted key indicates
+  // SliceKey.MIN.
   message IncrementPrimaryLoadP {
-    oneof increment_by_key {
-      int64 key = 1;
-      bytes bytes_key = 3;
-    }
+    optional bytes bytes_key = 3;
     optional int32 value = 2;
+
+    reserved 1;
   }
 
-  // Update the metrics.
-  message UpdateMetricsP {}
-
-  // Asserts that the value of load distribution histogram bucket for the given `le` matches
-  // the `expected` value.
-  message AssertHistogramBucketEqualsP {
-    optional string debug_msg = 1; // Debug message to output in case of failure.
-    optional int32 bucket_index = 2; // The index of the bucket to check.
-    optional int64 expected = 3;
+  // Advances the fake clock by the specified duration, or one second if omitted.
+  message AdvanceClockP {
+    optional int32 seconds = 1;
   }
-
-  // Advances the fake clock by 1 second. Currently, tests always advance the clock by 1 second,
-  // so there is no `advance_by` field.
-  message AdvanceClockP {}
 
   // Changes the assignment for the current squid.
   message ChangeAssignmentP {
@@ -615,6 +612,9 @@ message SliceletLoadAccumulatorTestDataP {
 
     // Optional: expect the match on top slice keys (ignoring the ordering).
     repeated bytes top_slice_keys = 3;
+
+    // Expected distribution; omit to assert that no distribution is reported.
+    optional ClientRequestP.SliceletDataP.LoadDistributionP expected_load_distribution = 4;
   }
 }
 

@@ -1,3 +1,4 @@
+// LINT.IfChange
 package com.databricks.dicer.external.javaapi;
 
 import com.google.common.collect.ImmutableList;
@@ -85,3 +86,5 @@ public final class Slicelet {
     return this.scalaSlicelet;
   }
 }
+// LINT.ThenChange(dicer/external/src/Slicelet.scala)
+// LINT.ThenChange(dicer/rust/external/slicelet/src/slicelet.rs)

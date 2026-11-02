@@ -1,12 +1,7 @@
 package com.databricks.dicer.assigner.algorithm
 
 import com.databricks.dicer.assigner.config.{ChurnConfig, InternalTargetConfig}
-import com.databricks.dicer.common.{
-  Assignment,
-  AssignmentConsistencyMode,
-  Generation,
-  SliceAssignment
-}
+import com.databricks.dicer.common.{Assignment, Generation, SliceAssignment}
 import com.databricks.dicer.common.testing.SliceTestUtils.{
   LowInclusiveLongFluent,
   LowInclusiveStringFluent,
@@ -35,7 +30,6 @@ class SplitterSuite extends AlgorithmPhaseSuiteBase {
       createConfigForLoadBalancing(ChurnConfig.DEFAULT, maxLoadHint = 100)
     val predecessor: Assignment = createAssignment(
       generation = 42,
-      consistencyMode = AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       ("" -- 10) @@ 42 -> Seq("resource0"),
       (10 -- 11) @@ 42 -> Seq("resource1"), // unsplittable
@@ -81,7 +75,6 @@ class SplitterSuite extends AlgorithmPhaseSuiteBase {
     val generation: Generation = createGeneration()
     val predecessor: Assignment = createAssignment(
       generation,
-      consistencyMode = AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       ("" -- 10) @@ generation -> Seq("resource0"),
       (10 -- 11) @@ generation -> Seq("resource1"), // unsplittable

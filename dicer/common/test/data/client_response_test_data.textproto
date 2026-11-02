@@ -240,7 +240,6 @@ round_tripping_cases: [
               resource_uuid_low: -6785983130110965960
             }
           ]
-          is_consistent: false
           slice_assignments: [
             {
               slice: { low_inclusive: "" high_exclusive: "Balin" }

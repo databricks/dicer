@@ -8,6 +8,7 @@ import scala.concurrent.duration._
 import com.databricks.api.proto.dicer.assigner.config.{
   AdvancedTargetConfigFieldsP,
   HealthWatcherConfigP,
+  InternalDicerTargetConfigP,
   LoadWatcherConfigP,
   ReplicationThresholdOverrideP,
   TargetWatchRequestRateLimitConfigP
@@ -565,10 +566,18 @@ class InternalTargetConfigSuite extends DatabricksTest {
 
     // toProto emits the field only when enabled.
     assertResult(Some(true))(
-      NamedInternalTargetConfig(name, enabledConfig).toProto.getAdvancedConfig.useAlternativeTarget
+      NamedInternalTargetConfig(
+        targetName = name,
+        config = enabledConfig,
+        overrides = Map.empty
+      ).toProto.getAdvancedConfig.useAlternativeTarget
     )
     assertResult(None)(
-      NamedInternalTargetConfig(name, disabledConfig).toProto.getAdvancedConfig.useAlternativeTarget
+      NamedInternalTargetConfig(
+        targetName = name,
+        config = disabledConfig,
+        overrides = Map.empty
+      ).toProto.getAdvancedConfig.useAlternativeTarget
     )
   }
 
@@ -617,9 +626,12 @@ class InternalTargetConfigSuite extends DatabricksTest {
     )
 
     // toProto emits the field for an explicit override, but leaves it unset for the default.
-    val namedMaxLoadHintConfig = NamedInternalTargetConfig(name, maxLoadHintConfig)
-    val namedMaxDesiredLoadConfig = NamedInternalTargetConfig(name, maxDesiredLoadConfig)
-    val namedDisabledConfig = NamedInternalTargetConfig(name, disabledConfig)
+    val namedMaxLoadHintConfig =
+      NamedInternalTargetConfig(name, maxLoadHintConfig, overrides = Map.empty)
+    val namedMaxDesiredLoadConfig =
+      NamedInternalTargetConfig(name, maxDesiredLoadConfig, overrides = Map.empty)
+    val namedDisabledConfig =
+      NamedInternalTargetConfig(name, disabledConfig, overrides = Map.empty)
     assertResult(
       Some(ReplicationThresholdOverrideP.REPLICATION_THRESHOLD_OVERRIDE_MAX_LOAD_HINT_BASED)
     )(
@@ -633,6 +645,53 @@ class InternalTargetConfigSuite extends DatabricksTest {
     assertResult(None)(
       namedDisabledConfig.toProto.getAdvancedConfig.replicationThresholdOverride
     )
+  }
+
+  test("NamedInternalTargetConfig.toProto serializes only the default config for empty overrides") {
+    // Test plan: Verify that an empty `overrides` map serializes only the default config.
+    // Verify this by setting explicit target and advanced field values, comparing the serialized
+    // fields with expected protos, and checking that `overrides` is empty.
+    val targetName: TargetName = TargetName("test-target")
+    val defaultConfig: InternalTargetConfig = ConfigTestUtils
+      .createConfig(
+        primaryRateMaxLoadHint = 100,
+        primaryRateImbalanceToleranceHintOpt = Some(ImbalanceToleranceHintP.DEFAULT),
+        primaryRateReservationHintOpt = Some(ReservationHintP.NO_RESERVATION),
+        watchMinDurationSecondsOpt = None
+      )
+      .copy(
+        loadWatcherConfig = LoadWatcherTargetConfig(
+          minDuration = 60.seconds,
+          maxAge = 300.seconds,
+          useTopKeys = true,
+          useLoadDistribution = false
+        )
+      )
+    val proto: InternalDicerTargetConfigP =
+      NamedInternalTargetConfig(targetName, defaultConfig, overrides = Map.empty).toProto
+    val expectedTargetConfig: TargetConfigFieldsP = TargetConfigFieldsP(
+      primaryRateMetricConfig = Some(
+        LoadBalancingMetricConfigP(
+          maxLoadHint = Some(100),
+          imbalanceToleranceHint = Some(ImbalanceToleranceHintP.DEFAULT),
+          uniformLoadReservationHint = Some(ReservationHintP.NO_RESERVATION)
+        )
+      )
+    )
+    val expectedAdvancedConfig: AdvancedTargetConfigFieldsP = AdvancedTargetConfigFieldsP(
+      loadWatcherConfig = Some(
+        LoadWatcherConfigP(
+          minDurationSeconds = Some(60),
+          maxAgeSeconds = Some(300),
+          useTopKeys = Some(true)
+        )
+      )
+    )
+
+    assertResult(Some(targetName.value))(proto.target)
+    assertResult(Some(expectedTargetConfig))(proto.targetConfig)
+    assertResult(Some(expectedAdvancedConfig))(proto.advancedConfig)
+    assert(proto.overrides.isEmpty)
   }
 
   test("InternalTargetConfig.toString") {
@@ -934,7 +993,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
         AuthorizerHelper.DEFAULT_AUTHORIZER,
         KeySensitivityConfig.DEFAULT,
         useAlternativeTarget = false
-      )
+      ),
+      overrides = Map.empty
     )
     // It's hard to access a real stale version of InternalTargetConfig in test and verify this in
     // scala class level, so we just verify the KeyReplicationConfig still exists in the advanced

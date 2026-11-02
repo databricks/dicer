@@ -1,3 +1,4 @@
+// LINT.IfChange
 package com.databricks.dicer.external.javaapi;
 
 import com.databricks.conf.RawConfigSingleton;
@@ -202,3 +203,5 @@ public final class DicerTestEnvironment {
     DicerClientTestInterop.stopClerkForTest(clerk.toScala());
   }
 }
+// LINT.ThenChange(dicer/external/src/DicerTestEnvironment.scala)
+// LINT.ThenChange(dicer/rust/external/testing/dicer_test_environment/src/dicer_test_environment.rs)

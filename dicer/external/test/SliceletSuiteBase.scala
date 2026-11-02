@@ -20,15 +20,12 @@ import scala.util.Using
 import scala.util.matching.Regex
 import io.prometheus.client.CollectorRegistry
 
-import com.databricks.caching.util.AlertOwnerTeam
 import com.databricks.caching.util.TestUtils.{TestName, assertThrow, loadTestData}
 import com.databricks.caching.util.{
   AssertionWaiter,
   CachingErrorCode,
-  FakeSequentialExecutionContext,
   HyperLogLog,
   MetricUtils,
-  SequentialExecutionContextPool,
   Severity,
   TestUtils,
   UnixTimeVersion
@@ -44,7 +41,7 @@ import com.databricks.conf.Configs
 import com.databricks.conf.trusted.ProjectConfByName
 import com.databricks.conf.trusted.LocationConf
 import com.databricks.conf.trusted.LocationConfTestUtils
-import com.databricks.dicer.client.{ClerkImpl, SliceletImpl, TestClientUtils, WatchAddressHelper}
+import com.databricks.dicer.client.{ClerkImpl, SliceletImpl, TestClientUtils}
 import com.databricks.dicer.client.TestClientUtils.FakeBlockingReadinessProvider
 import com.databricks.dicer.client.featurerollouts.DicerClientFeatureRolloutFlag
 import com.databricks.dicer.common.TargetHelper.TargetOps
@@ -1400,6 +1397,42 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     }
   }
 
+  test("Slicelet counts load increment calls independently of load values") {
+    // Test plan: verify that each load increment call counts once, including nonpositive
+    // increments, while creating and closing handles does not change the counter. Exercise the
+    // public increment API on reused handles for assigned and unassigned keys.
+    val initialProposal = createProposal(("" -- ∞) -> Seq("other_pod"))
+    TestUtils.awaitResult(setAndFreezeAssignment(testEnv, initialProposal), Duration.Inf)
+
+    val slicelet: SliceletHarness = createSlicelet(testEnv)()
+    slicelet.start(selfPort = 1234, listenerOpt = None)
+    val proposal = createProposal(
+      ("" -- "Kili") -> Seq(slicelet.squid),
+      ("Kili" -- ∞) -> Seq("other_pod")
+    )
+    TestUtils.awaitResult(setAndFreezeAssignment(testEnv, proposal), Duration.Inf)
+    waitForAssignment(slicelet, "Dori")
+
+    val metricName = "dicer_slicelet_load_increment_calls_total"
+    Using.Manager { use =>
+      val assignedHandle = use(slicelet.createHandle("Dori"))
+      val unassignedHandle = use(slicelet.createHandle("Nori"))
+      assert(assignedHandle.isAssignedContinuously)
+      assert(!unassignedHandle.isAssignedContinuously)
+      assert(readPrometheusMetric(metricName, targetMetricLabels) == 0)
+
+      assignedHandle.incrementLoadBy(10)
+      assignedHandle.incrementLoadBy(20)
+      unassignedHandle.incrementLoadBy(1000)
+      assert(readPrometheusMetric(metricName, targetMetricLabels) == 3)
+
+      assignedHandle.incrementLoadBy(0)
+      unassignedHandle.incrementLoadBy(-1)
+      assert(readPrometheusMetric(metricName, targetMetricLabels) == 5)
+    }.get
+    assert(readPrometheusMetric(metricName, targetMetricLabels) == 5)
+  }
+
   test("SliceKeyHandle.incrementLoadBy") {
     // Test plan: supply positive incremental load to SliceKeyHandle for both assigned and
     // unassigned Slices. Verify that watch requests include the expected load measurements. Note
@@ -2319,11 +2352,6 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
     }
   }
 
-  /** Gets the assigner address for sending watch requests from the slicelet conf. */
-  private def getAssignerAddress(sliceletConf: SliceletConf): URI = {
-    WatchAddressHelper.getAssignerURI(sliceletConf.assignerHost, sliceletConf.dicerAssignerRpcPort)
-  }
-
   final override protected def configureAppIdentifierForTest(
       name: String,
       instanceId: String): Unit = {
@@ -2685,101 +2713,6 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
 
     slicelet.stop()
     clerk.forTest.stop()
-  }
-
-  // This test case currently does not work for Rust, because the Rust Slicelet harness uses a real
-  // clock. Using a real clock in this test will increase the test runtime because the metrics are
-  // updated every 5 seconds. Since we have test coverage for SliceKey load distribution histogram
-  // population in slicelet_load_accumulator_test.rs, it should be okay to skip this test in Rust.
-  test("Reports SliceKey load distribution to Prometheus") {
-    // Test plan: Verify that the Slicelet maintains the SliceKey load distribution histogram
-    // metric. Verify this by creating our own Slicelet (with a fake sec), starting it, reporting
-    // load on SliceKeys, then advancing the clock by 5s (the interval for updating metrics), and
-    // checking that the Prometheus metric is updated.
-
-    // Create a fake sec and a fake pool with context propagation disabled to match the behavior of
-    // the real Slicelet.
-    val pool = SequentialExecutionContextPool.create(
-      poolName = "FakePool",
-      numThreads = 2,
-      alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME,
-      enableContextPropagation = false
-    )
-    val fakeSec =
-      FakeSequentialExecutionContext.create(s"SliceletExecutor-$getSafeName", pool = pool)
-
-    // Create a fake blocking readiness provider and set it to ready.
-    val fakeBlockingReadinessProvider = new FakeBlockingReadinessProvider()
-    fakeBlockingReadinessProvider.setReady(true)
-
-    val externalConf: SliceletConf =
-      TestClientUtils.createTestSliceletConf(
-        testEnv.getAssignerPort,
-        "some-host-name",
-        clientTlsFilePathsOpt = None,
-        serverTlsFilePathsOpt = None,
-        watchFromDataPlane
-      )
-
-    // Note: Since this test requires SliceletImpl (and thus bypasses the logic in the Slicelet
-    // constructor to populate cluster location information), we must pass in the expected Slicelet
-    // Target for this test
-    val slicelet = SliceletImpl.create(
-      fakeSec,
-      getAssignerAddress(externalConf),
-      externalConf,
-      expectedSliceletTargetIdentifier,
-      fakeBlockingReadinessProvider
-    )
-    slicelet.start(selfPort = 1234, listenerOpt = None)
-    Using.Manager { use =>
-      val doriHandle = use(slicelet.createHandle("Dori"))
-      val kiliHandle = use(slicelet.createHandle("Kili"))
-      val oriHandle = use(slicelet.createHandle("Ori"))
-
-      // Report load for each handle.
-      doriHandle.incrementLoadBy(10)
-      kiliHandle.incrementLoadBy(20)
-      oriHandle.incrementLoadBy(30)
-    }.get
-
-    // Setup: Advance the clock to just before the update metrics interval.
-    fakeSec.getClock.advanceBy(4.seconds)
-
-    // Verify: Metrics are not updated yet. Unfortunately since we're testing that something does
-    // *not* happen, we must use a thread sleep here (limited to 100ms) to give the test enough of a
-    // chance to reveal unexpected behavior.
-    Thread.sleep(100)
-    assert(
-      MetricUtils.getMetricValue(
-        CollectorRegistry.defaultRegistry,
-        "dicer_slicelet_slicekey_load_distribution_bucket_total",
-        Map(
-          "le" -> "+Inf",
-          "targetCluster" -> expectedSliceletTargetIdentifier.getTargetClusterLabel,
-          "targetName" -> expectedSliceletTargetIdentifier.getTargetNameLabel
-        )
-      ) == 0
-    )
-
-    // Setup: Advance the clock now 1 more second, so that the update metrics interval has elapsed.
-    fakeSec.getClock.advanceBy(1.seconds)
-
-    // Verify: The SliceKey load distribution metric gets updated.
-    AssertionWaiter("Waiting for the SliceKey load distribution metric to be updated")
-      .await {
-        assert(
-          MetricUtils.getMetricValue(
-            CollectorRegistry.defaultRegistry,
-            "dicer_slicelet_slicekey_load_distribution_bucket_total",
-            Map(
-              "le" -> "+Inf",
-              "targetCluster" -> expectedSliceletTargetIdentifier.getTargetClusterLabel,
-              "targetName" -> expectedSliceletTargetIdentifier.getTargetNameLabel
-            )
-          ) == 60
-        )
-      }
   }
 
   // This test case only makes sense for Scala, because the Rust Slicelet notifies the application

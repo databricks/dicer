@@ -1,9 +1,12 @@
 package com.databricks.dicer.assigner.algorithm
 
-import com.databricks.dicer.assigner.config.InternalTargetConfig
+import com.databricks.api.proto.dicer.external.LoadBalancingMetricConfigP.ImbalanceToleranceHintP
+import com.databricks.dicer.assigner.config.{ChurnConfig, InternalTargetConfig}
 import com.databricks.dicer.assigner.config.testing.{ConfigTestUtils}
+import com.databricks.dicer.assigner.config.InternalTargetConfig.KeyReplicationConfig
 import com.databricks.dicer.common.{
   Assignment,
+  Generation,
   ProposedAssignment,
   ProposedSliceAssignment,
   SliceAssignment
@@ -13,13 +16,17 @@ import com.databricks.dicer.common.testing.SliceTestUtils.{
   LowInclusiveStringFluent,
   ProposedSliceAssignmentFluent,
   SliceAssignmentSliceFluent,
+  createAssignment,
+  createLooseGeneration,
   createProposal,
+  createResources,
   toProposedAssignmentEntry,
   toSliceKey,
   toSquid,
+  toSquidWithValue,
   `∞`
 }
-import com.databricks.dicer.external.Target
+import com.databricks.dicer.external.{InfinitySliceKey, Slice, SliceKey, Target}
 import com.databricks.dicer.friend.{SliceMap, Squid}
 
 /** Tests for the merge phase of the algorithm (see [[MergePhase]]). */
@@ -174,6 +181,131 @@ class MergePhaseSuite extends AlgorithmPhaseSuiteBase {
         }
         assert(actualSlice.slice == expectedSlice.slice, testCase.description)
       }
+    }
+  }
+
+  test("Merge only combines Slices with the minimum number of replicas") {
+    // Test plan: Verify that the merge phase never merges a Slice with more than the minimum
+    // number of replicas, even when it is the coldest. Do this by running the merge phase on an
+    // assignment with too many slice replicas whose two coldest Slices are replicated, and checking
+    // that those Slices survive with their replica counts while other Slices are merged.
+    //
+    // This test calls `MergePhase.merge` directly rather than `Algorithm.generateAssignment`: the
+    // de-replication phase that runs before merge would de-replicate Slices this cold, so they
+    // would never reach the merge phase replicated.
+    val resources: Resources = createResources("pod-0", "pod-1")
+    val numSingleReplicaSlices: Int = 127
+    val replicatedSlices: Vector[Slice] = Vector("" -- 10L, 10L -- 20L)
+    val singleReplicaSlices: Vector[Slice] = (2 until numSingleReplicaSlices + 2).map { i: Int =>
+      if (i < numSingleReplicaSlices + 1) (i * 10L) -- ((i + 1) * 10L) else (i * 10L) -- ∞
+    }.toVector
+    val generation: Generation = createLooseGeneration(42)
+    val predecessor: Assignment = createAssignment(
+      generation,
+      assignerServiceInfoOpt = None,
+      replicatedSlices.map { slice: Slice =>
+        slice @@ generation -> Seq("pod-0", "pod-1")
+      } ++ singleReplicaSlices.zipWithIndex.map {
+        case (slice: Slice, i: Int) => slice @@ generation -> Seq(s"pod-${i % 2}")
+      }
+    )
+    // The replicated Slices are the coldest.
+    val loadMap: LoadMap = LoadMap
+      .newBuilder()
+      .putLoad(replicatedSlices.map { slice: Slice =>
+        LoadMap.Entry(slice, 1.0)
+      } ++ singleReplicaSlices.map { slice: Slice =>
+        LoadMap.Entry(slice, 10.0)
+      }: _*)
+      .build()
+    val assignment: MutableAssignment = createMutableAssignment(predecessor, resources, loadMap)
+    val config: Algorithm.Config = createAlgorithmConfig(
+      createConfigForLoadBalancing(ConfigTestUtils.ZERO_PENALTY_CHURN_CONFIG, maxLoadHint = 1000)
+        .copy(keyReplicationConfig = KeyReplicationConfig(minReplicas = 1, maxReplicas = 2)),
+      resources,
+      loadMap
+    )
+    // 2 * 2 + 127 = 131 slice replicas, above the maximum of 64 * 2 = 128.
+    assert(assignment.currentNumTotalSliceReplicas == 131)
+
+    MergePhase.merge(config, resources, assignment)
+
+    assert(assignment.currentNumTotalSliceReplicas == 128)
+    val replicaCountBySlice: Map[Slice, Int] = assignment.sliceAssignmentsIterator.map {
+      sliceAssignment: assignment.MutableSliceAssignment =>
+        (sliceAssignment.slice, sliceAssignment.currentNumReplicas)
+    }.toMap
+    for (slice: Slice <- replicatedSlices) {
+      assert(replicaCountBySlice.get(slice).contains(2), s"$slice should not have been merged")
+    }
+  }
+
+  test("Merge does not link candidates across a replicated Slice") {
+    // Test plan: Verify that a replicated Slice in the middle of the key space breaks the chain of
+    // merge candidates, so no merge spans it. Do this by calling `MergePhase.merge` directly (see
+    // the previous test) on an assignment with a replicated Slice whose neighbors on each side are
+    // the coldest pair, and checking that each pair merges on its own side while the replicated
+    // Slice keeps its bounds and replicas.
+    val resources: Resources = createResources("pod-0", "pod-1")
+    val numSlices: Int = 129
+    val replicatedIndex: Int = 61
+    val slices: Vector[Slice] = (0 until numSlices).map { i: Int =>
+      if (i == 0) "" -- 10L
+      else if (i == numSlices - 1) (i * 10L) -- ∞
+      else (i * 10L) -- ((i + 1) * 10L)
+    }.toVector
+    val generation: Generation = createLooseGeneration(42)
+    val predecessor: Assignment = createAssignment(
+      generation,
+      assignerServiceInfoOpt = None,
+      slices.zipWithIndex.map {
+        case (slice: Slice, i: Int) =>
+          val pods: Seq[Squid] =
+            if (i == replicatedIndex) Seq("pod-0", "pod-1") else Seq(s"pod-${i % 2}")
+          slice @@ generation -> pods
+      }
+    )
+    // The two Slices on each side of the replicated Slice, and the replicated Slice itself, are the
+    // coldest.
+    val coldIndices: Set[Int] = (replicatedIndex - 2 to replicatedIndex + 2).toSet
+    val loadMap: LoadMap = LoadMap
+      .newBuilder()
+      .putLoad(slices.zipWithIndex.map {
+        case (slice: Slice, i: Int) => LoadMap.Entry(slice, if (coldIndices(i)) 1.0 else 10.0)
+      }: _*)
+      .build()
+    val assignment: MutableAssignment = createMutableAssignment(predecessor, resources, loadMap)
+    val config: Algorithm.Config = createAlgorithmConfig(
+      createConfigForLoadBalancing(ConfigTestUtils.ZERO_PENALTY_CHURN_CONFIG, maxLoadHint = 1000)
+        .copy(keyReplicationConfig = KeyReplicationConfig(minReplicas = 1, maxReplicas = 2)),
+      resources,
+      loadMap
+    )
+    // 128 + 2 = 130 slice replicas, so two merges bring the total to the maximum of 64 * 2 = 128.
+    assert(assignment.currentNumTotalSliceReplicas == 130)
+
+    MergePhase.merge(config, resources, assignment)
+
+    assert(assignment.currentNumTotalSliceReplicas == 128)
+    val replicaCountBySlice: Vector[(Slice, Int)] = assignment.sliceAssignmentsIterator.map {
+      sliceAssignment: assignment.MutableSliceAssignment =>
+        (sliceAssignment.slice, sliceAssignment.currentNumReplicas)
+    }.toVector
+    val replicatedSlice: Slice = slices(replicatedIndex)
+    val leftPair =
+      Slice(slices(replicatedIndex - 2).lowInclusive, slices(replicatedIndex - 1).highExclusive)
+    val rightPair =
+      Slice(slices(replicatedIndex + 1).lowInclusive, slices(replicatedIndex + 2).highExclusive)
+    assert(replicaCountBySlice.contains((replicatedSlice, 2)))
+    assert(replicaCountBySlice.contains((leftPair, 1)))
+    assert(replicaCountBySlice.contains((rightPair, 1)))
+    val resultSlices: Vector[Slice] = replicaCountBySlice.map {
+      case (slice: Slice, _: Int) => slice
+    }
+    assert(resultSlices.head.lowInclusive == SliceKey.MIN)
+    assert(resultSlices.last.highExclusive == InfinitySliceKey)
+    for (i: Int <- 1 until resultSlices.size) {
+      assert(resultSlices(i - 1).highExclusive == resultSlices(i).lowInclusive)
     }
   }
 }

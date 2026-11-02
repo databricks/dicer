@@ -7,7 +7,6 @@ import io.grpc.Status
 import com.databricks.caching.util.{PrefixLogger, StateMachine, StateMachineOutput, TickerTime}
 import com.databricks.caching.util.StatusUtils
 import com.databricks.dicer.assigner.EtcdPreferredAssignerStateMachine.Event.{
-  ExternalPickReceived,
   HeartbeatRequestReceived,
   HeartbeatSuccess,
   PreferredAssignerReceived,
@@ -110,23 +109,6 @@ class EtcdPreferredAssignerStateMachine(
   /** Incrementing operation id to identify heartbeat requests. */
   private var heartbeatOpId: Long = 0
 
-  /**
-   * The latest externally-supplied preferred-assigner pick, or `None` if no pick is currently
-   * known.
-   *
-   * All reads and writes occur from `onEvent` / `onAdvance`, which the enclosing
-   * `StateMachineDriver` dispatches on its SEC; no other synchronization is required.
-   *
-   * When set, every non-abdication preferred-assigner write proposes this pick rather than
-   * `selfAssignerInfo`. Abdication writes (`Preferred + isTerminating`) are the sole exception:
-   * they always propose no preferred assigner regardless of this field.
-   *
-   * Not cleared by run-state transitions — this is a deliberate invariant: the
-   * most-recently-received pick is preserved across all transitions (verified by the
-   * "ExternalPick is preserved across Preferred -> Standby transitions" test).
-   */
-  private var externalPickOpt: Option[AssignerInfo] = None
-
   override def onEvent(
       tickerTime: TickerTime,
       instant: Instant,
@@ -150,9 +132,6 @@ class EtcdPreferredAssignerStateMachine(
 
       case WriteResultReceived(startTime: TickerTime, result: Try[WriteResult]) =>
         onWriteResultReceived(tickerTime, startTime, result, outputBuilder)
-
-      case ExternalPickReceived(newPickOpt: Option[AssignerInfo]) =>
-        onExternalPickReceived(newPickOpt)
     }
     onAdvanceInternal(tickerTime, outputBuilder)
   }
@@ -223,16 +202,6 @@ class EtcdPreferredAssignerStateMachine(
             earliestWriteTime = tickerTime + config.writeRetryInterval
           }
           outputBuilder.ensureAdvanceBy(earliestWriteTime)
-        } else if (externalPickOpt.exists { pick: AssignerInfo =>
-            pick.uuid != selfAssignerInfo.uuid
-          }) {
-          // Phase 2.1 handoff: the external (consistent-hashing) pick names a different assigner,
-          // so install it as the new preferred. As the current preferred we are the sole writer of
-          // this value, so this is a direct CAS handoff against our own generation -- no
-          // split-brain window and no interval with no preferred. Once the write lands we learn the
-          // new preferred and transition to standby. Writing self would be a no-op, so we act only
-          // when the pick differs.
-          writePreferredAssignerCandidateUnlessTerminating(tickerTime, outputBuilder)
         }
 
       case standbyState: RunState.Standby =>
@@ -247,10 +216,9 @@ class EtcdPreferredAssignerStateMachine(
         //    arrived, and write ourselves as preferred if there have been too many recent
         //    consecutive heartbeat failures.
         if (standbyState.generation.incarnation < storeIncarnation) {
-          // Attempt to write the preferred-assigner candidate (external pick if known, else
-          // self).
+          // Attempt to write this assigner as preferred.
           earliestWriteTime = tickerTime // Allow the write to happen immediately.
-          writePreferredAssignerCandidateUnlessTerminating(tickerTime, outputBuilder)
+          writeSelfAsPreferredUnlessTerminating(tickerTime, outputBuilder)
         } else if (standbyState.generation.incarnation > storeIncarnation) {
           // The preferred assigner is from a future store incarnation, so we don't heartbeat
           // against it and will never attempt to take over.
@@ -277,7 +245,7 @@ class EtcdPreferredAssignerStateMachine(
           )
 
           // The preferred assigner has missed too many heartbeats; attempt to take over by
-          // writing the preferred-assigner candidate (external pick if known, else self).
+          // writing this assigner as preferred.
           // We won't actually transition to the preferred state until we learn that the write
           // succeeded via a PreferredAssignerReceived event.
           if (heartbeatState.failureCount >= config.heartbeatFailureThreshold) {
@@ -285,7 +253,7 @@ class EtcdPreferredAssignerStateMachine(
               s"The preferred assigner ${standbyState.assignerInfo.uuid} failed to respond " +
               s"${heartbeatState.failureCount} heartbeats."
             )
-            writePreferredAssignerCandidateUnlessTerminating(tickerTime, outputBuilder)
+            writeSelfAsPreferredUnlessTerminating(tickerTime, outputBuilder)
           }
           // Update the run state with the new heartbeat state.
           updateRunState(standbyState.withHeartbeatState(heartbeatState))
@@ -293,10 +261,9 @@ class EtcdPreferredAssignerStateMachine(
           onAdvanceInternal(tickerTime, outputBuilder)
         }
       case RunState.StandbyWithoutPreferred(_) =>
-        // If there is no preferred assigner, attempt to write the preferred-assigner
-        // candidate (external pick if known, else self) and ensure another advance call at the
-        // next write time to retry if necessary.
-        writePreferredAssignerCandidateUnlessTerminating(tickerTime, outputBuilder)
+        // If there is no preferred assigner, attempt to write this assigner as preferred and
+        // ensure another advance call at the next write time to retry if necessary.
+        writeSelfAsPreferredUnlessTerminating(tickerTime, outputBuilder)
     }
     outputBuilder.build()
   }
@@ -329,19 +296,6 @@ class EtcdPreferredAssignerStateMachine(
       info: PreferredAssignerValue,
       outputBuilder: StateMachineOutput.Builder[DriverAction]): Unit = {
     incorporatePreferredAssigner(tickerTime, info, outputBuilder)
-  }
-
-  /**
-   * Responds to [[Event.ExternalPickReceived]] by recording the new pick. The pick takes
-   * effect on the next preferred-assigner write — no write is triggered here.
-   */
-  private def onExternalPickReceived(newExternalPickOpt: Option[AssignerInfo]): Unit = {
-    if (externalPickOpt != newExternalPickOpt) {
-      val oldUuid: String = externalPickOpt.map(_.uuid.toString).getOrElse("none")
-      val newUuid: String = newExternalPickOpt.map(_.uuid.toString).getOrElse("none")
-      logger.info(s"External preferred-assigner pick updated: $oldUuid -> $newUuid")
-      externalPickOpt = newExternalPickOpt
-    }
   }
 
   /**
@@ -532,12 +486,9 @@ class EtcdPreferredAssignerStateMachine(
   }
 
   /**
-   * Writes a candidate as the preferred assigner, unless the assigner has received a termination
-   * signal. The candidate is the latest external pick if one is known, or
-   * `selfAssignerInfo` otherwise. Used for every "make someone preferred" path — abdication is
-   * handled separately in the `RunState.Preferred` advance branch.
+   * Writes this assigner as the preferred assigner, unless it has received a termination signal.
    */
-  private def writePreferredAssignerCandidateUnlessTerminating(
+  private def writeSelfAsPreferredUnlessTerminating(
       tickerTime: TickerTime,
       outputBuilder: StateMachineOutput.Builder[DriverAction]): Unit = {
     if (!isTerminating) {
@@ -550,24 +501,12 @@ class EtcdPreferredAssignerStateMachine(
           predecessorGeneration: Generation =>
             predecessorGeneration.incarnation == storeIncarnation
         }
-        // Defer to the external pick when one has been wired in; otherwise write self,
-        // preserving pre-migration behavior.
-        externalPickOpt match {
-          case Some(externalPick) =>
-            emitWrite(
-              tickerTime,
-              ValueSource.ExternalPick,
-              PreferredAssignerProposal(predecessorGenerationOpt, Some(externalPick)),
-              outputBuilder
-            )
-          case None =>
-            emitWrite(
-              tickerTime,
-              ValueSource.Self,
-              PreferredAssignerProposal(predecessorGenerationOpt, Some(selfAssignerInfo)),
-              outputBuilder
-            )
-        }
+        emitWrite(
+          tickerTime,
+          ValueSource.Self,
+          PreferredAssignerProposal(predecessorGenerationOpt, Some(selfAssignerInfo)),
+          outputBuilder
+        )
         earliestWriteTime = tickerTime + config.writeRetryInterval
       }
       // Ensure an advance call at the next write time to retry if necessary. This depends on the
@@ -609,12 +548,6 @@ object EtcdPreferredAssignerStateMachine {
 
     /** A write attempt has completed with the given result. */
     case class WriteResultReceived(startTime: TickerTime, result: Try[WriteResult]) extends Event
-
-    /**
-     * Updates [[externalPickOpt]]. Pass `None` to clear any previously known pick. See the
-     * field's scaladoc for how the recorded pick influences subsequent writes.
-     */
-    case class ExternalPickReceived(newPickOpt: Option[AssignerInfo]) extends Event
 
     // We do not need an event on heartbeat failure, the state machine will fail the heartbeat if
     // exceeds the deadline.

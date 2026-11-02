@@ -10,12 +10,10 @@ import com.databricks.caching.util.{
 import com.databricks.dicer.assigner.algorithm.Algorithm.{Config, MAX_AVG_SLICE_REPLICAS}
 
 /**
- * Merges adjacent cold slices to ensure total replica count stays below MAX_AVG_SLICE_REPLICAS per
- * resource. This phase repeatedly merges the coldest adjacent slice pairs until the total replica
- * count is within bounds.
- *
- * Guarantee: Merged slices always have the minimum number of replicas (relied upon by
- * calculateDesiredLoadRange). This is reasonable because we only merge the coldest pairs.
+ * Merges adjacent cold Slices that both have the minimum number of replicas, to keep the total
+ * replica count at most MAX_AVG_SLICE_REPLICAS per resource. This phase repeatedly merges the
+ * coldest such pairs until the total replica count is within bounds. The merged Slice keeps the
+ * minimum number of replicas, so merging never changes how many replicas any key has.
  */
 private[assigner] object MergePhase {
   def merge(config: Config, resources: Resources, assignment: MutableAssignment): Unit = {
@@ -26,14 +24,8 @@ private[assigner] object MergePhase {
    * Merges the coldest slice pairs until the total number of slice replicas is less than or equal
    * to (MAX_AVG_SLICE_REPLICAS * numResources).
    *
-   * When a pair of slices is merged, the resulting slice will be unconditionally configured to have
-   * the minimum number of replicas. This is because the slice pairs that we merge are always the
-   * coldest adjacent pairs in the assignment, and if we only merge when there are more than
-   * [[MAX_AVG_SLICE_REPLICAS]] * numResources slice replicas, then the load on the coldest pair
-   * post-merge should also be fairly low.
-   *
-   * In addition, the per-replica load after merge is possible to be greater than split threshold,
-   * but this scenario should also be rare because we are merging the coldest pairs.
+   * A merged Slice may end up above the split threshold, but this should be rare because we merge
+   * the coldest pairs.
    */
   private class Merger(config: Config, resources: Resources, assignment: MutableAssignment) {
 
@@ -111,7 +103,7 @@ private[assigner] object MergePhase {
        */
       def merge(): Unit = {
         iassert(!attached, "this candidate must be detached from the heap before merging")
-        // See the doc of `Merger` for why `minReplicas` is used.
+        // Both halves have `minReplicas` (see `populateCandidates`).
         val merged: assignment.MutableSliceAssignment =
           left.mergeWithSuccessor(config.resourceAdjustedKeyReplicationConfig.minReplicas)
 
@@ -157,19 +149,28 @@ private[assigner] object MergePhase {
       }
     }
 
-    /** Populates all merge candidates (all adjacent Slices in [[assignment]]). */
+    /**
+     * Populates all merge candidates: all pairs of adjacent Slices in [[assignment]] that both have
+     * the minimum number of replicas.
+     */
     private def populateCandidates(): Unit = {
-      // Iterate over the assignment Slices in order to create candidates for each adjacent
-      // left-right pair.
+      val minReplicas: Int = config.resourceAdjustedKeyReplicationConfig.minReplicas
+      // Iterate over the assignment Slices in order to create candidates for each eligible
+      // adjacent left-right pair. A Slice with more than the minimum number of replicas is never
+      // merged, so it breaks the chain of predecessor/successor links between candidates.
       val it = assignment.sliceAssignmentsIterator
       var left: assignment.MutableSliceAssignment = it.next()
       var predecessorOpt: Option[CandidateSlicePair] = None
       while (it.hasNext) {
         val right: assignment.MutableSliceAssignment = it.next()
-        val candidate = new CandidateSlicePair(left, right, predecessorOpt)
-        candidates.push(candidate)
+        if (left.currentNumReplicas == minReplicas && right.currentNumReplicas == minReplicas) {
+          val candidate = new CandidateSlicePair(left, right, predecessorOpt)
+          candidates.push(candidate)
+          predecessorOpt = Some(candidate)
+        } else {
+          predecessorOpt = None
+        }
         left = right
-        predecessorOpt = Some(candidate)
       }
     }
   }

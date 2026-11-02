@@ -32,17 +32,11 @@ import com.databricks.testing.DatabricksTest
 
 class SubsliceAnnotationsMapSuite extends DatabricksTest {
 
-  private val CONSISTENCY_MODES = Seq[AssignmentConsistencyMode](
-    AssignmentConsistencyMode.Affinity,
-    AssignmentConsistencyMode.Strong
-  )
-
   test("SubsliceAnnotationsMap manual") {
     // Test plan: Create an assignment with some subslice annotations. Verify that the entries from
     // `SubsliceAnnotationsMap` are as expected.
     val assignment: Assignment = createAssignment(
       generation = 50,
-      AssignmentConsistencyMode.Affinity,
       assignerServiceInfoOpt = None,
       ("" -- "Balin") @@ 10 -> Seq("pod1"),
       ("Balin" -- "Kili") @@ 20 -> Seq("pod1") | Map(
@@ -80,58 +74,53 @@ class SubsliceAnnotationsMapSuite extends DatabricksTest {
 
   test("SubsliceAnnotationsMap for resource") {
     // Test plan: Create an assignment and verify that `SubsliceAnnotationsMap` calls return the
-    // Slice generation for only assigned resources. Tests consistency mode variations.
-    for (consistencyMode <- CONSISTENCY_MODES) {
-      val assignment: Assignment = createAssignment(
-        generation = 42 ## 67,
-        consistencyMode,
-        assignerServiceInfoOpt = None,
-        ("" -- fp("Dori")) @@ (42 ## 34) -> Seq("Pod2"),
-        (fp("Dori") -- fp("Fili")) @@ (42 ## 24) -> Seq("Pod0"),
-        (fp("Fili") -- fp("Kili")) @@ (42 ## 45) -> Seq("Pod1"),
-        (fp("Kili") -- fp("Nori")) @@ (42 ## 67) -> Seq("Pod2"),
-        (fp("Nori") -- ∞) @@ (42 ## 34) -> Seq("Pod3")
-      )
+    // Slice generation for resources whose address matches an assigned resource, regardless of the
+    // resource's incarnation (creation time).
+    val assignment: Assignment = createAssignment(
+      generation = 42 ## 67,
+      assignerServiceInfoOpt = None,
+      ("" -- fp("Dori")) @@ (42 ## 34) -> Seq("Pod2"),
+      (fp("Dori") -- fp("Fili")) @@ (42 ## 24) -> Seq("Pod0"),
+      (fp("Fili") -- fp("Kili")) @@ (42 ## 45) -> Seq("Pod1"),
+      (fp("Kili") -- fp("Nori")) @@ (42 ## 67) -> Seq("Pod2"),
+      (fp("Nori") -- ∞) @@ (42 ## 34) -> Seq("Pod3")
+    )
 
-      // Test data maps keys to expected assigned resources and Slice generations.
-      val testData = Seq[(SliceKey, String, Generation)](
-        (SliceKey.MIN, "Pod2", 42 ## 34),
-        (fp("Dori"), "Pod0", 42 ## 24),
-        (fp("Fili"), "Pod1", 42 ## 45),
-        (fp("Kili"), "Pod2", 42 ## 67),
-        (fp("Nori"), "Pod3", 42 ## 34),
-        (fp("Ori"), "Pod3", 42 ## 34)
-      )
-      // In addition to assigned resources, produce variant SQUIDs with the same address to test
-      // behavior that needs to be different depending on the consistency mode.
-      val altIncarnationResources = Seq[Squid](
-        createTestSquid("Pod0", creationTimeOffset = 1),
-        createTestSquid("Pod1", creationTimeOffset = 1),
-        createTestSquid("Pod2", creationTimeOffset = 1),
-        createTestSquid("Pod3", creationTimeOffset = 1)
-      )
-      for (tuple <- testData) {
-        val (key, assignedResourceUri, sliceGeneration): (SliceKey, String, Generation) = tuple
-        val assignedResource: Squid = createTestSquid(assignedResourceUri)
-        assert(assignment.isAssignedKey(key, assignedResource))
-        for (resource: Squid <- assignment.assignedResources ++ altIncarnationResources) {
-          // If the SQUID of the resource we're looking up is the same as the assigned resource
-          // SQUID, we should get the Slice generation. In the Affinity consistency mode,
-          // only the addresses need to match.
-          val expectedGenerationNumber: Option[UnixTimeVersion] =
-            if (resource == assignedResource ||
-              (consistencyMode == AssignmentConsistencyMode.Affinity &&
-              resource.resourceAddress == assignedResource.resourceAddress)) {
-              Some(sliceGeneration.number)
-            } else {
-              None
-            }
-          val subsliceAnnotationsMap =
-            SubsliceAnnotationsMap(assignment, resource)
-          assert(
-            subsliceAnnotationsMap.continuouslyAssignedGeneration(key) == expectedGenerationNumber
-          )
-        }
+    // Test data maps keys to expected assigned resources and Slice generations.
+    val testData = Seq[(SliceKey, String, Generation)](
+      (SliceKey.MIN, "Pod2", 42 ## 34),
+      (fp("Dori"), "Pod0", 42 ## 24),
+      (fp("Fili"), "Pod1", 42 ## 45),
+      (fp("Kili"), "Pod2", 42 ## 67),
+      (fp("Nori"), "Pod3", 42 ## 34),
+      (fp("Ori"), "Pod3", 42 ## 34)
+    )
+    // In addition to assigned resources, produce variant SQUIDs with the same address to verify
+    // that only the address needs to match.
+    val altIncarnationResources = Seq[Squid](
+      createTestSquid("Pod0", creationTimeOffset = 1),
+      createTestSquid("Pod1", creationTimeOffset = 1),
+      createTestSquid("Pod2", creationTimeOffset = 1),
+      createTestSquid("Pod3", creationTimeOffset = 1)
+    )
+    for (tuple <- testData) {
+      val (key, assignedResourceUri, sliceGeneration): (SliceKey, String, Generation) = tuple
+      val assignedResource: Squid = createTestSquid(assignedResourceUri)
+      assert(assignment.isAssignedKey(key, assignedResource))
+      for (resource: Squid <- assignment.assignedResources ++ altIncarnationResources) {
+        // The Slice generation is returned whenever the resource's address matches the assigned
+        // resource's address; the incarnation (creation time) is not considered.
+        val expectedGenerationNumber: Option[UnixTimeVersion] =
+          if (resource.resourceAddress == assignedResource.resourceAddress) {
+            Some(sliceGeneration.number)
+          } else {
+            None
+          }
+        val subsliceAnnotationsMap =
+          SubsliceAnnotationsMap(assignment, resource)
+        assert(
+          subsliceAnnotationsMap.continuouslyAssignedGeneration(key) == expectedGenerationNumber
+        )
       }
     }
   }
@@ -183,7 +172,6 @@ class SubsliceAnnotationsMapSuite extends DatabricksTest {
           ProposedAssignment(predecessorOpt, sliceMap = proposal, assignerServiceInfoOpt = None)
             .commit(
               isFrozen = false,
-              AssignmentConsistencyMode.Affinity,
               i * 10 + 1
             )
 
@@ -242,7 +230,6 @@ class SubsliceAnnotationsMapSuite extends DatabricksTest {
     val assignment1: Assignment =
       createAssignment(
         generation = 1,
-        AssignmentConsistencyMode.Affinity,
         assignerServiceInfoOpt = None,
         ("" -- ∞) @@ 1 -> Seq(resource1)
       )
@@ -256,7 +243,6 @@ class SubsliceAnnotationsMapSuite extends DatabricksTest {
       ProposedAssignment(Some(assignment1), sliceMap = proposal2, assignerServiceInfoOpt = None)
         .commit(
           isFrozen = false,
-          AssignmentConsistencyMode.Affinity,
           generation = 32
         )
     assert(SliceTestUtils.hasStateTransfers(assignment2))

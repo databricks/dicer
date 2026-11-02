@@ -403,31 +403,6 @@ from_diff_failure_test_cases: [
       ]
     }
     expected_diff_unused: INCONSISTENCY
-  },
-  # Unsupported consistency mode.
-  {
-    diff: {
-      is_consistent: true
-      generation { incarnation: 2 number: 10 }
-      slice_assignments: [
-        {
-          slice { low_inclusive: "" high_exclusive: "Fili" }
-          generation { incarnation: 2 number: 10 }
-          resources: ["Pod0", "Pod1"]
-        },
-        {
-          slice { low_inclusive: "Fili" high_exclusive: "Kili" }
-          generation { incarnation: 2 number: 10 }
-          resources: ["Pod2"]
-        },
-        {
-          slice { low_inclusive: "Kili" }
-          generation { incarnation: 2 number: 10 }
-          resources: ["Pod2"]
-        }
-      ]
-    }
-    expected_error: "TODO(<internal bug>): Only Affinity is currently supported"
   }
 ]
 
@@ -529,7 +504,6 @@ assigned_resources_test_cases: [
   },
   {
     assignment: {
-      is_consistent: true
       generation: { incarnation: 2 number: 81 }
       slice_assignments: [
         {
@@ -635,7 +609,6 @@ is_assigned_key_test_cases: [
   },
   {
     assignment: {
-      is_consistent: true
       generation: { incarnation: 4 number: 67 }
       slice_assignments: [
         {
@@ -655,25 +628,25 @@ is_assigned_key_test_cases: [
         }
       ]
     }
-    # For Strong consistency mode, resources with the same URI as an assigned resource but with
-    # different UUID/creation time are not considered assigned.
+    # Resources with the same URI as an assigned resource are considered assigned regardless of
+    # UUID/creation time: only the address needs to match.
     calls: [
       { slice_key: "" resource: "Pod2" expected_result: true },
       { slice_key: "" resource: "Pod3" expected_result: true },
       { slice_key: "" resource: "Pod4" expected_result: false },
-      { slice_key: "" resource: "Pod2" resource_creation_time_offset: 1 expected_result: false },
-      { slice_key: "" resource: "Pod3" resource_creation_time_offset: 1 expected_result: false },
+      { slice_key: "" resource: "Pod2" resource_creation_time_offset: 1 expected_result: true },
+      { slice_key: "" resource: "Pod3" resource_creation_time_offset: 1 expected_result: true },
       { slice_key: "Dori" resource: "Pod1" expected_result: true },
       { slice_key: "Dori" resource: "Pod2" expected_result: false },
-      { slice_key: "Dori" resource: "Pod1" resource_creation_time_offset: 1 expected_result: false },
+      { slice_key: "Dori" resource: "Pod1" resource_creation_time_offset: 1 expected_result: true },
       { slice_key: "Fili" resource: "Pod1" expected_result: true },
       { slice_key: "Fili" resource: "Pod3" expected_result: false },
       { slice_key: "Kili" resource: "Pod2" expected_result: true },
-      { slice_key: "Kili" resource: "Pod3" resource_creation_time_offset: 1 expected_result: false },
+      { slice_key: "Kili" resource: "Pod3" resource_creation_time_offset: 1 expected_result: true },
       { slice_key: "Nori" resource: "Pod2" expected_result: true },
       { slice_key: "Nori" resource: "Pod3" expected_result: true },
-      { slice_key: "Nori" resource: "Pod3" resource_creation_time_offset: 1 expected_result: false },
-      { slice_key: "Nori" resource: "Pod1" resource_creation_time_offset: 1 expected_result: false }
+      { slice_key: "Nori" resource: "Pod3" resource_creation_time_offset: 1 expected_result: true },
+      { slice_key: "Nori" resource: "Pod1" resource_creation_time_offset: 1 expected_result: true }
     ]
   }
 ]
@@ -828,7 +801,6 @@ get_slice_set_for_resource_test_cases: [
   },
   {
     assignment: {
-      is_consistent: true
       generation: { incarnation: 2 number: 67 }
       slice_assignments: [
         {
@@ -858,8 +830,8 @@ get_slice_set_for_resource_test_cases: [
         }
       ]
     }
-    # For Strong consistency mode, resources with the same URI as an assigned resource but with
-    # different UUID/creation time are not considered assigned.
+    # Resources with the same URI as an assigned resource are considered assigned regardless of
+    # UUID/creation time: only the address needs to match.
     calls: [
       {
         resource: "Pod0"
@@ -894,12 +866,16 @@ get_slice_set_for_resource_test_cases: [
       {
         resource: "Pod1"
         resource_creation_time_offset: 1
-        # No expected slices.
+        expected_slices: [
+          { low_inclusive: "" high_exclusive: "Fili" }
+        ]
       },
       {
         resource: "Pod4"
         resource_creation_time_offset: 1
-        # No expected slices.
+        expected_slices: [
+          { low_inclusive: "Nori" }
+        ]
       }
     ]
   }

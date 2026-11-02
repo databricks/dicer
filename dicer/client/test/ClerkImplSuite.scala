@@ -363,16 +363,18 @@ class ClerkImplSuite extends DatabricksTest with TestName {
       .create(clerkConf, target, DUMMY_WATCH_ADDRESS, identity[ResourceAddress], sourceIpOpt = None)
   }
 
-  /** Creates a Clerk via [[ClerkImpl.createForDataPlaneDirectClerk]] (direct-to-assigner path). */
+  /** Creates a Clerk via [[ClerkImpl.createForDirectClerk]] (direct-to-assigner path). */
   private def createViaDataPlaneDirect(
       target: Target,
       status: ClientUuidStatus): ClerkImpl[ResourceAddress] = {
     val clerkConf: ClerkConf = createClientUuidTestClerkConf(status)
-    ClerkImpl.createForDataPlaneDirectClerk(
+    ClerkImpl.createForDirectClerk(
       secPoolOpt = None,
       clerkConf,
       target,
       DUMMY_WATCH_ADDRESS,
+      watchFromDataPlane = true,
+      alternativeTargetOpt = None,
       identity[ResourceAddress]
     )
   }
@@ -473,7 +475,7 @@ class ClerkImplSuite extends DatabricksTest with TestName {
     // The "clerk" factory context (the public ClerkImpl.create path) is covered by
     // ClerkSuiteBase; this test covers the remaining entry points.
     Map[String, (String, ClerkImplFactory)](
-      "createForDataPlaneDirectClerk" -> (("dataPlaneDirectClerk", createViaDataPlaneDirect)),
+      "createForDirectClerk" -> (("dataPlaneDirectClerk", createViaDataPlaneDirect)),
       "createForMultiClerk" -> (("multiClerk", createViaMultiClerk)),
       "createForShardedStub" -> (("shardedStub", createViaShardedStub))
     )

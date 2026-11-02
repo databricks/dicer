@@ -42,8 +42,6 @@ import scala.util.Random
 
 import com.databricks.dicer.assigner.{
   EtcdPreferredAssignerDriver,
-  KubernetesMembershipChecker,
-  MigrationMode,
   PreferredAssignerConfig,
   PreferredAssignerDriver,
   PreferredAssignerMetrics,
@@ -190,57 +188,19 @@ object PreferredAssignerTestUtils {
     }
   }
 
-  /**
-   * Asserts that the current CH assigner role in the gauge is `role`.
-   *
-   * @note Please note that when there are multiple assigners, this method will only check the role
-   *       of the one who last updated the gauge. In production, different assigners are running in
-   *       different pods, and we can filter by "kubernetes_pod_name" label to get the role of a
-   *       specific assigner.
-   */
-  def assertChAssignerRoleGaugeMatches(
-      role: PreferredAssignerMetrics.MonitoredAssignerRole): Unit = {
-    val gaugeName: String = "dicer_assigner_ch_preferred_assigner_role_gauge"
-    AssertionWaiter(s"Assert current CH role is $role").await {
-      val currentRoleValues: Map[String, Int] = MonitoredAssignerRole.values.map {
-        role: MonitoredAssignerRole =>
-          role.toString -> MetricUtils
-            .getMetricValue(registry, gaugeName, Map("role" -> role.toString))
-            .toInt
-      }.toMap
-      for (otherRole: MonitoredAssignerRole <- MonitoredAssignerRole.values.filterNot(
-          _ == role
-        )) {
-        assert(currentRoleValues(otherRole.toString) == 0, s"CH role $otherRole should be 0")
-      }
-      assert(currentRoleValues(role.toString) == 1, s"CH role $role should be 1")
-    }
-  }
-
   def createAssignerConfig(
       preferredAssignerStoreIncarnation: Incarnation,
       preferredAssignerEnabled: Boolean = true,
-      targetMigratorOpt: Option[TargetMigrator] = None,
-      migrationModeOpt: Option[MigrationMode] = None,
-      membershipCheckerFactoryOpt: Option[KubernetesMembershipChecker.Factory] = None)
-      : TestAssigner.Config = {
+      targetMigratorOpt: Option[TargetMigrator] = None): TestAssigner.Config = {
     val baseConfigEntries: Seq[(String, Any)] = Seq(
       "databricks.dicer.assigner.preferredAssigner.modeEnabled" -> preferredAssignerEnabled,
       "databricks.dicer.assigner.preferredAssigner.storeIncarnation" ->
       preferredAssignerStoreIncarnation.value,
       "databricks.dicer.assigner.store.etcd.sslEnabled" -> false
     )
-    // The migration stage is a conf bit, exactly as in production; tests vary behavior through it
-    // rather than by swapping driver implementations.
-    val migrationModeEntries: Seq[(String, Any)] =
-      migrationModeOpt.toSeq.map { mode: MigrationMode =>
-        "databricks.dicer.assigner.preferredAssigner.migrationMode" -> mode.name
-      }
     TestAssigner.Config.create(
-      assignerConf =
-        new DicerAssignerConf(Configs.parseMap((baseConfigEntries ++ migrationModeEntries): _*)),
-      targetMigratorOpt = targetMigratorOpt,
-      membershipCheckerFactoryOpt = membershipCheckerFactoryOpt
+      assignerConf = new DicerAssignerConf(Configs.parseMap(baseConfigEntries: _*)),
+      targetMigratorOpt = targetMigratorOpt
     )
   }
 

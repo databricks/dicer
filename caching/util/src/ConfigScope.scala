@@ -5,8 +5,29 @@ import com.databricks.api.proto.caching.external.ConfigScopeP
 import com.databricks.conf.trusted.LocationConf
 import com.databricks.common.alias.RichScalaPB.RichMessage
 
-/** Represents the scope of a configuration override. */
-sealed trait ConfigScope
+/**
+ * Represents the scope of a configuration override.
+ *
+ * Config scopes have a stable total ordering. Cluster scopes precede instance scopes, and scopes
+ * within each kind are ordered lexicographically by their URI or instance ID, respectively.
+ */
+sealed trait ConfigScope extends Ordered[ConfigScope] {
+
+  /** Returns the proto representation of this configuration scope. */
+  def toProto: ConfigScopeP
+
+  /** Compares config scopes according to the stable ordering documented on [[ConfigScope]]. */
+  final override def compare(that: ConfigScope): Int = {
+    (this, that) match {
+      case (ClusterConfigScope(clusterUri), ClusterConfigScope(thatClusterUri)) =>
+        clusterUri.compareTo(thatClusterUri)
+      case (InstanceConfigScope(instanceId), InstanceConfigScope(thatInstanceId)) =>
+        instanceId.compareTo(thatInstanceId)
+      case (_: ClusterConfigScope, _: InstanceConfigScope) => -1
+      case (_: InstanceConfigScope, _: ClusterConfigScope) => 1
+    }
+  }
+}
 
 /**
  * Represents a cluster for which a configuration is overridden.
@@ -21,6 +42,8 @@ case class ClusterConfigScope @throws[IllegalArgumentException](
     clusterUri.startsWith("kubernetes-cluster:"),
     s"Cluster URI must start with 'kubernetes-cluster:': $clusterUri"
   )
+
+  override def toProto: ConfigScopeP = ConfigScopeP().withClusterUri(clusterUri)
 
   override def toString: String = clusterUri
 }
@@ -56,6 +79,8 @@ case class InstanceConfigScope @throws[IllegalArgumentException](
     extends ConfigScope {
   // TODO(<internal bug>): Share instance ID validation with Target.
   require(Rfc1123.isValid(instanceId), s"Instance ID is invalid: $instanceId")
+
+  override def toProto: ConfigScopeP = ConfigScopeP().withInstanceId(instanceId)
 
   override def toString: String = instanceId
 }

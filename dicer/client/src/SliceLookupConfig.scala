@@ -1,6 +1,6 @@
 package com.databricks.dicer.client
 
-import java.net.{InetAddress, URI}
+import java.net.URI
 import java.util.{Objects, UUID}
 
 import scala.concurrent.duration._
@@ -9,7 +9,6 @@ import com.databricks.caching.util.{KubernetesClusterUri, RegionUri, WhereAmIHel
 import com.databricks.dicer.common.ClientType
 import com.databricks.dicer.common.WatchServerHelper.{WATCH_RPC_TIMEOUT, validateWatchRpcTimeout}
 import com.databricks.dicer.external.{AppTarget, Target}
-import com.databricks.rpc.tls.TLSOptions
 
 /**
  * REQUIRES: `watchRpcTimeout` is at least 500 milliseconds
@@ -17,20 +16,17 @@ import com.databricks.rpc.tls.TLSOptions
  * Configuration for SliceLookup used by Clerk or Slicelet clients.
  *
  * Note: The config is used as a key for indexing into a map. Therefore, it should contain only the
- * information that is needed to uniquely identify the SliceLookup instance.
+ * information that is needed to uniquely identify the SliceLookup instance. The fields describing
+ * the watch connection itself live on [[WatchStubManagerConfig]], so that lookups differing only in
+ * a connection field are distinguished by that config rather than by this one.
  *
  * Instances are created through [[SliceLookupConfig.apply]], which populates `clientClusterUriOpt`
  * and `clientRegionUriOpt` from [[WhereAmIHelper]]; the primary constructor is `private` so callers
  * cannot bypass that population.
  *
  * @param clientType Type of the client, either Clerk or Slicelet
- * @param watchAddress URI to which the client connects to watch assignments
- * @param tlsOptionsOpt TLS options for the gRPC connection
  * @param target Resources for which the assignment is being watched
  * @param watchStubCacheTime How long to cache the gRPC stub for the watch RPC
- * @param watchFromDataPlane Whether the client is running in the data plane and watching
- *                           assignments from the Dicer Assigner running in the region's general
- *                           cluster.
  * @param watchRpcTimeout The deadline sent in the client request for each RPC.
  * @param clientIdOpt Unique identifier for this client, if available; typically the Kubernetes
  *                    pod UID. None when the client deployment has not yet been configured with
@@ -38,9 +34,6 @@ import com.databricks.rpc.tls.TLSOptions
  * @param minRetryDelay Minimum time to retry a failed RPC call for exponential backoff.
  * @param maxRetryDelay Maximum time to retry a failed RPC call for exponential backoff.
  * @param enableRateLimiting Whether rate limiting is enabled for watch RPC calls.
- * @param sourceIpOpt Local (source) address to bind the watch connection to, so it egresses through
- *                    the interface owning that address. `None` lets the kernel pick a source
- *                    address from the route.
  * @param alternativeTargetOpt See [[ClientRequestP.alternativeTarget]].
  * @param clientClusterUriOpt The Kubernetes cluster URI of the pod running this client, or `None`
  *                            when WhereAmI is unavailable.
@@ -51,49 +44,37 @@ import com.databricks.rpc.tls.TLSOptions
 // the primary constructor is `private`, which would let any caller derive a config carrying an
 // arbitrary `clientClusterUriOpt` / `clientRegionUriOpt` instead of the ones `apply` captures from
 // [[WhereAmIHelper]].
+//
+// `watchStubCacheTime` describes the watch connection rather than the lookup's identity, but it
+// lives here rather than on WatchStubManagerConfig (where Rust keeps it) because the redirect-stub
+// cache it configures is owned by SliceLookup in Scala and by WatchStubManager in Rust. Each
+// language keeps the field on the config of whichever class owns the cache.
+// TODO(<internal bug>): Remove this field once the redirect-stub cache is removed (see the TODO on
+// SliceLookup.watchStubsCache); Rust should drop it from WatchStubManagerConfig at the same time.
 class SliceLookupConfig private (
     val clientType: ClientType,
-    val watchAddress: URI,
-    val tlsOptionsOpt: Option[TLSOptions],
     val target: Target,
     val clientIdOpt: Option[UUID],
     val watchStubCacheTime: FiniteDuration,
-    val watchFromDataPlane: Boolean,
     val alternativeTargetOpt: Option[AppTarget],
     val watchRpcTimeout: FiniteDuration,
     val minRetryDelay: FiniteDuration,
     val maxRetryDelay: FiniteDuration,
     val enableRateLimiting: Boolean,
-    val sourceIpOpt: Option[InetAddress],
     val clientClusterUriOpt: Option[KubernetesClusterUri],
     val clientRegionUriOpt: Option[RegionUri]) {
   validateWatchRpcTimeout(watchRpcTimeout)
 
-  /**
-   * Client name to use for the RPC stub. A source-bound lookup includes the address so its channels
-   * and metrics stay distinct from unbound or differently bound lookups.
-   */
-  val clientName: String = {
-    val baseClientName: String = s"dicer-$clientType-${target.name}"
-    sourceIpOpt.fold(baseClientName)(
-      (sourceIp: InetAddress) => s"$baseClientName-source-ip-${sourceIp.getHostAddress}"
-    )
-  }
-
   override def equals(obj: Any): Boolean = obj match {
     case that: SliceLookupConfig =>
       clientType == that.clientType &&
-      watchAddress == that.watchAddress &&
-      tlsOptionsOpt == that.tlsOptionsOpt &&
       target == that.target &&
       clientIdOpt == that.clientIdOpt &&
       watchStubCacheTime == that.watchStubCacheTime &&
-      watchFromDataPlane == that.watchFromDataPlane &&
       watchRpcTimeout == that.watchRpcTimeout &&
       minRetryDelay == that.minRetryDelay &&
       maxRetryDelay == that.maxRetryDelay &&
       enableRateLimiting == that.enableRateLimiting &&
-      sourceIpOpt == that.sourceIpOpt &&
       alternativeTargetOpt == that.alternativeTargetOpt &&
       clientClusterUriOpt == that.clientClusterUriOpt &&
       clientRegionUriOpt == that.clientRegionUriOpt
@@ -102,29 +83,24 @@ class SliceLookupConfig private (
 
   override def hashCode(): Int = Objects.hash(
     clientType,
-    watchAddress,
-    tlsOptionsOpt,
     target,
     clientIdOpt,
     watchStubCacheTime,
-    watchFromDataPlane: java.lang.Boolean,
     watchRpcTimeout,
     minRetryDelay,
     maxRetryDelay,
     enableRateLimiting: java.lang.Boolean,
-    sourceIpOpt,
     alternativeTargetOpt,
     clientClusterUriOpt,
     clientRegionUriOpt
   )
 
   override def toString: String =
-    s"SliceLookupConfig(clientType=$clientType, watchAddress=$watchAddress, " +
-    s"tlsOptionsOpt=$tlsOptionsOpt, target=$target, clientIdOpt=$clientIdOpt, " +
-    s"watchStubCacheTime=$watchStubCacheTime, watchFromDataPlane=$watchFromDataPlane, " +
-    s"watchRpcTimeout=$watchRpcTimeout, minRetryDelay=$minRetryDelay, " +
-    s"maxRetryDelay=$maxRetryDelay, enableRateLimiting=$enableRateLimiting, " +
-    s"sourceIpOpt=$sourceIpOpt, alternativeTargetOpt=$alternativeTargetOpt, " +
+    s"SliceLookupConfig(clientType=$clientType, target=$target, clientIdOpt=$clientIdOpt, " +
+    s"watchStubCacheTime=$watchStubCacheTime, watchRpcTimeout=$watchRpcTimeout, " +
+    s"minRetryDelay=$minRetryDelay, maxRetryDelay=$maxRetryDelay, " +
+    s"enableRateLimiting=$enableRateLimiting, " +
+    s"alternativeTargetOpt=$alternativeTargetOpt, " +
     s"clientClusterUriOpt=$clientClusterUriOpt, clientRegionUriOpt=$clientRegionUriOpt)"
 }
 
@@ -161,18 +137,14 @@ object SliceLookupConfig {
    */
   def apply(
       clientType: ClientType,
-      watchAddress: URI,
-      tlsOptionsOpt: Option[TLSOptions],
       target: Target,
       clientIdOpt: Option[UUID],
       watchStubCacheTime: FiniteDuration,
-      watchFromDataPlane: Boolean,
       alternativeTargetOpt: Option[AppTarget],
       watchRpcTimeout: FiniteDuration = WATCH_RPC_TIMEOUT,
       minRetryDelay: FiniteDuration = 1.second,
       maxRetryDelay: FiniteDuration = 10.seconds,
-      enableRateLimiting: Boolean,
-      sourceIpOpt: Option[InetAddress]): SliceLookupConfig = {
+      enableRateLimiting: Boolean): SliceLookupConfig = {
     val clientClusterUriOpt: Option[KubernetesClusterUri] =
       WhereAmIHelper.getClusterUri.flatMap { (uri: URI) =>
         KubernetesClusterUri.fromUri(uri.toASCIIString)
@@ -181,18 +153,14 @@ object SliceLookupConfig {
       WhereAmIHelper.getRegionUri.flatMap(RegionUri.fromUri)
     new SliceLookupConfig(
       clientType = clientType,
-      watchAddress = watchAddress,
-      tlsOptionsOpt = tlsOptionsOpt,
       target = target,
       clientIdOpt = clientIdOpt,
       watchStubCacheTime = watchStubCacheTime,
-      watchFromDataPlane = watchFromDataPlane,
       alternativeTargetOpt = alternativeTargetOpt,
       watchRpcTimeout = watchRpcTimeout,
       minRetryDelay = minRetryDelay,
       maxRetryDelay = maxRetryDelay,
       enableRateLimiting = enableRateLimiting,
-      sourceIpOpt = sourceIpOpt,
       clientClusterUriOpt = clientClusterUriOpt,
       clientRegionUriOpt = clientRegionUriOpt
     )

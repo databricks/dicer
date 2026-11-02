@@ -148,6 +148,7 @@ proto_library(
 
 scala_test(
     name = "rpc_context_suite",
+    timeout = "short",
     testonly = True,
     srcs = [
         "test/RPCContextSuite.scala",

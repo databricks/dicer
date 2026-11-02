@@ -28,7 +28,7 @@ import com.databricks.caching.util.MetricUtils.ChangeTracker
 import com.databricks.caching.util.TestUtils.{TestName, assertThrow}
 import com.databricks.conf.Configs
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
-import com.databricks.dicer.client.WatchStubManager
+import com.databricks.dicer.client.{WatchStubManager, WatchStubManagerConfig}
 import com.databricks.rpc.tls.TLSOptionsMigration
 import com.databricks.dicer.assigner.config.{
   ChurnConfig,
@@ -52,6 +52,7 @@ import com.databricks.dicer.common.{
   ClerkData,
   ClientRequest,
   ClientResponse,
+  ClientType,
   Generation,
   ProposedSliceAssignment,
   SliceletData,
@@ -190,11 +191,14 @@ class AssignerSuite extends DatabricksTest with TestName {
 
   /** Manages the creation of watch stubs for this test suite. */
   private val watchStubManager = new WatchStubManager(
-    clientName = "dicer-assigner",
-    defaultWatchAddress = URI.create(s"http://localhost:${testEnv.getAssignerPort}"),
-    tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
-    watchFromDataPlane = false,
-    sourceIpOpt = None
+    WatchStubManagerConfig(
+      clientType = ClientType.Slicelet,
+      targetName = "assigner-suite-test",
+      watchAddress = URI.create(s"http://localhost:${testEnv.getAssignerPort}"),
+      tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
+      watchFromDataPlane = false,
+      sourceIpOpt = None
+    )
   )
   override def beforeAll(): Unit = {
     super.beforeAll()
@@ -1155,7 +1159,7 @@ class AssignerSuite extends DatabricksTest with TestName {
       // Generation.EMPTY, and a frozen assignment sits at a newer generation, so the server always
       // has something newer to return. A re-watch that already held the frozen generation would
       // find nothing newer and long-poll until WATCH_RPC_TIMEOUT - 5s (see
-      // WatchServerHelper.getWatchProcessingTimeout); no scenario re-watches, so none block. The
+      // SubscriberHandler.getWatchProcessingTimeout); no scenario re-watches, so none block. The
       // enabled target is served under its canonicalized AppTarget, so the assignment is frozen
       // under the AppTarget; the disabled target is served as-is. A watch that returns the
       // AppTarget's frozen assignment is direct evidence that the request was canonicalized, since
@@ -1170,11 +1174,14 @@ class AssignerSuite extends DatabricksTest with TestName {
       )
 
       val localStubManager = new WatchStubManager(
-        clientName = "dicer-assigner",
-        defaultWatchAddress = URI.create(s"http://localhost:${localTestEnv.getAssignerPort}"),
-        tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
-        watchFromDataPlane = false,
-        sourceIpOpt = None
+        WatchStubManagerConfig(
+          clientType = ClientType.Slicelet,
+          targetName = "alternative-target-alert-test",
+          watchAddress = URI.create(s"http://localhost:${localTestEnv.getAssignerPort}"),
+          tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
+          watchFromDataPlane = false,
+          sourceIpOpt = None
+        )
       )
       val enabledStub: AssignmentServiceStub = localStubManager.createWatchStub(
         redirectAddressOpt = None,
@@ -1301,11 +1308,10 @@ class AssignerSuite extends DatabricksTest with TestName {
     )
 
     // A driver that always reports this Assigner as a standby, so handleWatch takes the standby
-    // branch and redirects without evaluating the alert. The membership checker the factory
-    // receives is unused, since this fake driver runs no election.
+    // branch and redirects without evaluating the alert.
     val standbyDriverConfig: TestAssigner.Config = TestAssigner.Config.create(
       preferredAssignerDriverFactoryOverride =
-        Some((_: SequentialExecutionContext, _) => new StandbyPreferredAssignerDriver)
+        Some((_: SequentialExecutionContext) => new StandbyPreferredAssignerDriver)
     )
     val standbyTestEnv: InternalDicerTestEnvironment = InternalDicerTestEnvironment.create(
       config = standbyDriverConfig,
@@ -1314,11 +1320,14 @@ class AssignerSuite extends DatabricksTest with TestName {
     )
     try {
       val standbyStubManager = new WatchStubManager(
-        clientName = "dicer-assigner",
-        defaultWatchAddress = URI.create(s"http://localhost:${standbyTestEnv.getAssignerPort}"),
-        tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
-        watchFromDataPlane = false,
-        sourceIpOpt = None
+        WatchStubManagerConfig(
+          clientType = ClientType.Slicelet,
+          targetName = "standby-alternative-target-alert-test",
+          watchAddress = URI.create(s"http://localhost:${standbyTestEnv.getAssignerPort}"),
+          tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
+          watchFromDataPlane = false,
+          sourceIpOpt = None
+        )
       )
       val standbyStub: AssignmentServiceStub = standbyStubManager.createWatchStub(
         redirectAddressOpt = None,

@@ -24,27 +24,6 @@ class StatusUtilsCommonSuite extends DatabricksTest {
     converted = StatusUtils.convertExceptionToStatus(new StatusRuntimeException(status))
     assertStatusEqual(status, converted)
 
-    // Jetcd shaded StatusException gets converted properly.
-    val exception: Exception = new io.grpc.StatusException(
-      io.grpc.Status.ALREADY_EXISTS.withDescription("foobar")
-    )
-    converted = StatusUtils.convertExceptionToStatus(exception)
-    assertStatusEqual(
-      Status.ALREADY_EXISTS.withDescription("foobar"),
-      converted
-    )
-
-    // Jetcd shaded StatusRuntimeException gets converted properly.
-    converted = StatusUtils.convertExceptionToStatus(
-      new io.grpc.StatusRuntimeException(
-        io.grpc.Status.UNIMPLEMENTED.withDescription("baz")
-      )
-    )
-    assertStatusEqual(
-      Status.UNIMPLEMENTED.withDescription("baz"),
-      converted
-    )
-
     // IllegalArgumentException gets converted properly.
     var ex: Throwable = new IllegalArgumentException("test")
     converted = StatusUtils.convertExceptionToStatus(ex)

@@ -100,8 +100,8 @@ message AssignmentViewP {
   optional GenerationViewP generation = 1;
   // Whether this assignment has been frozen (no further changes will be made).
   optional bool is_frozen = 2;
-  // Consistency mode under which this assignment was generated (e.g. "Affinity").
-  optional string consistency_mode = 3;
+  reserved 3;
+  reserved "consistency_mode";
   // Resources included in this assignment.
   repeated ResourceViewP resources = 4;
   // Per-slice assignment details.

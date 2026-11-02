@@ -98,6 +98,11 @@ message CreateSliceletRequestP {
   // OPTIONAL
   optional bool use_fake_readiness_provider = 5;
 
+  // A list of feature names that will be force-enabled by the Dicer client feature rollout flags in
+  // the Rust process. See [[DicerClientFeatureRolloutFlag]] in Rust. Other features are disabled by
+  // default.
+  repeated string force_enabled_features = 7;
+
   reserved 1;
 }
 

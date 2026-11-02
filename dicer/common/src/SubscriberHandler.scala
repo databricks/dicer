@@ -6,6 +6,7 @@ import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 import scala.concurrent.duration._
 import scala.concurrent.{Future, Promise}
+import scala.util.Random
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.github.blemale.scaffeine.{Cache, Scaffeine}
 import io.grpc.{Status, StatusException}
@@ -52,16 +53,18 @@ import com.databricks.rpc.RPCContext
  *                                                    quickly sync their assignment back, when the
  *                                                    subscribers know a newer assignment.
  *                                                    A value of 0 disables this bound.
+ * @param random the random number generator used for adding jitter to the watch request timeouts.
  * @throws IllegalArgumentException if `maxSubscribersPromptedForAssignmentRecovery` is negative.
  */
 @ThreadSafe
-class SubscriberHandler(
+class SubscriberHandler private (
     sec: SequentialExecutionContext,
     target: Target,
     getSuggestedClerkRpcTimeoutFn: () => FiniteDuration,
     suggestedSliceletRpcTimeout: FiniteDuration,
     handlerLocation: Location,
-    maxSubscribersPromptedForAssignmentRecovery: Int) {
+    maxSubscribersPromptedForAssignmentRecovery: Int,
+    random: Random) {
 
   import SubscriberHandler.{AssignmentDistributionLatencyTracker, AssignmentRecoveryState}
 
@@ -407,7 +410,7 @@ class SubscriberHandler(
           // out its request (this is not always the case, since we leave some buffer in the
           // client-side RPC deadline, but we prefer to be conservative). Note that we are not
           // expected to reach here typically because we trigger a timeout below (and cancel the
-          // watch) after `WatchServerHelper.getWatchProcessingTimeout(request.timeout)`, which is
+          // watch) after `getWatchProcessingTimeout(request.timeout)`, which is
           // shorter than `request.timeout`. But if the `sec` is overloaded with watch requests,
           // we could end up here because we can't process the timeout soon enough.
           //
@@ -495,7 +498,7 @@ class SubscriberHandler(
     // may have a queue built up and delay the execution of this handler. But we still want to try
     // to respond to the client in time.
     val processingTimeout: FiniteDuration =
-      WatchServerHelper.getWatchProcessingTimeout(request.timeout)
+      getWatchProcessingTimeout(request.timeout)
     val elapsedTime: FiniteDuration = sec.getClock.tickerTime() - startTime
     val remainingTimeout: FiniteDuration = (processingTimeout - elapsedTime).max(0.millis)
     // Note that if we respond from the `streamCallback` above, we essentially end up leaking this
@@ -622,6 +625,67 @@ class SubscriberHandler(
     lastPublishedMetrics = currentMetrics
   }
 
+  /**
+   * The timeout on the server side so that the Watch RPC is "returned" rather than timed out. We
+   * want to return the RPC with an empty message (no assignment) rather than let it time out since
+   * a DEADLINE_EXCEEDED shows up as an error and can be confusing. Also, this model allows us to
+   * return the known generation number for sync purposes.
+   *
+   * @param clientWatchRpcTimeout the watch RPC timeout chosen by the client, used to derive the
+   *                              server-side processing timeout.
+   */
+  private def getWatchProcessingTimeout(clientWatchRpcTimeout: FiniteDuration): FiniteDuration = {
+    // Set the server-side processing timeout before jitter as follows:
+    // - If the client's watch RPC timeout is between 0 and 10 seconds, use
+    //   50% of the client's watch RPC timeout. At most, this will be 5 seconds.
+    // - If the client's watch RPC timeout exceeds 10 seconds, use the client's watch
+    //   RPC timeout minus 5 seconds (this will be constant).
+    //
+    // These values are heuristic choices intended to leave enough time to successfully return
+    // the RPC despite potential delays (e.g. networking delays).
+    val maxClientWatchRpcTimeoutOffset: FiniteDuration = 5.seconds
+    val clientWatchRpcTimeoutOffset: FiniteDuration =
+      (clientWatchRpcTimeout / 2).min(maxClientWatchRpcTimeoutOffset)
+
+    val processingTimeoutWithoutJitter: FiniteDuration =
+      clientWatchRpcTimeout - clientWatchRpcTimeoutOffset
+
+    // We add jitter to spread the periodic watch request cancellations across more CPU quota
+    // periods to try to avoid processing most or all of them in synchronized bursts. Our load
+    // tests have shown that this reduces CPU throttling in the Assigner, especially when
+    // dealing with watch request cancellations for larger targets (i.e., 200+ Slicelets).
+    //
+    // NOTE: Cap the total jitter range at 5 seconds, so the jitter we apply will be at most
+    // +/-2.5 seconds from the unjittered processing timeout calculated above. This cap ensures
+    // that the server-side timeout, even with the maximum applicable jitter, is still guaranteed
+    // to be earlier than the client's watch RPC timeout.
+    //
+    // Without this cap, for clients with sufficiently large watch RPC timeouts, applying jitter
+    // could produce server-side timeouts that exceed the client's deadline, contrary to our
+    // intent to return a response before that deadline.
+    //
+    // For example, with a jitter ratio of 40% (+/-20%) and a client watch RPC timeout of 35s:
+    //
+    //                             Server-side processing timeout:
+    // Without jitter:             30s
+    // With jitter, without cap:   [24s, 36s]     <-- can exceed the client's 35s deadline
+    // With jitter, with cap:      [27.5s, 32.5s] <-- stays below the client's 35s deadline
+    val jitterRange: Duration =
+      (SubscriberHandler.PROCESSING_TIMEOUT_JITTER_RATIO * processingTimeoutWithoutJitter)
+        .min(maxClientWatchRpcTimeoutOffset)
+
+    // Sample jitter from the uniform distribution: U[-jitterRange/2, jitterRange/2).
+    val jitter: Duration = (random.nextDouble() - 0.5) * jitterRange
+    val processingTimeout: Duration = processingTimeoutWithoutJitter + jitter
+
+    // NOTE: Multiplying by a Double returns a Duration. Although we expect the result to always
+    // be a FiniteDuration, defensively fall back to the unjittered timeout if it is not.
+    processingTimeout match {
+      case processingTimeout: FiniteDuration => processingTimeout
+      case _ => processingTimeoutWithoutJitter
+    }
+  }
+
   /** Returns the suggested RPC timeout. */
   private def getSuggestedRpcTimeout(clientRequest: ClientRequest): FiniteDuration = {
     clientRequest.getClientType match {
@@ -632,6 +696,13 @@ class SubscriberHandler(
 }
 
 object SubscriberHandler {
+
+  /**
+   * Total jitter range relative to the chosen watch request processing timeout. A value of
+   * 0.4 (40%) varies each request's timeout by up to 20% in either direction (+/-), which helps
+   * spread out watch request cancellations for a target.
+   */
+  private val PROCESSING_TIMEOUT_JITTER_RATIO: Double = 0.4
 
   /**
    * Threshold (80% of the max watch message content length) at or above which we alert that a
@@ -648,6 +719,41 @@ object SubscriberHandler {
     case object Slicelet extends Location { override def toString: String = "Slicelet" }
 
     case object Clerk extends Location { override def toString: String = "Clerk" }
+  }
+
+  /**
+   * Creates a subscriber handler with a fresh RNG for watch processing timeout jitter.
+   *
+   * @param sec the sec that protects the internal state and schedules background tasks.
+   * @param target the target for which this handler is serving.
+   * @param getSuggestedClerkRpcTimeoutFn the function to dynamically get the suggested watch RPC
+   *                                      timeout for [[Clerk]].
+   * @param suggestedSliceletRpcTimeout the suggested watch RPC timeout for [[Slicelet]].
+   * @param handlerLocation the location of this handler.
+   * @param maxSubscribersPromptedForAssignmentRecovery the maximum number of subscribers prompted
+   *                                                    to quickly sync their assignment back, when
+   *                                                    the subscribers know a newer assignment.
+   *                                                    A value of 0 disables this bound.
+   */
+  @throws[IllegalArgumentException](
+    "if maxSubscribersPromptedForAssignmentRecovery is negative"
+  )
+  def create(
+      sec: SequentialExecutionContext,
+      target: Target,
+      getSuggestedClerkRpcTimeoutFn: () => FiniteDuration,
+      suggestedSliceletRpcTimeout: FiniteDuration,
+      handlerLocation: Location,
+      maxSubscribersPromptedForAssignmentRecovery: Int): SubscriberHandler = {
+    new SubscriberHandler(
+      sec,
+      target,
+      getSuggestedClerkRpcTimeoutFn,
+      suggestedSliceletRpcTimeout,
+      handlerLocation,
+      maxSubscribersPromptedForAssignmentRecovery,
+      random = new Random()
+    )
   }
 
   /** Trait that stores information for either a Clerk or Slicelet, for metrics purposes. */
@@ -926,6 +1032,46 @@ object SubscriberHandler {
   }
 
   object forTestStatic {
+
+    /**
+     * Creates a subscriber handler with the supplied RNG for watch processing timeout jitter.
+     *
+     * @param sec the sec that protects the internal state and schedules background tasks.
+     * @param target the target for which this handler is serving.
+     * @param getSuggestedClerkRpcTimeoutFn the function to dynamically get the suggested watch RPC
+     *                                      timeout for [[Clerk]].
+     * @param suggestedSliceletRpcTimeout the suggested watch RPC timeout for [[Slicelet]].
+     * @param handlerLocation the location of this handler.
+     * @param maxSubscribersPromptedForAssignmentRecovery the maximum number of subscribers prompted
+     *                                                    to quickly sync their assignment back,
+     *                                                    when the subscribers know a newer
+     *                                                    assignment.
+     *                                                    A value of 0 disables this bound.
+     * @param random the random number generator used for adding jitter to the watch request
+     *               timeouts.
+     */
+    @throws[IllegalArgumentException](
+      "if maxSubscribersPromptedForAssignmentRecovery is negative"
+    )
+    def create(
+        sec: SequentialExecutionContext,
+        target: Target,
+        getSuggestedClerkRpcTimeoutFn: () => FiniteDuration,
+        suggestedSliceletRpcTimeout: FiniteDuration,
+        handlerLocation: Location,
+        maxSubscribersPromptedForAssignmentRecovery: Int,
+        random: Random): SubscriberHandler = {
+      new SubscriberHandler(
+        sec,
+        target,
+        getSuggestedClerkRpcTimeoutFn,
+        suggestedSliceletRpcTimeout,
+        handlerLocation,
+        maxSubscribersPromptedForAssignmentRecovery,
+        random
+      )
+    }
+
     def getAssignmentDistributionLatencyHistogram(target: Target): Histogram.Child =
       AssignmentDistributionLatencyTracker.forTest.getHistogram(target)
   }
@@ -941,29 +1087,16 @@ object SubscriberHandlerMetrics {
   private val UNKNOWN_SENDER_CLUSTER_URI: String = "unknown"
 
   /**
-   * Histogram buckets for serialized assignment size in bytes. Uses fine granularity (128 KiB
-   * steps) up to the gRPC limit (currently 4 MiB, see
-   * [[WatchServerHelper.MAX_WATCH_MESSAGE_CONTENT_LENGTH]]) and coarser granularity (1 MiB steps)
-   * beyond.
+   * Histogram buckets for serialized assignment and response sizes in bytes. These histograms are
+   * labeled per target, so the bucket count is kept small: boundaries grow 4x from 1 KiB to 1 MiB,
+   * which covers nearly all responses, then mark 2 MiB, 3 MiB and the gRPC limit (currently 4 MiB,
+   * see [[WatchServerHelper.MAX_WATCH_MESSAGE_CONTENT_LENGTH]]), with one boundary beyond it to
+   * capture outliers.
    */
   private val SERIALIZED_ASSIGNMENT_SIZE_BUCKETS: Array[Double] = {
-    val buckets = scala.collection.mutable.ArrayBuffer[Double]()
-
-    // Fine-grained buckets from 128 KiB to 4 MiB (128 KiB increments).
-    var bucketBytes: Long = 128 * 1024 // 128 KiB.
-    while (bucketBytes <= 4 * 1024 * 1024) { // Up to 4 MiB.
-      buckets.append(bucketBytes.toDouble)
-      bucketBytes += 128 * 1024
-    }
-
-    // Coarse-grained buckets from 5 MiB to 10 MiB (1 MiB increments).
-    bucketBytes = 5 * 1024 * 1024 // 5 MiB.
-    while (bucketBytes <= 10 * 1024 * 1024) { // Up to 10 MiB.
-      buckets.append(bucketBytes.toDouble)
-      bucketBytes += 1024 * 1024
-    }
-
-    buckets.toArray
+    val kib: Double = 1024
+    val mib: Double = 1024 * kib
+    Array(kib, 4 * kib, 16 * kib, 64 * kib, 256 * kib, mib, 2 * mib, 3 * mib, 4 * mib, 8 * mib)
   }
 
   private[common] val serializedAssignmentSizeBytes: Histogram = Histogram

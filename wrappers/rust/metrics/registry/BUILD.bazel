@@ -1,0 +1,9 @@
+load("//bazel/rules/rust:rules_rust.bzl", "rust_library")
+
+rust_library(
+    name = "registry",
+    srcs = ["src/lib.rs"],
+    crate_name = "raf_metrics_registry",
+    visibility = ["//visibility:public"],
+    deps = ["@crates//:prometheus-client"],
+)

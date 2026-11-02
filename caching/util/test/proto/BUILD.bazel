@@ -1,3 +1,4 @@
+load("//bazel/rules/rust:rules_rust.bzl", "rust_buffa_library", "rust_prost_library")
 load("@rules_proto//proto:defs.bzl", "proto_library")
 load("@rules_scala//scala_proto:scala_proto.bzl", "scala_proto_library")
 
@@ -14,6 +15,12 @@ proto_library(
     ],
 )
 
+rust_prost_library(
+    name = "example_config_override_proto_library_prost_lib",
+    crate_name = "caching_util_test_proto_example_config_override_proto_library",
+    proto = ":example_config_override_proto_library",
+)
+
 scala_proto_library(
     name = "example_config_override",
     deps = [":example_config_override_proto_library"],
@@ -24,6 +31,21 @@ proto_library(
     srcs = ["test_data.proto"],
     visibility = ["//caching/util:internal"],
     deps = ["//wrappers/rpc:scalapb_proto"],
+)
+
+rust_prost_library(
+    name = "test_data_proto_prost_lib",
+    crate_name = "caching_util_test_proto_test_data_proto",
+    proto = ":test_data_proto",
+    visibility = ["//caching/util:internal"],
+)
+
+rust_buffa_library(
+    name = "test_data_proto_buffa_lib",
+    crate_name = "caching_util_test_proto_test_data_proto_buffa",
+    proto = ":test_data_proto",
+    text = True,
+    visibility = ["//caching/util:internal"],
 )
 
 scala_proto_library(

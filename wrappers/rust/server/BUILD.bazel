@@ -1,0 +1,34 @@
+load("//bazel/rules/rust:rules_rust.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "server",
+    srcs = ["src/lib.rs"],
+    crate_name = "raf_server",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//wrappers/rust/tls",
+        "@crates//:anyhow",
+        "@crates//:http",
+        "@crates//:tokio",
+        "@crates//:tokio-util",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "server_test",
+    timeout = "short",
+    testonly = True,
+    srcs = ["tests/server_test.rs"],
+    deps = [
+        ":server",
+        "//wrappers/rust/tls",
+        "//wrappers/rust/tls/testing/test_tls_options",
+        "//wrappers/rust/tls/testing/test_tls_options/testing:test_identity",
+        "@crates//:http",
+        "@crates//:tempfile",
+        "@crates//:tokio",
+        "@crates//:tonic",
+        "@crates//:tonic-health",
+    ],
+)

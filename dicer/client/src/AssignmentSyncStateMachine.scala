@@ -180,7 +180,7 @@ class AssignmentSyncStateMachine(config: InternalClientConfig, random: Random)
       .map { responseAddress: URI =>
         responseAddress.toString
       }
-      .getOrElse(sliceLookupConfig.watchAddress.toString)
+      .getOrElse(config.watchStubManagerConfig.watchAddress.toString)
     val isNewAssignment: Boolean =
       incorporateSyncState(response.syncState, syncSourceDebugName, outputBuilder)
 

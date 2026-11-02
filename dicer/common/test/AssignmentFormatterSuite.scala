@@ -43,7 +43,6 @@ class AssignmentFormatterSuite extends DatabricksTest {
       AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
-      AssignmentConsistencyMode.Affinity,
       Some(assignerServiceInfo),
       // No annotation.
       (("" -- "Balin") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(42.0),
@@ -116,7 +115,6 @@ class AssignmentFormatterSuite extends DatabricksTest {
       AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
-      AssignmentConsistencyMode.Affinity,
       Some(assignerServiceInfo),
       (("" -- "aa") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(42.0),
       (("aa" -- "zz") @@ (43 ## 20) ->
@@ -173,7 +171,6 @@ class AssignmentFormatterSuite extends DatabricksTest {
       ProposedAssignment(predecessorOpt = None, proposedSliceMap, assignerServiceInfoOpt = None)
         .commit(
           isFrozen = false,
-          AssignmentConsistencyMode.Affinity,
           generation = 42
         )
     val truncatedString: String = assignment.toString
@@ -203,7 +200,6 @@ class AssignmentFormatterSuite extends DatabricksTest {
       AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment = createAssignment(
       generation = assignmentGeneration,
-      AssignmentConsistencyMode.Affinity,
       Some(assignerServiceInfo),
       (("" -- "Balin") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(42.0),
       (("Balin" -- "Kili") @@ (43 ## 20) -> Seq("https://pod1") | Map(
@@ -280,7 +276,6 @@ class AssignmentFormatterSuite extends DatabricksTest {
       AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
-      AssignmentConsistencyMode.Affinity,
       Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod1")).clearPrimaryRateLoad(),
       (("BBB" -- "CCC") @@ (43 ## 50) -> Seq("https://pod2")).withPrimaryRateLoad(20.0),
@@ -339,7 +334,6 @@ class AssignmentFormatterSuite extends DatabricksTest {
       AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
-      AssignmentConsistencyMode.Affinity,
       Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(10.0),
       (("BBB" -- "CCC") @@ (43 ## 50) -> Seq("https://pod2")).withPrimaryRateLoad(20.0),
@@ -397,7 +391,6 @@ class AssignmentFormatterSuite extends DatabricksTest {
       AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
-      AssignmentConsistencyMode.Affinity,
       Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(10.0),
       (("BBB" -- "CCC") @@ (43 ## 50) -> Seq("https://pod2")).withPrimaryRateLoad(20.0),
@@ -454,7 +447,6 @@ class AssignmentFormatterSuite extends DatabricksTest {
       AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
-      AssignmentConsistencyMode.Affinity,
       Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(10.0),
       (("BBB" -- "CCC") @@ (43 ## 50) -> Seq("https://pod2")).withPrimaryRateLoad(20.0),
@@ -509,7 +501,6 @@ class AssignmentFormatterSuite extends DatabricksTest {
       AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
-      AssignmentConsistencyMode.Affinity,
       Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(10.0),
       (("BBB" -- "CCC") @@ (43 ## 50) -> Seq("https://pod1")).withPrimaryRateLoad(20.0),
@@ -570,7 +561,6 @@ class AssignmentFormatterSuite extends DatabricksTest {
       AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
-      AssignmentConsistencyMode.Affinity,
       Some(assignerServiceInfo),
       (("" -- "Balin") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(42.0),
       // Assigned to 2 resources, and there are subslice annotations for each.
@@ -645,7 +635,6 @@ class AssignmentFormatterSuite extends DatabricksTest {
       AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment = createAssignment(
       generation = assignmentGeneration,
-      AssignmentConsistencyMode.Affinity,
       Some(assignerServiceInfo),
       (("" -- "Balin") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(42.0),
       (("Balin" -- "Kili") @@ (43 ## 20) -> Seq("https://pod1") | Map(
@@ -703,7 +692,6 @@ class AssignmentFormatterSuite extends DatabricksTest {
       AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment = createAssignment(
       generation = assignmentGeneration,
-      AssignmentConsistencyMode.Affinity,
       Some(assignerServiceInfo),
       (("" -- "Balin") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(42.0),
       (("Balin" -- "Kili") @@ (43 ## 20) -> Seq("https://pod1") | Map(
@@ -763,7 +751,6 @@ class AssignmentFormatterSuite extends DatabricksTest {
       AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
-      AssignmentConsistencyMode.Affinity,
       Some(assignerServiceInfo),
       (("" -- "Balin") @@ (0 ## 10) -> Seq("https://pod1", "https://pod2"))
         .withPrimaryRateLoad(42.0),
@@ -822,7 +809,6 @@ class AssignmentFormatterSuite extends DatabricksTest {
       AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
-      AssignmentConsistencyMode.Affinity,
       Some(assignerServiceInfo),
       (("" -- "Balin") @@ (2 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(42.0),
       (("Balin" -- "Kili") @@ (2 ## 20) -> Seq("https://pod1") | Map(
@@ -904,7 +890,6 @@ class AssignmentFormatterSuite extends DatabricksTest {
     )
     val assignment = Assignment(
       isFrozen = true,
-      consistencyMode = AssignmentConsistencyMode.Affinity,
       generation = assignmentGeneration,
       sliceMap = SliceMapHelper.ofSliceAssignments(assignmentEntries),
       assignerServiceInfoOpt = None
@@ -956,7 +941,6 @@ class AssignmentFormatterSuite extends DatabricksTest {
       AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
-      AssignmentConsistencyMode.Affinity,
       Some(assignerServiceInfo),
       (("" -- "Balin") @@ (43 ## 10) -> Seq("https://pod1"))
         .withPrimaryRateLoad(42.0),
@@ -1020,7 +1004,6 @@ class AssignmentFormatterSuite extends DatabricksTest {
       AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
-      AssignmentConsistencyMode.Affinity,
       Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(10.0),
       (("BBB" -- "CCC") @@ (43 ## 20) -> Seq("https://pod1")).withPrimaryRateLoad(20.0),
@@ -1079,7 +1062,6 @@ class AssignmentFormatterSuite extends DatabricksTest {
       AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
-      AssignmentConsistencyMode.Affinity,
       Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(10.0),
       (("BBB" -- "CCC") @@ (43 ## 20) -> Seq("https://pod1")).withPrimaryRateLoad(20.0),
@@ -1148,7 +1130,6 @@ class AssignmentFormatterSuite extends DatabricksTest {
       AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
-      AssignmentConsistencyMode.Affinity,
       Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(10.0),
       (("BBB" -- ∞) @@ (43 ## 50) -> Seq("https://pod3")).withPrimaryRateLoad(20.0)
@@ -1226,7 +1207,6 @@ class AssignmentFormatterSuite extends DatabricksTest {
       AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = 43 ## 50,
-      AssignmentConsistencyMode.Affinity,
       Some(assignerServiceInfo),
       (("" -- "Balin") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(42.0),
       (("Balin" -- ∞) @@ (43 ## 20) -> Seq("https://pod2")).clearPrimaryRateLoad()
@@ -1297,7 +1277,6 @@ class AssignmentFormatterSuite extends DatabricksTest {
       AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
-      AssignmentConsistencyMode.Affinity,
       Some(assignerServiceInfo),
       (("" -- "Balin") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(42.0),
       (("Balin" -- "Kili") @@ (43 ## 20) -> Seq("https://pod1")).withPrimaryRateLoad(42.0),
@@ -1346,7 +1325,6 @@ class AssignmentFormatterSuite extends DatabricksTest {
       AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
-      AssignmentConsistencyMode.Affinity,
       Some(assignerServiceInfo),
       (("" -- "BBBBBBBBBBBBBBBBBBBBBBBB") @@ (43 ## 10) -> Seq("https://pod1"))
         .withPrimaryRateLoad(10.0),
@@ -1412,7 +1390,6 @@ class AssignmentFormatterSuite extends DatabricksTest {
       AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
-      AssignmentConsistencyMode.Affinity,
       Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod1")).clearPrimaryRateLoad(),
       (("BBB" -- "CCC") @@ (43 ## 20) -> Seq("https://pod1")).withPrimaryRateLoad(10.0),
@@ -1459,7 +1436,6 @@ class AssignmentFormatterSuite extends DatabricksTest {
       AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
-      AssignmentConsistencyMode.Affinity,
       Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(10.0),
       (("BBB" -- "CCC") @@ (43 ## 20) -> Seq("https://pod1")).withPrimaryRateLoad(20.0),
@@ -1504,7 +1480,6 @@ class AssignmentFormatterSuite extends DatabricksTest {
       AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = 43 ## 50,
-      AssignmentConsistencyMode.Affinity,
       Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(10.0),
       (("BBB" -- ∞) @@ (43 ## 20) -> Seq("https://pod1")).withPrimaryRateLoad(20.0)
@@ -1533,7 +1508,6 @@ class AssignmentFormatterSuite extends DatabricksTest {
       AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
-      AssignmentConsistencyMode.Affinity,
       Some(assignerServiceInfo),
       (("" -- "Balin") @@ (0 ## 10) -> Seq("https://pod1", "https://pod2"))
         .withPrimaryRateLoad(42.0),
@@ -1573,7 +1547,6 @@ class AssignmentFormatterSuite extends DatabricksTest {
       AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
-      AssignmentConsistencyMode.Affinity,
       Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod3")).withPrimaryRateLoad(10.0),
       (("BBB" -- "CCC") @@ (43 ## 50) -> Seq("https://pod1")).withPrimaryRateLoad(20.0),
@@ -1625,7 +1598,6 @@ class AssignmentFormatterSuite extends DatabricksTest {
       AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
-      AssignmentConsistencyMode.Affinity,
       Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod3")).withPrimaryRateLoad(10.0),
       (("BBB" -- "CCC") @@ (43 ## 50) -> Seq("https://pod1")).withPrimaryRateLoad(50.0),
@@ -1678,7 +1650,6 @@ class AssignmentFormatterSuite extends DatabricksTest {
       AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
-      AssignmentConsistencyMode.Affinity,
       Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(50.0),
       (("BBB" -- "CCC") @@ (43 ## 20) -> Seq("https://pod1")).withPrimaryRateLoad(40.0),
@@ -1730,7 +1701,6 @@ class AssignmentFormatterSuite extends DatabricksTest {
       AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
-      AssignmentConsistencyMode.Affinity,
       Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(50.0),
       (("BBB" -- "CCC") @@ (43 ## 20) -> Seq("https://pod1")).withPrimaryRateLoad(40.0),
@@ -1780,7 +1750,6 @@ class AssignmentFormatterSuite extends DatabricksTest {
       AssignerServiceInfo(name = "test-assigner", instanceId = "test-instance")
     val assignment: Assignment = createAssignment(
       generation = assignmentGeneration,
-      AssignmentConsistencyMode.Affinity,
       Some(assignerServiceInfo),
       (("" -- "BBB") @@ (43 ## 10) -> Seq("https://pod1")).withPrimaryRateLoad(10.0),
       (("BBB" -- "CCC") @@ (43 ## 50) -> Seq("https://pod2")).withPrimaryRateLoad(20.0),

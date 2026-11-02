@@ -373,7 +373,8 @@ object Algorithm {
     logger.expect(
       numSliceReplicas <= numResources * MAX_AVG_SLICE_REPLICAS,
       CachingErrorCode.ASSIGNER_TOO_MANY_SLICES,
-      // $COVERAGE-OFF$: Unreachable because the MAX_AVG_SLICE_REPLICAS should be always satisfied.
+      // $COVERAGE-OFF$: Unreachable because MergePhase always satisfies MAX_AVG_SLICE_REPLICAS
+      // (see MergePhase.Merger).
       s"Number of slice replicas $numSliceReplicas is too large for $numResources resources"
       // $COVERAGE-ON$
     )

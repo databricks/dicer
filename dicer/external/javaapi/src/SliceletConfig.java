@@ -1,3 +1,4 @@
+// LINT.IfChange
 package com.databricks.dicer.external.javaapi;
 
 import com.databricks.dicer.client.javaapi.SliceletConfImpl;
@@ -85,3 +86,5 @@ public final class SliceletConfig {
     }
   }
 }
+// LINT.ThenChange(dicer/external/src/Conf.scala)
+// LINT.ThenChange(dicer/rust/external/slicelet/src/slicelet.rs)

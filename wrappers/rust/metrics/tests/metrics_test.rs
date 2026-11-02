@@ -3,8 +3,8 @@ use std::thread::{self, Scope};
 
 use prometheus_client::encoding::EncodeLabelSet;
 use prometheus_client::metrics::histogram::Histogram;
-use universe_raf_metrics::{counter, gauge, histogram, metric};
-use universe_raf_metrics_testing::{
+use raf_metrics::{counter, gauge, histogram, metric};
+use raf_metrics_testing::{
     encode_metrics_for_test,
     get_counter_value,
     get_histogram_bucket,

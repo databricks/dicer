@@ -409,6 +409,13 @@ object CachingErrorCode {
   }
 
   /**
+   * The index failed to complete a membership operation and now may be inconsistent with the cache.
+   */
+  case object CORE_CACHE_INDEX_INCONSISTENT_WITH_CACHE_STATE extends CachingErrorCode {
+    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
+  }
+
+  /**
    * A negative amount was passed to [[SafeCounter.Child.inc]] and suppressed (treated as an
    * increment of 0).
    */

@@ -1,3 +1,4 @@
+// LINT.IfChange
 package com.databricks.dicer.external.javaapi;
 
 
@@ -48,3 +49,5 @@ public final class Target {
     return scalaTarget;
   }
 }
+// LINT.ThenChange(dicer/external/src/Target.scala)
+// LINT.ThenChange(dicer/rust/external/types/src/target.rs)

@@ -15,7 +15,6 @@ import com.databricks.dicer.assigner.config.InternalTargetConfig.KeyReplicationC
 import com.databricks.dicer.assigner.MigrationTestAssignment
 import com.databricks.dicer.common.{
   Assignment,
-  AssignmentConsistencyMode,
   ProposedAssignment,
   ProposedSliceAssignment,
   SliceAssignment,
@@ -108,7 +107,6 @@ abstract class AlgorithmPhaseSuiteBase extends AlgorithmSuiteBase {
       )
       val assignment: Assignment = proposal.commit(
         isFrozen = false,
-        AssignmentConsistencyMode.Affinity,
         // The commit generation of the new assignment is not interesting. Just make it slightly
         // larger than `generateInstantEpochMilli` to make sure the requirement of
         // ProposedAssignment.commit() is satisfied.

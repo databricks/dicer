@@ -11,21 +11,16 @@ import com.databricks.caching.util.{CachingErrorCode, FakeTypedClock, MetricUtil
 import com.databricks.caching.util.TestUtils.TestName
 
 import com.databricks.dicer.assigner.config.{ChurnConfig, InternalTargetConfig}
+import com.databricks.dicer.assigner.config.testing.ConfigTestUtils
 import com.databricks.dicer.assigner.config.InternalTargetConfig.{
   KeyReplicationConfig,
   LoadBalancingConfig,
   LoadBalancingMetricConfig
 }
-import com.databricks.dicer.common.{
-  Assignment,
-  AssignmentConsistencyMode,
-  Generation,
-  ProposedAssignment,
-  TargetHelper
-}
+import com.databricks.dicer.common.{Assignment, Generation, ProposedAssignment, TargetHelper}
 import com.databricks.dicer.common.testing.{SliceTestUtils}
 import com.databricks.dicer.common.testing.SliceTestUtils.createTestSquid
-import com.databricks.dicer.external.Target
+import com.databricks.dicer.external.{Slice, Target}
 import com.databricks.dicer.friend.Squid
 import com.databricks.testing.DatabricksTest
 
@@ -149,7 +144,6 @@ abstract class AlgorithmSuiteBase extends DatabricksTest with TestName {
     }
     proposal.commit(
       isFrozen = false,
-      AssignmentConsistencyMode.Affinity,
       createGeneration()
     )
   }
@@ -232,6 +226,41 @@ abstract class AlgorithmSuiteBase extends DatabricksTest with TestName {
         churnConfig,
         LoadBalancingMetricConfig(maxLoadHint, imbalanceToleranceHint, uniformLoadReservationHint)
       )
+    )
+  }
+
+  /**
+   * Returns a [[MutableAssignment]] initialized from `predecessor` with the given load and no churn
+   * penalties, for tests that run individual algorithm phases.
+   */
+  protected def createMutableAssignment(
+      predecessor: Assignment,
+      resources: Resources,
+      loadMap: LoadMap): MutableAssignment = {
+    new MutableAssignment(
+      fakeClock.instant(),
+      predecessor.sliceMap,
+      resources,
+      loadMap,
+      ConfigTestUtils.ZERO_PENALTY_CHURN_CONFIG
+    )
+  }
+
+  /**
+   * Returns the [[Algorithm.Config]] for `targetConfig` on `resources` with the total load in
+   * `loadMap` (without load reservation adjustments), for tests that run individual algorithm
+   * phases.
+   */
+  protected def createAlgorithmConfig(
+      targetConfig: InternalTargetConfig,
+      resources: Resources,
+      loadMap: LoadMap): Algorithm.Config = {
+    Algorithm.Config.create(
+      target,
+      targetConfig.loadBalancingConfig,
+      targetConfig.keyReplicationConfig,
+      resources.availableResources.size,
+      loadMap.getLoad(Slice.FULL)
     )
   }
 }

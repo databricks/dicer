@@ -28,7 +28,6 @@ import com.databricks.dicer.assigner.AssignmentStats.AssignmentLoadStats
 import com.databricks.dicer.client.{ClerkImpl, SliceletImpl}
 import com.databricks.dicer.common.{
   Assignment,
-  AssignmentConsistencyMode,
   AssignerServiceInfo,
   ClientResponse,
   DiffAssignment,
@@ -724,13 +723,11 @@ object SliceTestUtils extends Assertions {
    */
   def createAssignment(
       generation: Generation,
-      consistencyMode: AssignmentConsistencyMode,
       assignerServiceInfoOpt: Option[AssignerServiceInfo],
       firstEntry: SliceAssignment,
       remainingEntries: SliceAssignment*): Assignment = {
     createAssignment(
       generation,
-      consistencyMode,
       assignerServiceInfoOpt,
       firstEntry +: remainingEntries
     )
@@ -742,12 +739,10 @@ object SliceTestUtils extends Assertions {
    */
   def createAssignment(
       generation: Generation,
-      consistencyMode: AssignmentConsistencyMode,
       assignerServiceInfoOpt: Option[AssignerServiceInfo],
       entries: Iterable[SliceAssignment]): Assignment = {
     Assignment(
       isFrozen = false,
-      consistencyMode,
       generation,
       SliceMapHelper.ofSliceAssignments(entries.toVector),
       assignerServiceInfoOpt
@@ -1050,9 +1045,6 @@ object SliceTestUtils extends Assertions {
       proto.sliceAssignments.map(parseSimpleSliceAssignment).toVector
     DiffAssignment(
       isFrozen = false,
-      consistencyMode =
-        if (proto.getIsConsistent) AssignmentConsistencyMode.Strong
-        else AssignmentConsistencyMode.Affinity,
       generation = Generation.fromProto(proto.getGeneration),
       sliceMap = proto.partialDiffGeneration match {
         case Some(partialDiffGeneration) =>

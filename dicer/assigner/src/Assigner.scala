@@ -367,8 +367,7 @@ class Assigner private (
           this.getAssignerInfoSync,
           PreferredAssignerSlicezData(
             preferredAssignerConfig.knownPreferredAssigner,
-            consistentHashingStateOpt,
-            conf.preferredAssignerMigrationMode
+            consistentHashingStateOpt
           ),
           targetSlicezData
         )
@@ -951,7 +950,7 @@ class Assigner private (
     private val subscriberHandler: SubscriberHandler = {
       val subscriberHandlerSec: SequentialExecutionContext =
         assignerSecPool.createExecutionContext(s"subscriber-handler-$target")
-      new SubscriberHandler(
+      SubscriberHandler.create(
         subscriberHandlerSec,
         target,
         getSuggestedClerkRpcTimeoutFn = () => conf.getAssignerSuggestedClerkWatchTimeout,
@@ -1292,7 +1291,7 @@ object Assigner {
       assignerSecPool,
       assignerSec,
       conf,
-      Assigner.createPreferredAssignerDriver(conf, localClusterMembershipChecker),
+      Assigner.createPreferredAssignerDriver(conf),
       Assigner.createStoreFactory(conf),
       kubernetesTargetWatcherFactory,
       HealthWatcher.DefaultFactory,
@@ -1373,47 +1372,27 @@ object Assigner {
   }
 
   /**
-   * Creates the [[PreferredAssignerDriver]] for the given config: a
-   * [[MigrationPreferredAssignerDriver]] (etcd + consistent-hashing) when the preferred assigner is
-   * enabled, else a [[DisabledPreferredAssignerDriver]] (which does not use the checker).
+   * Creates an [[EtcdPreferredAssignerDriver]] when the preferred assigner is enabled, else a
+   * [[DisabledPreferredAssignerDriver]].
    */
-  @throws[IllegalArgumentException](
-    "if the migration mode requires a KubernetesMembershipChecker but none is provided"
-  )
   private[dicer] def createPreferredAssignerDriver(
       conf: DicerAssignerConf,
-      localClusterMembershipChecker: KubernetesMembershipChecker,
       driverConfig: EtcdPreferredAssignerDriver.Config = EtcdPreferredAssignerDriver.Config()
   ): PreferredAssignerDriver = {
     if (conf.preferredAssignerEnabled) {
       val store: EtcdPreferredAssignerStore = createPreferredAssignerStore(conf)
       // Use `getDicerClientTlsOptions` so it can send heartbeats to the preferred assigner.
       val tlsOptions: Option[TLSOptions] = conf.getDicerClientTlsOptions
-      // REQUIRED: `etcdDriver`, `chDriver`, and the wrapping `MigrationPreferredAssignerDriver`
-      // must all run on the same `SequentialExecutionContext` — see the class scaladoc on
-      // `MigrationPreferredAssignerDriver`. This is load-bearing in the consistent-hashing modes,
-      // where picks are forwarded between the drivers; other modes don't require it, but all
-      // construction sites MUST preserve this property.
       val driverSec: SequentialExecutionContext =
         SequentialExecutionContext.createWithDedicatedPool(
           name = "preferred-assigner-driver",
           alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
         )
-      val etcdDriver: EtcdPreferredAssignerDriver = new EtcdPreferredAssignerDriver(
+      new EtcdPreferredAssignerDriver(
         driverSec,
         tlsOptions,
         store,
         driverConfig
-      )
-      val chDriver: ConsistentHashingPreferredAssignerDriver =
-        new ConsistentHashingPreferredAssignerDriver(driverSec, localClusterMembershipChecker)
-      val migrationMode: MigrationMode = conf.preferredAssignerMigrationMode
-      logger.info(s"Constructing MigrationPreferredAssignerDriver in mode: ${migrationMode.name}")
-      new MigrationPreferredAssignerDriver(
-        driverSec,
-        migrationMode = migrationMode,
-        oldDriver = etcdDriver,
-        newDriver = chDriver
       )
     } else {
       logger.info("Creating DisabledPreferredAssignerDriver.")

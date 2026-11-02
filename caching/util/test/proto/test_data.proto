@@ -254,6 +254,75 @@ message EwmaCounterTestDataP {
 }
 
 
+message EwmaAmplifierTestDataP {
+
+  // Factory parameters for creating EwmaAmplifier instances.
+  message EwmaAmplifierP {
+    optional double half_life_seconds = 1;
+    // The test runner always uses its clock time as the start_time, so it is omitted here.
+
+    // An optional expected error message. When set, the creation of the EwmaAmplifier must fail
+    // with this message.
+    optional string error_message_opt = 2;
+  }
+
+  // An action to call `amplifyAndIncrement(value)`. When `expected_amplified_value` is set, asserts
+  // the returned value is within tolerance range of it; when `error_message_opt` is set, asserts
+  // the call returns an error or throws an exception whose message contains it.
+  message AmplifyAndIncrementP {
+    optional int32 value = 1;
+    optional double expected_amplified_value = 2;
+    optional string error_message_opt = 3;
+  }
+
+  // An action to call `rescale()`. When `expected_factor_opt` is set, asserts the returned factor
+  // is within tolerance of it; when unset, asserts no factor was returned.
+  message RescaleP {
+    optional double expected_factor_opt = 1;
+  }
+
+  // An action to call `advanceAndRescaleIfNeeded(start_time + elapsed_ms)`. When
+  // `expected_rescale_factor_opt` is set, asserts a rescale happened and the returned factor is
+  // within tolerance of it; when unset, asserts no rescale happened. The start_time is the time
+  // when the EwmaAmplifier for this test case was created and will be supplied by the test code.
+  // The `elapsed_ms` values from multiple such actions don't accumulate.
+  message AdvanceAndRescaleIfNeededP {
+    optional int64 elapsed_ms = 1;
+    optional double expected_rescale_factor_opt = 2;
+  }
+
+  // An action to call `total()` and verify the result is within tolerance of `expected_total`.
+  message AssertTotalEqualsP {
+    optional double expected_total = 1;
+  }
+
+  // Represents the test action.
+  message ActionP {
+    oneof action {
+      AmplifyAndIncrementP amplify_and_increment = 1;
+      RescaleP rescale = 2;
+      AdvanceAndRescaleIfNeededP advance_and_rescale_if_needed = 3;
+      AssertTotalEqualsP assert_total_equals = 4;
+    }
+  }
+
+  // A test case for the EwmaAmplifier.
+  message TestCaseP {
+    // The name of this test case, used for debugging and helping find the relevant proto
+    // entry in the test data.
+    optional string test_case_name = 1;
+
+    // The factory parameters for creating the EwmaAmplifier.
+    optional EwmaAmplifierP ewma_amplifier = 2;
+
+    // The actions to perform against the EwmaAmplifier.
+    repeated ActionP actions = 3;
+  }
+
+  // All test cases.
+  repeated TestCaseP test_cases = 1;
+}
+
 message LossyEwmaCounterTestDataP {
   // Indicates to use a random valid sample.
   message RandomValidP {}

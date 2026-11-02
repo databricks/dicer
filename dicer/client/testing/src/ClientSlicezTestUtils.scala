@@ -10,7 +10,6 @@ import com.databricks.dicer.assigner.config.InternalTargetConfig.KeyReplicationC
 import com.databricks.dicer.client.ClientTargetSlicezData
 import com.databricks.dicer.common.{
   Assignment,
-  AssignmentConsistencyMode,
   ClerkSubscriberSlicezData,
   Generation,
   ProposedAssignment,
@@ -64,7 +63,7 @@ private[client] object ClientSlicezTestUtils {
     squidOpt = squidOpt,
     unattributedLoadBySliceOpt = unattributedLoadBySliceOpt,
     subscriberDebugName = subscriberDebugName,
-    watchAddress = watchAddress,
+    watchAddress = watchAddress.toString,
     watchAddressUsedSince = watchAddressUsedSince,
     lastSuccessfulHeartbeat = lastSuccessfulHeartbeat,
     clientClusterOpt = clientClusterOpt
@@ -90,7 +89,6 @@ private[client] object ClientSlicezTestUtils {
 
     proposedAsn.commit(
       isFrozen = false,
-      AssignmentConsistencyMode.Affinity,
       generation
     )
   }
