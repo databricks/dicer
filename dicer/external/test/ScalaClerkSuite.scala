@@ -21,7 +21,7 @@ private class ScalaClerkSuite extends ScalaClerkSuiteBase {
       clerkLocationConfigMap: Option[Map[String, String]],
       clientBranchOpt: Option[String] = None,
       enableRateLimitingOverrideOpt: Option[Boolean] = Some(false),
-      enableRateLimitingFeatureRollout: Boolean = false,
+      enabledFeatureRolloutFlags: Set[String] = Set.empty,
       sliceletWatchRpcTimeoutOpt: Option[FiniteDuration] = None): ClerkHarness = {
     val envMap: Map[String, String] = clerkLocationConfigMap.getOrElse(Map.empty)
     val locationConf: LocationConf = LocationConfTestUtils.newTestLocationConfig(envMap = envMap)
@@ -55,7 +55,7 @@ private class ScalaClerkSuite extends ScalaClerkSuiteBase {
         case None =>
           testEnv.createClerk(
             slicelet,
-            if (enableRateLimitingFeatureRollout) Some(clerkRateLimitingRolloutFlag) else None,
+            featureRolloutFlagOpt(enabledFeatureRolloutFlags),
             enableRateLimitingOverrideOpt
           )
       }

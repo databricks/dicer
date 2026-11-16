@@ -9,7 +9,6 @@ import com.databricks.dicer.friend.SliceMap
 import java.net.URI
 import java.util.UUID
 import java.util.concurrent.CompletionException
-import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 
 import scala.collection.mutable
@@ -28,20 +27,20 @@ import com.databricks.caching.util.{
   MetricUtils,
   Severity,
   TestUtils,
-  UnixTimeVersion
+  UnixTimeVersion,
+  WatchValueCell
 }
 import com.databricks.caching.util.MetricUtils.ChangeTracker
 import com.databricks.conf.Config
 import com.databricks.dicer.common.ClientType
 import com.databricks.rpc.RequestHeaders
 import com.databricks.api.proto.dicer.common.ClientRequestP.SliceletDataP
-import com.databricks.common.web.InfoService
 import com.google.protobuf.ByteString
 import com.databricks.conf.Configs
 import com.databricks.conf.trusted.ProjectConfByName
 import com.databricks.conf.trusted.LocationConf
 import com.databricks.conf.trusted.LocationConfTestUtils
-import com.databricks.dicer.client.{ClerkImpl, SliceletImpl, TestClientUtils}
+import com.databricks.dicer.client.{ClerkImpl, SliceletImpl, TestClientUtils, WatchAddress}
 import com.databricks.dicer.client.TestClientUtils.FakeBlockingReadinessProvider
 import com.databricks.dicer.client.featurerollouts.DicerClientFeatureRolloutFlag
 import com.databricks.dicer.common.TargetHelper.TargetOps
@@ -67,7 +66,6 @@ import com.databricks.dicer.common.{
   ClientRequest,
   Generation,
   Incarnation,
-  ProposedSliceAssignment,
   SliceSetImpl,
   SliceletData,
   SliceletState
@@ -79,8 +77,8 @@ import com.databricks.dicer.common.testing.{
   SliceTestUtils
 }
 import com.databricks.caching.util.Lock.withLock
-import com.databricks.common.status.{ProbeStatus, ProbeStatusSource, ProbeStatuses}
-import com.databricks.dicer.assigner.TargetMetricsUtils
+import com.databricks.common.status.{ProbeStatus, ProbeStatuses, ProbeStatusSource}
+import com.databricks.dicer.assigner.{ProposedSliceAssignment, TargetMetricsUtils}
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
 import com.databricks.dicer.assigner.config.InternalTargetConfig.HealthWatcherTargetConfig
 import com.databricks.dicer.assigner.config.{InternalTargetConfig, InternalTargetConfigMap}
@@ -89,7 +87,6 @@ import com.databricks.dicer.common.test.SliceletTestDataP
 import com.databricks.dicer.common.test.SliceletTestDataP.SliceletDebugNameTestCaseP
 import com.databricks.dicer.external.SliceletSuite.ASSIGNER_CLUSTER_URI
 import com.databricks.dicer.friend.Squid
-import com.databricks.web.SimpleWebClient
 import com.databricks.rpc.tls.TLSOptions
 import com.databricks.rpc.testing.TestTLSOptions
 import com.databricks.testing.DatabricksTest
@@ -122,25 +119,14 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
   protected def locationEnvVarJson: String
 
   /** Assigner config used by all test environments in this suite. */
-  private val sharedSliceletTestAssignerConfig: TestAssigner.Config = TestAssigner.Config.create(
-    assignerConf = new DicerAssignerConf(
-      Configs.parseMap(
-        // Short watch timeout to more quickly observe Slicelet changes.
-        "databricks.dicer.internal.cachingteamonly.watchServerSuggestedRpcTimeoutMillis" -> 500,
-        // Shrink the NotReady flapping-protection window so tests that exercise NotReady -> Running
-        // transitions don't have to wait for the default 10s timeout.
-        "databricks.dicer.assigner.notReadyTimeoutPeriodSeconds" -> 1
-      )
-    ),
-    assignerServiceInfoOpt = Some(SliceletSuite.TEST_ASSIGNER_SERVICE_INFO)
-  )
+  private val sharedSliceletTestAssignerConfig: TestAssigner.Config =
+    SliceletSuiteBase.sharedSliceletTestAssignerConfig
 
-  /** The test environment used for all the tests. */
-  protected val testEnv: InternalDicerTestEnvironment =
-    InternalDicerTestEnvironment.create(
-      config = sharedSliceletTestAssignerConfig,
-      assignerClusterUri = ASSIGNER_CLUSTER_URI
-    )
+  /** Readiness shared by Slicelet suite variants running in the same process. */
+  protected val readinessStatus: WatchValueCell[ProbeStatus] = SliceletSuiteBase.readinessStatus
+
+  /** Shared environment; each test uses a unique target name for isolation. */
+  protected val testEnv: InternalDicerTestEnvironment = SliceletSuiteBase.testEnv
 
   /** The number of Slicelets that have been created in the current test case. */
   private var numSlicelets: Int = 0
@@ -148,10 +134,9 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
   override def beforeEach(): Unit = {
     testCaseUuid = UUID.randomUUID()
     numSlicelets = 0
-  }
-
-  override def afterAll(): Unit = {
-    testEnv.stop()
+    // Restore readiness to OK before each test, since a prior test may have flipped it to
+    // not-ready.
+    readinessStatus.setValue(ProbeStatuses.ok("dicer-test"))
   }
 
   /**
@@ -276,8 +261,9 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
   protected def expectedAssignerCanonicalizedTargetIdentifier: Target
 
   /**
-   * Sets the readiness status reported by the probe status source and triggers a readiness
-   * endpoint update so the [[ReadinessProbeTracker]] picks up the change.
+   * Sets the readiness status that the Slicelet under test observes. Each implementation drives its
+   * own readiness source, so the change is picked up asynchronously; tests assert Slicelet state
+   * with a waiter.
    */
   protected def setReadinessProbeStatusSource(status: ProbeStatus): Unit
 
@@ -1680,17 +1666,17 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
       sliceletPort = slicelet.activePort,
       clientTlsFilePathsOpt = None
     )
-    // Use explicit http:// scheme to construct the watch URI because:
+    // Use explicit http:// scheme to construct the watch address because:
     // - Without a scheme, Armeria gRPC client defaults to HTTPS even when empty TLS options are
     //   configured.
     // - The Rust Slicelet in tests runs a plain HTTP server (no TLS options are configured).
     // - Explicit http:// ensures the Clerk connects via plain HTTP to the Rust Slicelet server.
-    val watchUri = URI.create(s"http://localhost:${slicelet.activePort}")
+    val watchAddress = WatchAddress.fromAddress(s"http://localhost:${slicelet.activePort}")
 
     val clerk = ClerkImpl.create(
       clerkConf,
       expectedSliceletTargetIdentifier,
-      watchUri, { resourceAddress: ResourceAddress =>
+      watchAddress, { resourceAddress: ResourceAddress =>
         resourceAddress
       },
       sourceIpOpt = None
@@ -1703,6 +1689,73 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
     }
 
     // Stop the Slicelet and Clerk created for the test.
+    slicelet.stop()
+    clerk.stop()
+  }
+
+  test("No assignment for mismatched target") {
+    // Test plan: verify that a Slicelet receiving assignment watch requests for a target which it
+    // does not own rejects them and does not distribute an assignment to the requester. Verify this
+    // by giving the Slicelet an assignment, then pointing a Clerk for another target at the
+    // Slicelet, waiting until the Clerk records a watch request rejected with NOT_FOUND, and
+    // checking that the Clerk has received no assignment.
+    val slicelet: SliceletHarness = createSlicelet(testEnv)()
+    slicelet.start(selfPort = 1234, None)
+    val squid: Squid = waitForSquidWithPort(testEnv, 1234)
+
+    // Set up the assignment at the Assigner.
+    val proposal = createProposal(
+      ("" -- fp("Dori")) -> Seq("Pod2"),
+      (fp("Dori") -- fp("Fili")) -> Seq("Pod0"),
+      (fp("Fili") -- fp("Kili")) -> Seq(squid),
+      (fp("Kili") -- fp("Nori")) -> Seq(squid),
+      (fp("Nori") -- ∞) -> Seq("Pod3")
+    )
+    TestUtils.awaitResult(setAndFreezeAssignment(testEnv, proposal), Duration.Inf)
+    // Sanity check: the Slicelet should be able to receive the assignment.
+    AssertionWaiter("slicelet receives assignment").await {
+      assert(slicelet.hasReceivedAssignment)
+    }
+
+    // Point a Clerk for another target at the Slicelet. The watch address names http:// because
+    // the Rust Slicelet's test server speaks plain HTTP, and the Armeria client otherwise assumes
+    // HTTPS.
+    val clerkTarget: Target = targetFactory(None, s"$getSafeName-other")
+    val clerkConf: ClerkConf = TestClientUtils.createTestClerkConf(
+      sliceletPort = slicelet.activePort,
+      clientTlsFilePathsOpt = None
+    )
+    val watchAddress = WatchAddress.fromAddress(s"http://localhost:${slicelet.activePort}")
+    val clerk = ClerkImpl.create(
+      clerkConf,
+      clerkTarget,
+      watchAddress, { resourceAddress: ResourceAddress =>
+        resourceAddress
+      },
+      sourceIpOpt = None
+    )
+
+    // The Clerk runs in this process whichever implementation the Slicelet is, so its watch
+    // outcomes are read from this process's metrics rather than through `readPrometheusMetric`.
+    // The labels leave out the target's cluster, which the Clerk fills in from its own location
+    // when the suite runs in a known cluster.
+    val rejectedWatchLabels: Map[String, String] = Map(
+      "targetName" -> clerkTarget.getTargetNameLabel,
+      "clientType" -> ClientType.Clerk.getMetricLabel,
+      "status" -> "failure",
+      "grpc_status" -> "NOT_FOUND"
+    )
+    AssertionWaiter("Slicelet rejects the Clerk's watch request").await {
+      assert(
+        MetricUtils.getMetricValuesSum(
+          CollectorRegistry.defaultRegistry,
+          "dicer_client_watch_requests_total",
+          rejectedWatchLabels
+        ) >= 1
+      )
+    }
+    assert(clerk.forTest.getLatestAssignmentOpt.isEmpty)
+
     slicelet.stop()
     clerk.stop()
   }
@@ -1845,10 +1898,9 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
 
   test("Assigner observes Slicelet readiness state transitions via full probe stack") {
     // Test plan: Verify that the Assigner correctly observes Slicelet state transitions (NOT_READY
-    // -> RUNNING -> NOT_READY -> TERMINATING) using the full readiness probe stack
-    // (InfoService with HTTP probes). This validates end-to-end behavior from the Assigner's
-    // perspective, ensuring that readiness changes propagate correctly and that TERMINATING state
-    // takes precedence over readiness.
+    // -> RUNNING -> NOT_READY -> TERMINATING) by toggling the Slicelet's readiness source. This
+    // validates end-to-end behavior from the Assigner's perspective, ensuring that readiness
+    // changes propagate correctly and that TERMINATING state takes precedence over readiness.
 
     // Set readiness source to report `notYetReady`.
     setReadinessProbeStatusSource(ProbeStatuses.notYetReady("test"))
@@ -1942,7 +1994,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
           InternalTargetConfig.forTest.DEFAULT
             .copy(
               healthWatcherConfig = HealthWatcherTargetConfig(
-                observeSliceletReadiness = true,
+                observeSliceletReadinessOpt = Some(true),
                 permitRunningToNotReady = false
               )
             )
@@ -2007,7 +2059,7 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
           InternalTargetConfig.forTest.DEFAULT
             .copy(
               healthWatcherConfig = HealthWatcherTargetConfig(
-                observeSliceletReadiness = true,
+                observeSliceletReadinessOpt = Some(true),
                 permitRunningToNotReady = false
               )
             )
@@ -2322,35 +2374,46 @@ abstract class SliceletSuiteBase extends DatabricksTest with TestName {
   }
 }
 
+/** Owns the test environment and readiness source shared by all Slicelet suite variants. */
+object SliceletSuiteBase {
+
+  /** Assigner config used by all test environments in this suite. */
+  private val sharedSliceletTestAssignerConfig: TestAssigner.Config = TestAssigner.Config.create(
+    assignerConf = new DicerAssignerConf(
+      Configs.parseMap(
+        // Short watch timeout to more quickly observe Slicelet changes.
+        "databricks.dicer.internal.cachingteamonly.watchServerSuggestedRpcTimeoutMillis" -> 500,
+        // Shrink the NotReady flapping-protection window so tests that exercise NotReady -> Running
+        // transitions don't have to wait for the default 10s timeout.
+        "databricks.dicer.assigner.notReadyTimeoutPeriodSeconds" -> 1
+      )
+    ),
+    assignerServiceInfoOpt = Some(SliceletSuite.TEST_ASSIGNER_SERVICE_INFO)
+  )
+
+  private val readinessStatus: WatchValueCell[ProbeStatus] = new WatchValueCell[ProbeStatus]
+  private val readinessSource: ProbeStatusSource = new ProbeStatusSource {
+    override def getStatus: ProbeStatus =
+      readinessStatus.getLatestValueOpt.getOrElse(ProbeStatuses.ok("dicer-test"))
+  }
+
+  /** Lives for the whole test process because OSS runs multiple child suites in one JVM. */
+  private lazy val testEnv: InternalDicerTestEnvironment = {
+    val env: InternalDicerTestEnvironment = InternalDicerTestEnvironment.create(
+      config = sharedSliceletTestAssignerConfig,
+      assignerClusterUri = ASSIGNER_CLUSTER_URI,
+      readinessSourceOpt = Some(readinessSource)
+    )
+    sys.addShutdownHook { env.stop() }
+    env
+  }
+}
+
 /**
  * Includes the common test cases from [[SliceletSuite]] plus test cases that apply to
  * the Scala implementation but not the Rust one.
  */
 abstract class ScalaSliceletSuite extends SliceletSuiteBase {
-
-  /**
-   * The custom [[ProbeStatusSource]] used by the [[InfoService]] to get the pod's readiness.
-   */
-  private val readinessSource = new TestProbeStatusSource()
-
-  /**
-   * A [[ProbeStatusSource]] for testing that allows dynamically changing the readiness status. It
-   * is queried by the [[InfoService]] to update the [[ReadinessProbeTracker]] underlying the
-   * [[ReadinessReporter]].
-   */
-  private class TestProbeStatusSource extends ProbeStatusSource {
-    private val status: AtomicReference[ProbeStatus] =
-      new AtomicReference[ProbeStatus](ProbeStatuses.notYetReady("test"))
-
-    override def getStatus: ProbeStatus = status.get()
-
-    /** Set the status reported by this probe source to `isReady`. */
-    def setReady(isReady: Boolean): Unit = {
-      val newStatus: ProbeStatus =
-        if (isReady) ProbeStatuses.ok("test") else ProbeStatuses.notYetReady("test")
-      status.set(newStatus)
-    }
-  }
 
   final override protected def configureAppIdentifierForTest(
       name: String,
@@ -2360,23 +2423,6 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
 
   final override protected def clearAppIdentifierForTest(): Unit = {
     AppIdentifierTestUtils.clearForTest()
-  }
-
-  override def beforeAll(): Unit = {
-    super.beforeAll()
-    // Set up the InfoService to be used by the ReadinessReporter.
-    InfoService.start(
-      port = 0,
-      startupStatusSourceOpt = None,
-      livenessStatusSourceOpt = None,
-      readinessStatusSourceOpt = Some(readinessSource),
-      branchOpt = None
-    )
-  }
-
-  override def afterAll(): Unit = {
-    InfoService.stop()
-    super.afterAll()
   }
 
   override def beforeEach(): Unit = {
@@ -2475,21 +2521,9 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
   }
 
   override protected def setReadinessProbeStatusSource(status: ProbeStatus): Unit = {
-    readinessSource.setReady(status.code == ProbeStatuses.OK_STATUS)
-    pokeReadinessSource()
-  }
-
-  /**
-   * Sends an HTTP request to the [[InfoService]] to trigger a status update. Used with the
-   * [[TestProbeStatusSource]] to update the readiness status of the pod.
-   */
-  private def pokeReadinessSource(): Unit = {
-    val port = InfoService.getActivePort()
-    assert(port != 0) // Ensure the server is started.
-
-    // Make HTTP request to the readiness endpoint. We don't care about the response, since we check
-    // that the readiness source is updated by way of verifying the Slicelet state later.
-    val _ = SimpleWebClient.webClient().get(s"http://localhost:$port/ready").aggregate()
+    // The Scala Slicelet reads readiness from the ProbeStatusManager, so drive its source.
+    // The change is observed within one poll interval; tests assert Slicelet state with a waiter.
+    readinessStatus.setValue(status)
   }
 
   test("Slicelet starts successfully when readiness check blocks indefinitely") {
@@ -2669,50 +2703,6 @@ abstract class ScalaSliceletSuite extends SliceletSuiteBase {
       }
     }
     slicelet.stop()
-  }
-
-  // TODO(<internal bug>): Match the behavior for the Rust Slicelet and move this test to
-  //  SliceletSuiteBase.
-  test("No assignment for mismatched target") {
-    // Test plan: verify that a Slicelet receiving assignment watch requests for a target which it
-    // does not own does not distribute an assignment to the requester.
-    val slicelet: ScalaSliceletHarness = createSlicelet(testEnv)()
-    slicelet.start(selfPort = 1234, None)
-    val squid: Squid = waitForSquidWithPort(testEnv, 1234)
-
-    // Set up the assignment at the Assigner.
-    val proposal = createProposal(
-      ("" -- fp("Dori")) -> Seq("Pod2"),
-      (fp("Dori") -- fp("Fili")) -> Seq("Pod0"),
-      (fp("Fili") -- fp("Kili")) -> Seq(squid),
-      (fp("Kili") -- fp("Nori")) -> Seq(squid),
-      (fp("Nori") -- ∞) -> Seq("Pod3")
-    )
-
-    val sliceletTarget: Target = targetFactory(None, getSafeName)
-    TestUtils.awaitResult(
-      testEnv.setAndFreezeAssignment(sliceletTarget, proposal),
-      Duration.Inf
-    )
-    // Sanity check: the Slicelet should be able to receive the assignment.
-    AssertionWaiter("slicelet receives assignment").await {
-      assert(slicelet.hasReceivedAssignment)
-    }
-
-    val clerkTarget: Target = targetFactory(None, s"$getSafeName-other")
-    val clerkConf: ClerkConf =
-      TestClientUtils
-        .createTestClerkConf(
-          slicelet.slicelet.impl.forTest.sliceletPort,
-          clientTlsFilePathsOpt = None
-        )
-    val clerk: Clerk[ResourceAddress] = TestClientUtils.createClerk(clerkTarget, clerkConf)
-
-    TestUtils.shamefullyAwait200msForNonEventInAsyncTest()
-    assert(!clerk.ready.isCompleted)
-
-    slicelet.stop()
-    clerk.forTest.stop()
   }
 
   // This test case only makes sense for Scala, because the Rust Slicelet notifies the application

@@ -1,4 +1,3 @@
-// LINT.IfChange
 package com.databricks.dicer.external
 
 import java.io.ByteArrayOutputStream
@@ -134,5 +133,3 @@ private[dicer] object SliceKeySegmentedFingerprintBuilder {
     new SliceKeySegmentedFingerprintBuilder()
   }
 }
-// LINT.ThenChange(dicer/external/javaapi/src/SliceKeyBuilder.java)
-// LINT.ThenChange(dicer/rust/external/types/src/slice_key_builder.rs)

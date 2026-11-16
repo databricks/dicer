@@ -45,6 +45,9 @@ message InternalDicerTargetConfigP {
   // Fully resolved configurations after applying the scoped overrides. Each scope must appear
   // at most once.
   repeated InternalDicerOverrideP overrides = 4;
+
+  // Owning team from the target config.
+  optional string owner_team_name = 5;
 }
 
 // A fully resolved target configuration for one scope.

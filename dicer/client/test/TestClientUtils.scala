@@ -40,6 +40,23 @@ object TestClientUtils {
   /** A fixed client UUID for use in unit tests where the client UUID is not important. */
   val TEST_CLIENT_UUID: UUID = UUID.fromString("00000000-0000-0000-0000-000000000001")
 
+  /** A [[DicerClientFeatureRolloutFlag]] that reports every flag as disabled for every target. */
+  val ALL_DISABLED_FEATURE_ROLLOUT_FLAG: DicerClientFeatureRolloutFlag =
+    new DicerClientFeatureRolloutFlag {
+      override def isEnabled(flagName: String, target: Target): Boolean = false
+    }
+
+  /**
+   * Creates an evaluator that enables only `enabledFeatures` for every target and disables all
+   * other features.
+   */
+  def createFeatureRolloutFlag(enabledFeatures: Set[String]): DicerClientFeatureRolloutFlag = {
+    new DicerClientFeatureRolloutFlag {
+      override def isEnabled(flagName: String, target: Target): Boolean =
+        enabledFeatures.contains(flagName)
+    }
+  }
+
   /** Wait for an assignment to be delivered to `slicelet` in which it is assigned `key`. */
   def waitForAssignment(slicelet: Slicelet, key: SliceKey): Unit = {
     AssertionWaiter("Waiting for assignment").await {
@@ -230,10 +247,7 @@ object TestClientUtils {
   /** Returns a [[Config]] with a bit set to allow multiple Slicelets within this process. */
   def createAllowMultipleClientsConfig(): Config = {
     Configs.parseMap(
-      InternalClientConf.allowMultipleSliceletInstancesPropertyName -> true,
-      // Tests which create multiple Clerks for the same target should not reuse lookups to
-      // simulate multiple pods between which there may be assignment skew.
-      InternalClientConf.allowMultipleClerksShareLookupPerTargetPropertyName -> false
+      InternalClientConf.allowMultipleSliceletInstancesPropertyName -> true
     )
   }
 

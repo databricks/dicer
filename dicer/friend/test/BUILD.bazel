@@ -30,6 +30,7 @@ scala_test(
         "//caching/util:test_utils",
         "//dicer/assigner/config:internal_target_config_map",
         "//dicer/assigner:assigner_slicez",
+        "//dicer/assigner:proposed_assignment",
         "//dicer/client:slicelet_impl",
         "//dicer/client:test_client",
         "//dicer/common/testing:test_common",
@@ -62,6 +63,7 @@ scala_test(
     timeout = "short",
     deps = [
         "//caching/util:test_utils",
+        "//dicer/assigner:proposed_assignment",
         "//dicer/common/test/proto:test_data_proto_scala_lib",
         "//dicer/common/testing:test_common",
         "//dicer/common:assignment_core",

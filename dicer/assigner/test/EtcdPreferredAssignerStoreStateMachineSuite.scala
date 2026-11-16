@@ -15,7 +15,7 @@ import com.databricks.dicer.assigner.EtcdPreferredAssignerStore.{
   PreferredAssignerProposal,
   WriteResult
 }
-import com.databricks.dicer.common.{EtcdClientHelper, Generation, Incarnation}
+import com.databricks.dicer.common.{Generation, Incarnation}
 import com.databricks.testing.DatabricksTest
 import com.databricks.dicer.assigner.EtcdPreferredAssignerStoreStateMachine.{
   DriverAction,

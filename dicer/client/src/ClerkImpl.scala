@@ -3,7 +3,7 @@ package com.databricks.dicer.client
 import java.net.{InetAddress, URI}
 import java.nio.ByteBuffer
 import java.util.UUID
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.locks.ReentrantLock
 
 import scala.concurrent.duration._
 import scala.concurrent.{Future, Promise}
@@ -11,6 +11,7 @@ import scala.concurrent.{Future, Promise}
 import javax.annotation.concurrent.ThreadSafe
 
 import com.databricks.caching.util.AssertMacros.iassert
+import com.databricks.caching.util.Lock.withLock
 import com.databricks.caching.util.{
   AlertOwnerTeam,
   ConsistentHashRing,
@@ -307,7 +308,7 @@ private[dicer] object ClerkImpl {
   def create[Stub <: AnyRef](
       clerkConf: ClerkConf,
       target: Target,
-      watchAddress: URI,
+      watchAddress: WatchAddress,
       stubFactory: ResourceAddress => Stub,
       sourceIpOpt: Option[InetAddress]): ClerkImpl[Stub] = {
     val targetBestEffortFullyQualified: Target = target match {
@@ -317,8 +318,6 @@ private[dicer] object ClerkImpl {
         // AppTargets are always fully qualified by `instanceId`.
         target
     }
-
-    val reuseLookups: Boolean = clerkConf.allowMultipleClerksShareLookupPerTarget
 
     val podName: String = InetAddress.getLocalHost.getHostName
     val clerkIndex: Int = assignNextClerkIndex()
@@ -347,13 +346,10 @@ private[dicer] object ClerkImpl {
         //   alternativeTargetOpt as part of the AppTarget migration.
         // TODO(<internal bug>): Populate alternativeTargetOpt once DBNS can supply it for the target.
         alternativeTargetOpt = None,
-        // The conf override, when set, takes precedence over the rollout flag, so that a service
-        // can force rate limiting on or off regardless of the rollout.
-        enableRateLimiting = clerkConf.enableRateLimitingOverrideOpt.getOrElse(
-          clerkConf.isFeatureRolloutFlagEnabled(
-            DicerClientFeatureRolloutFlag.CLERK_WATCH_RATE_LIMITING_FLAG_NAME,
-            targetBestEffortFullyQualified
-          )
+        enableRateLimiting = resolveEnableRateLimiting(
+          clerkConf.enableRateLimitingOverrideOpt,
+          clerkConf.isFeatureRolloutFlagEnabled,
+          targetBestEffortFullyQualified
         )
       ),
       subscriberDebugName = clerkDebugName,
@@ -376,7 +372,10 @@ private[dicer] object ClerkImpl {
       clerkIndex,
       factoryContext = "clerk",
       stubFactory,
-      reuseLookups
+      reuseLookups = clerkConf.isFeatureRolloutFlagEnabled(
+        DicerClientFeatureRolloutFlag.CLERK_CACHING_FLAG_NAME,
+        targetBestEffortFullyQualified
+      )
     )
   }
 
@@ -398,7 +397,7 @@ private[dicer] object ClerkImpl {
       secPoolOpt: Option[SequentialExecutionContextPool],
       clerkConf: ClerkConf,
       target: Target,
-      assignerAddress: URI,
+      assignerAddress: WatchAddress,
       watchFromDataPlane: Boolean,
       alternativeTargetOpt: Option[AppTarget],
       stubFactory: ResourceAddress => Stub): ClerkImpl[Stub] = {
@@ -409,7 +408,10 @@ private[dicer] object ClerkImpl {
       target,
       assignerAddress,
       factoryContext = "dataPlaneDirectClerk",
-      reuseLookups = clerkConf.allowMultipleClerksShareLookupPerTarget,
+      reuseLookups = clerkConf.isFeatureRolloutFlagEnabled(
+        DicerClientFeatureRolloutFlag.CLERK_CACHING_FLAG_NAME,
+        target
+      ),
       watchFromDataPlane = watchFromDataPlane,
       alternativeTargetOpt = alternativeTargetOpt,
       stubFactory
@@ -432,7 +434,7 @@ private[dicer] object ClerkImpl {
       protoLogger: DicerClientProtoLogger,
       clerkConf: ClerkConf,
       target: Target,
-      assignerAddress: URI,
+      assignerAddress: WatchAddress,
       stubFactory: ResourceAddress => Stub): ClerkImpl[Stub] = {
     createDirectClerkInternal(
       secPoolOpt,
@@ -451,6 +453,10 @@ private[dicer] object ClerkImpl {
 
   /**
    * Creates and returns a new [[ClerkImpl]] specifically for a Dicer-integrated stub.
+   *
+   * @param featureRolloutFlag The evaluator used to determine which Dicer client features are
+   *                           enabled for this Clerk's target.
+   * @param enableRateLimitingOverrideOpt See `DicerClientConf.enableRateLimitingOverrideOpt`.
    */
   // TODO(<internal bug>): Enforce the singleton Clerk constraint.
   def createForShardedStub(
@@ -458,7 +464,9 @@ private[dicer] object ClerkImpl {
       watchAddress: URI,
       protoLoggerConf: DicerClientProtoLoggerConf,
       tlsOptions: Option[TLSOptions],
-      clientUuidOpt: Option[String]
+      clientUuidOpt: Option[String],
+      featureRolloutFlag: DicerClientFeatureRolloutFlag,
+      enableRateLimitingOverrideOpt: Option[Boolean]
   ): ClerkImpl[ResourceAddress] = {
 
     val targetBestEffortFullyQualified: Target = target match {
@@ -490,13 +498,14 @@ private[dicer] object ClerkImpl {
         //   alternativeTargetOpt as part of the AppTarget migration.
         // TODO(<internal bug>): Populate alternativeTargetOpt once DBNS can supply it for the target.
         alternativeTargetOpt = None,
-        // TODO(<internal bug>): Resolve the clerk-watch-rate-limiting rollout flag here too. Unlike the
-        // other Clerk entry points, this one is handed no DicerClientConf (see the spec on
-        // DicerClientProtoLoggerConf), so it has nothing to query the flag on.
-        enableRateLimiting = false
+        enableRateLimiting = resolveEnableRateLimiting(
+          enableRateLimitingOverrideOpt,
+          featureRolloutFlag.isEnabled,
+          targetBestEffortFullyQualified
+        )
       ),
       subscriberDebugName = clerkDebugName,
-      watchAddress = watchAddress,
+      watchAddress = WatchAddress.fromAddress(watchAddress.toString),
       tlsOptionsOpt = tlsOptions,
       watchFromDataPlane = false,
       sourceIpOpt = None
@@ -514,8 +523,10 @@ private[dicer] object ClerkImpl {
       clerkIndex,
       factoryContext = "shardedStub",
       stubFactory = (resourceAddress: ResourceAddress) => resourceAddress,
-      // TODO(<internal bug>): Enable lookup reuse for sharded stubs, once rolled out to all clusters.
-      reuseLookups = false
+      reuseLookups = featureRolloutFlag.isEnabled(
+        DicerClientFeatureRolloutFlag.CLERK_CACHING_FLAG_NAME,
+        targetBestEffortFullyQualified
+      )
     )
   }
 
@@ -691,7 +702,7 @@ private[dicer] object ClerkImpl {
       sharedProtoLoggerOpt: Option[DicerClientProtoLogger],
       clerkConf: ClerkConf,
       target: Target,
-      assignerAddress: URI,
+      assignerAddress: WatchAddress,
       factoryContext: ClerkFactoryContext,
       reuseLookups: Boolean,
       watchFromDataPlane: Boolean,
@@ -728,13 +739,10 @@ private[dicer] object ClerkImpl {
         clientIdOpt = resolveClientUuid(clerkConf.clientUuidOpt, target),
         watchStubCacheTime = SliceLookupConfig.DEFAULT_WATCH_STUB_CACHE_TIME,
         alternativeTargetOpt = alternativeTargetOpt,
-        // The conf override, when set, takes precedence over the rollout flag, so that a service
-        // can force rate limiting on or off regardless of the rollout.
-        enableRateLimiting = clerkConf.enableRateLimitingOverrideOpt.getOrElse(
-          clerkConf.isFeatureRolloutFlagEnabled(
-            DicerClientFeatureRolloutFlag.CLERK_WATCH_RATE_LIMITING_FLAG_NAME,
-            target
-          )
+        enableRateLimiting = resolveEnableRateLimiting(
+          clerkConf.enableRateLimitingOverrideOpt,
+          clerkConf.isFeatureRolloutFlagEnabled,
+          target
         )
       ),
       subscriberDebugName = clerkDebugName,
@@ -780,14 +788,46 @@ private[dicer] object ClerkImpl {
     uuidOpt
   }
 
+  /**
+   * Returns whether a Clerk for `target` rate limits its watch requests. The conf override, when
+   * set, takes precedence over the rollout flag, so that a service can force rate limiting on or
+   * off regardless of the rollout.
+   *
+   * @param isFeatureRolloutFlagEnabled Returns whether the named rollout flag is enabled for a
+   *                                    target. Not called when the override is set.
+   */
+  private def resolveEnableRateLimiting(
+      enableRateLimitingOverrideOpt: Option[Boolean],
+      isFeatureRolloutFlagEnabled: (String, Target) => Boolean,
+      target: Target): Boolean = {
+    enableRateLimitingOverrideOpt.getOrElse(
+      isFeatureRolloutFlagEnabled(
+        DicerClientFeatureRolloutFlag.CLERK_WATCH_RATE_LIMITING_FLAG_NAME,
+        target
+      )
+    )
+  }
+
   /** Assigns an index number for the next Clerk to be created. */
-  private def assignNextClerkIndex(): Int = nextClerkIndex.getAndIncrement()
+  private def assignNextClerkIndex(): Int = {
+    // The lock is acquired here rather than in the Clerk factory methods so that it is not held
+    // across their other work, such as the hostname lookup.
+    withLock(nextClerkIndexLock) {
+      val clerkIndex: Int = nextClerkIndex
+      nextClerkIndex += 1
+      clerkIndex
+    }
+  }
+
+  /** Lock protecting [[nextClerkIndex]]. */
+  private val nextClerkIndexLock: ReentrantLock = new ReentrantLock()
 
   /**
    * Variable that keeps track of the index number of the next Clerk to be created. Primarily,
    * for debugging purposes - can be used in subscriber name.
    */
-  private val nextClerkIndex = new AtomicInteger()
+  @GuardedBy("nextClerkIndexLock")
+  private var nextClerkIndex: Int = 0
 
 }
 

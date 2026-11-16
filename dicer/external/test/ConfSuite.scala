@@ -1,6 +1,5 @@
 package com.databricks.dicer.external
 
-import java.net.URI
 import java.util.UUID
 
 import com.databricks.conf.Configs
@@ -20,8 +19,7 @@ class ConfSuite extends DatabricksTest {
    * Creates a ClerkConf configuration where the slicelet watch RPC port is always set to the value
    * of FAKE_SLICELET_PORT. Also sets a client UUID for rate limiting tests.
    *
-   * We create this config to test conf.getSliceletURI which only uses those config values, and so
-   * we do not override any other config values when instantiating the conf.
+   * These tests only need those values, so other config values keep their defaults.
    */
   private def createClerkConf(): ClerkConf = {
     val clerkConfig = Configs.parseMap(
@@ -35,15 +33,13 @@ class ConfSuite extends DatabricksTest {
     }
   }
 
-  test(
-    "getSliceletURI returns a URI with both host and port defined when a DBNS host is not defined"
-  ) {
-    // Test plan: Verify that getSliceletURI returns a URI containing both a host and port when
-    // the slicelet host is NOT a DBNS host.
+  test("getSliceletWatchAddress appends the port to ordinary hostnames") {
+    // Test plan: Verify that the Clerk preserves its scheme-less hostname/port address format.
     val sliceletHostName = "localhost"
     val conf = createClerkConf()
-    val expectedSliceletURI = new URI(s"$sliceletHostName:$FAKE_SLICELET_PORT")
-    assertResult(expectedSliceletURI)(conf.getSliceletURI(sliceletHostName))
+    assertResult(s"$sliceletHostName:$FAKE_SLICELET_PORT")(
+      conf.getSliceletWatchAddress(sliceletHostName).address
+    )
   }
 
   test("clientUuidOpt reads from config when set") {

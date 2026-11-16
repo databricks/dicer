@@ -27,16 +27,6 @@ class DisabledPreferredAssignerDriverSuite extends DatabricksTest {
     alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
   )
 
-  test("DisabledPreferredAssignerDriver exposes no consistent-hashing state") {
-    // Test plan: Verify the disabled driver reports no consistent-hashing snapshot, so the Assigner
-    // debug page shows the consistent-hashing section as inactive for the non-CH driver.
-    val driver: PreferredAssignerDriver =
-      new DisabledPreferredAssignerDriver
-    val stateOpt: Option[ConsistentHashingState] =
-      TestUtils.awaitResult(driver.consistentHashingStateView, Duration.Inf)
-    assertResult(None)(stateOpt)
-  }
-
   test("DisabledPreferredAssignerDriver should always return ModeDisabled") {
     // Test plan: verify that no matter what methods are called and how many times they are called,
     // the DisabledPreferredAssignerDriver should always return ModeDisabled for the preferred

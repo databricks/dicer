@@ -3,6 +3,96 @@
 
 invalid_cases: [
   {
+    debug_name: "Primary rate load above MAX_REPORTED_MEASUREMENT"
+    expected_error: "must be at most"
+    slice_load: {
+      primary_rate_load: 1.1e100
+      window_low_inclusive_seconds: 10
+      window_high_exclusive_seconds: 20
+      slice: {
+        low_inclusive: "aaa"
+        high_exclusive: "zzz"
+      }
+      num_replicas: 1
+    }
+  },
+  {
+    debug_name: "Top key with underestimated primary rate load above MAX_REPORTED_MEASUREMENT"
+    expected_error: "must be at most"
+    slice_load: {
+      primary_rate_load: 1.0
+      window_low_inclusive_seconds: 10
+      window_high_exclusive_seconds: 20
+      slice: {
+        low_inclusive: "aaa"
+        high_exclusive: "zzz"
+      }
+      top_keys: [
+        {
+          slice_key: "ggg"  # Within slice bounds
+          underestimated_primary_rate_load: 1.1e100
+        }
+      ]
+      num_replicas: 1
+    }
+  },
+  {
+    debug_name: "Window low before the epoch"
+    expected_error: "Window timestamp must be within"
+    slice_load: {
+      primary_rate_load: 1.0
+      window_low_inclusive_seconds: -1
+      window_high_exclusive_seconds: 20
+      slice: {
+        low_inclusive: "aaa"
+        high_exclusive: "zzz"
+      }
+      num_replicas: 1
+    }
+  },
+  {
+    debug_name: "Window high after the max window timestamp"
+    expected_error: "Window timestamp must be within"
+    slice_load: {
+      primary_rate_load: 1.0
+      window_low_inclusive_seconds: 10
+      window_high_exclusive_seconds: 4294967297
+      slice: {
+        low_inclusive: "aaa"
+        high_exclusive: "zzz"
+      }
+      num_replicas: 1
+    }
+  },
+  {
+    debug_name: "Window low at int64 min"
+    expected_error: "Window timestamp must be within"
+    slice_load: {
+      primary_rate_load: 1.0
+      window_low_inclusive_seconds: -9223372036854775808
+      window_high_exclusive_seconds: 20
+      slice: {
+        low_inclusive: "aaa"
+        high_exclusive: "zzz"
+      }
+      num_replicas: 1
+    }
+  },
+  {
+    debug_name: "Window high at int64 max"
+    expected_error: "Window timestamp must be within"
+    slice_load: {
+      primary_rate_load: 1.0
+      window_low_inclusive_seconds: 10
+      window_high_exclusive_seconds: 9223372036854775807
+      slice: {
+        low_inclusive: "aaa"
+        high_exclusive: "zzz"
+      }
+      num_replicas: 1
+    }
+  },
+  {
     debug_name: "Negative primary rate load"
     expected_error: "must be a number"
     slice_load: {
@@ -450,6 +540,34 @@ invalid_cases: [
 ]
 
 round_tripping_cases: [
+  # Largest allowed load, on a top key and on the whole Slice.
+  {
+    primary_rate_load: 1.0e100
+    window_low_inclusive_seconds: 10
+    window_high_exclusive_seconds: 20
+    slice: {
+      low_inclusive: "aaa"
+      high_exclusive: "zzz"
+    }
+    top_keys: [
+      {
+        slice_key: "ggg"
+        underestimated_primary_rate_load: 1.0e100
+      }
+    ]
+    num_replicas: 1
+  },
+  # Window spanning the full range of valid window timestamps.
+  {
+    primary_rate_load: 1.0
+    window_low_inclusive_seconds: 0
+    window_high_exclusive_seconds: 4294967296
+    slice: {
+      low_inclusive: "aaa"
+      high_exclusive: "zzz"
+    }
+    num_replicas: 1
+  },
   # Basic valid case with no top keys
   {
     primary_rate_load: 1.0

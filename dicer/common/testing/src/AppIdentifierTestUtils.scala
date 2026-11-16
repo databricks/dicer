@@ -12,6 +12,14 @@ private[dicer] object AppIdentifierTestUtils {
     AppIdentifier.setInstanceForTest(nameOpt = Some(name), instanceIdOpt = Some(instanceId))
   }
 
+  /**
+   * Does the same as [[configureForTest]]. Open source gets no [[AppIdentifier]] from the process
+   * environment, so every process uses the configured one.
+   */
+  def configureIfTestProcess(name: String, instanceId: String): Unit = {
+    configureForTest(name, instanceId)
+  }
+
   /** Configures the process-wide app identifier source to return no [[AppIdentifier]]. */
   def clearForTest(): Unit = {
     AppIdentifier.setInstanceForTest(nameOpt = None, instanceIdOpt = None)

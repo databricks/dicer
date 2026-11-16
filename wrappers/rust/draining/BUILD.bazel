@@ -1,0 +1,24 @@
+load("//bazel/rules/rust:rules_rust.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "draining",
+    srcs = ["src/lib.rs"],
+    crate_name = "raf_draining",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@crates//:futures",
+        "@crates//:tokio",
+        "@crates//:tracing",
+    ],
+)
+
+rust_test(
+    name = "draining_test",
+    timeout = "short",
+    testonly = True,
+    srcs = ["tests/draining_test.rs"],
+    deps = [
+        ":draining",
+        "@crates//:tokio",
+    ],
+)

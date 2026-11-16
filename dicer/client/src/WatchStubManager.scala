@@ -28,12 +28,9 @@ class WatchStubManager private[dicer] (config: WatchStubManagerConfig) {
    * The default channel to use for watching assignments.
    * It is bound to the config's watch address provided when the class is instantiated.
    */
-  private val defaultGrpcChannel: ManagedChannel = createGrpcChannel(config.watchAddress)
+  private val defaultGrpcChannel: ManagedChannel = createGrpcChannel(config.watchAddress.address)
 
   /**
-   * PRECONDITION: If [[redirectAddressOpt]] is provided, it must be a URI containing a direct
-   *               pod IP address and port (e.g., `10.0.0.1:8080`) or `localhost:port` (for tests).
-   *
    * Creates a watch stub for watching assignments.
    *
    * @param redirectAddressOpt The address of the redirect target to create a watch stub for.
@@ -50,25 +47,27 @@ class WatchStubManager private[dicer] (config: WatchStubManagerConfig) {
     val channel: ManagedChannel = redirectAddressOpt match {
       case None => defaultGrpcChannel
       case Some(redirectAddress: URI) =>
-        createGrpcChannel(redirectAddress)
+        createGrpcChannel(redirectAddress.toString)
     }
     AssignmentServiceGrpc.stub(channel)
   }
+
+  /** The address this manager's default stub connects to. */
+  private[client] def watchAddress: WatchAddress = config.watchAddress
 
   /**
    * Corrects the address if it was created without a scheme. For example, if the original string
    * address was "localhost:8080", then this method interprets it as "http://localhost:8080"
    * to avoid URI parsing issues (such as "localhost" being treated as the scheme).
    */
-  private def normalizeAddress(address: URI): URI = {
-    val addressString: String = address.toString
+  private def normalizeAddress(address: String): URI = {
     val normalizedAddress: String =
-      if (addressString.contains("://")) addressString else "http://" + addressString
+      if (address.contains("://")) address else "http://" + address
     new URI(normalizedAddress)
   }
 
   /** Creates a gRPC channel that's bound to the provided `address`. */
-  private def createGrpcChannel(address: URI): ManagedChannel = {
+  private def createGrpcChannel(address: String): ManagedChannel = {
     ClientMetrics.incrementWatchChannelsCreated(config.clientName)
     val correctedUri: URI = normalizeAddress(address)
 

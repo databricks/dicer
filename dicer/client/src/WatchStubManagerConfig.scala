@@ -1,6 +1,6 @@
 package com.databricks.dicer.client
 
-import java.net.{InetAddress, URI}
+import java.net.InetAddress
 
 import com.databricks.dicer.common.ClientType
 import com.databricks.rpc.tls.TLSOptions
@@ -34,7 +34,7 @@ import com.databricks.rpc.tls.TLSOptions
 case class WatchStubManagerConfig private[dicer] (
     clientType: ClientType,
     targetName: String,
-    watchAddress: URI,
+    watchAddress: WatchAddress,
     tlsOptionsOpt: Option[TLSOptions],
     watchFromDataPlane: Boolean,
     sourceIpOpt: Option[InetAddress]) {

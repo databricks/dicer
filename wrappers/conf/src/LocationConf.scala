@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.{
 }
 import com.databricks.api.proto.infra.Environment
 import com.databricks.conf.{DbConf, DbConfSingletonImpl}
+import com.databricks.testing.TestEnvironment.IS_TEST
 
 /**
  * Tells the process "where" it is running. The information must be static for a given compute node,
@@ -118,18 +119,14 @@ object LocationConf {
 
   /** Restores [[singleton]] to the default value. Not thread-safe. */
   def restoreSingletonForTest(): Unit = {
-    require(isBazelTest(), "restoreSingletonForTest can only be called in a Bazel test")
+    require(IS_TEST, "restoreSingletonForTest can only be called in a Bazel test")
     singletonInternal = defaultSingletonConf
   }
 
   /** Sets a test singleton for LocationConf. Not thread-safe. */
   def testSingleton(locationConf: LocationConf): Unit = {
-    require(isBazelTest(), "testSingleton can only be called in a Bazel test")
+    require(IS_TEST, "testSingleton can only be called in a Bazel test")
     singletonInternal = locationConf
-  }
-
-  private def isBazelTest(): Boolean = {
-    System.getenv("BAZEL_TEST") == "1"
   }
 }
 

@@ -14,6 +14,32 @@ import com.databricks.dicer.common.TargetName
 /** Contains metrics that record values in [[InternalTargetConfig]] across targets. */
 object InternalTargetConfigMetrics {
 
+  /** Where the serving config was selected, independently of which SAFE partition supplied it. */
+  private sealed trait ConfigSource {
+
+    /** The value exported in the metric's `source` label. */
+    def labelValue: String
+  }
+
+  /** The possible serving config sources and their metric labels. */
+  private object ConfigSource {
+
+    /** The cluster-resolved config bundled with the binary. */
+    case object Static extends ConfigSource {
+      override val labelValue: String = "static"
+    }
+
+    /** The SAFE value's top-level config, which may already include cluster-specific overrides. */
+    case object SafeTopLevel extends ConfigSource {
+      override val labelValue: String = "safe_top_level"
+    }
+
+    /** The config selected from the SAFE value's embedded `overrides` map. */
+    case object SafeOverride extends ConfigSource {
+      override val labelValue: String = "safe_override"
+    }
+  }
+
   /**
    * Metric set to 1 for each target name the Assigner has a configuration for. This provides an
    * explicit signal of which targets are configured, which can be used to count configured targets
@@ -201,6 +227,14 @@ object InternalTargetConfigMetrics {
     .labelNames("targetName")
     .register()
 
+  /** One active source per target in the dynamic provider's serving config, including fallbacks. */
+  private val targetConfigSource = Gauge
+    .build()
+    .name("dicer_assigner_target_config_source")
+    .help("Set to 1 for the selected config source: static, safe_top_level, or safe_override.")
+    .labelNames("targetName", "source")
+    .register()
+
   def setDynamicConfigUnavailableMetrics(unavailable: Boolean): Unit = {
     dynamicConfigUnavailabilityGauge.set(if (unavailable) 1 else 0)
   }
@@ -222,6 +256,38 @@ object InternalTargetConfigMetrics {
   /** Clears the dynamic-only target metric for all targets. */
   def clearAllDynamicOnlyTargetMetrics(): Unit = {
     dynamicOnlyTargetGauge.clear()
+  }
+
+  /** Records a config selected from an embedded override or the top level of a SAFE value. */
+  def setDynamicConfigSourceMetrics(targetName: TargetName, usesOverride: Boolean): Unit = {
+    val source: ConfigSource =
+      if (usesOverride) ConfigSource.SafeOverride else ConfigSource.SafeTopLevel
+    setConfigSource(targetName, source)
+  }
+
+  /** Resets source metrics to static configs and removes dynamic-only targets. */
+  def resetConfigSourceMetrics(staticTargetNames: Set[TargetName]): Unit = {
+    targetConfigSource.clear()
+    for (targetName: TargetName <- staticTargetNames) {
+      setConfigSource(targetName, ConfigSource.Static)
+    }
+  }
+
+  /** Sets the selected source to 1 and all other sources to 0. */
+  private def setConfigSource(targetName: TargetName, selectedSource: ConfigSource): Unit = {
+    val (staticValue, safeTopLevelValue, safeOverrideValue): (Int, Int, Int) =
+      selectedSource match {
+        case ConfigSource.Static => (1, 0, 0)
+        case ConfigSource.SafeTopLevel => (0, 1, 0)
+        case ConfigSource.SafeOverride => (0, 0, 1)
+      }
+    targetConfigSource.labels(targetName.value, ConfigSource.Static.labelValue).set(staticValue)
+    targetConfigSource
+      .labels(targetName.value, ConfigSource.SafeTopLevel.labelValue)
+      .set(safeTopLevelValue)
+    targetConfigSource
+      .labels(targetName.value, ConfigSource.SafeOverride.labelValue)
+      .set(safeOverrideValue)
   }
 
   /** Exports the fields in `loadWatcherConfig` to metrics. */
@@ -298,6 +364,7 @@ object InternalTargetConfigMetrics {
       dynamicConfigMalformedGauge.clear()
       staticTargetMissingDynamicConfigGauge.clear()
       clearAllDynamicOnlyTargetMetrics()
+      resetConfigSourceMetrics(Set.empty)
       advancedTargetConfigWatchRequestRateLimitClientRequestsPerSecond.clear()
     }
   }

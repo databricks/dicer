@@ -1,6 +1,5 @@
 use anyhow::anyhow;
 use derive_more::{Debug, Display};
-use infra_lib_rust::FROM_EMBEDDED;
 
 /// The scheme for Kubernetes cluster URIs in <internal link>.
 const KUBERNETES_CLUSTER_SCHEME: &str = "kubernetes-cluster";
@@ -17,9 +16,11 @@ pub struct KubernetesClusterUri(String);
 impl KubernetesClusterUri {
     /// Validates that the given Kubernetes cluster URI matches the spec at <internal link> (e.g.
     /// "kubernetes-cluster:prod/cloud1/public/region1/clustertype2/01").
-    // TODO(<internal bug>): Merge `new` with `from_uri` once we have validated that `from_uri` accepts all
-    // URIs that `new` accepts.
-    pub fn new(uri: String) -> anyhow::Result<KubernetesClusterUri> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `uri` is not a well-formed Kubernetes cluster URI.
+    pub fn from_uri(uri: String) -> anyhow::Result<KubernetesClusterUri> {
         // Verify that the URI has the expected scheme.
         let (scheme, scheme_specific_part) = uri
             .split_once(':')
@@ -57,28 +58,5 @@ impl KubernetesClusterUri {
         }
 
         Ok(KubernetesClusterUri(uri))
-    }
-
-    /// Validates that the given URI names a Kubernetes cluster in the embedded InfraDataModel owned
-    /// by the Infra team (e.g. "kubernetes-cluster:prod/cloud1/public/region1/clustertype2/01"; see
-    /// <internal link>).
-    ///
-    /// The embedded model is co-versioned with the binary, so a cluster turned up after the binary
-    /// was built is rejected.
-    ///
-    /// Note: this method accepts a larger set of URIs than the Scala implementation (e.g., it
-    /// accepts legacy aliases like `legacy-kube-context:`) due to a difference in the underlying
-    /// IDM libraries for Rust and Scala. Any valid `kubernetes-cluster:` URI that is accepted by
-    /// the Scala method is also accepted by this method.
-    pub fn from_uri(uri: String) -> anyhow::Result<KubernetesClusterUri> {
-        let cluster = FROM_EMBEDDED
-            .get_kubernetes_cluster_by_uri(&uri)
-            .ok_or_else(|| anyhow!("Expected a kubernetes-cluster IDM URI, got: {uri}"))?;
-        // Store the cluster's canonical URI: `get_kubernetes_cluster_by_uri` also resolves legacy
-        // aliases (e.g. "legacy-kube-context:...") whose canonical `uri` field differs from the
-        // lookup key, so we normalize to that. Fall back to the input only if the model entry has
-        // no `uri` set.
-        let canonical_uri: String = cluster.uri.clone().unwrap_or(uri);
-        Ok(KubernetesClusterUri(canonical_uri))
     }
 }

@@ -24,7 +24,6 @@ import com.databricks.dicer.assigner.AssignmentGenerator.{
   Event,
   GeneratorTargetSlicezData
 }
-import com.databricks.dicer.common.ProposedAssignment
 import com.databricks.dicer.common.Assignment.{AssignmentValueCell, AssignmentValueCellConsumer}
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.common.{AssignerServiceInfo, Assignment, ClientRequest}
@@ -52,7 +51,8 @@ class AssignmentGeneratorDriver private (
     minAssignmentGeneration: FiniteDuration,
     dicerSimulatorEventLogEmitter: DicerSimulatorEventEmitter,
     assignerProtoLogger: AssignerProtoLogger,
-    assignerServiceInfoOpt: Option[AssignerServiceInfo]) {
+    assignerServiceInfoOpt: Option[AssignerServiceInfo],
+    filterSelfTransfers: () => Boolean = () => false) {
 
   /** Generic driver implementation that drives the [[AssignmentGenerator]] state machine. */
   val baseDriver = new StateMachineDriver[Event, DriverAction, AssignmentGenerator](
@@ -137,6 +137,16 @@ class AssignmentGeneratorDriver private (
     )
   }
 
+  /**
+   * Informs the generator of a termination signal from Kubernetes for the Slicelet with
+   * `resourceUuid`.
+   */
+  private def onTerminationSignalFromKubernetes(resourceUuid: UUID): Unit = {
+    sec.assertCurrentContext()
+    logger.info(s"Received termination signal from Kubernetes for resourceUuid: $resourceUuid")
+    handleEvent(Event.TerminationSignalFromKubernetes(resourceUuid))
+  }
+
   /** Starts the driver. */
   protected def start(): Unit = {
     sec.assertCurrentContext()
@@ -157,13 +167,25 @@ class AssignmentGeneratorDriver private (
         val kubernetesTargetWatcher: KubernetesTargetWatcher =
           kubernetesTargetWatcherFactory.create(watchTarget)
 
+        // The last known set of terminating pods, used to perform edge detection on the levels
+        // reported by the watcher. Only accessed on `sec` (inside the callback below).
+        //
+        // TODO(<internal bug>): Remove this after maintaining the set of terminating resources from the
+        // cluster manager in the generator.
+        var knownTerminatingPods: Set[UUID] = Set.empty
+
         // The watcher invalidates our cached view whenever its terminating set may have changed;
-        // re-read and deliver the complete level so the generator never has to reconstruct it from
-        // edge-triggered events.
+        // re-read the level and emit a termination event for each newly-terminating pod.
         val invalidationCallback: () => Unit = () =>
           sec.run {
-            val terminatingUuids: Set[UUID] = kubernetesTargetWatcher.getTerminatingPods()
-            handleEvent(Event.InformClusterManagerResources(terminatingUuids))
+            val terminatingPods: Set[UUID] = kubernetesTargetWatcher.getTerminatingPods()
+
+            val newTerminatingPods: Set[UUID] = terminatingPods -- knownTerminatingPods
+            for (resourceUuid: UUID <- newTerminatingPods) {
+              onTerminationSignalFromKubernetes(resourceUuid)
+            }
+
+            knownTerminatingPods = terminatingPods
           }
 
         kubernetesTargetWatcher.start(invalidationCallback)
@@ -226,8 +248,10 @@ class AssignmentGeneratorDriver private (
           proposal: ProposedAssignment,
           contextOpt: Option[AssignmentGenerationContext]
           ) =>
+        val preparedProposal: ProposedAssignment =
+          proposal.copy(filterSelfTransfers = filterSelfTransfers())
         store
-          .writeAssignment(target, shouldFreeze = false, proposal)
+          .writeAssignment(target, shouldFreeze = false, preparedProposal)
           .onComplete { result: Try[Store.WriteAssignmentResult] =>
             // Pass the complete result to the generator, which will unpack and handle it.
             handleEvent(Event.AssignmentWriteComplete(result, contextOpt))
@@ -278,6 +302,7 @@ object AssignmentGeneratorDriver {
    * @param assignerProtoLogger The proto logger for Assigner-specific logging events.
    * @param assignerServiceInfoOpt The service info of the Assigner that creates this driver or
    *                               [[None]].
+   * @param filterSelfTransfers evaluates whether to filter self-transfers on each assignment write.
    */
   def create(
       sec: SequentialExecutionContext,
@@ -292,7 +317,8 @@ object AssignmentGeneratorDriver {
       minAssignmentGenerationInterval: FiniteDuration,
       dicerSimulatorEventLogEmitter: DicerSimulatorEventEmitter,
       assignerProtoLogger: AssignerProtoLogger,
-      assignerServiceInfoOpt: Option[AssignerServiceInfo]): AssignmentGeneratorDriver = {
+      assignerServiceInfoOpt: Option[AssignerServiceInfo],
+      filterSelfTransfers: () => Boolean = () => false): AssignmentGeneratorDriver = {
     val driver =
       new AssignmentGeneratorDriver(
         sec,
@@ -307,7 +333,8 @@ object AssignmentGeneratorDriver {
         minAssignmentGenerationInterval,
         dicerSimulatorEventLogEmitter,
         assignerProtoLogger,
-        assignerServiceInfoOpt
+        assignerServiceInfoOpt,
+        filterSelfTransfers
       )
     sec.run { driver.start() }
     driver

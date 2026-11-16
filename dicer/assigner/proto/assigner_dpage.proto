@@ -43,40 +43,6 @@ message PreferredAssignerStateViewP {
   optional string pa_uuid = 4;
 }
 
-// View data for the consistent-hashing preferred assigner state in DPage output.
-// Present only when the CH preferred-assigner driver is active.
-// (-- Next ID: 6. --)
-message ConsistentHashingStateViewP {
-  // State of the Kubernetes API connection as tracked by the membership checker's
-  // connection-health monitor. Nested and unprefixed per <internal link> since it is used only
-  // here.
-  enum K8sConnectionHealthP {
-    // Default value; used when the connection-health state is unset or unknown.
-    K8S_CONNECTION_HEALTH_P_UNSPECIFIED = 0;
-    // Membership checker has not yet observed a poll result; the connection-health monitor's
-    // initial state.
-    INIT = 1;
-    // The membership checker currently considers the Kubernetes API connection healthy.
-    HEALTHY = 2;
-    // The membership checker currently considers the Kubernetes API connection unhealthy.
-    UNHEALTHY = 3;
-  }
-  // Field 3 previously held eligible_pod_count (int32); replaced by the eligible_pods list below.
-  reserved 3;
-  reserved "eligible_pod_count";
-  // This Assigner instance's own identity (UUID + URI), so DPages of different assigners
-  // can be compared.
-  optional AssignerInfoViewP local_assigner = 1;
-  // The consistent-hashing-elected preferred assigner (UUID + URI), or unset when no
-  // assigner is currently elected.
-  optional AssignerInfoViewP preferred_assigner = 2;
-  // Whether the Kubernetes API connection is currently considered healthy by the
-  // membership checker's connection-health monitor.
-  optional K8sConnectionHealthP k8s_connection_health = 4;
-  // The healthy assigner pods currently considered eligible for election.
-  repeated AssignerInfoViewP eligible_pods = 5;
-}
-
 // View data for assignment churn statistics in DPage output.
 message ChurnViewP {
   // Whether the assignment change resulted in any resource-to-slice mapping changes.
@@ -121,12 +87,10 @@ message AssignerSliceViewP {
   optional PreferredAssignerStateViewP preferred_assigner_state = 2;
   // Per-target assignment state for all targets managed by this Assigner.
   repeated AssignerTargetViewP targets = 3;
-  // Consistent-hashing preferred-assigner state; present only when the CH driver is
-  // active.
-  // (-- TODO(<internal bug>): Remove once the migration to consistent-hashing PA is
-  // complete and we no longer need a split view with the etcd
-  // preferred-assigner. --)
-  optional ConsistentHashingStateViewP consistent_hashing = 4;
+  // Field 4 previously held consistent_hashing, which contained the entire view for a consistent-
+  // hashing-based Preferred Assigner. This approach is no longer used by any Assigner.
+  reserved 4;
+  reserved "consistent_hashing";
   // Field 5 previously held migration_mode (bool), but is now unused as the migration is no longer
   // in progress.
   reserved 5;

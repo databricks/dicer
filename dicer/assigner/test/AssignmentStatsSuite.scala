@@ -12,7 +12,7 @@ import com.databricks.dicer.assigner.config.InternalTargetConfig.{
   LoadBalancingConfig,
   LoadBalancingMetricConfig
 }
-import com.databricks.dicer.assigner.algorithm.LoadMap
+import com.databricks.dicer.assigner.algorithm.{LoadMap, MetricMap}
 import com.databricks.dicer.assigner.algorithm.LoadMap.Entry
 import com.databricks.dicer.common.testing.SliceTestUtils.{
   GenerationIncarnationFluent,
@@ -24,16 +24,18 @@ import com.databricks.dicer.common.testing.SliceTestUtils.{
   createRandomLoadMap,
   createRandomProposal,
   createTestSquid,
+  identityKey,
   toSliceKey,
   toSquid,
   toSquidWithValue,
   `∞`
 }
-import com.databricks.dicer.common.{Assignment, ProposedAssignment, SliceAssignment}
+import com.databricks.dicer.common.{Assignment, SliceAssignment}
 import com.databricks.dicer.common.testing.{SliceTestUtils}
-import com.databricks.dicer.external.Slice
+import com.databricks.dicer.external.{Slice, SliceKey}
 import com.databricks.dicer.friend.Squid
 import com.databricks.testing.DatabricksTest
+import com.google.common.primitives.Longs
 
 class AssignmentStatsSuite extends DatabricksTest with TestName {
 
@@ -544,6 +546,86 @@ class AssignmentStatsSuite extends DatabricksTest with TestName {
     assertResult(expectedNumOfAssignedSlicesByResource)(numOfAssignedSlicesByResource)
   }
 
+  test("AssignmentLoadStats.calculate computes maxResourcesPer8BytePrefix") {
+    // Test plan: Verify that maxResourcesPer8BytePrefix counts the distinct resources assigned
+    // keys of each 8-byte prefix, including the resources of a previous Slice when a boundary
+    // splits the prefix. Verify this by calculating the load stats for assignments with different
+    // Slice boundaries and comparing against the expected maximum.
+
+    // Returns the maxResourcesPer8BytePrefix of an assignment of `sliceAssignments`.
+    def calculateMaxResourcesPer8BytePrefix(sliceAssignments: SliceAssignment*): Int = {
+      val asn: Assignment =
+        createAssignment(12 ## 59, assignerServiceInfoOpt = None, sliceAssignments)
+      AssignmentLoadStats.calculate(asn, LoadMap.UNIFORM_LOAD_MAP).maxResourcesPer8BytePrefix
+    }
+
+    // Returns a [[SliceKey]] of `prefix` as 8 big-endian bytes followed by `suffixBytes`, e.g.
+    // `prefixedKey(0x11, 0x01)` is 0x000000000000001101.
+    def prefixedKey(prefix: Long, suffixBytes: Int*): SliceKey =
+      identityKey(Longs.toByteArray(prefix) ++ suffixBytes.map((byte: Int) => byte.toByte))
+
+    {
+      // 8-byte boundaries split no prefix, so each prefix is assigned to one resource.
+      val maxResourcesPer8BytePrefix: Int = calculateMaxResourcesPer8BytePrefix(
+        Slice("", prefixedKey(0x11)) @@ (12 ## 59) -> Seq("r1"),
+        Slice(prefixedKey(0x11), prefixedKey(0x22)) @@ (12 ## 59) -> Seq("r2"),
+        Slice.atLeast(prefixedKey(0x22)) @@ (12 ## 59) -> Seq("r3")
+      )
+      assertResult(1)(maxResourcesPer8BytePrefix)
+    }
+
+    {
+      // A boundary splitting a prefix: key 0x0000000000000011 is on r1 and the rest of the prefix
+      // on r2.
+      val maxResourcesPer8BytePrefix: Int = calculateMaxResourcesPer8BytePrefix(
+        Slice("", prefixedKey(0x11, 0x01)) @@ (12 ## 59) -> Seq("r1"),
+        Slice.atLeast(prefixedKey(0x11, 0x01)) @@ (12 ## 59) -> Seq("r2")
+      )
+      assertResult(2)(maxResourcesPer8BytePrefix)
+    }
+
+    {
+      // Multiple boundaries splitting a prefix across r2, r3 and r1.
+      val maxResourcesPer8BytePrefix: Int = calculateMaxResourcesPer8BytePrefix(
+        Slice("", prefixedKey(0x11)) @@ (12 ## 59) -> Seq("r1"),
+        Slice(prefixedKey(0x11), prefixedKey(0x11, 0x01)) @@ (12 ## 59) -> Seq("r2"),
+        Slice(prefixedKey(0x11, 0x01), prefixedKey(0x11, 0x02)) @@ (12 ## 59) -> Seq("r3"),
+        Slice.atLeast(prefixedKey(0x11, 0x02)) @@ (12 ## 59) -> Seq("r1")
+      )
+      assertResult(3)(maxResourcesPer8BytePrefix)
+    }
+
+    {
+      // Reset resources between prefixes and retain the maximum from an earlier prefix.
+      val maxResourcesPer8BytePrefix: Int = calculateMaxResourcesPer8BytePrefix(
+        Slice("", prefixedKey(0x11, 0x01)) @@ (12 ## 59) -> Seq("r1"),
+        Slice(prefixedKey(0x11, 0x01), prefixedKey(0x11, 0x02)) @@ (12 ## 59) -> Seq("r2"),
+        Slice(prefixedKey(0x11, 0x02), prefixedKey(0x22, 0x01)) @@ (12 ## 59) -> Seq("r3"),
+        Slice.atLeast(prefixedKey(0x22, 0x01)) @@ (12 ## 59) -> Seq("r4")
+      )
+      assertResult(3)(maxResourcesPer8BytePrefix)
+    }
+
+    {
+      // A boundary with an all-zero suffix still splits the prefix, since key 0x0000000000000011
+      // sorts before it.
+      val maxResourcesPer8BytePrefix: Int = calculateMaxResourcesPer8BytePrefix(
+        Slice("", prefixedKey(0x11, 0x00, 0x00)) @@ (12 ## 59) -> Seq("r1"),
+        Slice.atLeast(prefixedKey(0x11, 0x00, 0x00)) @@ (12 ## 59) -> Seq("r2")
+      )
+      assertResult(2)(maxResourcesPer8BytePrefix)
+    }
+
+    {
+      // Replicated Slices splitting a prefix: r2 is counted once.
+      val maxResourcesPer8BytePrefix: Int = calculateMaxResourcesPer8BytePrefix(
+        Slice("", prefixedKey(0x11, 0x01)) @@ (12 ## 59) -> Seq("r1", "r2"),
+        Slice.atLeast(prefixedKey(0x11, 0x01)) @@ (12 ## 59) -> Seq("r2", "r3")
+      )
+      assertResult(3)(maxResourcesPer8BytePrefix)
+    }
+  }
+
   test("calculateAdjustedLoadStats handles loadMap whose slice boundaries match assignment's") {
     // Test plan: Create a manual assignment and loadMap where the slices in the loadMap exactly
     // match the slices in the assignment. Verify that the per-resource / per-slice load info,
@@ -935,7 +1017,7 @@ class AssignmentStatsSuite extends DatabricksTest with TestName {
     assertResult(expected = perSliceLoadValues)(actual = perResourceLoadValues)
 
     // Get the new uniform slices.
-    val uniformSlices: Vector[Slice] = LoadMap.getUniformPartitioning(resources.size)
+    val uniformSlices: Vector[Slice] = MetricMap.getUniformPartitioning(resources.size)
 
     // Verify per-slice load.
     // - slice0: 2/3 * 1/3 = 2/9

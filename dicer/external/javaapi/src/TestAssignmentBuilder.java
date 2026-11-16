@@ -1,4 +1,3 @@
-// LINT.IfChange
 package com.databricks.dicer.external.javaapi;
 
 import com.databricks.dicer.external.DicerTestEnvironment;
@@ -38,5 +37,3 @@ public final class TestAssignmentBuilder {
     return scalaBuilder.build();
   }
 }
-// LINT.ThenChange(dicer/external/src/DicerTestEnvironment.scala)
-// LINT.ThenChange(dicer/rust/external/testing/dicer_test_environment/src/test_assignment_builder.rs)

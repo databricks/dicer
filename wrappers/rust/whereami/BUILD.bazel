@@ -1,0 +1,45 @@
+load("//bazel/rules/rust:rules_rust.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "whereami",
+    srcs = ["src/lib.rs"],
+    crate_name = "common_conf_rust_whereami",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:thiserror",
+    ],
+)
+
+rust_test(
+    name = "whereami_test",
+    timeout = "short",
+    testonly = True,
+    srcs = ["tests/whereami_test.rs"],
+    deps = [":whereami"],
+)
+
+rust_test(
+    name = "whereami_missing_environment_test",
+    timeout = "short",
+    testonly = True,
+    srcs = ["tests/whereami_missing_environment_test.rs"],
+    deps = [":whereami"],
+)
+
+rust_test(
+    name = "whereami_missing_location_test",
+    timeout = "short",
+    testonly = True,
+    srcs = ["tests/whereami_missing_location_test.rs"],
+    deps = [":whereami"],
+)
+
+rust_test(
+    name = "whereami_with_location_test",
+    timeout = "short",
+    testonly = True,
+    srcs = ["tests/whereami_with_location_test.rs"],
+    deps = [":whereami"],
+)

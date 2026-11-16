@@ -923,16 +923,19 @@ object SubscriberHandler {
         val buckets = ArrayBuffer[Double]()
         // Initial measurements indicate that latencies are typically low 10s of milliseconds but
         // can reach up to low 100s of milliseconds. To get some reasonable visibility into this
-        // range without excessive bucketing, we use a growth factor of 1.4 in the range [1ms, 1s)
-        // (yielding 21 buckets), and then a growth factor of 2 beyond that in the range [1s,
-        // 1024s(~17m)] (yielding 11 buckets), for a total of 33 buckets including +Inf.
-        var bucket: FiniteDuration = 1.millisecond
+        // range without excessive bucketing, we use a growth factor of 1.4 in the range
+        // [2.744ms, 1s) (yielding 18 buckets), and then a growth factor of 2 beyond that in the
+        // range [1s, 128s] (yielding 8 buckets), for a total of 27 buckets including +Inf. The
+        // histogram is labeled per target, and assignment distribution is expected to take more
+        // than 1.96ms and at most 128s, so finer low buckets or a longer tail only add series.
+        // 2.744ms = 1ms * 1.4^3, so every boundary matches the earlier [1ms, 1024s] layout.
+        var bucket: FiniteDuration = 2744.microseconds
         while (bucket < 1.second) {
           buckets.append(bucket.toUnit(TimeUnit.SECONDS))
           bucket = bucket.mul(1400).div(1000) // i.e. *= 1.4
         }
         bucket = 1.second
-        while (bucket <= 1024.seconds) {
+        while (bucket <= 128.seconds) {
           buckets.append(bucket.toUnit(TimeUnit.SECONDS))
           bucket *= 2
         }

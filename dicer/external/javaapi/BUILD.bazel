@@ -301,6 +301,7 @@ java_junit5_test(
         "//wrappers/conf:project",
         "//wrappers/java:databricks_java_test",
         "//wrappers/java:jtls",
+        "//wrappers/rpc:rpc_testing",
         "@maven//:org_assertj_assertj_core",
         "@maven//:org_scala_lang_scala_library",
     ],

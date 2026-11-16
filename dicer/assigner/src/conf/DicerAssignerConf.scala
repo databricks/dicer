@@ -1,11 +1,8 @@
 package com.databricks.dicer.assigner.conf
 
-import java.util.Base64
-
 import scala.concurrent.duration._
 import scala.util.control.NonFatal
 
-import com.databricks.backend.k8sauthmanagerclient.KamEndpoint
 import com.databricks.caching.util.AssertMacros.iassert
 import com.databricks.caching.util.SafeConfigUtil.DICER_TARGET_CONFIG_FLAGS_NAME_PREFIX
 import com.databricks.caching.util.{
@@ -18,8 +15,7 @@ import com.databricks.caching.util.{
 }
 import com.databricks.conf.trusted.{LocationConf, ProjectConfByName}
 import com.databricks.conf.{Config, ConfigParser, DbConf}
-import com.databricks.dicer.assigner.conf.DicerAssignerConf.{logger, ExecutionMode}
-import com.databricks.dicer.assigner.config.TargetMigrationConfig
+import com.databricks.dicer.assigner.conf.DicerAssignerConf.ExecutionMode
 import com.databricks.dicer.common.{CommonSslConf, Incarnation, WatchServerConf}
 import com.databricks.featureflag.client.utils.RuntimeContext
 import com.databricks.featureflag.client.{DynamicConf, FeatureFlagDefinition}
@@ -56,12 +52,17 @@ trait HealthConf extends DbConf {
     configure[Long]("databricks.dicer.assigner.unhealthyTimeoutPeriodSeconds", 30).seconds
 
   /**
-   * Retention window after which terminating resource incarnations are removed from HealthWatcher.
-   * A large value reduces the risk of a late, reordered healthy heartbeat reviving an
-   * already-terminating resource incarnation.
+   * Timeout for Terminating state in HealthWatcher. Once this expires, Dicer forgets about the
+   * pod entirely. We set this to 6 hours (21600s) because some pods may never receive a SIGTERM
+   * (e.g. due to a kubelet bug or network partition) and remain alive long after Kubernetes has
+   * marked them as Terminating. Forgetting about such a pod too early would cause Dicer to lose
+   * track of an active resource, which can lead to incorrect assignment decisions.
+   *
+   * For the same reason, if this value is set to less than the Kubernetes termination grace period,
+   * a pod that is still sending heartbeats may be forgotten and then re-admitted as healthy.
    */
-  val terminatingRetentionWindow: FiniteDuration =
-    configure[Long]("databricks.dicer.assigner.terminatingRetentionWindowSecs", 5 * 60).seconds
+  val terminatingTimeoutPeriod: FiniteDuration =
+    configure[Long]("databricks.dicer.assigner.terminatingTimeoutPeriod", 21600).seconds
 
   /**
    * Flapping protection timeout for the NotReady state in HealthWatcher. A Slicelet in the NotReady
@@ -87,216 +88,6 @@ trait LoadWatcherConf extends DbConf {
    * TODO(<internal bug>): Remove this config once we are confident in top key handling.
    */
   val allowTopKeys: Boolean = configure[Boolean]("databricks.dicer.assigner.allowTopKeys", true)
-
-  /**
-   * Whether to allow targets to use the per-key load distribution (CDF) reported by the Slicelet
-   * for load balancing. It still has to be enabled in each target's
-   * `LoadWatcherConfigP.use_load_distribution` - this config can be set to false as a killswitch to
-   * disable load distribution across all targets.
-   */
-  val allowLoadDistribution: Boolean =
-    configure[Boolean]("databricks.dicer.assigner.allowLoadDistribution", false)
-}
-
-/**
- * Configuration parameters for a remote membership checker that the Assigner can use to establish
- * the identity of an Assigner instance running in a remote cluster. The parameters describe how to
- * connect to both the remote K8s API server as well as the K8s Auth Manager service that provides
- * bearer tokens for connecting to the former.
- *
- * @throws IllegalArgumentException if any entry of
- *                                  `databricks.dicer.assigner.remote.k8sApiServers` contains an
- *                                  unrecognized key, an empty `kubeContext`, an empty or non-
- *                                  `https://` `kubeApiUrl`, or a `caCertBase64` that is not valid
- *                                  base64 or decodes to empty bytes.
- * @throws IllegalArgumentException if `databricks.dicer.assigner.remote.kamDbnsIdentifier` is set
- *                                  without `kamDestinationClusterUri` (or vice versa).
- * @throws IllegalArgumentException if `remoteK8sApiServers` and the KAM endpoint are not
- *                                  configured together (i.e., one is non-empty / configured
- *                                  while the other is not).
- */
-trait RemoteMembershipCheckerConf extends DbConf {
-
-  /**
-   * List of remote K8s API server connection infos that can be used to poll for peer Assigner pods.
-   *
-   * Note: declared as a `var` because if [[kamEndpoint]] initialization fails, this is reset to
-   * empty.
-   */
-  var remoteK8sApiServers: Seq[RemoteMembershipCheckerConf.RemoteK8sApiServerInfo] =
-    configure[Seq[Map[String, String]]](
-      "databricks.dicer.assigner.remote.k8sApiServers",
-      Seq.empty[Map[String, String]]
-    ).zipWithIndex.map {
-      case (entry: Map[String, String], i: Int) =>
-        try {
-          val unknownKeys: Set[String] =
-            entry.keySet.diff(RemoteMembershipCheckerConf.RemoteK8sApiServerInfo.ALLOWED_KEYS)
-          require(
-            unknownKeys.isEmpty,
-            s"unknown key(s) $unknownKeys, allowed keys are: " +
-            s"${RemoteMembershipCheckerConf.RemoteK8sApiServerInfo.ALLOWED_KEYS}"
-          )
-          RemoteMembershipCheckerConf.RemoteK8sApiServerInfo.create(
-            kubeContext = entry.getOrElse("kubeContext", ""),
-            kubeApiUrl = entry.getOrElse("kubeApiUrl", ""),
-            caCertBase64 = entry.getOrElse("caCertBase64", "")
-          )
-        } catch {
-          case e: IllegalArgumentException =>
-            throw new IllegalArgumentException(
-              s"databricks.dicer.assigner.remote.k8sApiServers[$i]: ${e.getMessage}",
-              e
-            )
-        }
-    }
-
-  /**
-   * K8s auth manager service endpoint used by checkers to obtain bearer tokens for connecting to
-   * remote K8s apiservers. `None` when `kamDbnsIdentifier` and `kamDestinationClusterUri` are unset
-   * (their defaults). Setting one without the other is rejected at conf-load.
-   *
-   * If constructing the `KamEndpoint.Dbns` fails for some reason, this will be set to `None` and
-   * `remoteK8sApiServers` cleared.
-   */
-  val kamEndpoint: Option[KamEndpoint] = {
-    val rawIdentifier: String =
-      configure("databricks.dicer.assigner.remote.kamDbnsIdentifier", "")
-    val rawDestinationClusterUri: String =
-      configure("databricks.dicer.assigner.remote.kamDestinationClusterUri", "")
-    if (rawIdentifier.isEmpty && rawDestinationClusterUri.isEmpty) {
-      None
-    } else {
-      require(
-        rawIdentifier.nonEmpty,
-        "databricks.dicer.assigner.remote.kamDbnsIdentifier must be non-empty when " +
-        "kamDestinationClusterUri is configured"
-      )
-      require(
-        rawDestinationClusterUri.nonEmpty,
-        "databricks.dicer.assigner.remote.kamDestinationClusterUri must be non-empty when " +
-        "kamDbnsIdentifier is configured"
-      )
-      // `KamEndpoint.Dbns` validates `destinationClusterUri` via embedded IDM and throws
-      // IllegalArgumentException on unresolvable input. To be paranoid and not let this crash the
-      // Assigner at startup, we degrade to no remote membership checking and fire an alert. Note
-      // that we still verify statically that this is not being triggered in DicerAssignerConfSuite,
-      // with test "kamEndpoint is defined whenever a bundled config specifies kamDbnsIdentifier".
-      try {
-        Some(KamEndpoint.Dbns(rawIdentifier, rawDestinationClusterUri))
-      } catch {
-        case NonFatal(e) =>
-          logger.alert(
-            Severity.DEGRADED,
-            CachingErrorCode.KAM_ENDPOINT_CONSTRUCTION_FAILED,
-            s"Failed to construct the K8s Auth Manager DBNS endpoint from " +
-            s"databricks.dicer.assigner.remote.kamDestinationClusterUri " +
-            s"($rawDestinationClusterUri). The Assigner will start without " +
-            s"remote-cluster membership checking. Exception: $e"
-          )
-          // We have to clear `remoteK8sApiServers` so the `remoteK8sApiServers.nonEmpty <=>
-          // kamEndpoint.isDefined` invariant asserted below (and potentially relied on by other
-          // code) still holds.
-          remoteK8sApiServers = Seq.empty
-          None
-      }
-    }
-  }
-
-  // Surface a partial misconfiguration at conf-load time so downstream callers don't have to
-  // re-validate. The two halves of the remote-cluster config must be configured together: a KAM
-  // endpoint without remote API servers is dead config, and remote API servers without a KAM
-  // endpoint can't mint bearer tokens.
-  if (remoteK8sApiServers.nonEmpty) {
-    require(
-      kamEndpoint.isDefined,
-      "databricks.dicer.assigner.remote.kamDbnsIdentifier and kamDestinationClusterUri must " +
-      "be configured when databricks.dicer.assigner.remote.k8sApiServers is non-empty"
-    )
-  }
-  if (kamEndpoint.isDefined) {
-    require(
-      remoteK8sApiServers.nonEmpty,
-      "databricks.dicer.assigner.remote.k8sApiServers must be non-empty when " +
-      "databricks.dicer.assigner.remote.kamDbnsIdentifier / kamDestinationClusterUri are configured"
-    )
-  }
-}
-
-object RemoteMembershipCheckerConf {
-
-  /**
-   * Connection info for a remote K8s API server, holding the CA cert as decoded bytes ready for
-   * use as a TLS trust anchor.
-   *
-   * @param kubeContext K8s context of the remote K8s API server.
-   * @param kubeApiUrl URL of the remote K8s API server.
-   * @param caCertBytes Decoded CA certificate bytes used as a TLS trust anchor when verifying
-   *                    the remote apiserver's server certificate.
-   */
-  case class RemoteK8sApiServerInfo private (
-      kubeContext: String,
-      kubeApiUrl: String,
-      caCertBytes: Vector[Byte])
-
-  object RemoteK8sApiServerInfo {
-
-    /** Map keys recognized in each entry of `databricks.dicer.assigner.remote.k8sApiServers`. */
-    private[RemoteMembershipCheckerConf] val ALLOWED_KEYS: Set[String] =
-      Set("kubeContext", "kubeApiUrl", "caCertBase64")
-
-    /**
-     * Returns a [[RemoteK8sApiServerInfo]] with the given `kubeContext`, `kubeApiUrl`, and
-     * `caCertBase64`. This method performs basic validation of the parameters and decodes
-     * `caCertBase64` into its byte form.
-     */
-    @throws[IllegalArgumentException](
-      "if any argument is empty, `kubeApiUrl` is not an `https://` URL with a host, or " +
-      "`caCertBase64` is not valid base64 / decodes to empty bytes"
-    )
-    private[RemoteMembershipCheckerConf] def create(
-        kubeContext: String,
-        kubeApiUrl: String,
-        caCertBase64: String): RemoteK8sApiServerInfo = {
-      require(kubeContext.nonEmpty, "kubeContext must not be empty")
-      require(kubeApiUrl.nonEmpty, "kubeApiUrl must not be empty")
-      require(
-        kubeApiUrl.startsWith("https://"),
-        "kubeApiUrl must be an https:// URL (bearer-token auth requires TLS)"
-      )
-      require(kubeApiUrl != "https://", "kubeApiUrl must include a host after https://")
-      require(caCertBase64.nonEmpty, "caCertBase64 must not be empty")
-      val caCertBytes: Vector[Byte] = decodeCaCertBase64(caCertBase64).toVector
-      new RemoteK8sApiServerInfo(kubeContext, kubeApiUrl, caCertBytes)
-    }
-
-    /**
-     * Decodes `caCertBase64` from standard base64 and returns the non-empty decoded bytes.
-     *
-     * NOTE: The certificate's bytes are intentionally not validated as an X.509 CA certificate or
-     * for expiry here. We previously did this in `RemoteMembershipCheckerConf`, but a hard
-     * dependency on cert validity that ties the Assigner's startup to non-deterministic behaviour
-     * is very dangerous. For example, in <internal bug>, the certificates had expired and this
-     * validation failed loudly, causing the Assigner to crash loop. As a result, these checks now
-     * run in `DicerAssignerConfSuite` instead.
-     */
-    @throws[IllegalArgumentException](
-      "if `caCertBase64` is not valid base64 or decodes to empty bytes"
-    )
-    private def decodeCaCertBase64(caCertBase64: String): Array[Byte] = {
-      val decoded: Array[Byte] =
-        try Base64.getDecoder.decode(caCertBase64)
-        catch {
-          case e: IllegalArgumentException =>
-            throw new IllegalArgumentException(
-              s"caCertBase64 is not valid base64: ${e.getMessage}",
-              e
-            )
-        }
-      require(decoded.nonEmpty, "caCertBase64 must decode to non-empty bytes")
-      decoded
-    }
-  }
 }
 
 /** Configuration parameters for the preferred assigner. */
@@ -343,7 +134,6 @@ trait PreferredAssignerConf extends DbConf {
  *  - `WatchServerConf`: Configuration for the Assignment Watch server.
  *  - `CommonSslConf`: SSL configuration for Assigner servers.
  *  - `PreferredAssignerConf`: Configuration for the preferred assigner, including etcd settings.
- *  - `RemoteMembershipCheckerConf`: Configuration for the remote membership checker.
  *  - `DynamicConf`: Support dynamic configuration of Dicer targets using SAFE.
  */
 class DicerAssignerConf(config: Config)
@@ -356,7 +146,6 @@ class DicerAssignerConf(config: Config)
     with CommonSslConf
     with PreferredAssignerConf
     with GeneratorConf
-    with RemoteMembershipCheckerConf
     with DynamicConf {
 
   final override def dicerTlsOptions: Option[TLSOptions] =
@@ -431,6 +220,15 @@ class DicerAssignerConf(config: Config)
   protected val enableDynamicConfig: FeatureFlag[Boolean] =
     FeatureFlag("databricks.dicer.enableDynamicConfig", false)
 
+  /** Controls removal of state transfers between trailing-slash aliases of the same SQUID. */
+  @FeatureFlagDefinition(team = "platform-team")
+  private val filterSelfTransfersFlag: FeatureFlag[Boolean] =
+    FeatureFlag("databricks.dicer.assigner.filterSelfTransfers", false)
+
+  /** Whether newly committed assignments should omit self-transfers between URI aliases. */
+  def filterSelfTransfers: Boolean =
+    filterSelfTransfersFlag.getCurrentValue(runtimeContext = RuntimeContext.EMPTY)
+
   /**
    * Dynamic Dicer target configurations via SAFE batch feature flag. Each target has its own sub-
    * flag, where the key is of the form "databricks.dicer.assigner.targetConfig.${target.name}".
@@ -451,95 +249,12 @@ class DicerAssignerConf(config: Config)
   )
 
   /**
-   * Dynamic target migration configurations delivered via a single SAFE feature flag. The value
-   * is a JSON-serialized [[TargetMigrationConfigP]] instance.
-   */
-  @FeatureFlagDefinition(
-    team = "platform-team",
-    description = "The SAFE flag for Dicer's dynamic target migration configurations"
-  )
-  protected val targetMigrationConfigFlag: FeatureFlag[String] =
-    FeatureFlag("databricks.dicer.assigner.targetMigrationConfig", "")
-
-  /**
-   * The static [[TargetMigrationConfig]] that the Assigner will read once upon startup.
-   *
-   * If this static config is set, it is passed to the [[TargetMigratorStateMachine]] in the same
-   * way as if the Assigner were to receive a new dynamic config from SAFE (see:
-   * [[TargetMigrator.start]] for more detail on the motivation behind this). This also means that
-   * this static config will be propagated, via gossip, to all other local/remote Assigners
-   * participating in the same target migration. A config with a newer version (e.g. a newer
-   * versioned dynamic config set in SAFE later on) will override this value.
-   *
-   * This should only be set during the following emergency situations:
-   * 1. The Assigner is unable to fetch the dynamic target migration config from SAFE.
-   *
-   *    NOTE: In this case, we should set the static config to reflect the same intended migration
-   *          state as the latest dynamic target migration config that's set for this Assigner in
-   *          the `databricks.dicer.assigner.targetMigrationConfig` SAFE flag, but with a strictly
-   *          greater version number.
-   *
-   *          Even though we could technically set it to be the same version number in this case
-   *          since we're unable to fetch the dynamic config from SAFE, we want to make it easier to
-   *          distinguish between the dynamic config and the static config (especially if we make a
-   *          mistake when specifying this static config and it differs from the intended migration
-   *          state specified by the latest dynamic config).
-   *
-   * 2. We want to override the latest dynamic target migration config that the Assigner is fetching
-   *    from SAFE (e.g. the latest config put out in SAFE introduced regressions and we want to
-   *    urgently override it).
-   *
-   *    NOTE: In this case, ensure that the version number specified in the static config is
-   *          strictly greater than the version number specified in the latest dynamic target
-   *          migration config that's set for this Assigner in the
-   *          `databricks.dicer.assigner.targetMigrationConfig` SAFE flag.
-   *
-   * The value for this static config is a JSON-serialized [[TargetMigrationConfigP]] instance. By
-   * default, this static config will be empty/unset.
-   *
-   * @throws IllegalArgumentException if the static target migration config value is set but cannot
-   *                                  be parsed as a valid [[TargetMigrationConfig]].
-   */
-  val staticTargetMigrationConfigOpt: Option[TargetMigrationConfig] = {
-    val rawStaticTargetMigrationConfig: String =
-      configure("databricks.dicer.assigner.staticTargetMigrationConfig", "")
-
-    if (rawStaticTargetMigrationConfig.isEmpty) {
-      None
-    } else {
-      try {
-        Some(TargetMigrationConfig.fromJsonString(rawStaticTargetMigrationConfig))
-      } catch {
-        case e: IllegalArgumentException =>
-          // Since we will only set the static target migration config in emergency situations, it
-          // is important that the conf load fails loudly if given a malformed config.
-          throw new IllegalArgumentException(
-            s"Failed to parse the static target migration config value specified in the " +
-            s"Assigner's DB_CONF: $rawStaticTargetMigrationConfig.",
-            e
-          )
-      }
-    }
-  }
-
-  /**
    * Safe batch flag does not give push notification when value gets changed. Assigner will
    * periodically poll the flag value and the `pollInterval` variable specifies the interval between
    * two consecutive polls.
    */
   val dynamicConfigPollInterval: FiniteDuration =
     configure[FiniteDuration]("databricks.dicer.assigner.dynamicConfigPollInterval", 120.seconds)
-
-  /**
-   * The interval at which the Assigner periodically polls the target migration config SAFE flag.
-   * Separate from [[dynamicConfigPollInterval]] since we intend on polling this flag more
-   * frequently so that target migration config changes propagate quickly across Assigners.
-   */
-  val dynamicTargetMigrationConfigPollInterval: FiniteDuration =
-    configure[FiniteDuration](
-      "databricks.dicer.assigner.dynamicTargetMigrationConfigPollInterval",
-      10.seconds
-    )
 
   /**
    * Determines whether to enforce the use of static configuration for dicer-assigner service.
@@ -631,20 +346,6 @@ class DicerAssignerConf(config: Config)
             key -> parsed
           }
     }
-  }
-
-  /**
-   * Returns the JSON-serialized target migration config value from the
-   * `databricks.dicer.assigner.targetMigrationConfig` SAFE feature flag.
-   */
-  def getDynamicTargetMigrationConfig: Option[String] = {
-    val unparsedTargetMigrationConfig: String =
-      targetMigrationConfigFlag.getCurrentValue(runtimeContext = RuntimeContext.EMPTY)
-    // The flag's declared default, which is an empty string (see `targetMigrationConfigFlag`
-    // above), is returned when no selector matches the current runtime context. If the default
-    // empty string is returned, we convert it to `None` so it's more explicit to the consumer
-    // that no dynamic target migration config was returned.
-    if (unparsedTargetMigrationConfig.nonEmpty) Some(unparsedTargetMigrationConfig) else None
   }
 
   /** Gets the runtime value of `enableDynamicConfig`. */

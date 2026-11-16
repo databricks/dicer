@@ -1,7 +1,7 @@
 package com.databricks.dicer.common.testing
 
 import com.databricks.caching.util.AlertOwnerTeam
-import com.databricks.caching.util.AssertMacros.ifail
+import com.databricks.caching.util.AssertMacros.{iassert, ifail}
 import com.databricks.caching.util.TestUtils
 import com.databricks.caching.util.{
   ClusterConfigScope,
@@ -9,8 +9,12 @@ import com.databricks.caching.util.{
   SequentialExecutionContext,
   SequentialExecutionContextPool
 }
-import com.databricks.rpc.armeria.ReadinessProbeTracker
-import com.databricks.common.status.ProbeStatuses
+import com.databricks.common.status.{
+  ProbeStatus,
+  ProbeStatusManager,
+  ProbeStatuses,
+  ProbeStatusSource
+}
 import java.util.concurrent.locks.ReentrantLock
 import javax.annotation.concurrent.GuardedBy
 
@@ -30,18 +34,12 @@ import com.databricks.dicer.assigner.config.TargetConfigProvider.DEFAULT_INITIAL
 import com.databricks.dicer.assigner.{
   Assigner,
   InterposingEtcdPreferredAssignerDriver,
+  ProposedSliceAssignment,
   TestableDicerAssignerConf
 }
 import com.databricks.dicer.client.{TestClientUtils, TlsFilePaths}
 import com.databricks.dicer.client.featurerollouts.DicerClientFeatureRolloutFlag
-import com.databricks.dicer.common.{
-  Assignment,
-  ClientRequest,
-  ProposedSliceAssignment,
-  SliceMapHelper,
-  SliceletData,
-  TargetName
-}
+import com.databricks.dicer.common.{Assignment, ClientRequest, SliceletData, TargetName}
 import com.databricks.dicer.common.SliceletData.SliceLoad
 import com.databricks.dicer.external.{
   Clerk,
@@ -373,7 +371,7 @@ class InternalDicerTestEnvironment private (
 
   /** Updates the dynamic configuration targets to include the given parsed `config`. */
   def putDynamicTargetConfig(targetName: TargetName, config: InternalTargetConfig): Unit = {
-    assignerConf.putDynamicTargetConfig(targetName, config)
+    assignerConf.putDynamicTargetConfig(targetName, config, overrides = Map.empty)
   }
 
   /** Updates the dynamic configuration targets to include the given parsed `config`. */
@@ -461,7 +459,6 @@ class InternalDicerTestEnvironment private (
         assignerConf = oldConfig.assignerConf,
         designatedDicerAssignerRpcPort = Some(previousPort),
         preferredAssignerDriverConfig = oldConfig.preferredAssignerDriverConfig,
-        targetMigratorOpt = oldConfig.targetMigratorOpt,
         preferredAssignerDriverFactoryOverride = oldConfig.preferredAssignerDriverFactoryOverride,
         assignerServiceInfoOpt = oldConfig.assignerServiceInfoOpt
       )
@@ -587,10 +584,20 @@ object InternalDicerTestEnvironment {
   // from the process app identifier). Thus, flipping `use_alternative_target` to enabled would
   // break existing customer tests unless the test suites configure an app identifier for the test
   // process.
+  // Only a test process gets this default. Another process that runs the environment, such as a
+  // server that serves it to remote clients, keeps the app identifier from its environment, if
+  // any. That identifier populates the alternative target in the same way.
   // TODO(<internal bug>): We can remove this once the migration to AppTarget is complete and we remove
   //   the code that internally populates an alternative target for a Slicelet based on its app
   //   identifier.
-  AppIdentifierTestUtils.configureForTest(name = "test-app", instanceId = "test-instance")
+  AppIdentifierTestUtils.configureIfTestProcess(name = "test-app", instanceId = "test-instance")
+
+  /**
+   * ProbeStatusManager poll interval used in tests. Kept short so readiness changes
+   * are re-polled and observed by Slicelets promptly, rather than after the multi-second
+   * production default.
+   */
+  private val TEST_PSM_POLL_INTERVAL_MS = 50L
 
   /**
    * Test-only wrapper that makes [[getClusterScoped]] return a default config for targets absent
@@ -665,6 +672,14 @@ object InternalDicerTestEnvironment {
    * @param dPageNamespaceOpt When specified, this namespace is used for DPage registration.
    *                          Each assigner instance uses this to register under a unique DAction
    *                          name. When None, each assigner's UUID is used as the namespace.
+   * @param readinessSourceOpt The process-wide readiness source to register when starting PSM.
+   *                           If absent, preserves an existing source, or defaults to always-OK
+   *                           if PSM is not started. Tests that need readiness transitions must
+   *                           supply and control this source. Creation never waits for readiness.
+   *
+   * PRECONDITION: If `readinessSourceOpt` is supplied, PSM must not already be started.
+   * PRECONDITION: PSM is not concurrently started or reset while this method executes, and is not
+   *               reset while an environment is in use.
    */
   def create(
       config: TestAssigner.Config = TestAssigner.Config.create(),
@@ -682,9 +697,26 @@ object InternalDicerTestEnvironment {
         alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
       ),
       assignerClusterUri: URI = new URI("kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01"),
-      dPageNamespaceOpt: Option[String] = None
+      dPageNamespaceOpt: Option[String] = None,
+      readinessSourceOpt: Option[ProbeStatusSource] = None
   ): InternalDicerTestEnvironment = {
     require(numAssigners >= 0)
+    // Standalone tests default to ready so Slicelets can receive assignments without requiring
+    // a service to drive readiness.
+    if (ProbeStatusManager.isStarted) {
+      iassert(readinessSourceOpt.isEmpty, "Cannot replace an existing PSM readiness source")
+    } else {
+      val alwaysOk: ProbeStatusSource = new ProbeStatusSource {
+        override def getStatus: ProbeStatus = ProbeStatuses.ok("dicer-test")
+      }
+      ProbeStatusManager.withPollIntervalMsForTesting(TEST_PSM_POLL_INTERVAL_MS) {
+        ProbeStatusManager.start(
+          startup = alwaysOk,
+          readiness = readinessSourceOpt.getOrElse(alwaysOk),
+          liveness = alwaysOk
+        )
+      }
+    }
 
     val assignerConf: TestableDicerAssignerConf = config.assignerConf
     assignerConf.setDynamicConfig(enableDynamicConfig)
@@ -727,17 +759,6 @@ object InternalDicerTestEnvironment {
     for (_ <- 0 until numAssigners) {
       internalDicerTestEnvironment.addAssigner(config)
     }
-
-    // In tests, the only instance in which the [[ReadinessProbeTracker]] becomes ready is from an
-    // explicit call to [[ReadinessProbeTracker.updatePodStatusForTesting]]. We set the
-    // [[ReadinessProbeTracker]] to report ready by default to avoid test failures when Slicelets
-    // are configured to observe readiness status.
-    //
-    // Note: Tests using the external Slicelet factory method (like customer tests using
-    // [[DicerTestEnvironment]]) cannot set the readiness statuses for individual Slicelets, since
-    // [[ReadinessProbeTracker]] is a global singleton. Tests may update the reported status for all
-    // Slicelets if desired.
-    ReadinessProbeTracker.updatePodStatusForTesting(ProbeStatuses.OK_STATUS)
 
     internalDicerTestEnvironment
   }
@@ -815,7 +836,7 @@ object InternalDicerTestEnvironment {
       )
     }
     val proposedAssignment: SliceMap[ProposedSliceAssignment] =
-      SliceMapHelper.ofProposedSliceAssignments(completeSliceAssignments.result())
+      ProposedSliceAssignment.createSliceMap(completeSliceAssignments.result())
 
     proposedAssignment
   }

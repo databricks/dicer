@@ -1,5 +1,6 @@
 package com.databricks.dicer.client
 
+import com.databricks.dicer.assigner.ProposedSliceAssignment
 import com.databricks.dicer.client.testing.{SliceLookupHarness}
 
 /**

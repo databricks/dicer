@@ -108,31 +108,25 @@ class SliceLookupConfigSuite extends DatabricksTest {
     }
   }
 
-  test("apply drops cluster and region URIs that are absent from the embedded model") {
-    // Test plan: Verify that well-formed cluster and region URIs naming resources absent from the
-    // binary's embedded InfraDataModel resolve to None rather than failing. Verify this by
-    // installing a LocationConf naming an unknown cluster and an unknown region, then asserting
-    // both captured URIs are empty.
+  test("apply drops a region URI that is absent from the embedded model") {
+    // Test plan: Verify that a well-formed region URI naming a region absent from the binary's
+    // embedded InfraDataModel resolves to None rather than failing. Verify this by installing a
+    // LocationConf naming an unknown region, then asserting the captured region URI is empty.
     //
-    // This covers a theoretical case rather than an expected one: the captured URIs name the
-    // cluster and region the pod is itself running in, so the embedded model is essentially
-    // guaranteed to include them, as deploying a pod to a cluster the model does not know would be
-    // nonsensical. The test pins that the theoretical case degrades to None instead of failing
-    // config creation.
-    //
-    // The region case is worth pinning separately because `WhereAmIHelper.getRegionUri` returns its
-    // value unvalidated, so `RegionUri.fromUri` is the only guard on that path.
+    // This covers a theoretical case rather than an expected one: the captured URI names the region
+    // the pod is itself running in, so the embedded model is essentially guaranteed to include it.
+    // It is worth pinning because `WhereAmIHelper.getRegionUri` returns its value unvalidated, so
+    // `RegionUri.fromUri` is the only guard on that path.
 
-    // Setup: Install a LocationConf naming a cluster and a region absent from the embedded model.
+    // Setup: Install a LocationConf naming a region absent from the embedded model.
     WhereAmITestUtils.withLocationConfSingleton(
       LocationConfTestUtils.newTestLocationConf(
-        kubernetesClusterUri = "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/99",
+        kubernetesClusterUri = TEST_CLUSTER_URI,
         regionUri = "region:dev/cloud1/public/us-west-9"
       )
     ) {
-      // Verify: Both unrecognized URIs are dropped rather than failing the build.
-      val config: SliceLookupConfig = createConfig(Target("unknown-location-test"))
-      assertResult(None)(config.clientClusterUriOpt)
+      // Verify: The unrecognized region URI is dropped rather than failing the build.
+      val config: SliceLookupConfig = createConfig(Target("unknown-region-test"))
       assertResult(None)(config.clientRegionUriOpt)
     }
   }

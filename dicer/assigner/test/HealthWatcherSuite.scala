@@ -13,17 +13,12 @@ import com.databricks.dicer.assigner.config.InternalTargetConfig.HealthWatcherTa
 import com.databricks.dicer.assigner.TargetMetrics.AssignmentDistributionSource
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.common.testing.SliceTestUtils.{createRandomProposal, createTestSquid}
-import com.databricks.dicer.common.{
-  Assignment,
-  Generation,
-  Incarnation,
-  ProposedAssignment,
-  SliceletState
-}
-import com.databricks.dicer.external.Target
+import com.databricks.dicer.common.{Assignment, Generation, Incarnation, SliceletState}
+import com.databricks.dicer.external.{ResourceAddress, Target}
 import com.databricks.dicer.friend.Squid
 import com.databricks.testing.DatabricksTest
 
+import java.net.URI
 import java.time.Instant
 import scala.concurrent.duration.Duration.Infinite
 import scala.concurrent.duration._
@@ -52,14 +47,14 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
     HealthWatcher.StaticConfig(
       initialHealthReportDelayPeriod = 30.seconds,
       unhealthyTimeoutPeriod = 30.seconds,
-      terminatingRetentionWindow = 60.seconds,
+      terminatingTimeoutPeriod = 60.seconds,
       notReadyTimeoutPeriod = 10.seconds
     )
 
   /** Determines whether the Assigner will mask the Slicelet's reported health status */
   private val healthWatcherTargetConfig: HealthWatcherTargetConfig =
     HealthWatcherTargetConfig(
-      observeSliceletReadiness = observeSliceletReadiness,
+      observeSliceletReadinessOpt = Some(observeSliceletReadiness),
       permitRunningToNotReady = false
     )
 
@@ -175,7 +170,9 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
     // the 3 Slicelets that reported within the window. Then verify that a late-signaling Slicelet
     // is included in a subsequent report.
     val harness =
-      new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
+      new TestHarness(
+        DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
+      )
     // Advance the watcher to initialize its start time and enter the starting state.
     harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
 
@@ -225,7 +222,8 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
       DefaultFactory.create(
         target,
         config,
-        healthWatcherTargetConfig
+        healthWatcherTargetConfig,
+        ownerTeamName = ""
       )
     val harness = new TestHarness(watcher)
 
@@ -245,7 +243,9 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
     // Test plan: Create a watcher, inform it about a pod and make sure that the health watcher's
     // state is as expected.
     val harness =
-      new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
+      new TestHarness(
+        DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
+      )
     // Advance the watcher to initialize its start time and enter the starting state.
     harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
 
@@ -270,7 +270,9 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
     // Test plan: Create a watcher, inform it about multiple pods. Make sure that the health
     // watcher's state is as expected.
     val harness =
-      new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
+      new TestHarness(
+        DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
+      )
     // Advance the watcher to initialize its start time and enter the starting state.
     harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
 
@@ -318,7 +320,9 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
     // heartbeat was NOT_READY when observeSliceletReadiness=true) is not counted as crashed when
     // it expires at t=75, since it was already removed from the healthy set on transition.
     val harness =
-      new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
+      new TestHarness(
+        DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
+      )
     // Advance the watcher to initialize its start time and enter the starting state.
     harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
 
@@ -476,7 +480,8 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
         DefaultFactory.create(
           target,
           config,
-          healthWatcherTargetConfig
+          healthWatcherTargetConfig,
+          ownerTeamName = ""
         )
       )
     // Advance the watcher to initialize its start time and enter the starting state.
@@ -548,7 +553,7 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
 
     harness.event(
       34.seconds,
-      Event.InformClusterManagerResources(Set(pod1.resourceUuid)),
+      Event.PodTerminatingFromKubernetes(pod1.resourceUuid),
       createHealthReportOutput(
         if (observeSliceletReadiness) Set(pod0) else Set(pod0, pod2, pod3)
       ),
@@ -556,7 +561,7 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
     )
     harness.event(
       34.seconds,
-      Event.InformClusterManagerResources(Set(pod1.resourceUuid, pod3.resourceUuid)),
+      Event.PodTerminatingFromKubernetes(pod3.resourceUuid),
       createHealthReportOutput(if (observeSliceletReadiness) Set(pod0) else Set(pod0, pod2)),
       64.seconds
     )
@@ -564,131 +569,28 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
     // Advance time to just before pod0 and pod2 should expire.
     harness.advance(63.seconds, Seq.empty, 64.seconds)
 
-    // All incarnations now expire. pod0 was Running → crashed. pod2 was Running only when
-    // observeSliceletReadiness=false (Starting state masked to Running) → crashed if so. The masked
-    // pod1 and pod3 are not counted as crashes.
+    // pod0 and pod2 are now expired. pod0 was Running → crashed. pod2 was Running only when
+    // observeSliceletReadiness=false (Starting state masked to Running) → crashed if so.
     harness.advance(
       64.seconds,
       createHealthReportOutput(
         healthy = Set.empty,
         newlyCrashedCount = if (observeSliceletReadiness) 1 else 2
       ),
-      Duration.Inf
+      94.seconds
     )
 
-    // The cluster-manager mask does not alter incarnation expiry. pod1 and pod3 also expire at
-    // 64s, so no later callback is needed.
-    harness.advance(94.seconds, Seq.empty, Duration.Inf)
+    // pod1 and pod3 are now terminated and should also be expired.
+    harness.advance(94.seconds, createHealthReportOutput(Set.empty), Duration.Inf)
   }
 
   test("Pod without SQUID does not show up in health report") {
     // Test plan: Mark a pod as terminating without SQUID, and expect it not show up in
     // HealthReportReady.
     val harness =
-      new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
-    // Advance the watcher to initialize its start time and enter the starting state.
-    harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
-
-    // While the watcher learns about the initial health of pods, the output should be empty and
-    // request us to callback after the initial report delay.
-    harness.event(
-      5.seconds,
-      Event.InformClusterManagerResources(Set(pod0.resourceUuid)),
-      Seq.empty,
-      30.seconds
-    )
-
-    // pod0 does not show up in health report, since it does not have a SQUID.
-    harness.advance(30.seconds, createHealthReportOutput(Set.empty), Duration.Inf)
-  }
-
-  test("Cluster manager terminating resources mask each resource incarnation") {
-    // Test plan: Verify that a cluster-manager terminating-resource mask applies to each
-    // incarnation by expiring one incarnation and reporting a newer Running incarnation before
-    // removing the UUID from the terminating set and verifying that the new incarnation is
-    // reported healthy only after the UUID is removed.
-    val harness =
-      new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
-    harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
-    harness.event(
-      5.seconds,
-      createSliceletStateFromSliceletEvent(pod0, SliceletState.Running),
-      Seq.empty,
-      30.seconds
-    )
-    harness.advance(30.seconds, createHealthReportOutput(Set(pod0)), 35.seconds)
-
-    // Apply the snapshot before the heartbeat expires at 35s, so it causes the removal.
-    harness.event(
-      31.seconds,
-      Event.InformClusterManagerResources(Set(pod0.resourceUuid)),
-      createHealthReportOutput(Set.empty),
-      35.seconds
-    )
-    harness.advance(35.seconds, createHealthReportOutput(Set.empty), Duration.Inf)
-
-    val newPod0: Squid = pod0.copy(creationTimeMillis = pod0.creationTimeMillis + 100)
-    harness.event(
-      92.seconds,
-      createSliceletStateFromSliceletEvent(newPod0, SliceletState.Running),
-      createHealthReportOutput(Set.empty),
-      122.seconds
-    )
-    harness.event(
-      93.seconds,
-      Event.InformClusterManagerResources(Set.empty),
-      createHealthReportOutput(Set(newPod0)),
-      122.seconds
-    )
-  }
-
-  test("Cluster manager terminating sets replace predecessors") {
-    // Test plan: Verify that one snapshot can mask multiple Running resource incarnations to
-    // ResourceTerminating, but that they are considered healthy again when subsequent calls deliver
-    // a subset of the initial resources.
-    val harness =
-      new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
-    harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
-    for (pod: Squid <- Seq(pod0, pod1, pod2)) {
-      harness.event(
-        5.seconds,
-        createSliceletStateFromSliceletEvent(pod, SliceletState.Running),
-        Seq.empty,
-        30.seconds
+      new TestHarness(
+        DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
       )
-    }
-    harness.advance(30.seconds, createHealthReportOutput(Set(pod0, pod1, pod2)), 35.seconds)
-    harness.event(
-      31.seconds,
-      Event.InformClusterManagerResources(Set(pod0.resourceUuid, pod1.resourceUuid)),
-      createHealthReportOutput(Set(pod2), newlyCrashedCount = 0),
-      35.seconds
-    )
-    harness.event(
-      32.seconds,
-      Event.InformClusterManagerResources(Set(pod1.resourceUuid)),
-      createHealthReportOutput(Set(pod0, pod2), newlyCrashedCount = 0),
-      35.seconds
-    )
-    harness.event(
-      33.seconds,
-      Event.InformClusterManagerResources(Set(pod2.resourceUuid)),
-      createHealthReportOutput(Set(pod0, pod1), newlyCrashedCount = 0),
-      35.seconds
-    )
-    harness.event(
-      34.seconds,
-      Event.InformClusterManagerResources(Set.empty),
-      createHealthReportOutput(Set(pod0, pod1, pod2), newlyCrashedCount = 0),
-      35.seconds
-    )
-  }
-
-  test("Repeated cluster manager terminating snapshots do not emit reports") {
-    // Test plan: Verify that repeating the same full terminating-resource snapshot neither emits
-    // another report nor schedules an expiry.
-    val harness =
-      new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
     // Advance the watcher to initialize its start time and enter the starting state.
     harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
 
@@ -696,20 +598,43 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
     // request us to callback after the initial report delay.
     harness.event(
       5.seconds,
-      Event.InformClusterManagerResources(Set(pod0.resourceUuid)),
+      Event.PodTerminatingFromKubernetes(pod0.resourceUuid),
       Seq.empty,
       30.seconds
     )
 
     // pod0 does not show up in health report, since it does not have a SQUID.
-    harness.advance(30.seconds, createHealthReportOutput(Set.empty), Duration.Inf)
+    harness.advance(30.seconds, createHealthReportOutput(Set.empty), 65.seconds)
+  }
 
-    // The identical snapshot does not make the watcher dirty.
+  test("Terminating after Terminating does not update expiry") {
+    // Test plan: Report health of a pod as Terminating to the HealthWatcher and send another
+    // Terminating status. The expiry should remain the same as the first Terminating state.
+    val harness =
+      new TestHarness(
+        DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
+      )
+    // Advance the watcher to initialize its start time and enter the starting state.
+    harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
+
+    // While the watcher learns about the initial health of pods, the output should be empty and
+    // request us to callback after the initial report delay.
+    harness.event(
+      5.seconds,
+      Event.PodTerminatingFromKubernetes(pod0.resourceUuid),
+      Seq.empty,
+      30.seconds
+    )
+
+    // pod0 does not show up in health report, since it does not have a SQUID.
+    harness.advance(30.seconds, createHealthReportOutput(Set.empty), 65.seconds)
+
+    // pod0's Terminating status expiry does not change.
     harness.event(
       35.seconds,
-      Event.InformClusterManagerResources(Set(pod0.resourceUuid)),
+      Event.PodTerminatingFromKubernetes(pod0.resourceUuid),
       Seq.empty,
-      Duration.Inf
+      65.seconds
     )
   }
 
@@ -717,7 +642,9 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
     // Test plan: Report HealthStatus of a pod, report another HealthStatus for the same pod with a
     // newer SQUID and expect the status to be updated in watcher.
     val harness =
-      new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
+      new TestHarness(
+        DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
+      )
     // Advance the watcher to initialize its start time and enter the starting state.
     harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
 
@@ -749,7 +676,9 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
     // Test plan: Report HealthStatus of a pod, report another HealthStatus for the same pod with an
     // older SQUID and expect the status to be unchanged in watcher.
     val harness =
-      new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
+      new TestHarness(
+        DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
+      )
     // Advance the watcher to initialize its start time and enter the starting state.
     harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
 
@@ -775,11 +704,13 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
     )
   }
 
-  test("Running incarnation remains masked while cluster manager reports termination") {
-    // Test plan: Verify that adding a UUID to the cluster-manager mask before its Slicelet reports
-    // Running keeps the incarnation excluded.
+  test("Report status as Healthy after Terminating") {
+    // Test plan: Report HealthStatus of a pod as Terminating, then report another HealthStatus for
+    // the same pod as Healthy and expect the status to be unchanged in watcher.
     val harness =
-      new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
+      new TestHarness(
+        DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
+      )
     // Advance the watcher to initialize its start time and enter the starting state.
     harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
 
@@ -787,31 +718,40 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
     // request us to callback after the initial report delay.
     harness.event(
       5.seconds,
-      Event.InformClusterManagerResources(Set(pod0.resourceUuid)),
+      Event.PodTerminatingFromKubernetes(pod0.resourceUuid),
       Seq.empty,
       30.seconds
     )
 
     // Advance to the initial report time.
-    harness.advance(30.seconds, createHealthReportOutput(Set.empty), Duration.Inf)
+    harness.advance(30.seconds, createHealthReportOutput(Set.empty), 65.seconds)
 
-    // The Running incarnation is tracked with its own expiry but excluded by the final mask.
+    // Report the HealthStatus as Running with SQUID, status expiry remains same but we add SQUID
+    // and update the report.
     harness.event(
       45.seconds,
       createSliceletStateFromSliceletEvent(pod0, SliceletState.Running),
+      // pod0's computed status is ResourceTerminating (resource-scoped; stays terminating once
+      // set). Not in healthy.
       createHealthReportOutput(Set.empty),
-      75.seconds
+      65.seconds
     )
   }
 
-  test("A new incarnation resets incarnation termination but remains cluster-manager masked") {
+  test(
+    "A new incarnation resets ResourceIncarnationTerminating but preserves ResourceTerminating"
+  ) {
     // Test plan: Verify the two outcomes of observing a new resource incarnation (a newer SQUID for
-    // the same resource UUID). Slicelet-reported incarnation termination is reset, so the new
-    // incarnation becomes healthy. A cluster-manager-reported UUID remains excluded because the
-    // mask is independent of incarnation health. Drive pod0 through the first case and pod1 through
-    // the second, then report a newer incarnation of each as Running.
+    // the same resource UUID). A resource that is ResourceIncarnationTerminating
+    // (Slicelet-reported) is reset, so the new incarnation becomes healthy, since the prior
+    // incarnation's termination no longer applies. A resource that is ResourceTerminating
+    // (Kubernetes-reported) is NOT reset, since the whole resource -- including the new incarnation
+    // -- is being deleted. Do this by driving pod0 to ResourceIncarnationTerminating and pod1 to
+    // ResourceTerminating, then reporting a newer incarnation of each as Running.
     val harness =
-      new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
+      new TestHarness(
+        DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
+      )
     harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
 
     // pod0 and pod1 report Running during the initial delay; both expire at 5s + 30s = 35s.
@@ -840,13 +780,13 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
       35.seconds
     )
 
-    // Kubernetes reports pod1 terminating at 31s. This masks pod1 without changing its Running
-    // incarnation expiry at 35s.
+    // Kubernetes reports pod1 terminating at 31s -> ResourceTerminating (expires at 31s + 60s =
+    // 91s).
     harness.event(
       31.seconds,
-      Event.InformClusterManagerResources(Set(pod1.resourceUuid)),
+      Event.PodTerminatingFromKubernetes(pod1.resourceUuid),
       createHealthReportOutput(Set.empty),
-      35.seconds
+      91.seconds
     )
 
     // A newer resource incarnation of pod0 reports Running at 32s. pod0 was
@@ -858,11 +798,12 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
       32.seconds,
       createSliceletStateFromSliceletEvent(newPod0, SliceletState.Running),
       createHealthReportOutput(Set(newPod0)),
-      35.seconds
+      62.seconds
     )
 
-    // A newer resource incarnation of pod1 reports Running at 32s. Its incarnation health and
-    // expiry are refreshed independently, but the UUID-level mask still excludes it.
+    // A newer resource incarnation of pod1 reports Running at 32s. pod1 was ResourceTerminating, so
+    // the restart does NOT revive it: it stays excluded and its expiry stays frozen at 91s. A
+    // report is still emitted because the SQUID changed, but the healthy set is unchanged.
     val newPod1: Squid = pod1.copy(creationTimeMillis = pod1.creationTimeMillis + 100)
     harness.event(
       32.seconds,
@@ -874,13 +815,15 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
 
   test("A new resource incarnation reported as TERMINATING gets a refreshed terminating expiry") {
     // Test plan: Verify that when a newer resource incarnation's first report is TERMINATING, it is
-    // treated as a fresh ResourceIncarnationTerminating status rather than the prior incarnation's,
-    // so its expiry is refreshed to this report's terminating timeout instead of staying frozen at
-    // the prior incarnation's expiry. Do this by driving pod0 to ResourceIncarnationTerminating,
-    // then reporting a newer incarnation as TERMINATING later, and confirming the resource expires
-    // at the later time.
+    // treated as a fresh ResourceIncarnationTerminating rather than the prior incarnation's, so its
+    // expiry is refreshed to this report's terminating timeout instead of staying frozen at the
+    // prior incarnation's expiry. Do this by driving pod0 to ResourceIncarnationTerminating, then
+    // reporting a newer incarnation as TERMINATING later, and confirming the resource expires at
+    // the later time.
     val harness =
-      new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
+      new TestHarness(
+        DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
+      )
     harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
 
     harness.event(
@@ -927,10 +870,12 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
     // Test plan: Verify that once a Slicelet reports TERMINATING, a later RUNNING report from the
     // same resource incarnation (same SQUID) does not revive it --
     // ResourceIncarnationTerminating is terminal within a resource incarnation, and only a newer
-    // resource incarnation clears it. Do this by driving pod0 to ResourceIncarnationTerminating
-    // and then reporting the same SQUID as Running.
+    // resource incarnation clears it. Do this by driving pod0 to ResourceIncarnationTerminating and
+    // then reporting the same SQUID as Running.
     val harness =
-      new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
+      new TestHarness(
+        DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
+      )
     harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
 
     harness.event(
@@ -959,11 +904,18 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
     )
   }
 
-  test("Cluster manager termination masks a new incarnation") {
-    // Test plan: Verify that a newer Running incarnation remains excluded while its resource has a
-    // cluster-manager termination mask.
+  test(
+    "Kubernetes termination escalates ResourceIncarnationTerminating to ResourceTerminating"
+  ) {
+    // Test plan: Verify that a Kubernetes pod-termination signal escalates a
+    // ResourceIncarnationTerminating resource to ResourceTerminating, so a subsequent new
+    // incarnation no longer revives it. Do this by driving pod0 to ResourceIncarnationTerminating,
+    // then reporting Kubernetes pod termination, then reporting a newer incarnation as Running and
+    // confirming it stays excluded.
     val harness =
-      new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
+      new TestHarness(
+        DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
+      )
     harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
 
     harness.event(
@@ -982,23 +934,25 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
       91.seconds
     )
 
-    // Kubernetes reports pod0 terminating at 32s. The effective status changes to
-    // ResourceTerminating, while the incarnation expiry remains frozen at 91s.
+    // Kubernetes reports pod0 terminating at 32s -> escalates to ResourceTerminating. A report is
+    // emitted for the status change, but the healthy set is unchanged and the expiry stays frozen
+    // at 91s.
     harness.event(
       32.seconds,
-      Event.InformClusterManagerResources(Set(pod0.resourceUuid)),
+      Event.PodTerminatingFromKubernetes(pod0.resourceUuid),
       createHealthReportOutput(Set.empty),
       91.seconds
     )
 
-    // A newer resource incarnation reports Running at 33s. Its incarnation expiry is refreshed,
-    // while the current cluster-manager mask continues to exclude it.
+    // A newer resource incarnation reports Running at 33s. Because the resource is now
+    // ResourceTerminating, the restart does not revive it: it stays excluded with its expiry frozen
+    // at 91s.
     val newPod0: Squid = pod0.copy(creationTimeMillis = pod0.creationTimeMillis + 100)
     harness.event(
       33.seconds,
       createSliceletStateFromSliceletEvent(newPod0, SliceletState.Running),
       createHealthReportOutput(Set.empty),
-      63.seconds
+      91.seconds
     )
   }
 
@@ -1012,7 +966,8 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
         DefaultFactory.create(
           target,
           config,
-          healthWatcherTargetConfig
+          healthWatcherTargetConfig,
+          ownerTeamName = ""
         )
       )
     harness.advance(Duration.Zero, actions = Seq.empty, nextTimeOffset = Duration.Inf)
@@ -1069,7 +1024,9 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
     // verify that NOT_READY heartbeats are masked to Running so Running pods stay Running
     // throughout.
     val harness =
-      new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
+      new TestHarness(
+        DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
+      )
     // Setup: advance the watcher to initialize its start time, then put pod0 in Running state.
     harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
     harness.event(
@@ -1128,14 +1085,15 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
     )
   }
 
-  test("TERMINATING heartbeat enters ResourceIncarnationTerminating despite flapping protection") {
+  test("Terminating heartbeat exits NotReady immediately, bypassing flapping protection") {
     // Test plan: Verify that a resource in NotReady (with active flapping protection) transitions
-    // immediately to ResourceIncarnationTerminating upon a TERMINATING heartbeat, regardless of
-    // whether the protection window has elapsed. Do this by putting pod0 in Running, triggering a
-    // NOT_READY heartbeat to enter NotReady (when observeSliceletReadiness is enabled), then
-    // sending a TERMINATING heartbeat within the protection window and verifying pod0 becomes
-    // ResourceIncarnationTerminating.
-    val harness = new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
+    // immediately to Terminating upon a TERMINATING heartbeat, regardless of whether the protection
+    // window has elapsed. Do this by putting pod0 in Running, triggering a NOT_READY heartbeat to
+    // enter NotReady (when observeSliceletReadiness is enabled), then sending a TERMINATING
+    // heartbeat within the protection window and verifying pod0 becomes Terminating.
+    val harness = new TestHarness(
+      DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
+    )
     harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
 
     // Setup: pod0 enters Running at t=5.
@@ -1163,14 +1121,13 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
     )
 
     // Verify: TERMINATING heartbeat at t=35, within the would-be protection window (35s < 41s).
-    // pod0 transitions to ResourceIncarnationTerminating immediately regardless of flapping
-    // protection or flag combination. pod0 is not healthy and is not counted as crashed because
-    // this is a status change rather than an expiry.
+    // pod0 transitions to Terminating immediately regardless of flapping protection or flag
+    // combination. pod0 not in healthy (Terminating). Not in crashed (status change, not expiry).
     harness.event(
       35.seconds,
       createSliceletStateFromSliceletEvent(pod0, SliceletState.Terminating),
       createHealthReportOutput(Set.empty),
-      95.seconds // 35s + terminatingRetentionWindow(60s)
+      95.seconds // 35s + terminatingTimeoutPeriod(60s)
     )
   }
 
@@ -1178,19 +1135,19 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
     // Test plan: Verify that the watcher bootstraps the health of assigned resources for which it
     // has no authoritative signals using the assignment observed from slicelets. Verify this by
     // delivering health signals to the watcher for various pods (including Running, NotReady, and
-    // ResourceIncarnationTerminating) and then telling the watcher about an assignment sync-ed from
-    // a slicelet that includes other pods, but also excludes some pods that are known. Check that
-    // the resulting health report includes the pods that were not previously known to the watcher,
-    // as well as the correct status for all pods with authoritative health information. Also verify
-    // that the bootstrapped health expires at the unhealthy timeout period past the watcher's start
-    // time.
+    // Terminating) and then telling the watcher about an assignment sync-ed from a slicelet that
+    // includes other pods, but also excludes some pods that are known. Check that the resulting
+    // health report includes the pods that were not previously known to the watcher, as well as the
+    // correct status for all pods with authoritative health information. Also verify that the
+    // bootstrapped health expires at the unhealthy timeout period past the watcher's start time.
 
     val harness =
-      new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
+      new TestHarness(
+        DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
+      )
     // Advance the watcher to initialize its start time and enter the starting state.
     harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
-    // Tell the watcher about pods 0,1 (Running), 2 (NotReady), and 3
-    // (ResourceIncarnationTerminating).
+    // Tell the watcher about pods 0,1 (Running), 2 (NotReady), and 3 (Terminating).
     harness.event(
       5.seconds,
       createSliceletStateFromSliceletEvent(pod0, SliceletState.Running),
@@ -1231,7 +1188,7 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
       ),
       // pod0,pod1,pod4,pod5 are Running. pod2: Running if observeSliceletReadiness=false
       // (masked), else Starting.
-      // pod3 ResourceIncarnationTerminating. crashed=Set.empty (first report).
+      // pod3 Terminating. crashed=Set.empty (first report).
       createHealthReportOutput(
         if (observeSliceletReadiness) Set(pod0, pod1, pod4, pod5)
         else Set(pod0, pod1, pod2, pod4, pod5)
@@ -1276,7 +1233,7 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
       ),
       68.seconds
     )
-    // pod3 expires. Was ResourceIncarnationTerminating → not in crashed.
+    // pod3 expires. Was Terminating → not in crashed.
     harness.advance(68.seconds, createHealthReportOutput(Set.empty), Duration.Inf)
   }
 
@@ -1292,11 +1249,13 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
     val config = HealthWatcher.StaticConfig(
       initialHealthReportDelayPeriod = 30.seconds,
       unhealthyTimeoutPeriod = 30.seconds,
-      terminatingRetentionWindow = 60.seconds,
+      terminatingTimeoutPeriod = 60.seconds,
       notReadyTimeoutPeriod = 10.seconds
     )
     val harness =
-      new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
+      new TestHarness(
+        DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
+      )
     harness.advance(Duration.Zero, actions = Seq.empty, nextTimeOffset = Duration.Inf)
 
     // Deliver the `AssignmentSyncObserved` event from different unreliable sources (store or clerk)
@@ -1404,7 +1363,7 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
       assignedResourcesLowerGeneration: Set[Squid] <- Seq(Set(pod2), Set(pod2, pod3))) {
 
       val harness = new TestHarness(
-        DefaultFactory.create(target, config, healthWatcherTargetConfig)
+        DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
       )
       // Advance the watcher to initialize its start time and enter the starting state.
       harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
@@ -1452,7 +1411,7 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
       )) {
 
       val harness = new TestHarness(
-        DefaultFactory.create(target, config, healthWatcherTargetConfig)
+        DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
       )
       // Advance the watcher to initialize its start time and enter the starting state.
       harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
@@ -1498,7 +1457,7 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
         AssignmentDistributionSource.Store
       )) {
       val harness = new TestHarness(
-        DefaultFactory.create(target, config, healthWatcherTargetConfig)
+        DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
       )
       // Advance the watcher to initialize its start time and enter the starting state.
       harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
@@ -1542,7 +1501,7 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
         AssignmentDistributionSource.Store
       )) {
       val harness = new TestHarness(
-        DefaultFactory.create(target, config, healthWatcherTargetConfig)
+        DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
       )
       // Advance the watcher to initialize its start time and enter the starting state.
       harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
@@ -1606,7 +1565,7 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
       )) {
 
       val harness = new TestHarness(
-        DefaultFactory.create(target, config, healthWatcherTargetConfig)
+        DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
       )
       // Advance the watcher to initialize its start time and enter the starting state.
       harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
@@ -1647,7 +1606,7 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
         AssignmentDistributionSource.Store
       )) {
       val harness = new TestHarness(
-        DefaultFactory.create(target, config, healthWatcherTargetConfig)
+        DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
       )
       // Advance the watcher to initialize its start time and enter the starting state.
       harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
@@ -1711,11 +1670,13 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
     val config = HealthWatcher.StaticConfig(
       initialHealthReportDelayPeriod = 30.seconds,
       unhealthyTimeoutPeriod = 30.seconds,
-      terminatingRetentionWindow = 60.seconds,
+      terminatingTimeoutPeriod = 60.seconds,
       notReadyTimeoutPeriod = 10.seconds
     )
     val harness =
-      new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
+      new TestHarness(
+        DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
+      )
     harness.advance(Duration.Zero, actions = Seq.empty, nextTimeOffset = Duration.Inf)
 
     // Observed assignment from unreliable resource from a higher incarnation. Not trigger
@@ -1748,7 +1709,9 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
     // Test plan: Verify that bootstrapping doesn't affect the ability of the watcher to update the
     // health of resources as it receives new health signals.
     val harness =
-      new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
+      new TestHarness(
+        DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
+      )
     // Advance the watcher to initialize its start time and enter the starting state.
     harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
     // Bootstrap pod 0.
@@ -1771,13 +1734,15 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
     // Test plan: Verify that the watcher does not bootstrap the health of a resource which is
     // terminating even when it only knows its UUID and not the full SQUID.
     val harness =
-      new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
+      new TestHarness(
+        DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
+      )
     // Advance the watcher to initialize its start time and enter the starting state.
     harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
     // Tell the watcher about pod 0, which is terminating, but only by UUID.
     harness.event(
       5.seconds,
-      Event.InformClusterManagerResources(Set(pod0.resourceUuid)),
+      Event.PodTerminatingFromKubernetes(pod0.resourceUuid),
       Seq.empty,
       30.seconds
     )
@@ -1799,7 +1764,9 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
     // Test plan: Verify that if the watcher receives a set of assigned resources right at the
     // end or after the initialization delay, it will not bootstrap the health of those resources.
     val harness =
-      new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
+      new TestHarness(
+        DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
+      )
     // Advance the watcher to initialize its start time and enter the starting state.
     harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
     // Tell the watcher about assigned resources right at the end of the initialization delay and
@@ -1832,7 +1799,9 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
     // assigned resources which have duplicate UUIDs, and that the watcher deduplicates by taking
     // the Squid with the latest creation time.
     val harness =
-      new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
+      new TestHarness(
+        DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
+      )
     // pod4 has the same UUID as pod0, but greater timestamp, so it should be taken.
     val pod4: Squid = pod0.copy(creationTimeMillis = pod0.creationTimeMillis + 1L)
     // pod5 has the same UUID as pod1, but lesser timestamp, so it should be ignored.
@@ -1876,7 +1845,7 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
 
     // Setup: Create watcher and initialize with health reports for 3 pods.
     val healthWatcher: HealthWatcher =
-      DefaultFactory.create(target, config, healthWatcherTargetConfig)
+      DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
     val harness = new TestHarness(healthWatcher)
     // Advance the watcher to initialize its start time and enter the starting state.
     harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
@@ -1925,11 +1894,18 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
     val shortDelayConfig = HealthWatcher.StaticConfig(
       initialHealthReportDelayPeriod = 10.seconds,
       unhealthyTimeoutPeriod = 30.seconds,
-      terminatingRetentionWindow = 60.seconds,
+      terminatingTimeoutPeriod = 60.seconds,
       notReadyTimeoutPeriod = 10.seconds
     )
     val harness =
-      new TestHarness(DefaultFactory.create(target, shortDelayConfig, healthWatcherTargetConfig))
+      new TestHarness(
+        DefaultFactory.create(
+          target,
+          shortDelayConfig,
+          healthWatcherTargetConfig,
+          ownerTeamName = ""
+        )
+      )
 
     // Advance the watcher to initialize its start time and enter the starting state.
     harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
@@ -1961,61 +1937,6 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
     )
   }
 
-  test("Removed cluster manager termination is not retained for expiration metrics") {
-    // Test plan: Verify that removing a UUID from the cluster-manager terminating set discards its
-    // observation timestamp, so a later incarnation expiry has no Kubernetes termination signal.
-    val metricsTarget: Target =
-      Target(s"removed-termination-stats-$observeSliceletReadiness")
-    val harness =
-      new TestHarness(DefaultFactory.create(metricsTarget, config, healthWatcherTargetConfig))
-    val noSignalExpirations = MetricUtils.ChangeTracker[Long] { () =>
-      TargetMetricsUtils.getHealthWatcherResourceExpirations(
-        metricsTarget,
-        receivedFromSlicelet = false,
-        receivedFromKubernetes = false
-      )
-    }
-    val k8sOnlyExpirations = MetricUtils.ChangeTracker[Long] { () =>
-      TargetMetricsUtils.getHealthWatcherResourceExpirations(
-        metricsTarget,
-        receivedFromSlicelet = false,
-        receivedFromKubernetes = true
-      )
-    }
-
-    harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
-    harness.event(
-      5.seconds,
-      createSliceletStateFromSliceletEvent(pod0, SliceletState.Running),
-      Seq.empty,
-      30.seconds
-    )
-    harness.advance(30.seconds, createHealthReportOutput(Set(pod0)), 35.seconds)
-
-    harness.event(
-      31.seconds,
-      Event.InformClusterManagerResources(Set(pod0.resourceUuid)),
-      createHealthReportOutput(Set.empty),
-      35.seconds
-    )
-
-    // Removing the UUID from the cluster manager's terminating set should unmask it immediately.
-    harness.event(
-      32.seconds,
-      Event.InformClusterManagerResources(Set.empty),
-      createHealthReportOutput(Set(pod0)),
-      35.seconds
-    )
-    harness.advance(
-      35.seconds,
-      createHealthReportOutput(healthy = Set.empty, newlyCrashedCount = 1),
-      Duration.Inf
-    )
-
-    assert(noSignalExpirations.totalChange() == 1)
-    assert(k8sOnlyExpirations.totalChange() == 0)
-  }
-
   test("Resource expiration stats track termination signal sources") {
     // Test plan: Verify that when resources expire from the health watcher, the expiration counter
     // is incremented with the correct termination signal source labels, and the delay histogram
@@ -2024,9 +1945,9 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
     // each pod expires separately and metrics can be verified after each expiration:
     //   pod0: expires without any termination signal (Running -> timeout at 35s)
     //   pod1: expires after termination from Slicelet only (at 31s, expires at 91s)
-    //   pod2: expires after termination from Kubernetes only (at 32s, incarnation expires at 35s)
+    //   pod2: expires after termination from Kubernetes only (at 32s, expires at 92s)
     //   pod3: expires after termination from both, K8s first (K8s at 33s, Slicelet at 35s,
-    //         expires at 95s, delay = +2.0s)
+    //         expires at 93s, delay = +2.0s)
     //   pod4: expires after termination from both, Slicelet first (Slicelet at 34s, K8s at 37s,
     //         expires at 94s, delay = -3.0s)
     // Use a unique target name to isolate metrics from other tests.
@@ -2034,7 +1955,9 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
     val target: Target =
       Target(s"expiration-stats-$observeSliceletReadiness")
     val harness =
-      new TestHarness(DefaultFactory.create(target, config, healthWatcherTargetConfig))
+      new TestHarness(
+        DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
+      )
 
     // Track changes in metric values.
     val noSignalExpirations = MetricUtils.ChangeTracker[Long] { () =>
@@ -2113,8 +2036,7 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
       35.seconds
     )
 
-    // pod1: Slicelet reports TERMINATING at 31s and enters ResourceIncarnationTerminating (expires
-    // at 91s).
+    // pod1: Slicelet reports Terminating at 31s (expires at 31s + 60s = 91s).
     harness.event(
       31.seconds,
       createSliceletStateFromSliceletEvent(pod1, SliceletState.Terminating),
@@ -2122,25 +2044,23 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
       35.seconds
     )
 
-    // pod2: Kubernetes reports Terminating at 32s. The final mask excludes it but does not alter
-    // its Running incarnation expiry at 35s.
+    // pod2: Kubernetes reports Terminating at 32s (expires at 32s + 60s = 92s).
     harness.event(
       32.seconds,
-      Event.InformClusterManagerResources(Set(pod2.resourceUuid)),
+      Event.PodTerminatingFromKubernetes(pod2.resourceUuid),
       createHealthReportOutput(Set(pod0, pod3, pod4)),
       35.seconds
     )
 
-    // pod3: Kubernetes reports Terminating at 33s. Its Running incarnation still expires at 35s.
+    // pod3: Kubernetes reports Terminating at 33s (expires at 33s + 60s = 93s).
     harness.event(
       33.seconds,
-      Event.InformClusterManagerResources(Set(pod2.resourceUuid, pod3.resourceUuid)),
+      Event.PodTerminatingFromKubernetes(pod3.resourceUuid),
       createHealthReportOutput(Set(pod0, pod4)),
       35.seconds
     )
 
-    // pod4: Slicelet reports TERMINATING at 34s and enters ResourceIncarnationTerminating (expires
-    // at 94s).
+    // pod4: Slicelet reports Terminating at 34s (expires at 34s + 60s = 94s).
     harness.event(
       34.seconds,
       createSliceletStateFromSliceletEvent(pod4, SliceletState.Terminating),
@@ -2148,10 +2068,9 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
       35.seconds
     )
 
-    // pod3: Slicelet reports TERMINATING at 35s (2 seconds after Kubernetes), entering
-    // ResourceIncarnationTerminating and refreshing its expiry to 95s. pod0 and pod2 also expire at
-    // 35s. pod0 has no termination signal and is counted as crashed; masked pod2 has the Kubernetes
-    // signal and is not.
+    // pod3: Slicelet reports Terminating at 35s (2 seconds after Kubernetes).
+    // pod0 also expires at 35s (no termination signal, Running -> timeout). pod0 was Running →
+    // in crashed.
     harness.event(
       35.seconds,
       createSliceletStateFromSliceletEvent(pod3, SliceletState.Terminating),
@@ -2159,93 +2078,118 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
       91.seconds
     )
 
-    // Verify: pod0 expired with no signal and pod2 with only the current Kubernetes signal.
+    // Verify: pod0 expired with no termination signal.
     assert(noSignalExpirations.totalChange() == 1)
     assert(sliceletOnlyExpirations.totalChange() == 0)
-    assert(k8sOnlyExpirations.totalChange() == 1)
+    assert(k8sOnlyExpirations.totalChange() == 0)
     assert(bothExpirations.totalChange() == 0)
     assert(delayCount.totalChange() == 0)
 
-    // pod4: Kubernetes reports Terminating at 37s (3 seconds after Slicelet). pod3 remains in the
-    // snapshot, which must preserve its original Kubernetes observation time of 33s. The effective
-    // status changes are benign because both resources were already excluded by incarnation health.
+    // pod4: Kubernetes reports Terminating at 37s (3 seconds after Slicelet). pod4 escalates from
+    // ResourceIncarnationTerminating to ResourceTerminating, a status change that emits a (benign)
+    // health report: the healthy set is unchanged and pod4's expiry remains at 94s since it was
+    // already terminating.
     harness.event(
       37.seconds,
-      Event.InformClusterManagerResources(
-        Set(pod2.resourceUuid, pod3.resourceUuid, pod4.resourceUuid)
-      ),
+      Event.PodTerminatingFromKubernetes(pod4.resourceUuid),
       createHealthReportOutput(Set.empty),
       91.seconds
     )
 
-    // pod1 expires at 91s (Slicelet-only termination). Was ResourceIncarnationTerminating → not
-    // crashed.
+    // pod1 expires at 91s (Slicelet-only termination). Was Terminating → not in crashed.
     harness.advance(
       91.seconds,
       createHealthReportOutput(Set.empty),
-      94.seconds
+      92.seconds
     )
 
     // Verify: pod1 expired with Slicelet-only termination signal.
     assert(noSignalExpirations.totalChange() == 1)
     assert(sliceletOnlyExpirations.totalChange() == 1)
+    assert(k8sOnlyExpirations.totalChange() == 0)
+    assert(bothExpirations.totalChange() == 0)
+    assert(delayCount.totalChange() == 0)
+
+    // pod2 expires at 92s (Kubernetes-only termination). Was Terminating → not in crashed.
+    harness.advance(
+      92.seconds,
+      createHealthReportOutput(Set.empty),
+      93.seconds
+    )
+
+    // Verify: pod2 expired with Kubernetes-only termination signal.
+    assert(noSignalExpirations.totalChange() == 1)
+    assert(sliceletOnlyExpirations.totalChange() == 1)
     assert(k8sOnlyExpirations.totalChange() == 1)
     assert(bothExpirations.totalChange() == 0)
     assert(delayCount.totalChange() == 0)
 
-    // pod4 expires at 94s (both termination signals, Slicelet first).
-    harness.advance(94.seconds, createHealthReportOutput(Set.empty), 95.seconds)
+    // pod3 expires at 93s (both termination signals, K8s first).
+    // pod3 was Terminating → not crashed.
+    harness.advance(
+      93.seconds,
+      createHealthReportOutput(Set.empty),
+      94.seconds
+    )
 
-    // Verify: pod4's negative delay is recorded.
+    // Verify: pod3 expired with both termination signals and delay histogram recorded.
     assert(noSignalExpirations.totalChange() == 1)
     assert(sliceletOnlyExpirations.totalChange() == 1)
     assert(k8sOnlyExpirations.totalChange() == 1)
     assert(bothExpirations.totalChange() == 1)
     assert(delayCount.totalChange() == 1)
-    assert(delaySum.totalChange() == -3.0)
+    // Delay = sliceletTime - k8sTime = 35s - 33s = 2.0s
+    assert(delaySum.totalChange() == 2.0)
 
-    // pod3 expires at 95s (both termination signals, Kubernetes first).
-    harness.advance(95.seconds, createHealthReportOutput(Set.empty), Duration.Inf)
+    // pod4 expires at 94s (both termination signals, Slicelet first).
+    harness.advance(94.seconds, createHealthReportOutput(Set.empty), Duration.Inf)
 
-    // Verify: pod3 uses the original Kubernetes observation at 33s, not the repeated snapshot at
-    // 37s, so it contributes +2.0s and the cumulative delay is -1.0s.
+    // Verify: pod4 expired with both termination signals and negative delay recorded.
     assert(noSignalExpirations.totalChange() == 1)
     assert(sliceletOnlyExpirations.totalChange() == 1)
     assert(k8sOnlyExpirations.totalChange() == 1)
     assert(bothExpirations.totalChange() == 2)
     assert(delayCount.totalChange() == 2)
+    // Cumulative delay = 2.0s (pod3) + (-3.0s) (pod4) = -1.0s
+    // pod4 delay = sliceletTime - k8sTime = 34s - 37s = -3.0s
     assert(delaySum.totalChange() == -1.0)
   }
 
   test("Podset size and health status metrics are recorded on each health report") {
     // Test plan: Verify that the HealthWatcher correctly records computed and Slicelet-reported
     // podset size metrics, and the computed-differs-from-reported counter, when it emits a health
-    // report. Also verifies that the ResourceIncarnationTerminating podset size resets to 0 once a
-    // ResourceIncarnationTerminating pod expires. Do this using a unique target to isolate metrics
-    // from other tests. Supply four pods: pod0 (Running), pod1 (first heartbeat NOT_READY), pod2
-    // (ResourceIncarnationTerminating), and pod3
+    // report. Also verifies that the Terminating podset size resets to 0 once a Terminating pod
+    // expires. Do this using a unique target to isolate metrics from other tests. Supply four
+    // pods: pod0 (Running), pod1 (first heartbeat NOT_READY), pod2 (Terminating), and pod3
     // (Running, then NOT_READY at t=32). After the initial health report at t=30, verify:
     //   - Computed podset sizes reflect the HealthWatcher's computed statuses. pod1's computed
     //     status is Starting when observeSliceletReadiness=true and Running when false (masked).
-    //     pod2 contributes ResourceIncarnationTerminating=1. pod3 is Running.
+    //     pod2 contributes Terminating=1. pod3 is Running.
     //   - Reported podset sizes reflect the raw Slicelet-reported statuses (pod0=Running,
-    //     pod1=NotReady, pod2=ResourceIncarnationTerminating, pod3=Running) regardless of masking.
+    //     pod1=NotReady, pod2=Terminating, pod3=Running) regardless of masking.
     //   - The computed-differs-from-reported counter is incremented once for pod1, whose
     //     reported status (NotReady) diverges from its computed status (Starting or Running).
     // At t=31, heartbeats are sent for pod0, pod1, and pod3 to push their expiry past pod2's.
     // At t=32, pod3 receives a NOT_READY heartbeat (expiry=62). When observeSliceletReadiness=false
     // the report is masked to Running, exercising the diff("NotReady", "Running") case. After t=61
     // (pod0, pod1 expire), verify the diff("NotReady", "Running") counter reflects pod3's masked
-    // NotReady. At t=62 pod3 expires, and at t=65 pod2 expires. Verify that
-    // ResourceIncarnationTerminating resets to 0 after pod2 expires.
+    // NotReady. At t=62 pod3 expires, and at t=65 pod2 expires. Verify that Terminating resets to 0
+    // after pod2 expires.
     val metricsTarget: Target =
       Target(s"podset-metrics-$observeSliceletReadiness")
     val harness: TestHarness =
-      new TestHarness(DefaultFactory.create(metricsTarget, config, healthWatcherTargetConfig))
+      new TestHarness(
+        DefaultFactory.create(
+          metricsTarget,
+          config,
+          healthWatcherTargetConfig,
+          ownerTeamName = ""
+        )
+      )
     harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
 
     // pod0: Running; pod1: first heartbeat NotReady (Starting or masked Running);
-    // pod2: ResourceIncarnationTerminating;
+    // pod2: Terminating;
     // pod3: Running (will receive NotReady at t=32). All heartbeats at t=5; pod0/pod1/pod3 expire
     // at t=35, pod2 at t=5+60=65.
     harness.event(
@@ -2294,8 +2238,8 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
     assert(TargetMetricsUtils.getPodSetSize(metricsTarget, "NotReady") == 0)
     assert(TargetMetricsUtils.getPodSetSize(metricsTarget, "ResourceIncarnationTerminating") == 1)
 
-    // Verify Slicelet-reported podset sizes (pod0=Running, pod1=NotReady,
-    // pod2=ResourceIncarnationTerminating, pod3=Running).
+    // Verify Slicelet-reported podset sizes (pod0=Running, pod1=NotReady, pod2=Terminating,
+    // pod3=Running).
     assert(TargetMetricsUtils.getReportedPodSetSize(metricsTarget, "Running") == 2) // pod0, pod3
     assert(TargetMetricsUtils.getReportedPodSetSize(metricsTarget, "NotReady") == 1)
     assert(
@@ -2351,8 +2295,7 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
     // At t=35 no expiry fires since pod0, pod1, and pod3 were all extended past t=35.
     harness.advance(35.seconds, Seq.empty, 61.seconds)
 
-    // At t=61, pod0 and pod1 expire. pod2 (ResourceIncarnationTerminating) and pod3 (expiry=62) are
-    // still alive.
+    // At t=61, pod0 and pod1 expire. pod2 (Terminating) and pod3 (expiry=62) still alive.
     // pod3 is Running (computed, masked) for !observeSliceletReadiness, NotReady for
     // observeSliceletReadiness.
     harness.advance(
@@ -2386,16 +2329,270 @@ private abstract class HealthWatcherSuite(observeSliceletReadiness: Boolean)
         healthy = Set.empty,
         newlyCrashedCount = if (observeSliceletReadiness) 0 else 1
       ),
-      65.seconds // pod2 (ResourceIncarnationTerminating) expires next
+      65.seconds // pod2 (Terminating) expires next
     )
 
-    // At t=65, pod2 (ResourceIncarnationTerminating) expires. It was never healthy so it is not in
-    // crashed.
+    // At t=65, pod2 (Terminating) expires. It was never healthy so it is not in crashed.
     harness.advance(65.seconds, createHealthReportOutput(Set.empty), Duration.Inf)
 
     // ResourceIncarnationTerminating resets to 0 once pod2 expires.
     assert(TargetMetricsUtils.getPodSetSize(metricsTarget, "ResourceIncarnationTerminating") == 0)
   }
+
+  test("Repeated NotReady reports extend protection without emitting health reports") {
+    // Test plan: Repeated NotReady reports must extend protection without changing the status kind.
+    // Running reports must remain blocked until the latest protection window ends.
+    val harness = new TestHarness(
+      DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
+    )
+    harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
+    harness.event(
+      5.seconds,
+      createSliceletStateFromSliceletEvent(pod0, SliceletState.Running),
+      Seq.empty,
+      30.seconds
+    )
+    harness.advance(30.seconds, createHealthReportOutput(Set(pod0)), 35.seconds)
+    val notReadyOutput: Seq[DriverAction] =
+      if (observeSliceletReadiness) createHealthReportOutput(Set.empty) else Seq.empty
+    harness.event(
+      31.seconds,
+      createSliceletStateFromSliceletEvent(pod0, SliceletState.NotReady),
+      notReadyOutput,
+      61.seconds
+    )
+    harness.event(
+      35.seconds,
+      createSliceletStateFromSliceletEvent(pod0, SliceletState.NotReady),
+      Seq.empty,
+      65.seconds
+    )
+    harness.event(
+      42.seconds,
+      createSliceletStateFromSliceletEvent(pod0, SliceletState.Running),
+      Seq.empty,
+      72.seconds
+    )
+    val runningOutput: Seq[DriverAction] =
+      if (observeSliceletReadiness) createHealthReportOutput(Set(pod0)) else Seq.empty
+    harness.event(
+      45.seconds,
+      createSliceletStateFromSliceletEvent(pod0, SliceletState.Running),
+      runningOutput,
+      75.seconds
+    )
+  }
+
+  test("Running incarnation remains masked while cluster manager reports termination") {
+    // Test plan: Verify that adding a UUID to the cluster-manager mask before its Slicelet reports
+    // Running keeps the incarnation excluded.
+    val harness =
+      new TestHarness(
+        DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
+      )
+    // Advance the watcher to initialize its start time and enter the starting state.
+    harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
+
+    // While the watcher learns about the initial health of pods, the output should be empty and
+    // request us to callback after the initial report delay.
+    harness.event(
+      5.seconds,
+      Event.PodTerminatingFromKubernetes(pod0.resourceUuid),
+      Seq.empty,
+      30.seconds
+    )
+
+    // Advance to the initial report time.
+    harness.advance(30.seconds, createHealthReportOutput(Set.empty), 65.seconds)
+
+    // The Running incarnation is tracked with its own expiry but excluded by the final mask.
+    harness.event(
+      45.seconds,
+      createSliceletStateFromSliceletEvent(pod0, SliceletState.Running),
+      createHealthReportOutput(Set.empty),
+      65.seconds
+    )
+  }
+
+  test("Repeated termination notices do not emit reports or extend expiry") {
+    // Test plan: Verify that repeating a termination notice neither emits a report nor extends
+    // its expiry.
+    val harness =
+      new TestHarness(
+        DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
+      )
+    // Advance the watcher to initialize its start time and enter the starting state.
+    harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
+
+    // While the watcher learns about the initial health of pods, the output should be empty and
+    // request us to callback after the initial report delay.
+    harness.event(
+      5.seconds,
+      Event.PodTerminatingFromKubernetes(pod0.resourceUuid),
+      Seq.empty,
+      30.seconds
+    )
+
+    // pod0 does not show up in health report, since it does not have a SQUID.
+    harness.advance(30.seconds, createHealthReportOutput(Set.empty), 65.seconds)
+
+    // The repeated notice does not make the watcher dirty.
+    harness.event(
+      35.seconds,
+      Event.PodTerminatingFromKubernetes(pod0.resourceUuid),
+      Seq.empty,
+      65.seconds
+    )
+    harness.advance(65.seconds, createHealthReportOutput(Set.empty), Duration.Inf)
+  }
+
+  test("A heartbeat with a new address updates the address of an existing incarnation") {
+    // Test plan: Verify that the health report uses the address from the latest heartbeat when a
+    // heartbeat has the same UUID and creation time as a tracked incarnation but a new address.
+    // pod0 reports Running and appears in the first report. Then the same incarnation reports
+    // Running from a new address, and the next report contains only the new address.
+    val newAddressPod0: Squid = pod0.copy(
+      resourceAddress = ResourceAddress(URI.create("http://pod0-new-address"))
+    )
+    val harness = new TestHarness(
+      DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
+    )
+    harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
+    harness.event(
+      5.seconds,
+      createSliceletStateFromSliceletEvent(pod0, SliceletState.Running),
+      Seq.empty,
+      30.seconds
+    )
+    harness.advance(30.seconds, createHealthReportOutput(Set(pod0)), 35.seconds)
+
+    // The address change alone triggers a report, and the heartbeat refreshes the expiry.
+    harness.event(
+      31.seconds,
+      createSliceletStateFromSliceletEvent(newAddressPod0, SliceletState.Running),
+      createHealthReportOutput(Set(newAddressPod0)),
+      61.seconds
+    )
+
+    // A later heartbeat from the old address of the same incarnation updates the address again.
+    harness.event(
+      32.seconds,
+      createSliceletStateFromSliceletEvent(pod0, SliceletState.Running),
+      createHealthReportOutput(Set(pod0)),
+      62.seconds
+    )
+  }
+
+  gridTest("Slicelet reports replace bootstrapped address aliases")(Seq(false, true)) {
+    bootstrapHasSlash: Boolean =>
+      // Test plan: Verify that a heartbeat replaces an address alias for the same incarnation.
+      // Cover both slash directions, unchanged reports, and rejection of an older incarnation.
+      val alias: Squid = pod0.copy(
+        resourceAddress = ResourceAddress(URI.create(s"${pod0.resourceAddress}/"))
+      )
+      val (bootstrapped, reported): (Squid, Squid) =
+        if (bootstrapHasSlash) (alias, pod0) else (pod0, alias)
+      val harness = new TestHarness(
+        DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
+      )
+      harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
+      harness.event(
+        5.seconds,
+        createAssignmentObserved(
+          GENERATION,
+          AssignmentDistributionSource.Slicelet,
+          Set(bootstrapped)
+        ),
+        createHealthReportOutput(Set(bootstrapped)),
+        30.seconds
+      )
+      harness.event(
+        6.seconds,
+        createSliceletStateFromSliceletEvent(reported, SliceletState.Running),
+        createHealthReportOutput(Set(reported)),
+        36.seconds
+      )
+      harness.event(
+        7.seconds,
+        createSliceletStateFromSliceletEvent(reported, SliceletState.Running),
+        Seq.empty,
+        37.seconds
+      )
+      val older: Squid = bootstrapped.copy(creationTimeMillis = reported.creationTimeMillis - 1)
+      harness.event(
+        8.seconds,
+        createSliceletStateFromSliceletEvent(older, SliceletState.Running),
+        Seq.empty,
+        37.seconds
+      )
+      val newer: Squid = bootstrapped.copy(creationTimeMillis = reported.creationTimeMillis + 1)
+      harness.event(
+        9.seconds,
+        createSliceletStateFromSliceletEvent(newer, SliceletState.Running),
+        createHealthReportOutput(Set(newer)),
+        39.seconds
+      )
+      harness.advance(
+        39.seconds,
+        createHealthReportOutput(Set.empty, newlyCrashedCount = 1),
+        Duration.Inf
+      )
+  }
+
+  gridTest("Address changes preserve incarnation health")(
+    Seq(SliceletState.NotReady, SliceletState.Terminating)
+  ) { sliceletState: SliceletState =>
+    // Test plan: Verify that an address update preserves readiness protection and terminal health.
+    // Check that Running reports refresh readiness expiry but do not extend terminating retention.
+    val alias: Squid = pod0.copy(
+      resourceAddress = ResourceAddress(URI.create(s"${pod0.resourceAddress}/"))
+    )
+    val terminating: Boolean = sliceletState == SliceletState.Terminating
+    val harness = new TestHarness(
+      DefaultFactory.create(target, config, healthWatcherTargetConfig, ownerTeamName = "")
+    )
+    harness.advance(Duration.Zero, Seq.empty, Duration.Inf)
+    harness.event(
+      5.seconds,
+      createAssignmentObserved(GENERATION, AssignmentDistributionSource.Slicelet, Set(pod0)),
+      createHealthReportOutput(Set(pod0)),
+      30.seconds
+    )
+    harness.event(
+      6.seconds,
+      createSliceletStateFromSliceletEvent(pod0, sliceletState),
+      if (terminating || observeSliceletReadiness) createHealthReportOutput(Set.empty)
+      else Seq.empty,
+      if (terminating) 66.seconds else 36.seconds
+    )
+    harness.event(
+      7.seconds,
+      createSliceletStateFromSliceletEvent(alias, SliceletState.Running),
+      createHealthReportOutput(
+        if (terminating || observeSliceletReadiness) Set.empty else Set(alias)
+      ),
+      if (terminating) 66.seconds else 37.seconds
+    )
+    harness.event(
+      15.seconds,
+      createSliceletStateFromSliceletEvent(alias, SliceletState.Running),
+      Seq.empty,
+      if (terminating) 66.seconds else 45.seconds
+    )
+    harness.event(
+      16.seconds,
+      createSliceletStateFromSliceletEvent(alias, SliceletState.Running),
+      if (!terminating && observeSliceletReadiness) createHealthReportOutput(Set(alias))
+      else Seq.empty,
+      if (terminating) 66.seconds else 46.seconds
+    )
+    harness.advance(
+      if (terminating) 66.seconds else 46.seconds,
+      createHealthReportOutput(Set.empty, newlyCrashedCount = if (terminating) 0 else 1),
+      Duration.Inf
+    )
+  }
+
 }
 
 private class HealthWatcherWithStatusMaskingSuite

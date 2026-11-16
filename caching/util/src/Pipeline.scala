@@ -249,7 +249,10 @@ object Pipeline {
           if (errorOpt.isEmpty) {
             impl.value match {
               case Success(value: T) =>
-                values += value
+                // A deferred input makes the accumulated values unnecessary for SequenceImpl.
+                if (!hasIncompleteInput) {
+                  values += value
+                }
               case Failure(exception: Throwable) =>
                 // We don't short-circuit because we want to ensure that all pipelines run, even
                 // when some pipeline has already failed.

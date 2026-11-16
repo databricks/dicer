@@ -133,7 +133,7 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
     // Test plan: Verify that each cluster or instance config merges defaults with only its own
     // ordinary and advanced overrides. Verify this by reading configs with shared cluster/instance
     // override entries, an instance with both kinds of overrides, and an advanced-only instance.
-    // Check the full config map and that selected-cluster reads still return the expected configs.
+    // Check that each target retains its own owner through ordinary and advanced overrides.
 
     // Define targets for which we have explicit configurations.
     val managerTargetName = TargetName("cons-manager")
@@ -143,7 +143,8 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
     val configWriter = new ConfigWriter
     configWriter.writeConfig(
       s"$managerTargetName.textproto",
-      """default_config {
+      """owner_team_name: "platform-team"
+        |default_config {
         |  primary_rate_metric_config {
         |    # 4500(AWS-MT) * 0.85(threshold) * 1000(millis/seconds)
         |    max_load_hint: 3825000
@@ -179,7 +180,8 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
     )
     configWriter.writeConfig(
       s"$softstoreTargetName.textproto",
-      """default_config {
+      """owner_team_name: "storage-team"
+        |default_config {
         |  primary_rate_metric_config {
         |    max_load_hint: 1610
         |    imbalance_tolerance_hint: TIGHT
@@ -221,33 +223,33 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
     val defaultManagerConfig: InternalTargetConfig = createConfig(
       primaryRateMaxLoadHint = 3825000,
       primaryRateReservationHintOpt = Some(ReservationHintP.MEDIUM_RESERVATION)
-    )
+    ).copy(ownerTeamName = "platform-team")
     val tightConfig: InternalTargetConfig =
       createConfig(
         primaryRateMaxLoadHint = 3825000,
         Some(ImbalanceToleranceHintP.TIGHT),
         Some(ReservationHintP.LARGE_RESERVATION)
-      )
+      ).copy(ownerTeamName = "platform-team")
     val highCapacityConfig: InternalTargetConfig = createConfig(
       4000000,
       primaryRateReservationHintOpt = Some(ReservationHintP.MEDIUM_RESERVATION)
-    )
+    ).copy(ownerTeamName = "platform-team")
     val softstoreConfig: InternalTargetConfig =
       createConfig(
         1610,
         Some(ImbalanceToleranceHintP.TIGHT)
-      )
+      ).copy(ownerTeamName = "storage-team")
     val lessHistoryConfig: InternalTargetConfig =
       createConfig(
         1610,
         Some(ImbalanceToleranceHintP.TIGHT),
         watchMinDurationSecondsOpt = Some(30)
-      )
+      ).copy(ownerTeamName = "storage-team")
     val largerMaxLoadConfig: InternalTargetConfig =
       createConfig(
         2000,
         Some(ImbalanceToleranceHintP.TIGHT)
-      )
+      ).copy(ownerTeamName = "storage-team")
 
     // 1. Verify that the configs map for each scope is correct.
     // Load target maps for all shards with overrides, and one additional shard that has no
@@ -342,7 +344,7 @@ class TargetConfigReaderSuite extends DatabricksTest with TestUtils.TestName {
         2000,
         Some(ImbalanceToleranceHintP.TIGHT),
         watchMinDurationSecondsOpt = Some(30)
-      )
+      ).copy(ownerTeamName = "storage-team")
     )
     assert(softstoreConfigs.overrides(InstanceConfigScope("instance-2")) == lessHistoryConfig)
 

@@ -1,0 +1,35 @@
+load("//bazel/rules/rust:rules_rust.bzl", "rust_library")
+
+rust_library(
+    name = "testing_lib",
+    srcs = [
+        "src/data_helpers.rs",
+        "src/lib.rs",
+        "src/proposed_slice_assignment.rs",
+        "src/test_data.rs",
+        "src/test_slice_utils.rs",
+    ],
+    crate_name = "dicer_rust_testing",
+    data = [
+        "//dicer/common/test/data",
+        "//dicer/friend/external/test/data",
+    ],
+    testonly = True,
+    visibility = ["//dicer:internal"],
+    deps = [
+        "//caching/rust/util/testing:testing_lib",
+        "//caching/rust/util:util_lib",
+        "//dicer/common/test/proto:assignment_control_proto_prost_lib",
+        "//dicer/common/test/proto:test_data_proto_buffa_lib",
+        "//dicer/common/test/proto:test_data_proto_prost_lib",
+        "//dicer/friend/external/test/proto:test_data_proto_buffa_lib",
+        "//dicer/friend/external/test/proto:test_data_proto_prost_lib",
+        "//dicer/rust/common:common_lib",
+        "//dicer/rust/external/types:types_lib",
+        "//dicer/rust/friend/external/slice_key_accessor:slice_key_accessor_lib",
+        "//dicer/rust/friend:friend_lib",
+        "@crates//:rand",
+        "@crates//:tonic",
+        "@crates//:uuid",
+    ],
+)

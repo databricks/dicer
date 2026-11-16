@@ -180,6 +180,55 @@ class ClientRequestSuite extends DatabricksTest {
     }
   }
 
+  test("SliceLoad rejects window timestamps outside the allowed range") {
+    // Test plan: verify that the `SliceLoad` constructor accepts the earliest and latest allowed
+    // window timestamps and rejects timestamps one second outside them. Do this by creating a
+    // SliceLoad whose window covers the whole allowed range, then ones that start one second too
+    // early or end one second too late.
+    val minTimestamp: Instant = Instant.ofEpochSecond(SliceLoad.MIN_WINDOW_EPOCH_SECONDS)
+    val maxTimestamp: Instant = Instant.ofEpochSecond(SliceLoad.MAX_WINDOW_EPOCH_SECONDS)
+    def createSliceLoad(windowLowInclusive: Instant, windowHighExclusive: Instant): SliceLoad = {
+      SliceLoad(
+        primaryRateLoad = 1.0,
+        windowLowInclusive,
+        windowHighExclusive,
+        slice = "a" -- "c",
+        topKeys = Seq.empty,
+        numReplicas = 1
+      )
+    }
+
+    val fullRange: SliceLoad = createSliceLoad(minTimestamp, maxTimestamp)
+    assert(fullRange.windowDuration == SliceLoad.MAX_WINDOW_EPOCH_SECONDS.seconds)
+    assertThrow[IllegalArgumentException]("Window timestamp must be within") {
+      createSliceLoad(minTimestamp.minusSeconds(1), maxTimestamp)
+    }
+    assertThrow[IllegalArgumentException]("Window timestamp must be within") {
+      createSliceLoad(minTimestamp, maxTimestamp.plusSeconds(1))
+    }
+  }
+
+  test("SliceLoad.ageAt") {
+    // Test plan: verify that `ageAt` returns how long before `now` the window ended, returns zero
+    // for a window that ends after `now`, and caps the age at the largest `FiniteDuration` when
+    // `now` is far later than any allowed window timestamp. Do this by calling `ageAt` on one
+    // SliceLoad with each kind of `now`.
+    val windowHighExclusive: Instant = Instant.ofEpochSecond(1000)
+    val sliceLoad = SliceLoad(
+      primaryRateLoad = 1.0,
+      windowLowInclusive = windowHighExclusive.minusSeconds(60),
+      windowHighExclusive,
+      slice = "a" -- "c",
+      topKeys = Seq.empty,
+      numReplicas = 1
+    )
+
+    assert(sliceLoad.ageAt(windowHighExclusive.plusMillis(1500)) == 1500.millis)
+    assert(sliceLoad.ageAt(windowHighExclusive) == Duration.Zero)
+    assert(sliceLoad.ageAt(windowHighExclusive.minusSeconds(5)) == Duration.Zero)
+    assert(sliceLoad.ageAt(Instant.MAX) == Duration.fromNanos(Long.MaxValue))
+  }
+
   test("SliceLoad.slice default value") {
     // Test plan: Verify that when `slice` field is missing in the SliceLoadP proto message,
     // the SliceLoad can still be successfully parsed from it and the value of `slice` will
@@ -345,7 +394,6 @@ class ClientRequestSuite extends DatabricksTest {
       timeout = 10.seconds,
       subscriberData = ClerkData,
       supportsSerializedAssignment = false,
-      redirectTokenOpt = None,
       alternativeTargetOpt = None,
       clusterUriOpt = None,
       regionUriOpt = None
@@ -368,7 +416,6 @@ class ClientRequestSuite extends DatabricksTest {
       timeout = 10.seconds,
       subscriberData = sliceletData,
       supportsSerializedAssignment = false,
-      redirectTokenOpt = None,
       alternativeTargetOpt = None,
       clusterUriOpt = None,
       regionUriOpt = None
@@ -377,17 +424,29 @@ class ClientRequestSuite extends DatabricksTest {
     assert(sliceletRequest.getClientType == ClientType.Slicelet)
   }
 
-  test("ClientRequest drops an unrecognized clusterUriOpt / regionUriOpt to None") {
-    // Test plan: Verify that fromProto drops a cluster_uri/region_uri that is unset, malformed, or
-    // well-formed but absent from IDM to None, parsing successfully rather than rejecting the
-    // request: these fields are advisory sender metadata. Verify this by parsing each dropped-URI
-    // test case and asserting both URI options are empty.
-    val testCases: Seq[ClientRequestP] = CLIENT_REQUEST_TEST_DATA.droppedUriCases
+  test("ClientRequest drops an unrecognized clusterUriOpt to None") {
+    // Test plan: Verify that deserializing drops a cluster_uri that is unset or malformed to None,
+    // parsing successfully rather than rejecting the request. Verify this by parsing each dropped
+    // cluster uri test case and asserting the cluster URI option is empty.
+    val testCases: Seq[ClientRequestP] = CLIENT_REQUEST_TEST_DATA.droppedClusterUriCases
 
     for (requestProto <- testCases) {
       val parsed: ClientRequest =
         ClientRequest.fromProto(TargetUnmarshaller.CLIENT_UNMARSHALLER, requestProto)
       assert(parsed.clusterUriOpt.isEmpty)
+    }
+  }
+
+  test("ClientRequest drops an unrecognized regionUriOpt to None") {
+    // Test plan: Verify that deserializing drops a region_uri that is unset, malformed, or
+    // well-formed but absent from IDM to None, parsing successfully rather than rejecting the
+    // request. Verify this by parsing each dropped region URI test case and asserting the region
+    // URI option is empty.
+    val testCases: Seq[ClientRequestP] = CLIENT_REQUEST_TEST_DATA.droppedRegionUriCases
+
+    for (requestProto <- testCases) {
+      val parsed: ClientRequest =
+        ClientRequest.fromProto(TargetUnmarshaller.CLIENT_UNMARSHALLER, requestProto)
       assert(parsed.regionUriOpt.isEmpty)
     }
   }

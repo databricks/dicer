@@ -4,7 +4,7 @@ import io.prometheus.client.Counter
 
 /**
  * Records the outcome of parsing IDM URIs (see <internal link>) through the validated-URI value
- * classes in this package (e.g. [[KubernetesClusterUri]] and [[RegionUri]]).
+ * classes in this package (e.g. [[RegionUri]]).
  */
 object IdmUriParseMetrics {
 
@@ -35,7 +35,6 @@ object IdmUriParseMetrics {
   sealed abstract class UriType(val label: String)
 
   object UriType {
-    case object KubernetesCluster extends UriType("kubernetesCluster")
     case object Region extends UriType("region")
   }
 }

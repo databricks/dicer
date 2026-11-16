@@ -11,7 +11,9 @@ scala_library(
     deps = [
         "//dicer/assigner/algorithm",
         "//dicer/assigner/config:internal_target_config",
+        "//dicer/assigner:proposed_assignment",
         "//dicer/client:slicez",
+        "//dicer/client:watch_address",
         "//dicer/common/testing:test_common",
         "//dicer/common:assignment_core",
         "//dicer/common:generation",

@@ -627,8 +627,12 @@ message ClientRequestTestDataP {
   repeated ClientRequestP round_tripping_cases = 2;
 
   // Test cases for verifying that ClientRequest.fromProto parses successfully but drops an
-  // unrecognized (malformed, or well-formed but absent from IDM) cluster_uri / region_uri to None.
-  repeated ClientRequestP dropped_uri_cases = 3;
+  // unrecognized (unset or malformed) cluster_uri to None.
+  repeated ClientRequestP dropped_cluster_uri_cases = 3;
+
+  // Test cases for verifying that ClientRequest.fromProto parses successfully but drops an
+  // unrecognized (unset, malformed, or well-formed but absent from IDM) region_uri to None.
+  repeated ClientRequestP dropped_region_uri_cases = 4;
 
   message InvalidClientRequestTestCaseP {
     // Name of the test case, logically required.

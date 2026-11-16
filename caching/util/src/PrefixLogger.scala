@@ -1,6 +1,7 @@
 package com.databricks.caching.util
 
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.LongAdder
 
 import scala.concurrent.duration.{Duration, FiniteDuration}
 
@@ -8,7 +9,13 @@ import com.typesafe.scalalogging.{Logger => TrackingLogger}
 import org.apache.logging.log4j.Level
 import org.apache.logging.log4j.core.appender.ConsoleAppender
 
-import com.databricks.caching.util.PrefixLogger.{FileLine, InternalLogger, LogTime, makeMessage}
+import com.databricks.caching.util.PrefixLogger.{
+  FileLine,
+  InternalLogger,
+  THROTTLED,
+  ThrottleState,
+  makeMessage
+}
 import com.databricks.logging.ConsoleLogging
 import com.databricks.macros.sourcecode.File
 import com.databricks.macros.sourcecode.Line
@@ -25,7 +32,10 @@ import org.apache.logging.log4j.core.layout.PatternLayout
  * Each call also has an `every` parameter that allows the caller to indicate that the logging
  * statement on that file/line must be logged after `every` duration has passed, i.e., it logs it
  * the first time and then only if `every` time has passed since the last time of that line's log
- * was emitted.
+ * was emitted. Throttled messages are annotated with `every`, and with the number of calls on that
+ * file/line that were suppressed since the previous emitted message (when non-zero), e.g.
+ * `[every=30s, skipped=2]`. Every suppressed call is counted exactly once, but a call that races
+ * with an emitted message may be counted in the next emitted message rather than that one.
  *
  * Note that all logs from PrefixLogger currently get attributed to the same line, which may hit the
  * located message limit (see <internal link>). As the method to locate log lines
@@ -39,9 +49,10 @@ class PrefixLogger private (className: String, prefix: String, clock: TypedClock
 
   /**
    * Hash table to track information for `every`, i.e., the last time an `every` call was printed
-   * for a particular logging statement for a given file and line.
+   * for a particular logging statement for a given file and line, and how many calls have been
+   * suppressed since.
    */
-  private lazy val lastLog = new ConcurrentHashMap[FileLine, LogTime]
+  private lazy val throttleStates = new ConcurrentHashMap[FileLine, ThrottleState]
 
   /** Logs the `message` at the error level. See class specs for specs on `every`. */
   @SuppressWarnings(
@@ -50,8 +61,9 @@ class PrefixLogger private (className: String, prefix: String, clock: TypedClock
   @inline final def error(message: => Any, every: FiniteDuration = Duration.Zero)(
       implicit file: File,
       line: Line): Unit = {
-    if (isLoggable(file, line, every)) {
-      logger.log.error(makeMessage(file, line, message, every))
+    val numSkipped: Long = checkThrottle(file, line, every)
+    if (numSkipped != THROTTLED) {
+      logger.log.error(makeMessage(file, line, message, every, numSkipped))
     }
   }
 
@@ -65,8 +77,9 @@ class PrefixLogger private (className: String, prefix: String, clock: TypedClock
   @inline final def error(message: => Any, throwable: Throwable, every: FiniteDuration)(
       implicit file: File,
       line: Line): Unit = {
-    if (isLoggable(file, line, every)) {
-      logger.log.error(makeMessage(file, line, message, every), throwable)
+    val numSkipped: Long = checkThrottle(file, line, every)
+    if (numSkipped != THROTTLED) {
+      logger.log.error(makeMessage(file, line, message, every, numSkipped), throwable)
     }
   }
 
@@ -86,8 +99,9 @@ class PrefixLogger private (className: String, prefix: String, clock: TypedClock
   @inline final def warn(message: => Any, every: FiniteDuration = Duration.Zero)(
       implicit file: File,
       line: Line): Unit = {
-    if (isLoggable(file, line, every)) {
-      logger.log.warn(makeMessage(file, line, message, every))
+    val numSkipped: Long = checkThrottle(file, line, every)
+    if (numSkipped != THROTTLED) {
+      logger.log.warn(makeMessage(file, line, message, every, numSkipped))
     }
   }
 
@@ -98,8 +112,9 @@ class PrefixLogger private (className: String, prefix: String, clock: TypedClock
   @inline final def info(message: => Any, every: FiniteDuration = Duration.Zero)(
       implicit file: File,
       line: Line): Unit = {
-    if (isLoggable(file, line, every)) {
-      logger.log.info(makeMessage(file, line, message, every))
+    val numSkipped: Long = checkThrottle(file, line, every)
+    if (numSkipped != THROTTLED) {
+      logger.log.info(makeMessage(file, line, message, every, numSkipped))
     }
   }
 
@@ -110,8 +125,9 @@ class PrefixLogger private (className: String, prefix: String, clock: TypedClock
   @inline final def debug(message: => Any, every: FiniteDuration = Duration.Zero)(
       implicit file: File,
       line: Line): Unit = {
-    if (isLoggable(file, line, every)) {
-      logger.log.debug(makeMessage(file, line, message, every))
+    val numSkipped: Long = checkThrottle(file, line, every)
+    if (numSkipped != THROTTLED) {
+      logger.log.debug(makeMessage(file, line, message, every, numSkipped))
     }
   }
 
@@ -122,8 +138,9 @@ class PrefixLogger private (className: String, prefix: String, clock: TypedClock
   @inline final def trace(message: => Any, every: FiniteDuration = Duration.Zero)(
       implicit file: File,
       line: Line): Unit = {
-    if (isLoggable(file, line, every)) {
-      logger.log.trace(makeMessage(file, line, message, every))
+    val numSkipped: Long = checkThrottle(file, line, every)
+    if (numSkipped != THROTTLED) {
+      logger.log.trace(makeMessage(file, line, message, every, numSkipped))
     }
   }
 
@@ -181,42 +198,78 @@ class PrefixLogger private (className: String, prefix: String, clock: TypedClock
   }
 
   /**
-   * Returns whether the logging statement in `file` and `line` has had sufficient time passed since
-   * the last call on that location (based on `every`). If `every` is 0, returns true.
+   * Decides whether the logging statement in `file` and `line` should be emitted based on `every`.
+   * Returns [[THROTTLED]] if fewer than `every` has elapsed since the statement was last emitted.
+   * Otherwise returns the (non-negative) number of calls on that location that were throttled since
+   * it was last emitted. If `every` is 0, always returns 0.
    */
-  private final def isLoggable(file: File, line: Line, every: Duration): Boolean = {
-    if (every == Duration.Zero) return true
+  private final def checkThrottle(file: File, line: Line, every: Duration): Long = {
+    if (every == Duration.Zero) return 0L
 
     val now: TickerTime = clock.tickerTime()
     val fileLine = FileLine(file, line)
-    // Returns whether the statement should be printed based on the `lastCallTime` and given
-    // `every` duration. `lastCallTime` is a value retrieved from a `ConcurrentHashMap`, so it can
-    // be `null` when there is no existing entry in the map.
-    def isDue(lastCallTime: LogTime): Boolean = {
-      // Print if it is the first time or last log time was too old.
-      lastCallTime == null || now - lastCallTime.time >= every
+    // Returns whether the statement should be printed based on `state` and the given `every`
+    // duration. `state` is a value retrieved from a `ConcurrentHashMap`, so it can be `null` when
+    // there is no existing entry in the map.
+    def isDue(state: ThrottleState): Boolean = {
+      // Log initial entries and whenever the last log was sufficiently far in the past.
+      state == null || now - state.lastLogTime >= every
     }
 
-    // A throttled statement sits on a hot path, so it reaches here at that path's rate and almost
-    // always decides not to print. `compute` makes each of those calls allocate and invoke a
-    // remapping closure and lock the bin to rewrite an unchanged timestamp; `get` does none of it.
-    if (!isDue(lastLog.get(fileLine))) {
-      return false
+    // A throttled statement usually sits on a hot path, and most calls to it are dropped, so
+    // dropped calls need to be cheap. For performance, they avoid taking locks and avoid writing to
+    // memory locations shared across threads: they read the state with `get` rather than
+    // `compute`, and count themselves in a `LongAdder` rather than the more obvious choice of an
+    // `AtomicLong`. Only calls that may be due fall through to `compute`, which makes the final
+    // decision under a lock. Here are the details:
+    //  - Locking: `compute` locks the map entry, and other threads updating it "may be blocked
+    //    while computation is in progress" [1]. When many threads hit one statement they queue
+    //    behind each other; calling `compute` for every call measured 13-18x slower than `get` at
+    //    4-8 threads.
+    //  - Shared writes: an `AtomicLong` count needs no lock, but every dropped call writes the same
+    //    memory location. Each write makes the other CPU cores drop their cached copy of it, and of
+    //    anything sharing its cache line, such as this state ("false sharing" [2]). That measured
+    //    3-4x slower than a `LongAdder`, which gives contending threads separate counters, each
+    //    padded onto its own cache line [3][4]. The cost is roughly one cache line (128 bytes) per
+    //    CPU core, and only for statements that actually see contention.
+    // Measurements: `PrefixLoggerBenchmark` (`//caching/util:prefix_logger_benchmark`).
+    //
+    // [1] https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/ConcurrentHashMap.html#compute(K,java.util.function.BiFunction)
+    // [2] https://openjdk.org/jeps/142
+    // [3] https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/atomic/LongAdder.html
+    // [4] https://github.com/openjdk/jdk21u/blob/master/src/java.base/share/classes/java/util/concurrent/atomic/Striped64.java
+    val currentState: ThrottleState = throttleStates.get(fileLine)
+    if (!isDue(currentState)) {
+      currentState.totalSkipped.increment()
+      return THROTTLED
     }
 
-    var toPrint = false
-    lastLog.compute(
+    var numSkipped: Long = THROTTLED
+    throttleStates.compute(
       fileLine,
-      (_, lastCallTime: LogTime) => {
-        if (isDue(lastCallTime)) {
-          toPrint = true
-          LogTime(now)
+      (_, state: ThrottleState) => {
+        if (isDue(state)) {
+          if (state == null) {
+            numSkipped = 0L
+            new ThrottleState(now, new LongAdder, totalSkippedAtLastLog = 0L)
+          } else {
+            // Report the skips since the last emitted message as the difference between two
+            // running totals. Emitting calls take turns (inside `compute`), so each total is at
+            // least the previous one, and the differences add up to every skip exactly once. A
+            // skip that lands while `sum` is adding up is counted by the next emitted message [3].
+            // `sumThenReset` would be simpler, but a skip that lands while it runs can be lost [3].
+            val totalSkipped: Long = state.totalSkipped.sum()
+            numSkipped = totalSkipped - state.totalSkippedAtLastLog
+            new ThrottleState(now, state.totalSkipped, totalSkippedAtLastLog = totalSkipped)
+          }
         } else {
-          lastCallTime
+          // Another call emitted this statement between our `get` and `compute`.
+          state.totalSkipped.increment()
+          state
         }
       }
     )
-    toPrint
+    numSkipped
   }
 }
 
@@ -231,11 +284,20 @@ object PrefixLogger {
   /** A class to track a file name and line number of a logging statement.  */
   private case class FileLine(file: File, line: Line)
 
+  /** Sentinel returned by `checkThrottle` when a logging statement must not be emitted. */
+  private final val THROTTLED = -1L
+
   /**
-   * A class to track time - used for the `every` call that uses ConcurrentHashMap's compute. That
-   * method requires the value to be a class and not a primitive or AnyVal value.
+   * Per file/line throttling state for `every` calls: when the statement was last emitted
+   * (`lastLogTime`), the number of calls throttled over the lifetime of the file/line's entry
+   * (`totalSkipped`, shared by all of its states so that increments made against a superseded state
+   * are still reported), and the value of that total reported by the last emitted message
+   * (`totalSkippedAtLastLog`).
    */
-  private case class LogTime(time: TickerTime)
+  private final class ThrottleState(
+      val lastLogTime: TickerTime,
+      val totalSkipped: LongAdder,
+      val totalSkippedAtLastLog: Long)
 
   /**
    * An internal logger class that utilizes [[ConsoleLogging]] but does not expose it to the
@@ -342,19 +404,27 @@ object PrefixLogger {
   }
 
   /**
-   * Given `line`, `path` and `every` for prefixing with `message`, returns the prefixed message.
+   * Given `line`, `path`, `every` and `numSkipped` (the number of calls throttled since this
+   * statement was last emitted) for prefixing with `message`, returns the prefixed message.
    */
   private def makeMessage(
       file: File,
       line: Line,
       message: => Any,
-      every: FiniteDuration): String = {
+      every: FiniteDuration,
+      numSkipped: Long): String = {
     // `split` would allocate an array on every log call just to take its last element. The path
     // comes from a compile-time macro and always ends in a file name, so scanning backward to the
     // last separator avoids the array allocation.
     val filename: String = file.value.substring(file.value.lastIndexOf('/') + 1)
     val everyStr: String =
-      if (every == Duration.Zero) "" else s" [every=${durationToCompactString(every)}]"
+      if (every == Duration.Zero) {
+        ""
+      } else if (numSkipped == 0) {
+        s" [every=${durationToCompactString(every)}]"
+      } else {
+        s" [every=${durationToCompactString(every)}, skipped=$numSkipped]"
+      }
     s"[$filename:${line.value}]$everyStr $message"
   }
 

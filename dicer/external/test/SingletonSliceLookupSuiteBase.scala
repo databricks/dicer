@@ -51,14 +51,18 @@ abstract class SingletonSliceLookupSuiteBase extends DatabricksTest with TestNam
   }
 
   /**
-   * Creates a Clerk for the given target with SliceLookup sharing enabled.
+   * Creates a Clerk for the given target with the specified Clerk Caching rollout setting.
    *
    * Note: Each new Clerk created has a new stub factory instance.
    *
-   * @param target       The target to watch.
-   * @param sliceletPort The Slicelet port the Clerk watches.
+   * @param target              The target to watch.
+   * @param sliceletPort        The Slicelet port the Clerk watches.
+   * @param clerkCachingEnabled Whether the test evaluator enables Clerk Caching.
    */
-  protected def createSharingClerk(target: Target, sliceletPort: Int): ClerkHarness
+  protected def createClerk(
+      target: Target,
+      sliceletPort: Int,
+      clerkCachingEnabled: Boolean): ClerkHarness
 
   /**
    * Reads and returns the value of the Prometheus metric with the given name and labels. Returns
@@ -103,32 +107,29 @@ abstract class SingletonSliceLookupSuiteBase extends DatabricksTest with TestNam
       )
     }
 
-  test("Clerk creation reuses SliceLookup for same Target and same SliceLookupConfig") {
-    // Test plan: Verify that creating multiple Clerks with the same (Target, SliceLookupConfig)
-    // reuses the same SliceLookup instance, even when different stub factory instances are used.
-    // Create N Clerks with the same config and check that the SliceLookup count increments once
-    // and cache hits are recorded for the remaining N-1.
-
+  gridTest("Clerk creation honors caching rollout for same Target and same SliceLookupConfig")(
+    Seq(false, true)
+  ) { clerkCachingEnabled: Boolean =>
+    // Test plan: Create ten Clerks with identical lookup configs and different stub factories.
+    // With caching enabled, verify one SliceLookup and nine cache hits. With caching disabled,
+    // verify ten SliceLookups and no cache hits.
     val target: Target = Target(getUniqueTargetName)
-
     val cacheHitTracker: ChangeTracker[Double] =
       createCacheResultTracker(target, configMatched = true)
     val sliceLookupTracker: ChangeTracker[Double] = createSliceLookupCountTracker(target)
 
-    // Create a number of Clerks with the same (Target, SliceLookupConfig) but different stub
-    // factory instances. This verifies that lookup caching works correctly even when stub
-    // factories differ (which is common in production, where anonymous functions are used).
     val numClerks: Int = 10
-    for (_: Int <- 0 until numClerks) {
-      createSharingClerk(target, DUMMY_SLICELET_PORT_A)
+    val clerks: Seq[ClerkHarness] = (0 until numClerks).map { _: Int =>
+      createClerk(target, DUMMY_SLICELET_PORT_A, clerkCachingEnabled = clerkCachingEnabled)
     }
-
-    // Verify: there is only one SliceLookup created for the (Target, SliceLookupConfig).
-    assert(sliceLookupTracker.totalChange() == 1)
-
-    // Verify: cache hit metric should be incremented (numClerks - 1) times, because the first
-    // Clerk creation doesn't count as a cache hit.
-    assert(cacheHitTracker.totalChange() == numClerks - 1)
+    try {
+      assert(sliceLookupTracker.totalChange() == (if (clerkCachingEnabled) 1 else numClerks))
+      assert(cacheHitTracker.totalChange() == (if (clerkCachingEnabled) numClerks - 1 else 0))
+    } finally {
+      clerks.foreach { clerk: ClerkHarness =>
+        clerk.stop()
+      }
+    }
   }
 
   test(
@@ -148,25 +149,25 @@ abstract class SingletonSliceLookupSuiteBase extends DatabricksTest with TestNam
     val sliceLookupTracker: ChangeTracker[Double] = createSliceLookupCountTracker(target)
 
     // Create first Clerk with config A - no cache hit, no config mismatch, new lookup.
-    createSharingClerk(target, DUMMY_SLICELET_PORT_A)
+    createClerk(target, DUMMY_SLICELET_PORT_A, clerkCachingEnabled = true)
     assert(cacheHitTracker.totalChange() == 0)
     assert(configMismatchTracker.totalChange() == 0)
     assert(sliceLookupTracker.totalChange() == 1)
 
     // Create second Clerk with config A - cache hit, no config mismatch, no new lookup.
-    createSharingClerk(target, DUMMY_SLICELET_PORT_A)
+    createClerk(target, DUMMY_SLICELET_PORT_A, clerkCachingEnabled = true)
     assert(cacheHitTracker.totalChange() == 1)
     assert(configMismatchTracker.totalChange() == 0)
     assert(sliceLookupTracker.totalChange() == 1)
 
     // Create third Clerk with config B - no cache hit, config mismatch, new lookup.
-    createSharingClerk(target, DUMMY_SLICELET_PORT_B)
+    createClerk(target, DUMMY_SLICELET_PORT_B, clerkCachingEnabled = true)
     assert(cacheHitTracker.totalChange() == 1)
     assert(configMismatchTracker.totalChange() == 1)
     assert(sliceLookupTracker.totalChange() == 2)
 
     // Create fourth Clerk with config B - cache hit, no config mismatch, no new lookup.
-    createSharingClerk(target, DUMMY_SLICELET_PORT_B)
+    createClerk(target, DUMMY_SLICELET_PORT_B, clerkCachingEnabled = true)
     assert(cacheHitTracker.totalChange() == 2)
     assert(configMismatchTracker.totalChange() == 1)
     assert(sliceLookupTracker.totalChange() == 2)
@@ -195,7 +196,7 @@ abstract class SingletonSliceLookupSuiteBase extends DatabricksTest with TestNam
     // Create multiple Clerks with the same config (caching enabled), all watching the Slicelet.
     val numClerks: Int = 3
     val clerks: Seq[ClerkHarness] = (0 until numClerks).map { (_: Int) =>
-      createSharingClerk(target, slicelet.impl.forTest.sliceletPort)
+      createClerk(target, slicelet.impl.forTest.sliceletPort, clerkCachingEnabled = true)
     }
 
     // Verify: Only one SliceLookup was created for all Clerks.

@@ -5,7 +5,6 @@ import com.google.common.primitives.{Ints, Longs, UnsignedLongs}
 import com.google.protobuf.ByteString
 import com.databricks.caching.util.Bytes
 
-// LINT.IfChange
 /**
  * A Slice key is a representation of an immutable sequence of bytes. Dicer assigns ranges of Slice
  * keys, known as Slices, to resources, like pods. They are derived from the application keys routed
@@ -200,10 +199,7 @@ object SliceKey {
     new SliceKey(bytes)
   }
 }
-// LINT.ThenChange(dicer/external/javaapi/src/SliceKey.java)
-// LINT.ThenChange(dicer/rust/external/types/src/slice_key.rs)
 
-// LINT.IfChange
 /**
  * Trait implemented by [[Slice.highExclusive]] instances, which may be either finite [[SliceKey]]
  * values or the sentinel [[InfinitySliceKey]] object.
@@ -228,10 +224,7 @@ sealed trait HighSliceKey extends Ordered[HighSliceKey] {
    */
   private[dicer] def toDetailedDebugString: String
 }
-// LINT.ThenChange(dicer/external/javaapi/src/HighSliceKey.java)
-// LINT.ThenChange(dicer/rust/external/types/src/slice_key.rs)
 
-// LINT.IfChange
 /** Sentinel value that sorts after all [[SliceKey]] values, used for [[Slice.atLeast]]. */
 object InfinitySliceKey extends HighSliceKey {
   override def compare(that: HighSliceKey): Int = that match {
@@ -249,5 +242,3 @@ object InfinitySliceKey extends HighSliceKey {
 
   // No need to override hashCode or equals, as reference equality is desirable for a singleton.
 }
-// LINT.ThenChange(dicer/external/javaapi/src/InfinitySliceKey.java)
-// LINT.ThenChange(dicer/rust/external/types/src/slice_key.rs)

@@ -48,16 +48,3 @@ rust_prost_library(
     crate_name = "dicer_assigner_config_proto_internal_target_config_proto",
     proto = ":internal_target_config_proto",
 )
-
-proto_library(
-    name = "target_migration_config_proto",
-    srcs = ["target_migration_config.proto"],
-    visibility = ["//dicer:internal"],
-    deps = ["//wrappers/rpc:scalapb_proto"],
-)
-
-scala_proto_library(
-    name = "target_migration_config_scala_lib",
-    visibility = ["//dicer:internal"],
-    deps = [":target_migration_config_proto"],
-)

@@ -62,6 +62,7 @@ import com.databricks.dicer.assigner.config.InternalTargetConfig.{
  * @param useAlternativeTarget   When true, the Assigner treats this target as canonicalized to its
  *                               AppTarget identity, using the AppTarget carried in a watch
  *                               request's `alternative_target` field in place of `target`.
+ * @param ownerTeamName          Owning team from the target config.
  */
 case class InternalTargetConfig(
     loadWatcherConfig: LoadWatcherTargetConfig,
@@ -72,7 +73,8 @@ case class InternalTargetConfig(
     targetRateLimitConfig: TargetWatchRequestRateLimitConfig,
     authorizer: Authorizer,
     keySensitivityConfig: KeySensitivityConfig,
-    useAlternativeTarget: Boolean) {
+    useAlternativeTarget: Boolean,
+    ownerTeamName: String) {
 
   override def toString: String = {
     // Format non-default configuration parameters.
@@ -100,6 +102,9 @@ case class InternalTargetConfig(
     if (useAlternativeTarget) {
       builder.append(s", useAlternativeTarget=$useAlternativeTarget")
     }
+    if (ownerTeamName.nonEmpty) {
+      builder.append(s", ownerTeamName=$ownerTeamName")
+    }
     builder.append(")").toString()
   }
 }
@@ -120,10 +125,12 @@ object InternalTargetConfig {
    *                      advanced configuration is present for a target, the caller should supply
    *                      the default proto, which is semantically equivalent: by design, all fields
    *                      of the advanced configuration are optional.
+   * @param ownerTeamName Owning team from the enclosing target config.
    */
   def fromProtos(
       proto: TargetConfigFieldsP,
-      advancedProto: AdvancedTargetConfigFieldsP): InternalTargetConfig = {
+      advancedProto: AdvancedTargetConfigFieldsP,
+      ownerTeamName: String): InternalTargetConfig = {
     val loadWatcherConfig = LoadWatcherTargetConfig.fromProto(advancedProto.getLoadWatcherConfig)
     val primaryRateMetric = LoadBalancingMetricConfig.fromProto(proto.getPrimaryRateMetricConfig)
     // KeyReplicationConfig is an optional field in TargetConfigFields, and also used to be a
@@ -201,7 +208,8 @@ object InternalTargetConfig {
       targetRateLimitConfig,
       authorizer,
       keySensitivityConfig,
-      useAlternativeTarget
+      useAlternativeTarget,
+      ownerTeamName
     )
   }
 
@@ -287,19 +295,25 @@ object InternalTargetConfig {
    *                                     threshold, either from the max load hint or from the
    *                                     default average per-resource load plus imbalance
    *                                     tolerance. See [[ReplicationThresholdOverride]].
+   * @param primaryGaugeMetricOpt Configuration for the primary gauge (size) metric. When empty,
+   *                              Dicer does not limit size.
    */
   case class LoadBalancingConfig(
       loadBalancingInterval: FiniteDuration,
       churnConfig: ChurnConfig,
       primaryRateMetric: LoadBalancingMetricConfig,
       replicationThresholdOverride: ReplicationThresholdOverride =
-        ReplicationThresholdOverride.Default) {
+        ReplicationThresholdOverride.Default,
+      primaryGaugeMetricOpt: Option[SizeLimitMetricConfig] = None) {
     require(loadBalancingInterval > Duration.Zero, "LB interval must be positive")
 
     override def toString: String = {
       // Format non-default configuration parameters.
       val builder = mutable.StringBuilder.newBuilder
       builder.append(s"LoadBalancingConfig(primaryRate=$primaryRateMetric")
+      for (primaryGaugeMetric: SizeLimitMetricConfig <- primaryGaugeMetricOpt) {
+        builder.append(s", primaryGauge=$primaryGaugeMetric")
+      }
       if (loadBalancingInterval != LoadBalancingConfig.DEFAULT_LOAD_BALANCING_INTERVAL) {
         builder.append(s", LoadBalancingInterval=$loadBalancingInterval")
       }
@@ -397,6 +411,7 @@ object InternalTargetConfig {
      */
     def absoluteImbalanceTolerance: Double = maxLoadHint * imbalanceToleranceRatio
   }
+
   object LoadBalancingMetricConfig {
 
     /** Validates and parses `proto`. */
@@ -407,6 +422,24 @@ object InternalTargetConfig {
         uniformLoadReservationHint = proto.getUniformLoadReservationHint
       )
     }
+  }
+
+  /**
+   * Size-limit configuration for a gauge metric. Size, unlike load, is limited rather than
+   * balanced, and every replica of a Slice is assumed to bear the full size of the Slice. See
+   *<internal link>.
+   *
+   * @param sizeLimitHint The desired maximum total size per resource. A hint because it cannot be
+   *                      honored when a single key exceeds it, or when the total size across all
+   *                      Slice replicas (the total assignment size) exceeds the hint times the
+   *                      number of resources.
+   * @throws IllegalArgumentException If `sizeLimitHint` is not a positive, finite number.
+   */
+  case class SizeLimitMetricConfig @throws[IllegalArgumentException]()(sizeLimitHint: Double) {
+    require(
+      sizeLimitHint.signum > 0 && !sizeLimitHint.isNaN && !sizeLimitHint.isInfinite,
+      "size limit hint must be a positive, finite number"
+    )
   }
 
   /**
@@ -553,19 +586,20 @@ object InternalTargetConfig {
    *
    * REQUIRES: if `permitRunningToNotReady` is true, `observeSliceletReadiness` must also be true.
    *
-   * @param observeSliceletReadiness whether the Assigner should use a Slicelet's reported readiness
-   *                                 state to decide its status on startup, or whether the Assigner
-   *                                 should mask that state to Running from the NotReady state.
-   * @param permitRunningToNotReady  whether to allow transitions from Running to NotReady. When
-   *                                 true, Slicelets reporting NOT_READY will immediately transition
-   *                                 to NotReady. When false, NOT_READY reports from Slicelets
-   *                                 labeled Running by the Assigner are ignored. This setting only
-   *                                 applies when observeSliceletReadiness is true.
+   * @param observeSliceletReadinessOpt whether the Assigner should use a Slicelet's reported
+   *                                   readiness state to decide its status on startup, or mask
+   *                                   that state to Running from the NotReady state. When unset,
+   *                                   uses the default readiness behavior.
+   * @param permitRunningToNotReady    whether to allow transitions from Running to NotReady. When
+   *                                   true, Slicelets reporting NOT_READY immediately transition
+   *                                   to NotReady. When false, NOT_READY reports from Slicelets
+   *                                   labeled Running by the Assigner are ignored. This setting
+   *                                   only applies when observeSliceletReadiness is true.
    * @throws[IllegalArgumentException] if permitRunningToNotReady is true but
    *                                   observeSliceletReadiness is false.
    */
   case class HealthWatcherTargetConfig(
-      observeSliceletReadiness: Boolean,
+      observeSliceletReadinessOpt: Option[Boolean],
       permitRunningToNotReady: Boolean
   ) {
     // The HealthWatcher only computes the NotReady status for Slicelets when it is faithfully
@@ -577,21 +611,15 @@ object InternalTargetConfig {
       "permitRunningToNotReady can only be true if observeSliceletReadiness is also true"
     )
 
+    /** Whether to use reported readiness, falling back to the default when unset. */
+    def observeSliceletReadiness: Boolean = observeSliceletReadinessOpt.getOrElse(false)
+
     override def toString: String =
       "HealthWatcherConfig(" +
       s"observeSliceletReadiness=$observeSliceletReadiness, " +
       s"permitRunningToNotReady=$permitRunningToNotReady)"
 
     def toProto: HealthWatcherConfigP = {
-      // Only set the field in the proto if it differs from the default. This is to avoid updating
-      // the dynamic config for customers who don't specify this field.
-      val observeSliceletReadinessOpt: Option[Boolean] =
-        if (observeSliceletReadiness !=
-          HealthWatcherTargetConfig.DEFAULT.observeSliceletReadiness) {
-          Some(observeSliceletReadiness)
-        } else {
-          None
-        }
       val permitRunningToNotReadyOpt: Option[Boolean] =
         if (permitRunningToNotReady !=
           HealthWatcherTargetConfig.DEFAULT.permitRunningToNotReady) {
@@ -605,24 +633,21 @@ object InternalTargetConfig {
 
   object HealthWatcherTargetConfig {
     val DEFAULT: HealthWatcherTargetConfig = HealthWatcherTargetConfig(
-      observeSliceletReadiness = false,
+      observeSliceletReadinessOpt = None,
       permitRunningToNotReady = false
     )
 
     def fromProto(proto: HealthWatcherConfigP): HealthWatcherTargetConfig = {
-      val observeSliceletReadiness: Boolean =
-        proto.observeSliceletReadiness match {
-          case Some(observeSliceletReadiness: Boolean) =>
-            observeSliceletReadiness
-          case None => DEFAULT.observeSliceletReadiness
-        }
       val permitRunningToNotReady: Boolean =
         proto.permitRunningToNotReady match {
           case Some(permitRunningToNotReady: Boolean) =>
             permitRunningToNotReady
           case None => DEFAULT.permitRunningToNotReady
         }
-      HealthWatcherTargetConfig(observeSliceletReadiness, permitRunningToNotReady)
+      HealthWatcherTargetConfig(
+        observeSliceletReadinessOpt = proto.observeSliceletReadiness,
+        permitRunningToNotReady = permitRunningToNotReady
+      )
     }
   }
 
@@ -751,7 +776,8 @@ object InternalTargetConfig {
     TargetWatchRequestRateLimitConfig.DEFAULT,
     AuthorizerHelper.DEFAULT_AUTHORIZER,
     KeySensitivityConfig.DEFAULT,
-    useAlternativeTarget = false
+    useAlternativeTarget = false,
+    ownerTeamName = ""
   )
 
   object forTest {
@@ -774,7 +800,8 @@ object InternalTargetConfig {
       TargetWatchRequestRateLimitConfig.DEFAULT,
       AuthorizerHelper.DEFAULT_AUTHORIZER,
       KeySensitivityConfig.DEFAULT,
-      useAlternativeTarget = false
+      useAlternativeTarget = false,
+      ownerTeamName = ""
     )
   }
 }
@@ -837,7 +864,8 @@ case class NamedInternalTargetConfig(
       target = Some(targetName.value),
       targetConfig = Some(targetConfigProto),
       advancedConfig = Some(advancedConfigProto),
-      overrides = overrideProtos
+      overrides = overrideProtos,
+      ownerTeamName = Some(config.ownerTeamName).filter(_.nonEmpty)
     )
   }
 
@@ -959,11 +987,15 @@ object NamedInternalTargetConfig {
     }
     val targetName: TargetName = TargetName(proto.getTarget)
     val config: InternalTargetConfig =
-      fromProtos(proto.getTargetConfig, proto.getAdvancedConfig)
+      fromProtos(proto.getTargetConfig, proto.getAdvancedConfig, proto.getOwnerTeamName)
     val overrides: Map[ConfigScope, InternalTargetConfig] =
       proto.overrides.map { overrideProto: InternalDicerOverrideP =>
         ConfigScope.fromProto(overrideProto.getOverrideScope) ->
-        fromProtos(overrideProto.getTargetConfig, overrideProto.getAdvancedConfig)
+        fromProtos(
+          overrideProto.getTargetConfig,
+          overrideProto.getAdvancedConfig,
+          proto.getOwnerTeamName
+        )
       }.toMap
     if (overrides.size != proto.overrides.size) {
       throw new IllegalArgumentException(

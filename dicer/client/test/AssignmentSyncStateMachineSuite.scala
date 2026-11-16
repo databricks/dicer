@@ -8,7 +8,6 @@ import scala.collection.mutable.ArrayBuffer
 import scala.concurrent.Await
 import scala.concurrent.duration._
 
-import com.google.protobuf.ByteString
 import io.grpc.Status
 import javax.annotation.concurrent.{GuardedBy, ThreadSafe}
 import io.prometheus.client.CollectorRegistry
@@ -26,6 +25,7 @@ import com.databricks.caching.util.{
   TickerTime
 }
 import com.databricks.caching.util.TestUtils.{TestName, shamefullyAwait200msForNonEventInAsyncTest}
+import com.databricks.dicer.assigner.ProposedAssignment
 import com.databricks.dicer.client.AssignmentSyncStateMachine.{DriverAction, Event}
 import com.databricks.dicer.common.{
   Assignment,
@@ -34,7 +34,6 @@ import com.databricks.dicer.common.{
   ClientResponse,
   ClientType,
   Generation,
-  ProposedAssignment,
   Redirect,
   SyncAssignmentState
 }
@@ -76,10 +75,7 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     /** The driver for an [[AssignmentSyncStateMachine]]. */
     private val driver: AssignmentSyncStateMachineDriver = new AssignmentSyncStateMachineDriver(
       sec,
-      new AssignmentSyncStateMachine(
-        createInternalClientConfig(config),
-        new Random
-      ),
+      createStateMachine(config),
       recordAction,
       AlertOwnerTeam.CACHING_TEAM_NAME
     )
@@ -191,10 +187,25 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     InternalClientConfig(
       sliceLookupConfig,
       subscriberDebugName = "test-clerk",
-      watchAddress = URI.create("fake-address"),
+      watchAddress = WatchAddress.fromAddress("fake-address"),
       tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
       watchFromDataPlane = false,
       sourceIpOpt = None
+    )
+  }
+
+  /**
+   * Creates an [[AssignmentSyncStateMachine]] for `sliceLookupConfig`, watching through the default
+   * address of the config [[createInternalClientConfig]] wraps it in.
+   */
+  private def createStateMachine(
+      sliceLookupConfig: SliceLookupConfig): AssignmentSyncStateMachine = {
+    val config: InternalClientConfig = createInternalClientConfig(sliceLookupConfig)
+    new AssignmentSyncStateMachine(
+      config.sliceLookupConfig,
+      config.subscriberDebugName,
+      config.watchStubManagerConfig.watchAddress,
+      new Random
     )
   }
 
@@ -322,12 +333,10 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
         }
       }
 
-    // Inject a response with a redirect carrying an opaque token. We will test that the token is
-    // echoed back on the next request to the redirected address, and that after the request times
-    // out the fallback request goes to the default address with the token cleared.
+    // Inject a response with a redirect. We will test later that after the request times out, we
+    // send the next request to the default address.
     val uri = URI.create("fake-redirect")
-    val redirectToken: ByteString = ByteString.copyFrom(Array[Byte](1, 2, 3, 4))
-    val redirect = Redirect(Some(uri), redirectTokenOpt = Some(redirectToken))
+    val redirect = Redirect(Some(uri))
     val response = ClientResponse(
       SyncAssignmentState.KnownGeneration(Generation.EMPTY),
       config.watchRpcTimeout,
@@ -378,7 +387,7 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
           case otherAction => fail(s"Expected SendRequest action, but got $otherAction")
         }
       }
-    // The fallback request should go to the default address with the redirect token cleared.
+    // The fallback request should go to the default address.
     assert(fallbackRequest.redirect == Redirect.EMPTY)
 
     // Now, try to send a successful response to an old request. A successful response with
@@ -389,8 +398,7 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     //
     // We use a distinct `staleRedirect` here so that the final assertion below can confirm the
     // next request carries the redirect from the latest response, not this stale one.
-    val staleRedirect: Redirect =
-      Redirect(Some(uri), redirectTokenOpt = Some(ByteString.copyFrom(Array[Byte](5, 6, 7, 8))))
+    val staleRedirect: Redirect = Redirect(Some(URI.create("stale-redirect")))
     val asnGeneration: Generation = 2 ## 6
     val assignment = createAssignment(
       asnGeneration,
@@ -494,7 +502,7 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
 
     // Setup: For both drivers, trigger a `ReadSuccess` with a response with an empty assignment and
     // a redirect.
-    val redirect = Redirect(Some(URI.create("fake-redirect")), redirectTokenOpt = None)
+    val redirect = Redirect(Some(URI.create("fake-redirect")))
     val response = ClientResponse(
       SyncAssignmentState.KnownGeneration(Generation.EMPTY),
       config.watchRpcTimeout,
@@ -595,6 +603,39 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     )
   }
 
+  test("AssignmentSyncStateMachine Event.Cancel when a retry is due") {
+    // Test plan: Verify that cancellation emits no actions or wakeup when a failed watch retry
+    // is due, and that subsequent failures and advances remain inert.
+    val config: SliceLookupConfig = createSliceLookupConfig(enableRateLimiting = false)
+    val testDriver: TestStateMachineDriver[Event, DriverAction] =
+      new TestStateMachineDriver(
+        createStateMachine(config)
+      )
+    val tickerTime: TickerTime = sec.getClock.tickerTime()
+    val instant: Instant = sec.getClock.instant()
+    val initialOutput: StateMachineOutput[DriverAction] = testDriver.onAdvance(tickerTime, instant)
+    assert(initialOutput.actions.size == 1)
+    val firstRequest: DriverAction.SendRequest = initialOutput.actions.head match {
+      case request: DriverAction.SendRequest => request
+      case other => fail(s"Expected SendRequest, got $other")
+    }
+    val failure: Event = Event.ReadFailure(firstRequest.opId, Status.UNAVAILABLE)
+    val failureOutput: StateMachineOutput[DriverAction] =
+      testDriver.onEvent(tickerTime, instant, failure)
+    assert(failureOutput.actions.isEmpty)
+    val retryTime: TickerTime = failureOutput.nextTickerTime
+    assert(retryTime > tickerTime && retryTime < TickerTime.MAX)
+    val retryInstant: Instant = instant.plusNanos((retryTime - tickerTime).toNanos)
+
+    // Deliver cancellation before advancing the due retry.
+    val cancelOutput: StateMachineOutput[DriverAction] =
+      testDriver.onEvent(retryTime, retryInstant, Event.Cancel)
+    assert(cancelOutput.actions.isEmpty)
+    assert(cancelOutput.nextTickerTime == TickerTime.MAX)
+    assert(testDriver.onEvent(retryTime, retryInstant, failure) == StateMachineOutput.empty)
+    assert(testDriver.onAdvance(retryTime, retryInstant) == StateMachineOutput.empty)
+  }
+
   test("Request containing assignment for different target ignored") {
     // Test plan: verify that a new sync state machine does not erroneously incorporate the
     // assignment for a target which it does not own, even if it has no assignment itself.
@@ -610,10 +651,7 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     val config: SliceLookupConfig = createSliceLookupConfig(enableRateLimiting = false)
     val testDriver: TestStateMachineDriver[Event, DriverAction] =
       new TestStateMachineDriver(
-        new AssignmentSyncStateMachine(
-          createInternalClientConfig(config),
-          new Random()
-        )
+        createStateMachine(config)
       )
 
     // Send the initial `onAdvance` call to initialize the state machine.
@@ -647,7 +685,6 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
               5.seconds,
               ClerkData,
               supportsSerializedAssignment = true,
-              redirectTokenOpt = None,
               alternativeTargetOpt = None,
               clusterUriOpt = None,
               regionUriOpt = None
@@ -672,7 +709,6 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
               5.seconds,
               ClerkData,
               supportsSerializedAssignment = true,
-              redirectTokenOpt = None,
               alternativeTargetOpt = None,
               clusterUriOpt = None,
               regionUriOpt = None
@@ -710,7 +746,6 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
               5.seconds,
               ClerkData,
               supportsSerializedAssignment = true,
-              redirectTokenOpt = None,
               alternativeTargetOpt = None,
               clusterUriOpt = None,
               regionUriOpt = None
@@ -813,10 +848,7 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     val config: SliceLookupConfig = createSliceLookupConfig(enableRateLimiting = true)
     val testDriver: TestStateMachineDriver[Event, DriverAction] =
       new TestStateMachineDriver(
-        new AssignmentSyncStateMachine(
-          createInternalClientConfig(config),
-          new Random()
-        )
+        createStateMachine(config)
       )
     val tickerTime: TickerTime = sec.getClock.tickerTime()
     val instant: Instant = sec.getClock.instant()
@@ -1096,10 +1128,7 @@ class AssignmentSyncStateMachineSuite extends DatabricksTest with TestName {
     val config: SliceLookupConfig = createSliceLookupConfig(enableRateLimiting = false)
     val testDriver: TestStateMachineDriver[Event, DriverAction] =
       new TestStateMachineDriver(
-        new AssignmentSyncStateMachine(
-          createInternalClientConfig(config),
-          new Random()
-        )
+        createStateMachine(config)
       )
     val tickerTime: TickerTime = sec.getClock.tickerTime()
     val instant: Instant = sec.getClock.instant()

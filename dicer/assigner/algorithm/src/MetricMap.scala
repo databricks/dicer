@@ -329,6 +329,54 @@ object MetricMap {
   /** Function returning the Slice from a [[MetricMap]] entry. */
   private[algorithm] val ENTRY_SLICE_ACCESSOR = (entry: Entry) => entry.slice
 
+  /**
+   * Divides the full [[SliceKey]] space into `sliceCount` slices of equal "width", where width
+   * respects the definition used for apportioning in [[MetricMap]]. For example, if `sliceCount` is
+   * 4, returns equally spaced Slices with 8-byte keys for all internal boundaries:
+   *
+   *   - ["" -- 0x4000000000000000)
+   *   - [0x4000000000000000 -- 0x8000000000000000)
+   *   - [0x8000000000000000 -- 0xc000000000000000)
+   *   - [0xc000000000000000 -- ∞)
+   *
+   * Because the Slices have equal width, each gets an equal share of any value spread evenly
+   * across the key space, whatever the metric (e.g. each gets 1 / `sliceCount` of the load in
+   * [[LoadMap.UNIFORM_LOAD_MAP]]), ignoring rounding errors for Slice boundaries.
+   */
+  def getUniformPartitioning(sliceCount: Int): Vector[Slice] = {
+    val slices = Vector.newBuilder[Slice]
+    slices.sizeHint(sliceCount)
+
+    // We create `count` 64-bit integers that are equally spaced apart. To do so, we increment by
+    // `step` each time - `step` is required to ensure we are setting the most-significant bits in
+    // the byte. E.g. when `count` is 4, `step` is 0x04..00 and `curKey` will be 0x4..00,
+    // 0x8..00, 0xc..00. We track the previous key used (starting at `SliceKey.MIN`) and create
+    // slices from previous to current. So the resulting slices will be ["" .. 0x4000000000000000),
+    // [0x4000000000000000 .. 0x8000000000000000), [0x8000000000000000 .. 0xc000000000000000),
+    // [0xc000000000000000 .. ∞).
+    val step: BigInt = (BigInt(1) << 64) / sliceCount
+    var previousHighKey = SliceKey.MIN
+    for (i <- 1 until sliceCount) {
+      val highKey: SliceKey = SliceKeyHelper.fromBigInt(magnitude = step * i, length = 8)
+      slices += Slice(previousHighKey, highKey)
+      previousHighKey = highKey
+    }
+    slices += Slice.atLeast(previousHighKey)
+    slices.result()
+  }
+
+  /**
+   * The largest value of an entry in a [[MetricMap]]. Larger values are lowered to this one when a
+   * map is built (see [[Builder.build]]). It is far above any value a Slicelet can report
+   * ([[MetricMeasurement.MAX_REPORTED_MEASUREMENT]], even times the largest replica count), and
+   * small enough that the algorithm can multiply entry values by replica counts and add up many of
+   * them without reaching infinity.
+   */
+  private[assigner] val MAX_ENTRY_VALUE: Double = 1e200
+
+  /** Returns `value`, lowered to [[MAX_ENTRY_VALUE]] if it is larger. */
+  private[assigner] def capValue(value: Double): Double = Math.min(value, MAX_ENTRY_VALUE)
+
   /** The minimum length for synthesized key boundaries in [[MetricMap.getSplitForValue()]]. */
   private val MIN_BYTES_LENGTH_FOR_SYNTHESIZED_KEY_BOUNDARIES: Int = 8
 
@@ -356,7 +404,10 @@ object MetricMap {
     /** Range of keys for which value was observed. Non-empty. */
     def slice: Slice
 
-    /** Value of the metric attributed to [[slice]]. Non-negative and finite. */
+    /**
+     * Value of the metric attributed to [[slice]]. Non-negative and finite, and in a [[MetricMap]]
+     * at most [[MAX_ENTRY_VALUE]].
+     */
     def value: Double
   }
 
@@ -374,7 +425,10 @@ object MetricMap {
     /** Entries recorded so far. See remarks on `MetricMap.sliceMap`. */
     private val entries = mutable.ArrayBuffer[E]()
 
-    /** Builds a map with all values recorded on the builder. */
+    /**
+     * Builds a map with all values recorded on the builder. Values larger than
+     * [[MAX_ENTRY_VALUE]] are lowered to it.
+     */
     final def build(): M = {
       // First, build a map with gaps.
       val gappyMap: SliceMap[GapEntry[E]] = SliceMap.createFromOrderedDisjointEntries(
@@ -382,11 +436,12 @@ object MetricMap {
         ENTRY_SLICE_ACCESSOR
       )
 
-      // Next, fill in the gaps with 0-value entries.
+      // Next, fill in the gaps with 0-value entries, and cap the values of the other entries.
       val map: SliceMap[E] = new SliceMap[E](
         gappyMap.entries.map {
           case GapEntry.Gap(slice: Slice) => createEntry(slice, 0)
-          case GapEntry.Some(entry) => entry
+          case GapEntry.Some(entry) =>
+            if (entry.value > MAX_ENTRY_VALUE) createEntry(entry.slice, MAX_ENTRY_VALUE) else entry
         },
         ENTRY_SLICE_ACCESSOR
       )
@@ -657,6 +712,9 @@ final class LoadMap private[LoadMap] (sliceMap: SliceMap[LoadMap.Entry])
    *  - `["", 0x40) -> 35`: adjusted load is 10 + 25% * 100
    *  - `[0x40, 0x80) -> 55`: adjusted load is 30 + 25% * 100
    *  - `[0x80, ∞) -> 70`: adjusted load is 20 + 50% * 100
+   *
+   * As when building a map, adjusted loads larger than [[MetricMap.MAX_ENTRY_VALUE]] are lowered to
+   * it.
    */
   def withAddedUniformLoad(addedLoad: Double): LoadMap = {
     val adjustedEntries = Vector.newBuilder[LoadMap.Entry]
@@ -669,7 +727,7 @@ final class LoadMap private[LoadMap] (sliceMap: SliceMap[LoadMap.Entry])
       // ratio.
       val ratio: Double = UNIFORM_LOAD_MAP.getLoad(slice)
       val apportionedUniformLoad: Double = addedLoad * ratio
-      val adjustedLoad: Double = entry.load + apportionedUniformLoad
+      val adjustedLoad: Double = MetricMap.capValue(entry.load + apportionedUniformLoad)
       adjustedEntries += LoadMap.Entry(slice, adjustedLoad)
     }
     new LoadMap(new SliceMap[LoadMap.Entry](adjustedEntries.result(), ENTRY_SLICE_ACCESSOR))
@@ -736,41 +794,6 @@ object LoadMap {
 
   /** A load map with uniform load in the full key space. The total load is 1. */
   val UNIFORM_LOAD_MAP: LoadMap = LoadMap.newBuilder().putLoad(Entry(Slice.FULL, 1.0)).build()
-
-  /**
-   * Divides the full [[SliceKey]] space into `sliceCount` slices of equal "width", where width
-   * respects the definition used for apportioning in [[MetricMap]]. For example, if `sliceCount` is
-   * 4, returns equally spaced Slices with 8-byte keys for all internal boundaries:
-   *
-   *   - ["" -- 0x4000000000000000)
-   *   - [0x4000000000000000 -- 0x8000000000000000)
-   *   - [0x8000000000000000 -- 0xc000000000000000)
-   *   - [0xc000000000000000 -- ∞)
-   *
-   * By definition, the uniform partitioning results in Slices with uniform load when applied to
-   * [[UNIFORM_LOAD_MAP]] (ignoring rounding errors for Slice boundaries).
-   */
-  def getUniformPartitioning(sliceCount: Int): Vector[Slice] = {
-    val slices = Vector.newBuilder[Slice]
-    slices.sizeHint(sliceCount)
-
-    // We create `count` 64-bit integers that are equally spaced apart. To do so, we increment by
-    // `step` each time - `step` is required to ensure we are setting the most-significant bits in
-    // the byte. E.g. when `count` is 4, `step` is 0x04..00 and `curKey` will be 0x4..00,
-    // 0x8..00, 0xc..00. We track the previous key used (starting at `SliceKey.MIN`) and create
-    // slices from previous to current. So the resulting slices will be ["" .. 0x4000000000000000),
-    // [0x4000000000000000 .. 0x8000000000000000), [0x8000000000000000 .. 0xc000000000000000),
-    // [0xc000000000000000 .. ∞).
-    val step: BigInt = (BigInt(1) << 64) / sliceCount
-    var previousHighKey = SliceKey.MIN
-    for (i <- 1 until sliceCount) {
-      val highKey: SliceKey = SliceKeyHelper.fromBigInt(magnitude = step * i, length = 8)
-      slices += Slice(previousHighKey, highKey)
-      previousHighKey = highKey
-    }
-    slices += Slice.atLeast(previousHighKey)
-    slices.result()
-  }
 
   /** Creates a [[LoadMap]] builder. */
   def newBuilder(): Builder = new Builder()

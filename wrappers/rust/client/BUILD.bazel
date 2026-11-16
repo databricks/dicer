@@ -1,0 +1,9 @@
+load("//bazel/rules/rust:rules_rust.bzl", "rust_library")
+
+rust_library(
+    name = "client",
+    srcs = ["src/lib.rs"],
+    crate_name = "raf_client",
+    visibility = ["//visibility:public"],
+    deps = ["@crates//:tonic"],
+)

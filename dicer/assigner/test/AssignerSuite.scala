@@ -1,7 +1,5 @@
 package com.databricks.dicer.assigner
 
-import com.databricks.dicer.assigner.testing.KubernetesTestUtils
-
 import java.net.URI
 import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 import java.util.UUID
@@ -28,7 +26,7 @@ import com.databricks.caching.util.MetricUtils.ChangeTracker
 import com.databricks.caching.util.TestUtils.{TestName, assertThrow}
 import com.databricks.conf.Configs
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
-import com.databricks.dicer.client.{WatchStubManager, WatchStubManagerConfig}
+import com.databricks.dicer.client.{WatchAddress, WatchStubManager, WatchStubManagerConfig}
 import com.databricks.rpc.tls.TLSOptionsMigration
 import com.databricks.dicer.assigner.config.{
   ChurnConfig,
@@ -44,7 +42,14 @@ import com.databricks.dicer.assigner.config.InternalTargetConfig.{
   LoadBalancingMetricConfig
 }
 import com.databricks.dicer.common.testing.SliceTestUtils
-import com.databricks.dicer.common.testing.SliceTestUtils.sampleProposal
+import com.databricks.dicer.common.testing.SliceTestUtils.{
+  LowInclusiveStringFluent,
+  SliceAssignmentSliceFluent,
+  createProposal,
+  sampleProposal,
+  toProposedAssignmentEntry,
+  `∞`
+}
 import com.databricks.dicer.common.Version.LATEST_VERSION
 import com.databricks.dicer.common.{
   Assignment,
@@ -54,11 +59,13 @@ import com.databricks.dicer.common.{
   ClientResponse,
   ClientType,
   Generation,
-  ProposedSliceAssignment,
+  SliceAssignment,
   SliceletData,
   SliceletState,
   SubscriberHandler,
-  SyncAssignmentState
+  SubsliceAnnotation,
+  SyncAssignmentState,
+  Transfer
 }
 import com.databricks.dicer.common.testing.{
   InternalDicerTestEnvironment,
@@ -68,7 +75,8 @@ import com.databricks.dicer.common.testing.{
 }
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.external.{AppTarget, Clerk, ResourceAddress, Slicelet, Target}
-import com.databricks.dicer.friend.SliceMap
+import com.databricks.dicer.friend.{SliceMap, Squid}
+import com.databricks.featureflag.client.utils.RuntimeContext
 import com.databricks.rpc.testing.TestSslArguments
 import com.databricks.rpc.testing.TestTLSOptions
 import com.databricks.testing.DatabricksTest
@@ -194,7 +202,7 @@ class AssignerSuite extends DatabricksTest with TestName {
     WatchStubManagerConfig(
       clientType = ClientType.Slicelet,
       targetName = "assigner-suite-test",
-      watchAddress = URI.create(s"http://localhost:${testEnv.getAssignerPort}"),
+      watchAddress = WatchAddress.fromAddress(s"http://localhost:${testEnv.getAssignerPort}"),
       tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
       watchFromDataPlane = false,
       sourceIpOpt = None
@@ -261,7 +269,6 @@ class AssignerSuite extends DatabricksTest with TestName {
       WATCH_RPC_TIMEOUT,
       ClerkData,
       supportsSerializedAssignment = true,
-      redirectTokenOpt = None,
       alternativeTargetOpt = None,
       clusterUriOpt = None,
       regionUriOpt = None
@@ -314,7 +321,6 @@ class AssignerSuite extends DatabricksTest with TestName {
       shortTimeout,
       ClerkData,
       supportsSerializedAssignment = true,
-      redirectTokenOpt = None,
       alternativeTargetOpt = None,
       clusterUriOpt = None,
       regionUriOpt = None
@@ -337,7 +343,6 @@ class AssignerSuite extends DatabricksTest with TestName {
       WATCH_RPC_TIMEOUT,
       ClerkData,
       supportsSerializedAssignment = true,
-      redirectTokenOpt = None,
       alternativeTargetOpt = None,
       clusterUriOpt = None,
       regionUriOpt = None
@@ -382,7 +387,6 @@ class AssignerSuite extends DatabricksTest with TestName {
       WATCH_RPC_TIMEOUT,
       ClerkData,
       supportsSerializedAssignment = true,
-      redirectTokenOpt = None,
       alternativeTargetOpt = None,
       clusterUriOpt = None,
       regionUriOpt = None
@@ -394,7 +398,6 @@ class AssignerSuite extends DatabricksTest with TestName {
       WATCH_RPC_TIMEOUT,
       ClerkData,
       supportsSerializedAssignment = true,
-      redirectTokenOpt = None,
       alternativeTargetOpt = None,
       clusterUriOpt = None,
       regionUriOpt = None
@@ -438,7 +441,6 @@ class AssignerSuite extends DatabricksTest with TestName {
       WATCH_RPC_TIMEOUT,
       ClerkData,
       supportsSerializedAssignment = true,
-      redirectTokenOpt = None,
       alternativeTargetOpt = None,
       clusterUriOpt = None,
       regionUriOpt = None
@@ -469,9 +471,9 @@ class AssignerSuite extends DatabricksTest with TestName {
   }
 
   test("createAndStart() completes successfully") {
-    // Test plan: Exercise the production startup path, which creates the membership checker,
-    // store factory, and default health watcher factory. TestAssigner supplies these dependencies
-    // through separate test wiring. Verify that startup and shutdown both complete successfully.
+    // Test plan: Exercise the production startup path, which creates the store factory and
+    // default health watcher factory. TestAssigner supplies these dependencies through separate
+    // test wiring. Verify that startup and shutdown both complete successfully.
 
     val assignerConf = new DicerAssignerConf(
       Configs.parseMap(
@@ -493,9 +495,6 @@ class AssignerSuite extends DatabricksTest with TestName {
         initialPollTimeout = 1.second
       )
 
-    // The Assigner requires a checker to start; this one never polls (see the factory).
-    val checkerFactory: KubernetesMembershipChecker.Factory =
-      KubernetesTestUtils.inertMembershipCheckerFactory
     val assigner = Assigner.createAndStart(
       assignerConf,
       dynamicConfigProvider,
@@ -503,8 +502,6 @@ class AssignerSuite extends DatabricksTest with TestName {
       "localhost",
       ASSIGNER_CLUSTER_URI,
       KubernetesTargetWatcher.NoOpFactory,
-      localClusterMembershipCheckerFactory = checkerFactory,
-      remoteClusterMembershipCheckerFactoryOpt = None,
       assignerServiceInfoOpt = None
     )
 
@@ -846,7 +843,6 @@ class AssignerSuite extends DatabricksTest with TestName {
       timeout = 1.second,
       ClerkData,
       supportsSerializedAssignment = true,
-      redirectTokenOpt = None,
       alternativeTargetOpt = None,
       clusterUriOpt = None,
       regionUriOpt = None
@@ -865,7 +861,6 @@ class AssignerSuite extends DatabricksTest with TestName {
         keyCardinalityEstimateOpt = None
       ),
       supportsSerializedAssignment = true,
-      redirectTokenOpt = None,
       alternativeTargetOpt = None,
       clusterUriOpt = None,
       regionUriOpt = None
@@ -1177,7 +1172,8 @@ class AssignerSuite extends DatabricksTest with TestName {
         WatchStubManagerConfig(
           clientType = ClientType.Slicelet,
           targetName = "alternative-target-alert-test",
-          watchAddress = URI.create(s"http://localhost:${localTestEnv.getAssignerPort}"),
+          watchAddress =
+            WatchAddress.fromAddress(s"http://localhost:${localTestEnv.getAssignerPort}"),
           tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
           watchFromDataPlane = false,
           sourceIpOpt = None
@@ -1200,7 +1196,6 @@ class AssignerSuite extends DatabricksTest with TestName {
           WATCH_RPC_TIMEOUT,
           ClerkData,
           supportsSerializedAssignment = true,
-          redirectTokenOpt = None,
           alternativeTargetOpt = alternativeTargetOpt,
           clusterUriOpt = None,
           regionUriOpt = None
@@ -1323,7 +1318,8 @@ class AssignerSuite extends DatabricksTest with TestName {
         WatchStubManagerConfig(
           clientType = ClientType.Slicelet,
           targetName = "standby-alternative-target-alert-test",
-          watchAddress = URI.create(s"http://localhost:${standbyTestEnv.getAssignerPort}"),
+          watchAddress =
+            WatchAddress.fromAddress(s"http://localhost:${standbyTestEnv.getAssignerPort}"),
           tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
           watchFromDataPlane = false,
           sourceIpOpt = None
@@ -1356,7 +1352,6 @@ class AssignerSuite extends DatabricksTest with TestName {
           WATCH_RPC_TIMEOUT,
           ClerkData,
           supportsSerializedAssignment = true,
-          redirectTokenOpt = None,
           alternativeTargetOpt = None,
           clusterUriOpt = None,
           regionUriOpt = None
@@ -1433,7 +1428,6 @@ class AssignerSuite extends DatabricksTest with TestName {
           keyCardinalityEstimateOpt = None
         ),
         supportsSerializedAssignment = true,
-        redirectTokenOpt = None,
         alternativeTargetOpt = alternativeTargetOpt,
         clusterUriOpt = None,
         regionUriOpt = None

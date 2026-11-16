@@ -481,34 +481,42 @@ class ScalaSubscriberHandlerSuite extends SubscriberHandlerSuiteBase {
   // This test is Scala-only because distribution tracking is the Assigner behavior.
   test("Assignment tracker buckets meet expectations") {
     // Test plan: Verify that the assignment distribution tracker buckets use a growth factor of 1.4
-    // in the range [1ms, 1s) (21 buckets), and a growth factor of 2 in the range [1s, 1024s] (11
-    // buckets), for a total of 32 buckets plus 1 for the +Inf bucket.
+    // in the range [2.744ms, 1s) (18 buckets), and a growth factor of 2 in the range [1s, 128s] (8
+    // buckets), for a total of 26 buckets plus 1 for the +Inf bucket. Observe values on and around
+    // the boundaries and check the cumulative bucket counts.
     import SubscriberHandler.forTestStatic.getAssignmentDistributionLatencyHistogram
 
     assert(
       getAssignmentDistributionLatencyHistogram(target)
         .get()
         .buckets
-        .length == 32 + 1
+        .length == 26 + 1
     )
 
-    // Verify: Growth factor of 1.4 in [1ms, 1s).
+    // Verify: Latencies below 2.744ms fall in the first bucket.
     getAssignmentDistributionLatencyHistogram(target).observe(0.001)
     assert(getAssignmentDistributionLatencyHistogram(target).get().buckets(0) == 1)
-    getAssignmentDistributionLatencyHistogram(target).observe(0.0014)
-    assert(getAssignmentDistributionLatencyHistogram(target).get().buckets(1) == 2)
-    getAssignmentDistributionLatencyHistogram(target)
-      .observe(0.00196)
-    assert(getAssignmentDistributionLatencyHistogram(target).get().buckets(2) == 3)
 
-    // Verify: Growth factor of 2 in [1s, 1024s).
+    // Verify: Growth factor of 1.4 in [2.744ms, 1s).
+    getAssignmentDistributionLatencyHistogram(target).observe(0.002744)
+    assert(getAssignmentDistributionLatencyHistogram(target).get().buckets(0) == 2)
+    getAssignmentDistributionLatencyHistogram(target).observe(0.0038416)
+    assert(getAssignmentDistributionLatencyHistogram(target).get().buckets(1) == 3)
+    getAssignmentDistributionLatencyHistogram(target).observe(0.00537824)
+    assert(getAssignmentDistributionLatencyHistogram(target).get().buckets(2) == 4)
+
+    // Verify: Growth factor of 2 in [1s, 128s].
     getAssignmentDistributionLatencyHistogram(target).observe(1.0)
-    assert(getAssignmentDistributionLatencyHistogram(target).get().buckets(21) == 4)
+    assert(getAssignmentDistributionLatencyHistogram(target).get().buckets(18) == 5)
     getAssignmentDistributionLatencyHistogram(target).observe(2.0)
-    assert(getAssignmentDistributionLatencyHistogram(target).get().buckets(22) == 5)
-    getAssignmentDistributionLatencyHistogram(target)
-      .observe(1024.0)
-    assert(getAssignmentDistributionLatencyHistogram(target).get().buckets(31) == 6)
+    assert(getAssignmentDistributionLatencyHistogram(target).get().buckets(19) == 6)
+    getAssignmentDistributionLatencyHistogram(target).observe(128.0)
+    assert(getAssignmentDistributionLatencyHistogram(target).get().buckets(25) == 7)
+
+    // Verify: Latencies above 128s fall only in the +Inf bucket.
+    getAssignmentDistributionLatencyHistogram(target).observe(256.0)
+    assert(getAssignmentDistributionLatencyHistogram(target).get().buckets(25) == 7)
+    assert(getAssignmentDistributionLatencyHistogram(target).get().buckets(26) == 8)
   }
 
   test("Non-empty Redirect") {
@@ -529,7 +537,7 @@ class ScalaSubscriberHandlerSuite extends SubscriberHandlerSuiteBase {
     val fut: Future[ClientResponseP] =
       driver.handleWatch(
         request,
-        redirectOpt = Some(Redirect(Some(redirectURI), redirectTokenOpt = None))
+        redirectOpt = Some(Redirect(Some(redirectURI)))
       )
 
     val response = ClientResponse.fromProto(TestUtils.awaitResult(fut, Duration.Inf))

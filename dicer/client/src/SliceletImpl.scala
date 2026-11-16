@@ -2,7 +2,7 @@ package com.databricks.dicer.client
 
 import java.net.URI
 import java.util.UUID
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.locks.ReentrantLock
 
 import scala.concurrent.Future
 import scala.concurrent.duration._
@@ -17,6 +17,7 @@ import com.databricks.caching.util.InstantiationTracker.{
   PerProcessSingleton,
   PerProcessSingletonType
 }
+import com.databricks.caching.util.Lock.withLock
 import com.databricks.caching.util.{
   AlertOwnerTeam,
   Cancellable,
@@ -31,6 +32,7 @@ import com.databricks.caching.util.{
   WatchValueCellPollAdapter,
   WhereAmIHelper
 }
+import com.databricks.common.status.ProbeStatusManager
 import com.databricks.common.util.ShutdownHookManager
 import com.databricks.dicer.client.featurerollouts.DicerClientFeatureRolloutFlag
 import com.databricks.dicer.common.WatchServerHelper.WATCH_RPC_TIMEOUT
@@ -60,7 +62,6 @@ import com.databricks.dicer.friend.ShutdownHookConstants.SLICELET_TERMINATION_SH
 import com.databricks.dicer.friend.SliceMap.GapEntry
 import com.databricks.dicer.friend.{SliceWithStateProvider, Squid}
 import com.databricks.rpc.DatabricksServerWrapper
-import com.databricks.rpc.armeria.ReadinessProbeTracker
 import javax.annotation.concurrent.GuardedBy
 
 /** Implementation of `Slicelet`. */
@@ -322,7 +323,11 @@ private[dicer] object SliceletImpl {
    * Variable that keeps track of the index number of the current Slicelet that was last created.
    * Primarily, for debugging/monitoring purposes - can be used in subscriber name.
    */
-  private val sliceletNum: AtomicInteger = new AtomicInteger(-1)
+  @GuardedBy("sliceletNumLock")
+  private var sliceletNum: Int = -1
+
+  /** Lock protecting [[sliceletNum]]. */
+  private val sliceletNumLock: ReentrantLock = new ReentrantLock()
 
   /**
    * See specs for the external `Slicelet.apply`. Takes an explicit sequential execution context
@@ -336,7 +341,7 @@ private[dicer] object SliceletImpl {
    */
   def create(
       sec: SequentialExecutionContext,
-      assignerWatchAddress: URI,
+      assignerWatchAddress: WatchAddress,
       sliceletConf: SliceletConf,
       target: Target,
       readinessProvider: BlockingReadinessProvider): SliceletImpl = {
@@ -450,9 +455,9 @@ private[dicer] object SliceletImpl {
     )
 
     // The readiness provider runs on a separate thread from the main Slicelet thread because
-    // isReady() calls an external API on the ReadinessProbeTracker. This is currently a
-    // non-blocking call, but there is no guarantee it will remain non-blocking. We don't want to
-    // risk blocking the main Slicelet thread, which handles assignment updates and client requests.
+    // isReady() calls an external API on the ProbeStatusManager. This is currently a non-blocking
+    // call, but there is no guarantee it will remain non-blocking. We don't want to risk blocking
+    // the main Slicelet thread, which handles assignment updates and client requests.
     val readinessProviderSec: SequentialExecutionContext = {
       SequentialExecutionContext.createWithDedicatedPool(
         name = "Slicelet-ReadinessProvider",
@@ -471,7 +476,13 @@ private[dicer] object SliceletImpl {
 
     // Accumulates load observed by this Slicelet.
     val metrics = new SliceletMetrics(target)
-    val loadAccumulator = new SliceletLoadAccumulator(sec.getClock, metrics)
+    val loadAccumulator = new SliceletLoadAccumulator(
+      sec.getClock,
+      target,
+      metrics,
+      cdfPointBudget = 0,
+      maxKeyLengthBytes = Int.MaxValue
+    )
     val keyCardinalityEstimator = new SliceletKeyCardinalityEstimator(sec.getClock)
     val lookup =
       new SliceletSliceLookup(
@@ -597,14 +608,15 @@ private[dicer] object SliceletImpl {
         target
       }
 
-    val assignerURI: URI = WatchAddressHelper.getAssignerURI(
+    val assignerWatchAddress: WatchAddress = WatchAddress.fromHostPort(
       sliceletConf.assignerHost,
-      sliceletConf.dicerAssignerRpcPort
+      sliceletConf.dicerAssignerRpcPort,
+      schemeOpt = Some("https")
     )
 
     val slicelet = SliceletImpl.create(
       sec,
-      assignerURI,
+      assignerWatchAddress,
       sliceletConf,
       fullyQualifiedTargetIfNeeded,
       readinessProvider
@@ -628,8 +640,9 @@ private[dicer] object SliceletImpl {
   }
 
   /** Given a Slicelet hostname, returns a name that is useful for debugging. */
-  def getDebugName(target: Target, hostName: String): String = {
-    val num = sliceletNum.addAndGet(1)
+  def getDebugName(target: Target, hostName: String): String = withLock(sliceletNumLock) {
+    sliceletNum += 1
+    val num: Int = sliceletNum
 
     // Use just the first part of the hostname if it starts with a letter (so if the name is
     // 123.foo.xyz, we will use the full hostname - that is ok since such names are not seen
@@ -652,11 +665,9 @@ private[dicer] trait BlockingReadinessProvider {
   def isReady: Boolean
 }
 
-/**
- * Real implementation of [[BlockingReadinessProvider]] that queries the [[ReadinessProbeTracker]].
- */
+/** Uses PSM's cached readiness, including its startup gate. */
 private[dicer] object RealBlockingReadinessProvider extends BlockingReadinessProvider {
-  override def isReady: Boolean = ReadinessProbeTracker.isPodReady
+  override def isReady: Boolean = ProbeStatusManager.isReady
 }
 
 /**

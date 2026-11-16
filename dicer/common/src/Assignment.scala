@@ -263,11 +263,22 @@ object Assignment {
                   newSliceAssignments += existingSliceAssignment
               }
             }
+            // A gap that covers only part of a known Slice means the diff wasn't built from the
+            // known assignment's history: copying the whole known Slice then overlaps its
+            // neighbors, which the Slice map rejects. Relying on that validation adds no work to
+            // well-formed merges.
+            val newSliceMap: SliceMap[SliceAssignment] =
+              try {
+                SliceMapHelper.ofSliceAssignments(newSliceAssignments.result())
+              } catch {
+                case _: IllegalArgumentException =>
+                  return Right(DiffUnused.INCONSISTENCY)
+              }
             Left(
               Assignment(
                 diffAssignment.isFrozen,
                 diffAssignment.generation,
-                SliceMapHelper.ofSliceAssignments(newSliceAssignments.result()),
+                newSliceMap,
                 diffAssignment.assignerServiceInfoOpt
               )
             )
@@ -407,7 +418,8 @@ object Assignment {
 
     /**
      * An inconsistency was detected between the diff and known assignments, e.g., the known
-     * assignment has Slices with higher generations than a supposedly fresher diff assignment.
+     * assignment has Slices with higher generations than a supposedly fresher diff assignment, or
+     * a gap in the diff does not cover whole Slices of the known assignment.
      */
     case object INCONSISTENCY extends DiffUnused
 

@@ -31,6 +31,12 @@ trait DicerClientFeatureRolloutFlag {
 
 object DicerClientFeatureRolloutFlag {
 
+  /**
+   * Name of the flag gating Clerk Caching (i.e. SliceLookup sharing between Clerks that have the
+   * same SliceLookupConfig).
+   */
+  private[dicer] final val CLERK_CACHING_FLAG_NAME: String = "clerk-caching"
+
   /** Name of the flag gating client-side rate limiting of Clerk watch requests. */
   private[dicer] final val CLERK_WATCH_RATE_LIMITING_FLAG_NAME: String =
     "clerk-watch-rate-limiting"

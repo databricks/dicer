@@ -1,5 +1,6 @@
 package com.databricks.dicer.common
 
+import com.databricks.dicer.assigner.{ProposedAssignment, ProposedSliceAssignment}
 import com.databricks.dicer.common.testing.{InternalDicerTestEnvironment, TestAssigner}
 
 import scala.collection.mutable
@@ -10,6 +11,7 @@ import com.databricks.caching.util.TestUtils
 import com.databricks.caching.util.TestUtils.TestName
 import com.databricks.conf.Configs
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
+import com.databricks.dicer.client.TestClientUtils
 import com.databricks.dicer.common.testing.SliceTestUtils.{
   LowInclusiveStringFluent,
   SliceAssignmentSliceFluent,
@@ -141,9 +143,20 @@ class GossipSuite extends DatabricksTest with TestName {
     // are designed to exercise assignment diffs when using `incrementalTestEnv`.
     val target = Target(getSafeName)
 
-    // Create two Clerks that watches assignments via the Assigner.
-    val clerk1: Clerk = testEnv.createDirectClerk(target, initialAssignerIndex = 0)
-    val clerk2: Clerk = testEnv.createDirectClerk(target, initialAssignerIndex = 0)
+    // Keep the Clerks' lookups independent so both must receive assignments from the Assigner.
+    // TODO(<internal bug>): Once Clerk Caching is fully rolled out and no longer controlled by the feature
+    // flag, but enabled by default, give these Clerks distinct client UUIDs to keep their
+    // SliceLookups independent.
+    val clerk1: Clerk = testEnv.createDirectClerk(
+      target,
+      initialAssignerIndex = 0,
+      featureRolloutFlagOpt = Some(TestClientUtils.ALL_DISABLED_FEATURE_ROLLOUT_FLAG)
+    )
+    val clerk2: Clerk = testEnv.createDirectClerk(
+      target,
+      initialAssignerIndex = 0,
+      featureRolloutFlagOpt = Some(TestClientUtils.ALL_DISABLED_FEATURE_ROLLOUT_FLAG)
+    )
 
     /** Waits until all parties have the given `assignment`. */
     def allAwaitAssignment(assignment: Assignment): Unit = {

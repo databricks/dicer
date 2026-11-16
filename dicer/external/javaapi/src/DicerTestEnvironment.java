@@ -1,4 +1,3 @@
-// LINT.IfChange
 package com.databricks.dicer.external.javaapi;
 
 import com.databricks.conf.RawConfigSingleton;
@@ -135,6 +134,9 @@ public final class DicerTestEnvironment {
   /**
    * Injects connection config for a new Clerk that communicates with the given Slicelet into the
    * caller-provided config builder and returns that same builder.
+   *
+   * <p>The injected config turns off watch rate limiting for the Clerk, so a rollout rule cannot
+   * rate limit test Clerks.
    */
   public ClerkConfig.Builder setConnectionConfigForNewClerk(
       ClerkConfig.Builder configBuilder, Slicelet slicelet) {
@@ -203,5 +205,3 @@ public final class DicerTestEnvironment {
     DicerClientTestInterop.stopClerkForTest(clerk.toScala());
   }
 }
-// LINT.ThenChange(dicer/external/src/DicerTestEnvironment.scala)
-// LINT.ThenChange(dicer/rust/external/testing/dicer_test_environment/src/dicer_test_environment.rs)

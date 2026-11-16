@@ -3,8 +3,8 @@ package com.databricks.dicer.common.testing
 import scala.collection.mutable
 import scala.concurrent.{Future, Promise}
 import com.databricks.caching.util.{Cancellable, SequentialExecutionContext, ValueStreamCallback}
-import com.databricks.dicer.assigner.Store
-import com.databricks.dicer.common.{Assignment, Incarnation, ProposedAssignment}
+import com.databricks.dicer.assigner.{ProposedAssignment, Store}
+import com.databricks.dicer.common.{Assignment, Incarnation}
 import com.databricks.dicer.external.Target
 import com.databricks.dicer.common.testing.InterceptableStore.{
   DeferredWriteAssignment,

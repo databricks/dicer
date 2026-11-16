@@ -206,7 +206,7 @@ class EtcdClientSuite extends DatabricksTest {
    * Encoded characters to replace reserved characters in etcd keys.
    *
    * [[EtcdClient]] reserves the ':', '/', and '%' characters for internal use. If these characters
-   * * are present in the etcd key, the test needs to encode them before reading from etcd.
+   * are present in the etcd key, the test needs to encode them before reading from etcd.
    */
   private val KEY_ENCODING_MAP = Map[Char, String]('/' -> "%2F", ':' -> "%3A", '%' -> "%25")
 
@@ -272,7 +272,7 @@ class EtcdClientSuite extends DatabricksTest {
   }
 
   /**
-   * Returns a sequence of malformed versioned keys in tuples of of the form (key: String,
+   * Returns a sequence of malformed versioned keys in tuples of the form (key: String,
    * malformedVersionedKeyBytes: ByteSequence). If `isGlobalLogKey` is true, then the versioned key
    * has "/tag" appended to the end (otherwise it does not).
    */
@@ -340,8 +340,8 @@ class EtcdClientSuite extends DatabricksTest {
   }
 
   test("KeyNamespace validation") {
-    // Test plan: Verify that EtcdClient.KeyNamespace construct throws IllegalArgumentException when
-    // given invalid namespace values.
+    // Test plan: Verify that the EtcdClient.KeyNamespace constructor throws
+    // IllegalArgumentException when given invalid namespace values.
     assertThrow[IllegalArgumentException]("KeyNamespace must be non-empty") {
       EtcdClient.KeyNamespace("")
     }
@@ -721,7 +721,7 @@ class EtcdClientSuite extends DatabricksTest {
     // Test plan: verify that an update which attempts to increase the version high watermark
     // can tolerate an intervening write which updates the watermark first. A store write which
     // also updates the watermark involves two transactions. The test verifies that a concurrent
-    // write, which intervienes between these two transactions, is correctly tolerated.
+    // write, which intervenes between these two transactions, is correctly tolerated.
     val (clientUnderTest, interposingWrapperUnderTest): (EtcdClient, InterposingJetcdWrapper) =
       etcd.createEtcdClientWithInterposingJetcdWrapper(
         RealtimeTypedClock,
@@ -1234,7 +1234,7 @@ class EtcdClientSuite extends DatabricksTest {
 
   /**
    * Tests that [[EtcdClient.read()]] returns a 'DATA_LOSS' StatusException on a series of malformed
-   * keys. If `isGlobalKeyLey` is true, keys have a tag appended to the end to simulate a global log
+   * keys. If `isGlobalLogKey` is true, keys have a tag appended to the end to simulate a global log
    * key, otherwise they do not (see [[generateMalformedVersionedKeys()]]).
    */
   private def testReadMalformedKey(isGlobalLogKey: Boolean): Unit = {
@@ -1492,7 +1492,7 @@ class EtcdClientSuite extends DatabricksTest {
   }
 
   test("Watch with corrupted update") {
-    // Test plan: Verify that the watcher sees an error when it encounters a corrupted key is
+    // Test plan: Verify that the watcher sees an error when it encounters a corrupted key
     // written after the watch begins.
 
     // Start watching.
@@ -1833,7 +1833,7 @@ class EtcdClientSuite extends DatabricksTest {
   }
 
   test("InterposingJetcdWrapper allows watches to be paused and resumed") {
-    // Test plan: Verify that the InterposingJetCdWrapper queues watch events after
+    // Test plan: Verify that the InterposingJetcdWrapper queues watch events after
     // `pauseCurrentWatch` is called and releases them and resumes normal delivery after
     // `resumeCurrentWatch` is called. Cause gets to fail once the watch is established to ensure
     // that backup polling does not give the state machine an alternate path to discovering updates.
@@ -1983,7 +1983,7 @@ class EtcdClientSuite extends DatabricksTest {
       isIncremental = true
     )
 
-    // Advance to just before the backup polling interview and check to see that we haven't received
+    // Advance to just before the backup polling interval and check to see that we haven't received
     // the new elements yet.
     sec.getClock.advanceBy(watchArgs.backupPollingInterval - 1.nanos)
     // Note that we generally discourage sleeping in tests, but in this case we're checking for a
@@ -2058,7 +2058,7 @@ class EtcdClientSuite extends DatabricksTest {
 
   test("Watcher cancels watch after specified finite watch duration is exceeded.") {
     // Test plan: Verify that the watcher automatically cancels the watch after the configured watch
-    // duration is exceeded, but no so sooner than that. Do this by verifying that the callback
+    // duration is exceeded, but no sooner than that. Do this by verifying that the callback
     // observes an item written to the store just before the watch expires, and that the callback
     // receives a cancellation event after the watch duration has passed.
     val sec = FakeSequentialExecutionContext.create("watcher")
@@ -2082,7 +2082,7 @@ class EtcdClientSuite extends DatabricksTest {
       assert(callback.getLog == expectedElements)
     }
 
-    // Advance to just before the watch duration interview and ensure that a newly added item is
+    // Advance to just before the watch duration ends and ensure that a newly added item is
     // reported to the callback by the watch.
     val justBeforeWatchDuration: FiniteDuration = watchDuration - 1.nano
     sec.getClock.advanceBy(justBeforeWatchDuration)
@@ -2112,7 +2112,7 @@ class EtcdClientSuite extends DatabricksTest {
 
   test("Watcher never cancels watch with default, infinite watch duration.") {
     // Test plan: Verify that the watcher automatically cancels the watch after the configured watch
-    // duration is exceeded, but no so sooner than that. Do this by verifying that the callback
+    // duration is exceeded, but no sooner than that. Do this by verifying that the callback
     // observes an item written to the store just before the watch expires, and that the callback
     // receives a cancellation event after the watch duration has passed.
     val sec = FakeSequentialExecutionContext.create("watcher")
@@ -2138,15 +2138,15 @@ class EtcdClientSuite extends DatabricksTest {
     // Advance the fake clock by a very long time and make sure the watch is not cancelled.
     sec.getClock.advanceBy(10.days)
     expectedElements += StatusOr.error(Status.CANCELLED)
-    // Wait a short amount of real time to give asynchronous a cancellation a chance to happen or
-    // // not.
+    // Wait a short amount of real time to give asynchronous cancellation a chance to happen or
+    // not.
     Thread.sleep(100)
     assert(!callback.getLog.contains(StatusOr.error(Status.CANCELLED)))
   }
 
   test("Write to new high bits requires predecessor with previous high bits value") {
     // Test plan: verify that the first write with a version with a new high bits value still
-    // require the correct predecessor to succeed, even though the predecessor version has a lower
+    // requires the correct predecessor to succeed, even though the predecessor version has a lower
     // value in its high bits.
 
     val client: EtcdClient = etcd.createEtcdClientAndInitializeStore(EtcdClient.Config(NAMESPACE))
@@ -2743,7 +2743,7 @@ class EtcdClientSuite extends DatabricksTest {
   }
 
   test("High version watermark is maintained and checked separately for each namespace") {
-    // Verify that EtcdClient checks high version watermark on a per-namespace basic and allows
+    // Verify that EtcdClient checks high version watermark on a per-namespace basis and allows
     // non-monotonic writes across different namespaces. Verify this by writing a value for a key
     // to namespace1 with a higher version, then writing the same key to namespace2 with a lower
     // version. The second write should succeed even if it writes a lower version than the first

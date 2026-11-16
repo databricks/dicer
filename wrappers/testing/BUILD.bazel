@@ -1,0 +1,10 @@
+load("@rules_scala//scala:scala.bzl", "scala_library")
+
+package(
+    default_visibility = ["//visibility:public"],
+)
+
+scala_library(
+    name = "test_environment",
+    srcs = ["src/TestEnvironment.scala"],
+)

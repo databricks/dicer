@@ -21,10 +21,10 @@ import com.databricks.caching.util.Lock.withLock
  * Wrapper around [[EtcdClient.JetcdWrapper]] supporting error injection and spy functionality.
  * Thread-safe.
  *
- * @sec An SEC on which to schedule callbacks and timeout events.
+ * @param sec An SEC on which to schedule callbacks and timeout events.
  * @param clock The clock to use for reporting times in [[getCallTimes()]].
  *
- * Implementation note: `sec.getClock` and `clock` are independent and do not have be the same.
+ * Implementation note: `sec.getClock` and `clock` are independent and do not have to be the same.
  */
 final class InterposingJetcdWrapper private (
     sec: SequentialExecutionContext,
@@ -150,7 +150,7 @@ final class InterposingJetcdWrapper private (
 
   /**
    * Resume the latest watch, delivering all queued watch events and resuming normal delivery for
-   * fture events.
+   * future events.
    */
   def resumeCurrentWatch(): Unit = withLock(lock) {
     for (latestWatchListener: PausableWatchListener <- latestWatchListenerOpt) {

@@ -12,7 +12,7 @@ import com.databricks.caching.util.{
   ValueStreamCallback
 }
 import com.databricks.dicer.common.Assignment.AssignmentValueCell
-import com.databricks.dicer.common.{Assignment, Generation, Incarnation, ProposedAssignment}
+import com.databricks.dicer.common.{Assignment, Generation, Incarnation}
 import com.databricks.dicer.external.Target
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import java.time.Instant

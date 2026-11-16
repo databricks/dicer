@@ -113,6 +113,80 @@ class PrefixLoggerSuite extends DatabricksTest with TestName {
     }
   }
 
+  test("Log every includes skipped count") {
+    // Test plan: Verify that a throttled message reports how many calls on the same call site were
+    // suppressed since the previous emitted message, and that the count resets after each emitted
+    // message. Do this with a fake clock: log a burst of calls in one `every` window, advance past
+    // the window and log again, then advance again and log once more with no calls in between.
+    val fakeClock = new FakeTypedClock
+    val logger = PrefixLogger.create(getClass, "Skipped", clock = fakeClock)
+    LogCapturer.withCapturer(new Regex("Skip log")) { capturer: LogCapturer =>
+      def logOnce(i: Int): Unit = logger.info(s"Skip log $i", 30.seconds)
+
+      // The first call is emitted, the next 4 are throttled.
+      for (i <- 0 until 5) {
+        logOnce(i)
+      }
+      fakeClock.advanceBy(30.seconds)
+      logOnce(5)
+      fakeClock.advanceBy(30.seconds)
+      logOnce(6)
+
+      val events: Vector[CapturedLogEvent] = capturer.getCapturedEvents
+      assert(events.size == 3)
+      assert(events(0).formattedMessage.contains("[every=30s] Skip log 0"))
+      assert(events(1).formattedMessage.contains("[every=30s, skipped=4] Skip log 5"))
+      assert(events(2).formattedMessage.contains("[every=30s] Skip log 6"))
+    }
+  }
+
+  test("Log every skipped count loses no calls under concurrency") {
+    // Test plan: Verify that every call on a throttled call site is either emitted or reported in
+    // the skipped count of a later emitted message, even when calls race with emitted messages.
+    // Do this by calling the same call site from several threads while the main thread keeps
+    // advancing a fake clock past `every`, then advancing once more and making a final call that
+    // reports any remaining skips. The emitted messages plus their skipped counts must add up to
+    // the total number of calls.
+    val fakeClock = new FakeTypedClock
+    val logger = PrefixLogger.create(getClass, "Concurrent skipped", clock = fakeClock)
+    val skippedRegex: Regex = raw"skipped=(\d+)".r
+    val numThreads = 4
+    val callsPerThread = 20000
+    def logOnce(): Unit = logger.info("Concurrent skip log", 30.seconds)
+
+    LogCapturer.withCapturer(new Regex("Concurrent skip log")) { capturer: LogCapturer =>
+      val threads: Seq[Thread] = (0 until numThreads).map { _ =>
+        new Thread(() => for (_ <- 0 until callsPerThread) logOnce())
+      }
+      threads.foreach { thread: Thread =>
+        thread.start()
+      }
+      // Advance the clock repeatedly so emitted messages interleave with throttled calls. The
+      // sleep only paces the advances: without it the clock could advance about as often as calls
+      // are made, so many calls would be emitted and few throttled, leaving little to count.
+      // The test does not depend on timing to pass: the assertion below must hold for every
+      // interleaving of threads and clock advances. A slower or faster machine only changes how
+      // many emitted messages race with throttled calls, not whether the counts must add up.
+      while (threads.exists { thread: Thread =>
+          thread.isAlive
+        }) {
+        fakeClock.advanceBy(30.seconds)
+        Thread.sleep(1)
+      }
+      threads.foreach { thread: Thread =>
+        thread.join()
+      }
+      fakeClock.advanceBy(30.seconds)
+      logOnce()
+
+      val events: Vector[CapturedLogEvent] = capturer.getCapturedEvents
+      val totalSkipped: Long = events.map { event: CapturedLogEvent =>
+        skippedRegex.findFirstMatchIn(event.formattedMessage).map(_.group(1).toLong).getOrElse(0L)
+      }.sum
+      assertResult(numThreads * callsPerThread + 1)(events.size + totalSkipped)
+    }
+  }
+
   test("trace statements") {
     // Test plan: Just log trace statements to make sure that the code does not crash. We can't
     // seem to capture trace statements since they don't even show up in the log file.

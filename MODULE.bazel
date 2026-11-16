@@ -8,6 +8,14 @@ bazel_dep(name = "rules_java", version = "9.6.1")
 bazel_dep(name = "rules_scala", version = "7.0.0")
 bazel_dep(name = "rules_proto", version = "7.0.2")
 bazel_dep(name = "contrib_rules_jvm", version = "0.32.0")
+bazel_dep(name = "rules_pkg", version = "0.7.0")
+
+# Pin rules_pkg to 0.7.0 to match the internal Databricks build. protobuf requests 1.0.1, and
+# bazel_dep only sets a minimum version, so the override is required.
+single_version_override(
+    module_name = "rules_pkg",
+    version = "0.7.0",
+)
 
 # Use precompiled protoc rather than building it from source, which saves about 30 seconds on a
 # new build. See
@@ -161,6 +169,10 @@ maven.install(
         "io.opencensus:opencensus-contrib-grpc-metrics:0.31.1",
         "io.opencensus:opencensus-contrib-zpages:0.31.1",
     ],
+    # Fail to build if the artifacts list above is updated without updating the lockfile.
+    fail_if_repin_required = True,
+    # Pin artifact versions and hashes using a lockfile.
+    lock_file = "//bazel:maven_install.json",
     repositories = [
         "https://repo1.maven.org/maven2",
     ],
@@ -169,11 +181,8 @@ maven.install(
     # the latest version, which can cause incompatibilities with components that depend on
     # specific library versions (e.g., Guava for Dicer).
     version_conflict_policy = "pinned",
-    # Pin artifact versions and hashes using a lockfile.
-    lock_file = "//bazel:maven_install.json",
-    # Fail to build if the artifacts list above is updated without updating the lockfile.
-    fail_if_repin_required = True,
 )
+
 # Reexport `contrib_rules_jvm_deps` from `contrib_rules_jvm`, so that we use the same version of
 # JUnit libraries.
 use_repo(maven, "contrib_rules_jvm_deps", "maven")
@@ -215,7 +224,7 @@ rust.toolchain(
         "rust-src-1.97.1.tar.xz": "e9a1e616d04c6845895c827a178b9227f7c7199f3f4a80af81ab3aff7b80156b",
         "rust-std-1.97.1-x86_64-unknown-linux-gnu.tar.xz": "1c1e704ae80126b7de34f72ea2825f7fd01736dec20732faed47374b95282fba",
         "rustc-1.97.1-x86_64-unknown-linux-gnu.tar.xz": "9819d0a32d56bd339585319c80260e332779f5541fd66838ab7e016d6c814819",
-    }, 
+    },
     versions = [RUSTC_VERSION],
 )
 

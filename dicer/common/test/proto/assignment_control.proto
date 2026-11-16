@@ -1,0 +1,105 @@
+syntax = "proto2";
+
+package dicer.test;
+
+
+import "dicer/common/proto/common.proto";
+import "dicer/friend/proto/friend.proto";
+import "scalapb.proto";
+
+option java_package = "com.databricks.dicer.common";
+option java_generate_equals_and_hash = true;
+
+option java_multiple_files = true;
+option (scalapb.options) = {
+  package_name: "com.databricks.dicer.common",
+  flat_package: true,
+};
+
+// A gRPC service exposed by DicerTestEnvironmentDriverMain that allows Rust tests to control
+// assignments in the Scala test environment. This enables Rust tests to freeze assignments
+// to specific Slicelets for deterministic testing.
+//
+// This is the inverse direction of the TestDriver service: TestDriver is Rust-implemented and
+// Scala-called, whereas AssignmentControl is Scala-implemented and Rust-called.
+service AssignmentControl {
+  // Sets and freezes the assignment for a target, returning a handle that represents this
+  // assignment generation. Once frozen, the Assigner will not automatically update the assignment
+  // based on Slicelet signals - the assignment remains fixed until explicitly unfrozen.
+  rpc SetAndFreezeAssignment(SetAndFreezeAssignmentRequestP)
+      returns (SetAndFreezeAssignmentResponseP) {
+  }
+
+  // Unfreezes the assignment for a target, allowing Dicer to resume automatic assignment
+  // generation. If already unfrozen, this is a no-op.
+  rpc UnfreezeAssignment(UnfreezeAssignmentRequestP)
+      returns (UnfreezeAssignmentResponseP) {
+
+  }
+
+  // Returns the total attributed load reported in the latest Slicelet watch request for a target.
+  rpc GetTotalAttributedLoad(GetTotalAttributedLoadRequestP)
+      returns (GetTotalAttributedLoadResponseP) {
+
+  }
+}
+
+// Request to set and freeze an assignment for a target.
+message SetAndFreezeAssignmentRequestP {
+  // The target for which to set the assignment.
+  optional dicer.TargetP target = 1;
+
+  // The proposed assignment. This contains the full slice-to-resource mapping.
+  optional TestAssignmentP test_assignment = 2;
+}
+
+// Response containing the generation of the frozen assignment.
+message SetAndFreezeAssignmentResponseP {
+  // The generation of the frozen assignment. This can be used as a handle to verify
+  // that Clerks have received at least this assignment version.
+  optional dicer.GenerationP generation = 1;
+}
+
+// Request to unfreeze the assignment for a target.
+message UnfreezeAssignmentRequestP {
+  // The target for which to unfreeze the assignment.
+  optional dicer.TargetP target = 1;
+}
+
+// Response for unfreezing an assignment.
+message UnfreezeAssignmentResponseP {}
+
+// Request to get the total attributed load for a target.
+message GetTotalAttributedLoadRequestP {
+  // The target for which to get the total attributed load.
+  optional dicer.TargetP target = 1;
+}
+
+// Response containing the total attributed load.
+message GetTotalAttributedLoadResponseP {
+  // The total attributed load (sum of primaryRateLoad across all slices).
+  optional double total_attributed_load = 1;
+}
+
+// Represents a test assignment built via TestAssignmentBuilder.
+// This corresponds to Scala's `DicerTestEnvironment.TestAssignment` class.
+message TestAssignmentP {
+  // The complete slice assignments covering the full key space.
+  // Each entry maps a Slice to one or more Slicelet resources.
+  repeated ProposedSliceAssignmentP slice_assignments = 1;
+}
+
+// A single slice assignment mapping a slice to resources (Slicelets).
+// This corresponds to Scala's `ProposedSliceAssignment` class.
+message ProposedSliceAssignmentP {
+  // The slice being assigned.
+  optional dicer.friend.SliceP slice = 1;
+
+  // The SQUIDs of resources (Slicelets) to which this slice is assigned.
+  // Must contain at least one resource. Multiple resources support replication.
+  repeated dicer.friend.SquidP resources = 2;
+
+  // OPTIONAL: Primary rate load for this slice assignment.
+  // Corresponds to the load reported by Slicelets for this slice.
+  optional double primary_rate_load = 3;
+}

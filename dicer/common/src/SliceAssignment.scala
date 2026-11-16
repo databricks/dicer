@@ -104,7 +104,7 @@ import com.databricks.dicer.friend.Squid
  * The Slice assignment optionally defines [[primaryRateLoadOpt]], which is the primary rate load
  * measurement for this Slice as of `generation`. (See [[SliceletData.SliceLoad.primaryRateLoad]]
  * for more details on this measurement.) If this measurement changes significantly between
- * assignments, [[ProposedAssignment.commit()]] may choose to update this value and
+ * assignments, the assigner's `ProposedAssignment.commit()` may choose to update this value and
  * advance [[generation]], even if nothing else has changed in the Slice assignment. In this case,
  * [[SubsliceAnnotation]]s still captures assignment continuity, but the generation bump for the
  * Slice assignment as a whole ensures that the roughly accurate load measurements are disseminated

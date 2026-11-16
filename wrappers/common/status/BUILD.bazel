@@ -1,4 +1,4 @@
-load("@rules_scala//scala:scala.bzl", "scala_library")
+load("@rules_scala//scala:scala.bzl", "scala_library", "scala_test")
 
 package(
     default_visibility = ["//visibility:public"],
@@ -8,5 +8,28 @@ package(
 scala_library(
     name = "status",
     srcs = ["ProbeStatuses.scala"],
-    deps = ["//wrappers/rpc:readiness_probe_tracker"],
+)
+
+# Probe status manager wrapper (status-poller in the internal repo)
+scala_library(
+    name = "status-poller",
+    srcs = ["ProbeStatusManager.scala"],
+    deps = [
+        ":status",
+        "//wrappers/util:lock",
+        "@maven//:com_google_code_findbugs_jsr305",
+    ],
+)
+
+scala_test(
+    name = "status_poller_test",
+    timeout = "short",
+    testonly = True,
+    srcs = ["test/ProbeStatusManagerSuite.scala"],
+    deps = [
+        ":status",
+        ":status-poller",
+        "//wrappers/util:databricks-test",
+        "//wrappers/util:lock",
+    ],
 )

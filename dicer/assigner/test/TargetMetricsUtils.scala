@@ -279,8 +279,7 @@ object TargetMetricsUtils {
   def getGeneratorsRemovedTotalAllReasons(target: Target): Long = {
     getGeneratorsRemovedTotal(target, GeneratorShutdownReason.GENERATOR_INACTIVITY) +
     getGeneratorsRemovedTotal(target, GeneratorShutdownReason.PREFERRED_ASSIGNER_CHANGE) +
-    getGeneratorsRemovedTotal(target, GeneratorShutdownReason.TARGET_CONFIG_CHANGE) +
-    getGeneratorsRemovedTotal(target, GeneratorShutdownReason.TARGET_MIGRATION_REROUTE)
+    getGeneratorsRemovedTotal(target, GeneratorShutdownReason.TARGET_CONFIG_CHANGE)
   }
 
   /** Gets the current number of targets with active generators. */

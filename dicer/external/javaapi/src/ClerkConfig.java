@@ -1,4 +1,3 @@
-// LINT.IfChange
 package com.databricks.dicer.external.javaapi;
 
 import com.databricks.dicer.client.javaapi.ClerkConfImpl;
@@ -110,5 +109,3 @@ public final class ClerkConfig {
     }
   }
 }
-// LINT.ThenChange(dicer/external/src/Conf.scala)
-// LINT.ThenChange(dicer/rust/external/clerk/src/clerk.rs)

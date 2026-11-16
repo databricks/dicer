@@ -1,4 +1,3 @@
-// LINT.IfChange
 package com.databricks.dicer.external
 
 import java.net.URI
@@ -30,5 +29,3 @@ final class ResourceAddress private (val uri: URI) extends Ordered[ResourceAddre
 private[dicer] object ResourceAddress {
   def apply(uri: URI): ResourceAddress = new ResourceAddress(uri)
 }
-// LINT.ThenChange(dicer/external/javaapi/src/ResourceAddress.java)
-// LINT.ThenChange(dicer/rust/external/types/src/resource_address.rs)

@@ -117,7 +117,8 @@ object ConfigTestUtils {
       targetRateLimitConfig = TargetWatchRequestRateLimitConfig.DEFAULT,
       authorizer = AuthorizerHelper.DEFAULT_AUTHORIZER,
       keySensitivityConfig = KeySensitivityConfig.DEFAULT,
-      useAlternativeTarget = false
+      useAlternativeTarget = false,
+      ownerTeamName = ""
     )
     // Try parsing as well, just to make sure the assumptions in this helper are valid.
     val proto = TargetConfigFieldsP(
@@ -139,7 +140,8 @@ object ConfigTestUtils {
     }
     // When parsing, the choice of config scope has no effect because we haven't defined any
     // overrides.
-    val parsedConfig = InternalTargetConfig.fromProtos(proto, advancedProto)
+    val parsedConfig: InternalTargetConfig =
+      InternalTargetConfig.fromProtos(proto, advancedProto, ownerTeamName = "")
     assert(config == parsedConfig)
     config
   }

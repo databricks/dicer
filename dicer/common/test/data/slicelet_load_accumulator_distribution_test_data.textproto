@@ -1,7 +1,7 @@
 # proto-file: dicer/common/test/proto/test_data.proto
 # proto-message: SliceletLoadAccumulatorTestDataP
 
-# Load-distribution reporting cases, currently consumed only by Rust.
+# Load-distribution reporting cases, shared by the Scala and Rust SliceletLoadAccumulator tests.
 
 valid_cases: [
   # Test plan: No CDF is produced in load report when distribution reporting is

@@ -14,7 +14,7 @@ import com.databricks.caching.util.{FakeSequentialExecutionContextPool, FakeType
 import com.databricks.caching.util.TestUtils.TestName
 import com.databricks.conf.Configs
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
-import com.databricks.dicer.client.{WatchStubManager, WatchStubManagerConfig}
+import com.databricks.dicer.client.{WatchAddress, WatchStubManager, WatchStubManagerConfig}
 import com.databricks.dicer.common.{
   ClerkData,
   ClientRequest,
@@ -79,7 +79,7 @@ class AssignerBoundedAssignmentSyncingSuite extends DatabricksTest with TestName
       WatchStubManagerConfig(
         clientType = ClientType.Slicelet,
         targetName = "assigner-bounded-assignment-syncing-suite-test",
-        watchAddress = URI.create(s"http://localhost:${assigner.localUri.getPort}"),
+        watchAddress = WatchAddress.fromAddress(s"http://localhost:${assigner.localUri.getPort}"),
         tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
         watchFromDataPlane = false,
         sourceIpOpt = None
@@ -106,7 +106,6 @@ class AssignerBoundedAssignmentSyncingSuite extends DatabricksTest with TestName
       timeout = 1.minute,
       subscriberData = ClerkData,
       supportsSerializedAssignment = true,
-      redirectTokenOpt = None,
       alternativeTargetOpt = None,
       clusterUriOpt = None,
       regionUriOpt = None
@@ -142,7 +141,6 @@ class AssignerBoundedAssignmentSyncingSuite extends DatabricksTest with TestName
       timeout = 1.minute,
       subscriberData = ClerkData,
       supportsSerializedAssignment = true,
-      redirectTokenOpt = None,
       alternativeTargetOpt = None,
       clusterUriOpt = None,
       regionUriOpt = None

@@ -1,4 +1,3 @@
-// LINT.IfChange
 package com.databricks.dicer.external.javaapi;
 
 import com.google.protobuf.ByteString;
@@ -147,5 +146,3 @@ public final class SliceKey extends HighSliceKey {
     return this.scalaSliceKey;
   }
 }
-// LINT.ThenChange(dicer/external/src/SliceKey.scala)
-// LINT.ThenChange(dicer/rust/external/types/src/slice_key.rs)

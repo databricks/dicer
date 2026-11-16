@@ -32,11 +32,26 @@ scala_test(
         ":info-service",
         ":instrumentation",
         "//wrappers/common/status",
+        "//wrappers/common/status:status-poller",
         "//wrappers/logging",
-        "//wrappers/rpc:readiness_probe_tracker",
         "//wrappers/util:databricks-test",
         "//wrappers/util:lock",
         "@maven//:org_scala_lang_scala_library",
+    ],
+)
+
+scala_test(
+    name = "info_service_readiness_test",
+    timeout = "short",
+    testonly = True,
+    srcs = ["test/InfoServiceReadinessSuite.scala"],
+    deps = [
+        ":info-service",
+        "//wrappers/common/status",
+        "//wrappers/common/status:status-poller",
+        "//wrappers/logging",
+        "//wrappers/util:databricks-test",
+        "//wrappers/util:lock",
     ],
 )
 
@@ -56,8 +71,8 @@ scala_library(
     deps = [
         ":instrumentation",
         "//wrappers/common/status",
+        "//wrappers/common/status:status-poller",
         "//wrappers/logging",
-        "//wrappers/rpc:readiness_probe_tracker",
         "//wrappers/util:lock",
         "@maven//:com_google_code_findbugs_jsr305",
         "@maven//:io_opencensus_opencensus_contrib_grpc_metrics",

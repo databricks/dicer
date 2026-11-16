@@ -10,10 +10,8 @@ trait ProbeStatusSource {
 
 /** ProbeStatuses contains various probe status definitions. */
 object ProbeStatuses {
-  val OK_STATUS: Int =
-    com.databricks.rpc.armeria.ProbeStatuses.OK_STATUS
-  val NOT_YET_READY_STATUS: Int =
-    com.databricks.rpc.armeria.ProbeStatuses.NOT_YET_READY_STATUS
+  val OK_STATUS: Int = 200
+  val NOT_YET_READY_STATUS: Int = 418
   val NEED_RESTART_STATUS: Int = 503
 
   def notYetReady(serviceName: String): ProbeStatus =

@@ -1,4 +1,3 @@
-// LINT.IfChange
 package com.databricks.dicer.external.javaapi;
 
 /**
@@ -20,5 +19,3 @@ public abstract sealed class HighSliceKey implements Comparable<HighSliceKey>
   /** Internal bridge to the underlying Scala representation. */
   protected abstract com.databricks.dicer.external.HighSliceKey scalaHighSliceKey();
 }
-// LINT.ThenChange(dicer/external/src/SliceKey.scala)
-// LINT.ThenChange(dicer/rust/external/types/src/slice_key.rs)

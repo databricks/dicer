@@ -27,15 +27,13 @@ message Rfc1123TestDataP {
   repeated string invalid_strings = 4;
 }
 
-// Shared test data for the KubernetesClusterUri IDM-URI wrappers' `fromUri` contract against the
-// embedded InfraDataModel.
+// Shared test data for the KubernetesClusterUri wrappers' `fromUri` contract.
 message KubernetesClusterUriTestDataP {
-  // Canonical `kubernetes-cluster:` URIs present in the embedded InfraDataModel; `fromUri` must
-  // accept these and round-trip them back to the same string.
+  // Well-formed `kubernetes-cluster:` URIs; `fromUri` must accept these and round-trip them back to
+  // the same string.
   repeated string valid_uris = 1;
 
-  // Values `fromUri` must reject: URIs of another scheme, structurally malformed values, and
-  // well-formed cluster URIs absent from the embedded model.
+  // Values `fromUri` must reject: URIs of another scheme and structurally malformed values.
   repeated string invalid_uris = 2;
 }
 

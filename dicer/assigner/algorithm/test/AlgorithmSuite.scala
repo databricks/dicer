@@ -13,6 +13,7 @@ import com.databricks.api.proto.dicer.external.LoadBalancingMetricConfigP.{
   ReservationHintP
 }
 import com.databricks.caching.util.TestUtils.ParameterizedTestNameDecorator
+import com.databricks.dicer.assigner.{ProposedAssignment, ProposedSliceAssignment}
 import com.databricks.dicer.assigner.AssignmentStats.{AssignmentChangeStats, AssignmentLoadStats}
 import com.databricks.dicer.assigner.config.{ChurnConfig, InternalTargetConfig}
 import com.databricks.dicer.assigner.config.testing.{ConfigTestUtils}
@@ -20,15 +21,7 @@ import com.databricks.dicer.assigner.config.InternalTargetConfig.{
   KeyReplicationConfig,
   LoadBalancingConfig
 }
-import com.databricks.dicer.common.{
-  Assignment,
-  Generation,
-  ProposedAssignment,
-  ProposedSliceAssignment,
-  SliceAssignment,
-  SliceKeyHelper,
-  SliceMapHelper
-}
+import com.databricks.dicer.common.{Assignment, Generation, SliceAssignment, SliceKeyHelper}
 import com.databricks.dicer.common.testing.SliceTestUtils.{
   LowInclusiveLongFluent,
   LowInclusiveStringFluent,
@@ -40,6 +33,7 @@ import com.databricks.dicer.common.testing.SliceTestUtils.{
   createRandomLoadMap,
   createRandomProposal,
   createResources,
+  createLooseGeneration,
   createTestSquid,
   toSliceKey,
   toSquid,
@@ -820,7 +814,7 @@ class ParameterizedAlgorithmSuite(keyReplicationConfig: KeyReplicationConfig)
     val resources: Resources = createNResources(10)
     val firstAssignment: Assignment =
       generateInitialAssignment(target, resources, targetConfig.keyReplicationConfig)
-    val updatedResources: Resources = createNResources(10)(creationTimeOffset = 1)
+    val updatedResources: Resources = createNResources(10, creationTimeOffset = 1)
     val assignment: Assignment =
       generateAssignment(
         target,
@@ -854,7 +848,7 @@ class ParameterizedAlgorithmSuite(keyReplicationConfig: KeyReplicationConfig)
     val loadMap: LoadMap = loadMapBuilder.build()
 
     val expectedSlices: SliceMap[ProposedSliceAssignment] =
-      predecessor.sliceMap.map(SliceMapHelper.PROPOSED_SLICE_ASSIGNMENT_ACCESSOR) {
+      predecessor.sliceMap.map(ProposedSliceAssignment.SLICE_ACCESSOR) {
         sliceAssignment: SliceAssignment =>
           ProposedSliceAssignment(
             sliceAssignment.slice,
@@ -1294,4 +1288,5 @@ class ParameterizedAlgorithmSuite(keyReplicationConfig: KeyReplicationConfig)
     )
     verifyHomomorphicAssignment(initialAssignment, newAssignment)
   }
+
 }

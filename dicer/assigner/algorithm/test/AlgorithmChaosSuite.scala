@@ -11,7 +11,7 @@ import com.databricks.api.proto.dicer.external.LoadBalancingMetricConfigP.{
 }
 import com.databricks.caching.util.AsciiTable
 import com.databricks.dicer.assigner.AssignmentStats.AssignmentLoadStats
-import com.databricks.dicer.assigner.config.{ChurnConfig}
+import com.databricks.dicer.assigner.config.{ChurnConfig, InternalTargetConfig}
 import com.databricks.dicer.assigner.config.testing.{ConfigTestUtils}
 import com.databricks.dicer.assigner.config.InternalTargetConfig.{
   KeyReplicationConfig,
@@ -38,6 +38,32 @@ class AlgorithmChaosSuite extends AlgorithmSuiteBase {
     }
   }
 
+  /** How Slice sizes relate to Slice loads in a size-limit chaos scenario. */
+  private sealed trait SizeCorrelation
+
+  private object SizeCorrelation {
+
+    /** Sizes are drawn from a random size map generated independently of the load map. */
+    case object Independent extends SizeCorrelation
+
+    /** Sizes are proportional to load (excluding any hot key, which has negligible size). */
+    case object ProportionalToLoad extends SizeCorrelation
+  }
+
+  /**
+   * Parameters for chaos test cases with size limits.
+   *
+   * @param sizeCorrelation How sizes relate to loads in each round.
+   * @param sizeOvershootRatioIcdfBound An expected upper bound of the ICDF for the distribution of
+   *        the ratio by which the maximum resource size exceeds the maximum desired size per
+   *        resource, i.e. `maxSize / maxDesiredSize - 1` (negative when all resources are within
+   *        the maximum desired size). See [[ChaosTestCase.minToAvgImbalanceRatioIcdfBound]] for the
+   *        meaning of "bound".
+   */
+  private case class SizeLimitChaosScenario(
+      sizeCorrelation: SizeCorrelation,
+      sizeOvershootRatioIcdfBound: DiscreteInverseCdf)
+
   /**
    * Case class encapsulating the configurable parameters for the parameterized chaos test below.
    *
@@ -52,11 +78,14 @@ class AlgorithmChaosSuite extends AlgorithmSuiteBase {
    * @param avgToMaxImbalanceRatioIcdfBound
    *        Same as [[minToAvgImbalanceRatioIcdfBound]], but bounds the imbalance ratio that the
    *        maximum resource load can deviate from the average resource load.
+   * @param sizeLimitScenarioOpt When defined, each round configures a size limit and a random size
+   *        map as described by the scenario.
    */
   private case class ChaosTestCase(
       churnConfig: ChurnConfig,
       minToAvgImbalanceRatioIcdfBound: DiscreteInverseCdf,
       avgToMaxImbalanceRatioIcdfBound: DiscreteInverseCdf,
+      sizeLimitScenarioOpt: Option[SizeLimitChaosScenario],
   )
 
   /** The parameters for the chaos test. */
@@ -89,6 +118,7 @@ class AlgorithmChaosSuite extends AlgorithmSuiteBase {
             1.00 -> 0.70
           )
         ),
+        sizeLimitScenarioOpt = None
       ),
       ChaosTestCase(
         churnConfig = ConfigTestUtils.ZERO_PENALTY_CHURN_CONFIG,
@@ -113,7 +143,8 @@ class AlgorithmChaosSuite extends AlgorithmSuiteBase {
             0.99 -> 0.35,
             1.00 -> 0.70
           )
-        )
+        ),
+        sizeLimitScenarioOpt = None
       )
     )
   }
@@ -123,7 +154,8 @@ class AlgorithmChaosSuite extends AlgorithmSuiteBase {
     // generation. The test begins with an initial assignment, then updates the assignment 1000
     // times, each time with a random set of input parameters. The test verifies that all the
     // produced assignments meet the expected properties, and that the distribution of imbalance
-    // ratios does not exceed the expected upper bounds at various quantiles (see `ChaosTestCase`).
+    // ratios (and, for size-limit scenarios, of size overshoot ratios) does not exceed the expected
+    // upper bounds at various quantiles (see `ChaosTestCase`).
     //
     // The range of randomized inputs for each round are as follows:
     // - Number of resources: uniformly distributed between 6 and 8 (in each round, we pick a random
@@ -136,6 +168,10 @@ class AlgorithmChaosSuite extends AlgorithmSuiteBase {
     //   to 20% over total capacity).
     // - Whether there's a hot key. If there's a hot key, it has load equal to 50% of the
     //   total load.
+    // - For size-limit scenarios (see `SizeLimitChaosScenario`): total size (summed over Slices,
+    //   before replication) uniformly distributed between 0 and 120% of the size limit hint across
+    //   all resources divided by the minimum number of replicas, so that the size limit hint is
+    //   sometimes relaxed. Sizes are either independent of or proportional to load.
     //   - Note: We intentionally do not attempt to simulate multiple hot keys, since when we do,
     //     sometimes those two hot keys end up being on the same resource before the algo runs. When
     //     this happens, neither key can be moved to another resource without making the target
@@ -156,6 +192,8 @@ class AlgorithmChaosSuite extends AlgorithmSuiteBase {
     val loadMapMaxToMinDensityRatio: Double = 4.0
     // Use a TIGHT imbalance tolerance (2.5%) to stress the migration phase of the algorithm.
     val loadImbalanceToleranceHintP: ImbalanceToleranceHintP = ImbalanceToleranceHintP.TIGHT
+    // Size limit hint for all rounds of size-limit scenarios (we vary the total size instead)
+    val sizeLimitHint: Double = 1000.0
     // Total set of resources to choose from to be "healthy" in any given round
     val allResources: Resources = createNResources(8)
 
@@ -213,29 +251,30 @@ class AlgorithmChaosSuite extends AlgorithmSuiteBase {
     // (i.e. (max - avg) / adjustedMaxLoadHint) is recorded in these arrays.
     val minLoadImbalanceRatios = mutable.ArrayBuffer[Double]()
     val maxLoadImbalanceRatios = mutable.ArrayBuffer[Double]()
+    // For size-limit scenarios, the measured size overshoot ratio (i.e.
+    // maxSize / maxDesiredSize - 1) of each generated assignment.
+    val sizeOvershootRatios = mutable.ArrayBuffer[Double]()
 
     for (_: Int <- 0 until generationRounds) {
       val resources: Resources = pickSubsetOfResources()
       val hasHotKey: Boolean = pickHasHotKey
       val totalLoad: Double = pickTotalLoad(resources.availableResources.size)
+      // Without a hot key, the base load map is the load map. With a hot key, it bears
+      // (1 - `hotKeyLoadFraction`) of the total load, and the hot key's load is added separately
+      // below.
+      val baseLoadMap: LoadMap = createRandomLoadMap(
+        rng,
+        totalLoad = if (hasHotKey) totalLoad * (1.0 - hotKeyLoadFraction) else totalLoad,
+        numSlices = loadMapNumSlices,
+        maxToMinDensityRatio = loadMapMaxToMinDensityRatio
+      )
       val loadMap: LoadMap = if (!hasHotKey) {
-        createRandomLoadMap(
-          rng,
-          totalLoad = totalLoad,
-          numSlices = loadMapNumSlices,
-          maxToMinDensityRatio = loadMapMaxToMinDensityRatio
-        )
+        baseLoadMap
       } else {
-        // Include a hot key in the load map by first generating a load map with (1 -
-        // `hotKeyLoadFraction`) load, then picking some random slice's low-key to be the hot key,
-        // and splicing it out from the load map to assign it `hotKeyLoadFraction` of the total
-        // load, then re-build the load map with this new single hot key slice.
-        val baseLoadMap: LoadMap = createRandomLoadMap(
-          rng,
-          totalLoad = totalLoad * (1.0 - hotKeyLoadFraction),
-          numSlices = loadMapNumSlices,
-          maxToMinDensityRatio = loadMapMaxToMinDensityRatio
-        )
+        // Include a hot key in the load map by picking some random slice's low-key in the base
+        // load map to be the hot key, and splicing it out from the load map to assign it
+        // `hotKeyLoadFraction` of the total load, then re-build the load map with this new single
+        // hot key slice.
         val hotKey: SliceKey =
           baseLoadMap.sliceMap
             .entries(rng.nextInt(baseLoadMap.sliceMap.entries.size))
@@ -267,12 +306,44 @@ class AlgorithmChaosSuite extends AlgorithmSuiteBase {
         keyReplicationConfig =
           pickKeyReplicationConfig(resources.availableResources.size, hasHotKey)
       )
-      val newAssignment: Assignment = generateAssignment(
+      // For size-limit scenarios, configure the size limit and pick a random size map.
+      val sizeMapOpt: Option[SizeMap] = chaosTestCase.sizeLimitScenarioOpt.map {
+        scenario: SizeLimitChaosScenario =>
+          // The total size of the size map. Each replica holds a full copy, so the total assignment
+          // size is up to `minReplicas` times larger; dividing by it keeps that total within 120%
+          // of the hint across all resources.
+          val totalSize: Double = rng.nextDouble() * 1.2 * sizeLimitHint *
+            resources.availableResources.size / targetConfig.keyReplicationConfig.minReplicas
+          scenario.sizeCorrelation match {
+            case SizeCorrelation.Independent =>
+              createRandomSizeMap(
+                rng,
+                totalSize,
+                numSlices = loadMapNumSlices,
+                maxToMinDensityRatio = loadMapMaxToMinDensityRatio
+              )
+            case SizeCorrelation.ProportionalToLoad =>
+              // Proportional to the base load map, which excludes the hot key: the hot key bears
+              // `hotKeyLoadFraction` (half) of the load, and that share of the size on one
+              // unsplittable key would overshoot any size limit on its own.
+              val baseTotalLoad: Double = baseLoadMap.getLoad(Slice.FULL)
+              val sizePerLoad: Double = if (baseTotalLoad > 0) totalSize / baseTotalLoad else 0
+              val entries: Vector[SizeMap.Entry] = baseLoadMap.sliceMap.entries.map {
+                entry: LoadMap.Entry =>
+                  SizeMap.Entry(entry.slice, entry.load * sizePerLoad)
+              }
+              SizeMap.newBuilder().putSize(entries: _*).build()
+          }
+      }
+      val sizedTargetConfig: InternalTargetConfig =
+        if (sizeMapOpt.isDefined) withSizeLimit(targetConfig, sizeLimitHint) else targetConfig
+      val newAssignment: Assignment = generateAssignmentWithSizes(
         target,
-        targetConfig,
+        sizedTargetConfig,
         resources,
         previousAssignment,
-        loadMap
+        loadMap,
+        sizeMapOpt
       )
 
       val metric: LoadBalancingMetricConfig = targetConfig.loadBalancingConfig.primaryRateMetric
@@ -314,15 +385,28 @@ class AlgorithmChaosSuite extends AlgorithmSuiteBase {
       maxLoadImbalanceRatios +=
       (reservationAdjustedLoadByResource.values.max - averageReservationAdjustedLoad) /
       adjustedMaxLoadHint
+      for (sizeMap: SizeMap <- sizeMapOpt) {
+        val maxDesiredSize: Double =
+          getMaxDesiredSize(sizeLimitHint, resources, newAssignment, sizeMap)
+        val maxSize: Double = getSizeByResource(newAssignment, sizeMap).values.max
+        sizeOvershootRatios += maxSize / maxDesiredSize - 1
+      }
 
       previousAssignment = newAssignment
     }
 
     // Finished all iterations of assignment generation. Verify the imbalance ratio statistics.
+    // Without a size limit, there are no size overshoot ratios and nothing to check.
+    val sizeOvershootRatioIcdfBound: DiscreteInverseCdf = chaosTestCase.sizeLimitScenarioOpt
+      .map { scenario: SizeLimitChaosScenario =>
+        scenario.sizeOvershootRatioIcdfBound
+      }
+      .getOrElse(DiscreteInverseCdf(points = SortedMap.empty))
     for (entry <- Seq(
-        // The "min" and "max" Strings indicating imbalance ratio types used in debug messages.
-        (minLoadImbalanceRatios, chaosTestCase.minToAvgImbalanceRatioIcdfBound, "min"),
-        (maxLoadImbalanceRatios, chaosTestCase.avgToMaxImbalanceRatioIcdfBound, "max")
+        // The Strings indicating ratio types used in debug messages.
+        (minLoadImbalanceRatios, chaosTestCase.minToAvgImbalanceRatioIcdfBound, "min load"),
+        (maxLoadImbalanceRatios, chaosTestCase.avgToMaxImbalanceRatioIcdfBound, "max load"),
+        (sizeOvershootRatios, sizeOvershootRatioIcdfBound, "size overshoot")
       )) {
       val (actualImbalanceRatios, imbalanceRatioBound, imbalanceRatioType): (
           Seq[Double],

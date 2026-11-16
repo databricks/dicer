@@ -10,7 +10,7 @@ import com.databricks.caching.util.Lock.withLock
 
 /**
  * FakeKubernetesTargetWatcherFactory - A [[KubernetesTargetWatcher.Factory]] that returns fake k8s
- * target watchers and enables simulating terminating resource snapshots.
+ * target watchers and enables simulating pod termination signals.
  */
 @ThreadSafe
 class FakeKubernetesTargetWatcherFactory extends KubernetesTargetWatcher.Factory {
@@ -71,15 +71,20 @@ class FakeKubernetesTargetWatcherFactory extends KubernetesTargetWatcher.Factory
       )
     }
 
-  /** Replaces the terminating resource set reported by the fake watcher. */
+  /**
+   * Simulates Kubernetes marking `podUuid` as terminating for `kubernetesWatchTarget`.
+   *
+   * NOTE: It is OK for the callback to be invoked multiple times for the same podUuid.
+   */
   @throws[IllegalArgumentException](
     "if no watch on kubernetesWatchTarget has been established, or the watch is not started"
   )
-  def simulateTerminatingResources(
+  def simulateTerminationSignal(
       kubernetesWatchTarget: KubernetesWatchTarget,
-      terminatingResources: Set[UUID]): Unit = {
-    // Record the terminating resources and read the callback under the lock. Release the lock
-    // before invoking the callback since it may re-enter the lock.
+      podUuid: UUID): Unit = {
+    // Record the terminating pod and read the callback under the lock. We invoke the callback ONLY
+    // after releasing the lock, since we should never invoke callbacks under the lock (and also k8s
+    // watchers make no guarantees about serial execution of callbacks).
     val invalidationCallback: () => Unit = withLock(lock) {
       val targetWatcher: FakeKubernetesTargetWatcher = targetWatcherMap.getOrElse(
         kubernetesWatchTarget,
@@ -88,17 +93,20 @@ class FakeKubernetesTargetWatcherFactory extends KubernetesTargetWatcher.Factory
         )
       )
 
-      // The callback is present iff the watch is started; an update only makes sense while running.
+      // The callback is present iff the watch is started; a signal only makes sense while running.
       val callback: () => Unit = targetWatcher.getInvalidationCallbackOpt.getOrElse(
         throw new IllegalArgumentException(
           s"Watch on $kubernetesWatchTarget has not been started"
         )
       )
 
-      targetWatcher.terminatingResourceUuids = terminatingResources
+      // Record the pod as terminating so the watch's getTerminatingPods() reports it.
+      targetWatcher.terminatingResourceUuids = targetWatcher.terminatingResourceUuids + podUuid
       callback
-    }
+    } // lock released
 
+    // NOTE: As documented on the watcher's start(), the callback is not guaranteed to be serialized
+    // (it can be invoked concurrently from multiple threads).
     invalidationCallback()
   }
 }

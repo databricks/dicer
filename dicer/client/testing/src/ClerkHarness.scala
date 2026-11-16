@@ -71,20 +71,6 @@ object ClerkHarness {
         }
     }
   }
-
-  /**
-   * Compares two [[ResourceAddress]] instances for equality, normalizing trailing slashes.
-   *
-   * This is necessary because Rust's Uri applies root-path normalization where a trailing slash
-   * is added when accessing the root path URI as a string. Whereas, Java's `java.net.URI` preserves
-   * the original form without adding the trailing slash. Since `URI.equals()` considers these as
-   * different URIs, we normalize by stripping trailing slashes before comparing.
-   *
-   * TODO(<internal bug>): Normalize URI for ResourceAddress in Scala/Java.
-   */
-  def resourceAddressEquals(actual: ResourceAddress, expected: ResourceAddress): Boolean = {
-    actual.uri.toString.stripSuffix("/") == expected.uri.toString.stripSuffix("/")
-  }
 }
 
 /**

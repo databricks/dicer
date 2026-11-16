@@ -1,18 +1,11 @@
 package com.databricks.dicer.client
 
-import java.net.URI
-
-/**
- * Helper object for constructing watch addresses (URIs) for Dicer clients to connect to the
- * Assigner watch server.
- */
-object WatchAddressHelper {
+/** Framework-specific address classification. Service discovery is not supported in open source. */
+private[client] object WatchAddressHelper {
 
   /**
-   * Returns the Assigner URI that a client needs to connect to by the given assigner hostname
-   * and port.
+   * Whether `address` is a service discovery address which has no port. Open-source addresses
+   * always require an explicit port.
    */
-  def getAssignerURI(assignerHostName: String, assignerPort: Int): URI = {
-    URI.create(s"https://$assignerHostName:$assignerPort")
-  }
+  def isServiceDiscoveryAddress(address: String): Boolean = false
 }

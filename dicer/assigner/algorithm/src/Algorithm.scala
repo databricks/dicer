@@ -4,19 +4,17 @@ import java.time.Instant
 
 import scala.collection.mutable
 
+import com.databricks.caching.util.AssertMacros.iassert
 import com.databricks.caching.util.{CachingErrorCode, PrefixLogger}
+import com.databricks.dicer.assigner.ProposedSliceAssignment
 import com.databricks.dicer.assigner.config.{ChurnConfig, InternalTargetConfig}
 import com.databricks.dicer.assigner.config.InternalTargetConfig.{
   KeyReplicationConfig,
-  LoadBalancingConfig
+  LoadBalancingConfig,
+  SizeLimitMetricConfig
 }
 import com.databricks.dicer.common.TargetHelper.TargetOps
-import com.databricks.dicer.common.{
-  ProposedSliceAssignment,
-  SliceAssignment,
-  SliceMapHelper,
-  SliceWithResources
-}
+import com.databricks.dicer.common.{SliceAssignment, SliceMapHelper, SliceWithResources}
 import com.databricks.dicer.external.{Slice, Target}
 import com.databricks.dicer.friend.{SliceMap, Squid}
 
@@ -32,6 +30,21 @@ object Algorithm {
   // slices).
   private[assigner] val MIN_AVG_SLICE_REPLICAS: Int = 32
   private[assigner] val MAX_AVG_SLICE_REPLICAS: Int = MIN_AVG_SLICE_REPLICAS * 2
+
+  // Headroom for size limits: the maximum desired size per resource is at least this multiple of
+  // the average size per resource. This gives us wiggle room: even when the size limit hint has to
+  // be relaxed, resources aren't packed exactly full, so the algorithm can still move Slices
+  // between them. 20% is a starting point; it will likely need tuning based on production traces
+  // and synthetic workloads. See<internal link>.
+  private[assigner] val SIZE_LIMIT_HEADROOM_RATIO: Double = 1.2
+
+  // Fraction of the maximum desired size per resource above which a Slice is split by size. Slices
+  // must be small relative to the maximum desired size so that the greedy allocation and migration
+  // phases can pack them into resources without exceeding it: with items at most 10% of a bin,
+  // greedy packing fills nearly every bin to at least 10/11 (Johnson et al. 1974, Theorem 2.3,
+  // https://doi.org/10.1137/0203025), comfortably above the average fill of
+  // 1 / SIZE_LIMIT_HEADROOM_RATIO (83%).
+  private[assigner] val SIZE_SPLIT_THRESHOLD_RATIO: Double = 0.1
 
   /**
    * REQUIRES: `resources.availableResources` is not empty.
@@ -58,10 +71,13 @@ object Algorithm {
    * @param instant the time at which the assignment is being generated. Used to determine the churn
    *                penalty applied for recently reassigned Slices (it is used to determine how
    *                recent the reassignment was).
-   * @param target the target that is being load balanced, used for debugging purposes only
-   * @param resources the current set of healthy pods
+   * @param target the target that is being load balanced, used for debugging purposes only.
+   * @param resources the current set of healthy pods.
    * @param baseAssignmentSliceMap the slice map of the predecessor for the new assignment.
    * @param loadMap the current load on the application.
+   * @param sizeMapOpt the current size of the application's state per Slice (borne in full by each
+   *                   replica). Used only when size limits are configured for the target. When
+   *                   empty, all Slices are assumed to have zero size.
    * @param targetConfig the configuration parameters specific to the target
    */
   def generateAssignment(
@@ -70,20 +86,22 @@ object Algorithm {
       targetConfig: InternalTargetConfig,
       resources: Resources,
       baseAssignmentSliceMap: SliceMap[SliceAssignment],
-      loadMap: LoadMap): AssignmentGenerationResult = {
+      loadMap: LoadMap,
+      sizeMapOpt: Option[SizeMap]): AssignmentGenerationResult = {
     val availableResourceCount: Int = resources.availableResources.size
-    val (sliceAssignments, desiredLoadRangeOpt): (
+    val (sliceAssignments, desiredLoadRangeOpt, desiredSizeLimitOpt): (
         SliceMap[SliceWithResources],
-        Option[DesiredLoadRange]) =
+        Option[DesiredLoadRange],
+        Option[DesiredSizeLimit]) =
       if (availableResourceCount == 0) {
         // No available resources, return the same assignment. No load balancing is performed, so
-        // there is no desired load range to report.
+        // there is no desired load range or size limit to report.
         val unchangedAssignments: SliceMap[SliceWithResources] =
           baseAssignmentSliceMap.map((_: SliceWithResources).slice) {
             sliceAssignment: SliceAssignment =>
               sliceAssignment.sliceWithResources
           }
-        (unchangedAssignments, None)
+        (unchangedAssignments, None, None)
       } else {
         // Load balance while accounting for predicted future uniformly-distributed load.
         val adjustedLoadMap: LoadMap =
@@ -107,24 +125,29 @@ object Algorithm {
             baseAssignmentSliceMap,
             resources,
             adjustedLoadMap,
+            sizeMapOpt,
             config.churnConfig
           )
         AlgorithmExecutor.run(config, resources, assignment)
         validateAssignment(config, resources, assignment)
 
-        (assignment.toSliceAssignments, Some(config.desiredLoadRange))
+        val desiredSizeLimitOpt: Option[DesiredSizeLimit] = for {
+          sizeLimitConfig: SizeLimitMetricConfig <- config.sizeLimitConfigOpt
+          maxDesiredSize: Double <- assignment.getMaxDesiredSizeOpt
+        } yield DesiredSizeLimit(sizeLimitConfig.sizeLimitHint, maxDesiredSize)
+        (assignment.toSliceAssignments, Some(config.desiredLoadRange), desiredSizeLimitOpt)
       }
     // Record the application-measured load (not the uniform reservation adjusted load, which is
     // only used internally by the algorithm for decision-making).
     val proposedSliceAssignments: SliceMap[ProposedSliceAssignment] =
-      sliceAssignments.map(SliceMapHelper.PROPOSED_SLICE_ASSIGNMENT_ACCESSOR) {
+      sliceAssignments.map(ProposedSliceAssignment.SLICE_ACCESSOR) {
         sliceWithResources: SliceWithResources =>
           ProposedSliceAssignment(
             sliceWithResources,
             Some(loadMap.getLoad(sliceWithResources.slice))
           )
       }
-    AssignmentGenerationResult(proposedSliceAssignments, desiredLoadRangeOpt)
+    AssignmentGenerationResult(proposedSliceAssignments, desiredLoadRangeOpt, desiredSizeLimitOpt)
   }
 
   /**
@@ -154,7 +177,11 @@ object Algorithm {
         baseAssignmentSliceMap
       )
     // Homomorphic generation performs no load balancing, so there is no desired load range.
-    AssignmentGenerationResult(sliceAssignments, desiredLoadRangeOpt = None)
+    AssignmentGenerationResult(
+      sliceAssignments,
+      desiredLoadRangeOpt = None,
+      desiredSizeLimitOpt = None
+    )
   }
 
   /**
@@ -186,10 +213,31 @@ object Algorithm {
    *                            resources were available, or the assignment was generated
    *                            homomorphically). Included to allow metrics to be reported without
    *                            recomputing it from the predecessor/committed assignments.
+   * @param desiredSizeLimitOpt the size limit that the algorithm used to generate the assignment,
+   *                            or None when size limits are not configured or no load balancing
+   *                            was performed. Included to allow metrics to be reported.
    */
   private[assigner] case class AssignmentGenerationResult(
       sliceAssignments: SliceMap[ProposedSliceAssignment],
-      desiredLoadRangeOpt: Option[DesiredLoadRange])
+      desiredLoadRangeOpt: Option[DesiredLoadRange],
+      desiredSizeLimitOpt: Option[DesiredSizeLimit])
+
+  /**
+   * The size limit that the algorithm targeted when generating an assignment.
+   *
+   * @param sizeLimitHint the configured size limit hint per resource.
+   * @param maxDesiredSize the maximum desired size per resource that the algorithm committed to
+   *                       (see [[applyDesiredSizeLimit]]). Equal to `sizeLimitHint` unless the
+   *                       hint could not be honored with headroom, in which case it is greater.
+   */
+  private[assigner] case class DesiredSizeLimit(sizeLimitHint: Double, maxDesiredSize: Double) {
+
+    /**
+     * Returns how far the size limit was relaxed, as a fraction of the hint: 0 when the hint is
+     * honored, and positive when the maximum desired size is above it.
+     */
+    def relaxationRatio: Double = maxDesiredSize / sizeLimitHint - 1
+  }
 
   /**
    * Configuration of the algorithm. Defines the thresholds used in the policy and migration phases,
@@ -200,12 +248,14 @@ object Algorithm {
    * @param desiredLoadRange The range of desired load per resource/slice.
    * @param resourceAdjustedKeyReplicationConfig The key replication configuration, adjusted based
    *                                             on the number of available resources.
+   * @param sizeLimitConfigOpt The size limit configuration, if size limits are enabled.
    */
   private[assigner] case class Config private (
       target: Target,
       churnConfig: ChurnConfig,
       desiredLoadRange: DesiredLoadRange,
-      resourceAdjustedKeyReplicationConfig: KeyReplicationConfig)
+      resourceAdjustedKeyReplicationConfig: KeyReplicationConfig,
+      sizeLimitConfigOpt: Option[SizeLimitMetricConfig])
 
   private[assigner] object Config {
 
@@ -236,7 +286,8 @@ object Algorithm {
         target,
         loadBalancingConfig.churnConfig,
         desiredLoadRange,
-        resourceAdjustedKeyReplicationConfig
+        resourceAdjustedKeyReplicationConfig,
+        loadBalancingConfig.primaryGaugeMetricOpt
       )
     }
   }
@@ -349,6 +400,39 @@ object Algorithm {
       minDesiredLoadNewResource = minDesiredLoadNewResource,
       maxDesiredLoad = maxDesiredLoad
     )
+  }
+
+  /**
+   * PRECONDITION: `assignment` has at least one available resource.
+   *
+   * If size limits are configured, sets the maximum desired size per resource and includes size in
+   * heat (see [[MutableAssignment.enableSizeLimit]]). The maximum desired size is the size limit
+   * hint, relaxed when the total assignment size cannot fit within the hint with headroom, so that
+   * it always has [[SIZE_LIMIT_HEADROOM_RATIO]] headroom over the average size per resource. Must
+   * be called after replica counts are locked, since the total assignment size depends on them.
+   */
+  private[assigner] def applyDesiredSizeLimit(
+      config: Config,
+      assignment: MutableAssignment): Unit = {
+    iassert(assignment.numAvailableResources > 0, "assignment has no available resources")
+    for (sizeLimitConfig: SizeLimitMetricConfig <- config.sizeLimitConfigOpt) {
+      val averagePerResourceSize: Double =
+        assignment.currentTotalAssignmentSize / assignment.numAvailableResources
+      val maxDesiredSize: Double =
+        sizeLimitConfig.sizeLimitHint.max(averagePerResourceSize * SIZE_LIMIT_HEADROOM_RATIO)
+      // This also keeps normalized sizes in the same range as loads, however large or small sizes
+      // are. Let T be the total assignment size and N the number of resources. No Slice replica or
+      // resource holds more than T, and maxDesiredSize >= T / N * SIZE_LIMIT_HEADROOM_RATIO. So
+      // for any size s:
+      //
+      //   normalized(s) = s / maxDesiredSize * maxDesiredLoad
+      //                <= s / (T / N * SIZE_LIMIT_HEADROOM_RATIO) * maxDesiredLoad
+      //                <= N / SIZE_LIMIT_HEADROOM_RATIO * maxDesiredLoad          (since s <= T)
+      //
+      // This relies on heat dividing by maxDesiredSize before multiplying by maxDesiredLoad (see
+      // `MutableAssignment.SizeLimit.normalize`).
+      assignment.enableSizeLimit(config.desiredLoadRange.maxDesiredLoad, maxDesiredSize)
+    }
   }
 
   /**
@@ -471,7 +555,7 @@ private[assigner] object InitialAssignmentAlgorithm {
     val sliceCount: Int = Integer.highestOneBit(minSliceCount - 1) << 1
 
     // We create `sliceCount` Slices with uniformly spaced boundaries.
-    val slices: Vector[Slice] = LoadMap.getUniformPartitioning(sliceCount)
+    val slices: Vector[Slice] = MetricMap.getUniformPartitioning(sliceCount)
 
     // Assign slices to resources round-robin. If the number of resources is less than the
     // configured min replicas, then adjust the min replicas down to the number of available
@@ -531,7 +615,7 @@ private[assigner] object HomomorphicAssignmentAlgorithm {
     }.toSet
     if (resources.availableResources.subsetOf(baseAssignmentResources)) {
       val proposedSliceAssignments: SliceMap[ProposedSliceAssignment] =
-        baseAssignmentSliceMap.map(SliceMapHelper.PROPOSED_SLICE_ASSIGNMENT_ACCESSOR) {
+        baseAssignmentSliceMap.map(ProposedSliceAssignment.SLICE_ACCESSOR) {
           sliceAssignment: SliceAssignment =>
             ProposedSliceAssignment(
               sliceAssignment.sliceWithResources,
@@ -662,7 +746,7 @@ private[assigner] object HomomorphicAssignmentAlgorithm {
     // Create proposed assignment, attributing the load measured by the application to each Slice in
     // the proposal.
     val proposedSliceAssignments: SliceMap[ProposedSliceAssignment] =
-      homomorphicAssignmentSliceMap.map(SliceMapHelper.PROPOSED_SLICE_ASSIGNMENT_ACCESSOR) {
+      homomorphicAssignmentSliceMap.map(ProposedSliceAssignment.SLICE_ACCESSOR) {
         sliceWithResources: SliceWithResources =>
           ProposedSliceAssignment(
             sliceWithResources,

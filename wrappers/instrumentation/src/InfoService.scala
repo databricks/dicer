@@ -9,7 +9,12 @@ import com.sun.net.httpserver.HttpServer
 import io.opencensus.contrib.grpc.metrics.RpcViews
 import io.opencensus.contrib.zpages.ZPageHandlers
 
-import com.databricks.common.status.ProbeStatusSource
+import com.databricks.common.status.{
+  ProbeStatus,
+  ProbeStatusManager,
+  ProbeStatuses,
+  ProbeStatusSource
+}
 import com.databricks.common.util.Lock
 import com.databricks.instrumentation.{DebugStringServletRegistry, DebuggingRootPageHandler}
 import com.databricks.logging.ConsoleLogging
@@ -22,8 +27,8 @@ import javax.annotation.concurrent.ThreadSafe
  *
  * This object provides an API compatible with the internal ArmeriaInfoServer, so that callers that
  * depend on the ArmeriaInfoServer API can use it in open source builds without code changes. The
- * optional status source and branch parameters are accepted but ignored since this open source
- * version of the debug server does not support health check endpoints.
+ * startup and readiness sources are registered with the process-wide ProbeStatusManager. Liveness
+ * and branch parameters are accepted but ignored in OSS.
  */
 @ThreadSafe
 object InfoService extends ConsoleLogging {
@@ -54,11 +59,11 @@ object InfoService extends ConsoleLogging {
   /**
    * Starts the InfoService on the given port. Creates a single HTTP server with ZPages/debug
    * endpoints and, if `readinessStatusSourceOpt` is provided, a `/ready` endpoint. The parameters
-   * mirror the internal ArmeriaInfoServer.start() API for compatibility, but only `port` is used in
-   * the OSS implementation.
+   * mirror the internal ArmeriaInfoServer.start() API for compatibility. Readiness uses the same
+   * cached status as Slicelets, preserving any sources registered before this call.
    *
    * @param port The port to listen on, or 0 to use an ephemeral port.
-   * @param startupStatusSourceOpt Ignored in OSS.
+   * @param startupStatusSourceOpt Startup gate; defaults to OK when absent.
    * @param livenessStatusSourceOpt Ignored in OSS.
    * @param readinessStatusSourceOpt The source of the readiness status served by the `/ready`
    *                                 endpoint, if defined.
@@ -101,9 +106,21 @@ object InfoService extends ConsoleLogging {
     try {
       registerZPagesAndDebugEndpoint(httpServer)
 
+      val alwaysOk: ProbeStatusSource = new ProbeStatusSource {
+        override def getStatus: ProbeStatus = ProbeStatuses.ok("InfoService")
+      }
+      ProbeStatusManager.start(
+        startup = startupStatusSourceOpt.getOrElse(alwaysOk),
+        readiness = readinessStatusSourceOpt.getOrElse(alwaysOk),
+        liveness = alwaysOk
+      )
+
       // Register readiness endpoint if a readiness source is specified.
-      for (source: ProbeStatusSource <- readinessStatusSourceOpt) {
-        httpServer.createContext("/ready", new ReadinessHandler(source))
+      if (readinessStatusSourceOpt.isDefined) {
+        val cachedReadiness: ProbeStatusSource = new ProbeStatusSource {
+          override def getStatus: ProbeStatus = ProbeStatusManager.currentReadiness
+        }
+        httpServer.createContext("/ready", new ReadinessHandler(cachedReadiness))
       }
 
       httpServer.start()

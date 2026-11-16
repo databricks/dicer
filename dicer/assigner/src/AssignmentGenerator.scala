@@ -59,8 +59,6 @@ import com.databricks.dicer.common.{
   DiffAssignment,
   Generation,
   Incarnation,
-  ProposedAssignment,
-  ProposedSliceAssignment,
   SliceletData,
   SyncAssignmentState
 }
@@ -181,13 +179,8 @@ class AssignmentGenerator(
     }
 
     event match {
-      case Event.InformClusterManagerResources(terminatingUuids: Set[UUID]) =>
-        handleClusterManagerTerminatingResources(
-          tickerTime,
-          instant,
-          outputBuilder,
-          terminatingUuids
-        )
+      case Event.TerminationSignalFromKubernetes(resourceUuid) =>
+        handleTerminationSignalFromKubernetes(tickerTime, instant, outputBuilder, resourceUuid)
       case Event.WatchRequest(request) =>
         handleWatchRequest(tickerTime, instant, outputBuilder, request)
       case Event.AssignmentWriteComplete(result, contextOpt) =>
@@ -564,13 +557,13 @@ class AssignmentGenerator(
     // which declare the start and end of a key of death scenario, respectively.
   }
 
-  /** Handles a new full set of resources terminating in the cluster manager. */
-  private def handleClusterManagerTerminatingResources(
+  /** Handles termination signal from Kubernetes. */
+  private def handleTerminationSignalFromKubernetes(
       tickerTime: TickerTime,
       instant: Instant,
       outputBuilder: StateMachineOutput.Builder[DriverAction],
-      terminatingUuids: Set[UUID]): Unit = {
-    val event = HealthWatcher.Event.InformClusterManagerResources(terminatingUuids)
+      resourceUuid: UUID): Unit = {
+    val event = HealthWatcher.Event.PodTerminatingFromKubernetes(resourceUuid)
     handleHealthWatcherOutput(
       tickerTime,
       instant,
@@ -614,15 +607,8 @@ class AssignmentGenerator(
           for (sliceLoad: SliceletData.SliceLoad <- sliceletData.attributedLoads) {
             // `LoadWatcher` expects the time at which the measurement was taken as a `TickerTime`
             // value rather than an `Instant`. Determine the relative time at which the measurement
-            // was taken to perform the conversion. Since the clock on the server where the
-            // measurement was taken may be significantly off (e.g. running far ahead of our clock,
-            // making the load report appear to be from the future), we restrict the age of the load
-            // report to be non-negative.
-            val loadReportAge: FiniteDuration = Duration
-              .fromNanos(
-                java.time.Duration.between(sliceLoad.windowHighExclusive, instant).toNanos
-              )
-              .max(Duration.Zero)
+            // was taken to perform the conversion.
+            val loadReportAge: FiniteDuration = sliceLoad.ageAt(instant)
             val measurementTime: TickerTime = tickerTime - loadReportAge
             primaryRateMeasurements += loadWatcher.createMeasurement(
               measurementTime,
@@ -771,7 +757,8 @@ class AssignmentGenerator(
             TargetMetrics.reportReassignmentStats(
               target,
               churnAndLoadStats,
-              context.desiredLoadRangeOpt
+              context.desiredLoadRangeOpt,
+              context.desiredSizeLimitOpt
             )
 
             // Update the generator Slicez data.
@@ -942,7 +929,11 @@ class AssignmentGenerator(
   /** Informs the generator that it should shut down. */
   private def handleShutdown(outputBuilder: StateMachineOutput.Builder[DriverAction]): Unit = {
     iassert(runState == RunState.Running, s"advanceStateMachine called with runState $runState")
-    TargetMetrics.clearTerminatedGeneratorFromMetrics(target, resources)
+    TargetMetrics.clearTerminatedGeneratorFromMetrics(
+      target,
+      resources,
+      targetConfig.ownerTeamName
+    )
     runState = RunState.Shutdown
     // Stop the watchers because there is no longer a need for these signals.
     outputBuilder.appendAction(DriverAction.StopKubernetesTargetWatcher())
@@ -1023,7 +1014,8 @@ class AssignmentGenerator(
                   targetConfig,
                   resources,
                   latestKnownAssignment.sliceMap,
-                  loadMap
+                  loadMap,
+                  sizeMapOpt = None
                 )
             }
           val proposedSliceMap: SliceMap[ProposedSliceAssignment] =
@@ -1047,7 +1039,8 @@ class AssignmentGenerator(
                 target,
                 loadMap,
                 baseAssignment = latestKnownAssignment,
-                desiredLoadRangeOpt = generationResult.desiredLoadRangeOpt
+                desiredLoadRangeOpt = generationResult.desiredLoadRangeOpt,
+                desiredSizeLimitOpt = generationResult.desiredSizeLimitOpt
               )
             )
           )
@@ -1201,12 +1194,10 @@ object AssignmentGenerator {
     case class AssignmentReceived(assignment: Assignment) extends Event
 
     /**
-     * Informs the generator of the full set of resource UUIDs which the cluster manager is
-     * terminating.
-     *
-     * Events of this type must be delivered in order, i.e., later calls contain more recent state.
+     * Informs the generator that a termination signal was received from Kubernetes for a given
+     * resourceUuid.
      */
-    case class InformClusterManagerResources(terminatingUuids: Set[UUID]) extends Event
+    case class TerminationSignalFromKubernetes(resourceUuid: UUID) extends Event
 
     /** Informs the generator that it should stop generating assignments. */
     case class Shutdown() extends Event
@@ -1295,12 +1286,16 @@ object AssignmentGenerator {
    * @param desiredLoadRangeOpt the desired load range that the algorithm used to generate the
    *                            assignment, or None when the algorithm did not attempt to perform
    *                            any load balancing.
+   * @param desiredSizeLimitOpt the size limit that the algorithm used to generate the assignment,
+   *                            or None when size limits are not configured or the algorithm did
+   *                            not attempt to perform any load balancing.
    */
   case class AssignmentGenerationContext(
       target: Target,
       primaryRateLoadMap: LoadMap,
       baseAssignment: Assignment,
-      desiredLoadRangeOpt: Option[Algorithm.DesiredLoadRange])
+      desiredLoadRangeOpt: Option[Algorithm.DesiredLoadRange],
+      desiredSizeLimitOpt: Option[Algorithm.DesiredSizeLimit] = None)
 
   /** The state of assignment generation. */
   sealed trait RunState

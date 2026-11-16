@@ -39,19 +39,4 @@ object SliceMapHelper {
     sliceAssignmentWithReplica: SliceAssignment =>
       sliceAssignmentWithReplica.slice
   }
-
-  /**
-   * REQUIRES: See REQUIRES clause on the [[SliceMap]] constructor.
-   *
-   * Creates a [[SliceMap]] with [[ProposedSliceAssignment]] entries.
-   */
-  def ofProposedSliceAssignments(
-      entries: immutable.Vector[ProposedSliceAssignment]): SliceMap[ProposedSliceAssignment] = {
-    new SliceMap(entries, PROPOSED_SLICE_ASSIGNMENT_ACCESSOR)
-  }
-
-  val PROPOSED_SLICE_ASSIGNMENT_ACCESSOR: ProposedSliceAssignment => Slice = {
-    sliceAssignment: ProposedSliceAssignment =>
-      sliceAssignment.slice
-  }
 }

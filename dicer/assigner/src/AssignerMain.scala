@@ -10,7 +10,6 @@ import scala.util.control.NonFatal
 import io.prometheus.client.{Counter, Gauge}
 
 import com.databricks.DatabricksMain
-import com.databricks.backend.common.util.Project
 import com.databricks.caching.util.{
   CachingErrorCode,
   EtcdClient,
@@ -25,15 +24,10 @@ import com.databricks.dicer.assigner.config.{
   TargetConfigProviderFactory
 }
 import com.databricks.dicer.assigner.config.TargetConfigProvider.DEFAULT_INITIAL_POLL_TIMEOUT
-import com.databricks.dicer.common.{
-  AppIdentifier,
-  AssignerServiceInfo,
-  EtcdBootstrapper,
-  Incarnation
-}
+import com.databricks.dicer.common.{AppIdentifier, AssignerServiceInfo, Incarnation}
 
 /** The production Dicer Assigner entry point. */
-object AssignerMain extends DatabricksMain(Project.DicerAssigner) {
+object AssignerMain extends DatabricksMain("dicer-assigner") {
 
   private val prefixLogger = PrefixLogger.create(this.getClass, "")
 
@@ -117,23 +111,6 @@ object AssignerMain extends DatabricksMain(Project.DicerAssigner) {
   private def startAssignerService(
       conf: DicerAssignerConf,
       localClusterApiClientFactory: KubernetesApiClientFactory): Assigner = {
-    val membershipCheckerNamespace: String = Option(System.getenv("NAMESPACE")).getOrElse("")
-    val membershipCheckerAppName: String = Option(System.getenv("APP_NAME")).getOrElse("")
-    val localClusterMembershipCheckerFactory: KubernetesMembershipChecker.Factory =
-      KubernetesMembershipChecker.DefaultFactory.create(
-        localClusterApiClientFactory,
-        membershipCheckerNamespace,
-        membershipCheckerAppName,
-        pollingInterval = KubernetesMembershipChecker.DEFAULT_POLLING_INTERVAL,
-        rpcPort = conf.dicerAssignerRpcPort
-      )
-    val remoteClusterMembershipCheckerFactoryOpt: Option[KubernetesMembershipChecker.Factory] =
-      RemoteMembershipCheckerFactory.tryCreate(
-        conf,
-        membershipCheckerNamespace,
-        membershipCheckerAppName
-      )
-
     // Initialize and start the target config provider.
     val configProvider: TargetConfigProvider =
       TargetConfigProviderFactory.createBlocking(
@@ -224,8 +201,6 @@ object AssignerMain extends DatabricksMain(Project.DicerAssigner) {
       hostName,
       assignerClusterUri,
       kubernetesTargetWatcherFactory,
-      localClusterMembershipCheckerFactory,
-      remoteClusterMembershipCheckerFactoryOpt,
       assignerServiceInfoOpt
     )
   }

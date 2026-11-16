@@ -1,5 +1,6 @@
 package com.databricks.dicer.client
 
+import com.databricks.dicer.assigner.ProposedSliceAssignment
 import com.databricks.dicer.client.testing.{ScalaSliceLookupHarness}
 
 import com.databricks.dicer.client.testing.{SliceLookupHarness}
@@ -11,6 +12,7 @@ import com.databricks.dicer.external.Target
 import TestClientUtils.TEST_CLIENT_UUID
 
 import scala.collection.immutable.SortedMap
+import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 import scala.concurrent.duration._
 
@@ -28,14 +30,7 @@ import com.databricks.caching.util.{
   TestUtils
 }
 import com.databricks.conf.trusted.LocationConfTestUtils
-import com.databricks.dicer.common.{
-  Assignment,
-  ClientType,
-  ClerkData,
-  ProposedSliceAssignment,
-  SliceletData,
-  SliceletState
-}
+import com.databricks.dicer.common.{Assignment, ClientType, ClerkData, SliceletData, SliceletState}
 import com.databricks.dicer.common.testing.{TestAssigner}
 import com.databricks.dicer.common.SliceletData.{KeyLoad, SliceLoad}
 import com.databricks.dicer.common.testing.TestAssigner.AssignerReplyType
@@ -51,6 +46,9 @@ import io.prometheus.client.CollectorRegistry
  */
 abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
     extends SliceLookupSuiteBase(watchFromDataPlane) {
+
+  /** The shared [[WatchStubManager]]s, keyed by name, each built on first use. */
+  private val sharedWatchStubManagers: mutable.Map[String, WatchStubManager] = mutable.Map.empty
 
   /** Creates a test DicerClientProtoLogger using the given config. */
   private def createTestLogger(
@@ -90,7 +88,7 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
       val config: InternalClientConfig =
         createInternalClientConfig(
           ClientType.Clerk,
-          portToConnectTo(testAssigner),
+          watchAddressFor(testAssigner),
           watchStubCacheTime,
           subscriberDebugName = subscriberDebugName,
           enableRateLimiting = enableRateLimiting,
@@ -128,27 +126,44 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
       clientType: ClientType,
       enableRateLimiting: Boolean,
       watchStubCacheTime: FiniteDuration = 20.seconds,
-      sec: SequentialExecutionContext = sec): SliceLookupHarness = {
+      sec: SequentialExecutionContext = sec,
+      sharedWatchStubManagerNameOpt: Option[String] = None): SliceLookupHarness = {
+    // Data plane needs to configure S2S proxy to route to the test assigner
+    if (watchFromDataPlane) {
+      fakeS2SProxy.setFallbackUpstreamPorts(Vector(testAssigner.localUri.getPort))
+    }
+
     val subscriberDebugName: String = "test-clerk"
     val config: InternalClientConfig =
       createInternalClientConfig(
         clientType,
-        portToConnectTo(testAssigner),
+        watchAddressFor(testAssigner),
         watchStubCacheTime,
         subscriberDebugName = subscriberDebugName,
         enableRateLimiting = enableRateLimiting
       )
-    val lookup =
-      SliceLookup.createUnstarted(
-        sec,
-        config,
-        createTestLogger(
-          clientType,
-          TestClientUtils.createTestProtoLoggerConf(sampleFraction = 0.0),
-          subscriberDebugName
-        ),
-        serviceBuilderOpt = None
-      )
+
+    val protoLogger: DicerClientProtoLogger = createTestLogger(
+      clientType,
+      TestClientUtils.createTestProtoLoggerConf(sampleFraction = 0.0),
+      subscriberDebugName
+    )
+
+    val lookup: SliceLookup = sharedWatchStubManagerNameOpt match {
+      case None =>
+        SliceLookup.createUnstarted(sec, config, protoLogger, serviceBuilderOpt = None)
+      case Some(name: String) =>
+        // The shared manager watches the connection `config` describes, which is the one the
+        // lookup would otherwise open for itself.
+        SliceLookup.createUnstartedWithWatchStubManager(
+          sec,
+          config.sliceLookupConfig,
+          subscriberDebugName,
+          protoLogger,
+          serviceBuilderOpt = None,
+          getOrCreateSharedWatchStubManager(name, config.watchStubManagerConfig)
+        )
+    }
     new ScalaSliceLookupHarness(lookup, () => ClerkData)
   }
 
@@ -162,6 +177,16 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
       metricName: String,
       labels: Vector[(String, String)]): Double = {
     MetricUtils.getMetricValuesSum(CollectorRegistry.defaultRegistry, metricName, labels.toMap)
+  }
+
+  /**
+   * Returns the shared [[WatchStubManager]] named `name`, building it from `config` if this is the
+   * first caller to name it.
+   */
+  private def getOrCreateSharedWatchStubManager(
+      name: String,
+      config: WatchStubManagerConfig): WatchStubManager = {
+    sharedWatchStubManagers.getOrElseUpdate(name, new WatchStubManager(config))
   }
 
   // This test case is not exercised for Rust, because the Rust implementation currently (as of
@@ -215,7 +240,7 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
 
     val clerkConfig: InternalClientConfig = createInternalClientConfig(
       ClientType.Clerk,
-      portToConnectTo(singleAssignerTestEnv.testAssigner),
+      watchAddressFor(singleAssignerTestEnv.testAssigner),
       watchStubCacheTime = 20.seconds,
       subscriberDebugName = clerkDebugName
     )
@@ -294,7 +319,7 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
       squidOpt = None,
       unattributedLoadBySliceOpt = None,
       subscriberDebugName = clerkDebugName,
-      watchAddress = clerkConfig.watchStubManagerConfig.watchAddress.toString,
+      watchAddress = clerkConfig.watchStubManagerConfig.watchAddress.address,
       lastSuccessfulHeartbeat = clerkSlicezData.lastSuccessfulHeartbeat,
       watchAddressUsedSince = clerkSlicezData.watchAddressUsedSince,
       clientClusterOpt = clerkSlicezData.clientClusterOpt
@@ -423,7 +448,7 @@ abstract class ScalaSliceLookupSuiteBase(watchFromDataPlane: Boolean)
     val subscriberDebugName: String = "slice-lookup-client-slicez-register-test"
     val config: InternalClientConfig = createInternalClientConfig(
       ClientType.Clerk,
-      portToConnectTo(singleAssignerTestEnv.testAssigner),
+      watchAddressFor(singleAssignerTestEnv.testAssigner),
       watchStubCacheTime = 20.seconds,
       subscriberDebugName = subscriberDebugName
     )

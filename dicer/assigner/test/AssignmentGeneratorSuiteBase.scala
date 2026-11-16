@@ -14,6 +14,7 @@ import io.grpc.Status.Code
 import com.databricks.api.proto.dicer.common.ClientRequestP.SliceletDataP
 import com.databricks.api.proto.dicer.external.LoadBalancingMetricConfigP.ImbalanceToleranceHintP
 import com.databricks.caching.util.{
+  AlertOwnerTeam,
   AssertionWaiter,
   CachingErrorCode,
   Cancellable,
@@ -72,7 +73,6 @@ import com.databricks.dicer.common.{
   ClerkData,
   Generation,
   Incarnation,
-  ProposedAssignment,
   SliceAssignment,
   SliceletData,
   SliceMapHelper,
@@ -333,6 +333,85 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
     assertMetrics()
   }
 
+  test("Diff synced from Slicelet that does not match the known assignment is unused") {
+    // Test plan: Verify that a Slicelet watch request carrying a partial diff whose gap does not
+    // line up with the Slices of the generator's known assignment is counted as an unused
+    // INCONSISTENCY diff, without an uncaught state machine error. Partial diffs exist only in
+    // non-loose incarnations, while the in-memory store's incarnation is loose, so first sync a
+    // full known assignment from a higher, non-loose incarnation through a Clerk. Then send a
+    // Slicelet watch request with a diff whose gap ends inside one of the known Slices, and check
+    // the unused diff and error metrics.
+    val storeIncarnation: Incarnation = createLargerValidIncarnation(Incarnation.MIN)
+    val (driver, _): (AssignmentGeneratorDriver, InterceptableStore) =
+      createDriverAndStore(
+        assignerServiceInfoOpt = None,
+        storeIncarnationOpt = Some(storeIncarnation)
+      )
+    // The store incarnation is loose (odd), so the next incarnation is non-loose.
+    val incarnation = Incarnation(storeIncarnation.value + 1)
+    assert(incarnation.isNonLoose)
+    val knownGenerationNumber: Long = sec.getClock.instant().toEpochMilli
+    val knownGeneration = Generation(incarnation, knownGenerationNumber)
+    val knownAssignment: Assignment = createAssignment(
+      knownGeneration,
+      assignerServiceInfoOpt = None,
+      ("" -- "Kili") @@ knownGeneration -> Seq(resource(0)),
+      ("Kili" -- ∞) @@ knownGeneration -> Seq(resource(1))
+    )
+    driver.onWatchRequest(createClerkRequest(knownAssignment))
+    awaitAssignment(driver, debugMessage = "wait for the known assignment") {
+      assignment: Assignment =>
+        assignment.generation == knownGeneration
+    }
+
+    // The newer assignment's first Slice is unchanged since the known generation, so its diff
+    // against the known generation has a gap ["", "Fili"), which ends inside the known Slice
+    // ["", "Kili").
+    val newerGeneration = Generation(incarnation, knownGenerationNumber + 10)
+    val newerAssignment: Assignment = createAssignment(
+      newerGeneration,
+      assignerServiceInfoOpt = None,
+      ("" -- "Fili") @@ knownGeneration -> Seq(resource(0)),
+      ("Fili" -- ∞) @@ newerGeneration -> Seq(resource(0))
+    )
+    val uncaughtErrorCountBefore: Int = MetricUtils.getPrefixLoggerErrorCount(
+      Severity.CRITICAL,
+      CachingErrorCode.UNCAUGHT_STATE_MACHINE_ERROR(AlertOwnerTeam.CachingTeam),
+      prefix = ""
+    )
+    driver.onWatchRequest(
+      createSliceletRequest(
+        id = 0,
+        SyncAssignmentState.KnownAssignment(newerAssignment.toDiff(knownGeneration))
+      )
+    )
+    AssertionWaiter("Wait for the unused diff metric", ecOpt = Some(sec)).await {
+      val unusedDiffCount: Double = MetricUtils
+        .getMetricValueOpt(
+          registry,
+          metric = "dicer_assigner_num_unused_assignment_diffs",
+          Map(
+            "targetCluster" -> defaultTarget.getTargetClusterLabel,
+            "targetName" -> defaultTarget.getTargetNameLabel,
+            "targetInstanceId" -> defaultTarget.getTargetInstanceIdLabel,
+            "source" -> "Slicelet",
+            "reason" -> DiffUnused.INCONSISTENCY.toString
+          )
+        )
+        .getOrElse(0.0)
+      assert(unusedDiffCount == 1.0)
+    }
+    val uncaughtErrorCountAfter: Int = MetricUtils.getPrefixLoggerErrorCount(
+      Severity.CRITICAL,
+      CachingErrorCode.UNCAUGHT_STATE_MACHINE_ERROR(AlertOwnerTeam.CachingTeam),
+      prefix = ""
+    )
+    assert(uncaughtErrorCountAfter == uncaughtErrorCountBefore)
+    assert(driver.getGeneratorCell.getLatestValueOpt.forall { assignment: Assignment =>
+      assignment.generation != newerGeneration
+    })
+  }
+
   test(
     "Known assignment sync-ed from slicelet bootstraps health information when in-memory " +
     "store is empty"
@@ -528,7 +607,7 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
 
   private def createGeneratorConfig(): AssignmentGenerator.Config = AssignmentGenerator.Config(
     storeIncarnation = createLargerValidIncarnation(Incarnation.MIN),
-    LoadWatcher.StaticConfig(allowTopKeys = false, allowLoadDistribution = false),
+    LoadWatcher.StaticConfig(allowTopKeys = false),
     GENERATOR_CLUSTER_URI,
     minAssignmentGenerationInterval = Duration.Zero
   )
@@ -536,7 +615,7 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
   protected def defaultTargetConfig: InternalTargetConfig = {
     InternalTargetConfig.forTest.DEFAULT.copy(
       healthWatcherConfig = HealthWatcherTargetConfig(
-        observeSliceletReadiness = observeSliceletReadiness,
+        observeSliceletReadinessOpt = Some(observeSliceletReadiness),
         permitRunningToNotReady = false
       )
     )
@@ -603,7 +682,7 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
       Configs.parseMap(
         "databricks.dicer.assigner.unhealthyTimeoutPeriodSeconds" ->
         UNHEALTHY_TIMEOUT_PERIOD.toSeconds,
-        "databricks.dicer.assigner.terminatingRetentionWindowSecs" ->
+        "databricks.dicer.assigner.terminatingTimeoutPeriod" ->
         TERMINATING_TIMEOUT_PERIOD.toSeconds
       )
     )
@@ -618,7 +697,8 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
         .create(
           target,
           HealthWatcher.StaticConfig.fromConf(conf),
-          targetConfig.healthWatcherConfig
+          targetConfig.healthWatcherConfig,
+          targetConfig.ownerTeamName
         ),
       new KeyOfDeathDetector(target, keyOfDeathDetectorConfig),
       GENERATOR_CLUSTER_URI,
@@ -668,10 +748,11 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
         HealthWatcher.StaticConfig(
           initialHealthReportDelayPeriod = INITIAL_HEALTH_REPORT_DELAY_PERIOD,
           unhealthyTimeoutPeriod = UNHEALTHY_TIMEOUT_PERIOD,
-          terminatingRetentionWindow = TERMINATING_TIMEOUT_PERIOD,
+          terminatingTimeoutPeriod = TERMINATING_TIMEOUT_PERIOD,
           notReadyTimeoutPeriod = NOT_READY_TIMEOUT_PERIOD
         ),
-        targetConfig.healthWatcherConfig
+        targetConfig.healthWatcherConfig,
+        targetConfig.ownerTeamName
       ),
       new KeyOfDeathDetector(
         target,
@@ -819,7 +900,6 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
         keyCardinalityEstimateOpt = None
       ),
       supportsSerializedAssignment = true,
-      redirectTokenOpt = None,
       alternativeTargetOpt = None,
       clusterUriOpt = None,
       regionUriOpt = None
@@ -860,7 +940,6 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
       WATCH_RPC_TIMEOUT,
       ClerkData,
       supportsSerializedAssignment = true,
-      redirectTokenOpt = None,
       alternativeTargetOpt = None,
       clusterUriOpt = None,
       regionUriOpt = None
@@ -2859,10 +2938,10 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
     assertResult(expected = 3)(assignment2.assignedResources.size)
     awaitGeneratorTargetSlicezData(driver, assignment2)
 
-    // Report the terminating-resource snapshot.
-    fakeKubernetesTargetWatcherFactory.simulateTerminatingResources(
+    // Simulate a pod removal.
+    fakeKubernetesTargetWatcherFactory.simulateTerminationSignal(
       kubernetesWatchTarget,
-      Set(resource(0).resourceUuid)
+      resource(0).resourceUuid
     )
 
     // Obtain the latest assignment. This new assignment generation should trigger the update of
@@ -3012,9 +3091,9 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
     // via a Slicelet TERMINATING report (-> ResourceIncarnationTerminating). resource 4 remains
     // Running.
     sec.advanceBySync(1.second)
-    fakeKubernetesTargetWatcherFactory.simulateTerminatingResources(
+    fakeKubernetesTargetWatcherFactory.simulateTerminationSignal(
       kubernetesWatchTarget1,
-      Set(resource(0).resourceUuid)
+      resource(0).resourceUuid
     )
     driver1.onWatchRequest(
       createSliceletRequest(
@@ -3134,11 +3213,11 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
     val assignment1: Assignment = awaitNewerAssignment(driver, Generation.EMPTY)
     assert(assignment1.assignedResources == Set(resource(0), resource(1)))
 
-    // Now report resource 0 as terminating.
+    // Now deliver a termination signal for resource 0.
     sec.advanceBySync(1.second)
-    fakeKubernetesTargetWatcherFactory.simulateTerminatingResources(
+    fakeKubernetesTargetWatcherFactory.simulateTerminationSignal(
       kubernetesWatchTarget,
-      Set(resource(0).resourceUuid)
+      resource(0).resourceUuid
     )
     // Verify a new assignment is generated with resource 0 removed.
     val assignment2: Assignment = awaitNewerAssignment(driver, assignment1.generation)
@@ -3227,11 +3306,11 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
       )
     )
 
-    // Now report resource 0 as terminating.
+    // Now deliver a termination signal for resource 0.
     sec.advanceBySync(1.second)
-    fakeKubernetesTargetWatcherFactory.simulateTerminatingResources(
+    fakeKubernetesTargetWatcherFactory.simulateTerminationSignal(
       kubernetesWatchTarget,
-      Set(resource(0).resourceUuid)
+      resource(0).resourceUuid
     )
     // Verify that the generator reacts to the termination signal by removing resource 0 from the
     // assignment.
@@ -5629,7 +5708,6 @@ abstract class AssignmentGeneratorSuiteBase(observeSliceletReadiness: Boolean)
           keyCardinalityEstimateOpt = Some(requestHll)
         ),
         supportsSerializedAssignment = true,
-        redirectTokenOpt = None,
         alternativeTargetOpt = None,
         clusterUriOpt = None,
         regionUriOpt = None

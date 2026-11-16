@@ -1,11 +1,6 @@
 package com.databricks.dicer.assigner
 
-import com.databricks.api.proto.dicer.assigner.{
-  GossipRequestP,
-  GossipResponseP,
-  HeartbeatRequestP,
-  HeartbeatResponseP
-}
+import com.databricks.api.proto.dicer.assigner.{HeartbeatRequestP, HeartbeatResponseP}
 import com.databricks.api.proto.dicer.common.{ClientRequestP, ClientResponseP}
 import com.databricks.caching.util.AlertOwnerTeam
 import com.databricks.caching.util.AssertMacros.iassert
@@ -31,7 +26,6 @@ import com.databricks.dicer.assigner.config.{
   InternalTargetConfigMap,
   InternalTargetConfigMetrics,
   TargetConfigProvider,
-  TargetMigrationConfig,
   UnauthorizedException
 }
 import com.databricks.dicer.common.TargetName
@@ -92,12 +86,6 @@ import scala.util.Random
  * @param dPageNamespace The namespace used for DPage registration. In production this is
  *                       "dicer"; in tests each [[Assigner]] instance uses its UUID so that
  *                       concurrent instances register under unique DAction names.
- * @param targetMigrator Watches the current target migration state and exposes it to
- *                       consumers that need to react to the active migration.
- * @param localClusterMembershipChecker Local-cluster membership checker (not yet started). Backs
- *                                      consistent-hashing selection; not the checker used by
- *                                      [[TargetMigrator]] (that one lives inside the
- *                                      TargetMigrator instance).
  * @param assignerServiceInfoOpt The service info of the Assigner, used to uniquely identify
  *                               an assigner instance. It should be populated but may be absent
  *                               if the service info is not available due to an outdated binary
@@ -118,8 +106,6 @@ class Assigner private (
     assignerClusterUri: URI,
     minAssignmentGenerationInterval: FiniteDuration,
     dPageNamespace: String,
-    targetMigrator: TargetMigrator,
-    localClusterMembershipChecker: KubernetesMembershipChecker,
     assignerServiceInfoOpt: Option[AssignerServiceInfo])
     extends AssignerSlicezDataExporter {
 
@@ -196,15 +182,6 @@ class Assigner private (
     TargetUnmarshaller.createAssignerUnmarshaller(assignerClusterUri)
 
   /**
-   * The latest [[TargetOwnershipResolver]] published by [[targetMigrator]]. Initialized
-   * synchronously from the migrator at construction time (see [[TargetMigrator.getLatestResolver]]
-   * for why this is safe to call immediately) and updated by watching the migrator.
-   */
-  @GuardedBy("sec")
-  private var latestTargetOwnershipResolver: TargetOwnershipResolver =
-    targetMigrator.getLatestResolver
-
-  /**
    * The emitter for logging [[AssignmentGenerator.Event]]s to Lumberjack for replay by the Dicer
    * Simulator.
    */
@@ -222,13 +199,7 @@ class Assigner private (
   /**
    * Handles the watch call from a Clerk/Slicelet and returns the relevant response.
    *
-   * @note The [[targetOwnershipResolver]] is checked first. If it returns
-   *       [[RoutingVerdict.Reroute]], the request is immediately rerouted to the specified
-   *       assigner. If the request carries an inbound `redirectTokenOpt` whose
-   *       `targetMigrationConfigVersion` is newer than the local config, the resolver forces a
-   *       [[RoutingVerdict.Handle]] to avoid ping-ponging the client back to the sender while a
-   *       new [[TargetMigrationConfig]] propagates to this Assigner.
-   *       Otherwise, routing proceeds as per the preferred assigner's role:
+   * @note Routing proceeds as per the preferred assigner's role:
    *        - If the current assigner is a standby, it redirects to the preferred assigner.
    *        - If the current assigner is preferred, it handles the request and responds with a
    *          redirect to be [[Redirect.EMPTY]] if the preferred assigner mode is disabled, or a
@@ -250,64 +221,32 @@ class Assigner private (
         request.alternativeTargetOpt
       )
 
-      // Try to parse the inbound redirect token, transparently treating invalid tokens as absent
-      // (`RedirectToken.tryFromBytes` will fire a DEGRADED alert on parse failure).
-      val inboundRedirectTokenOpt: Option[RedirectToken] =
-        request.redirectTokenOpt.flatMap(RedirectToken.tryFromBytes)
-
-      // Check the target ownership resolver first to determine whether to handle or reroute the
-      // target.
-      latestTargetOwnershipResolver.getRoutingVerdict(
-        request.target,
-        inboundRedirectTokenOpt
-      ) match {
-        case RoutingVerdict.Reroute(peerAssignerUri: URI, redirectToken: RedirectToken) =>
+      val outboundRedirect: Redirect = preferredAssignerConfig.preferredAssignerUriOpt match {
+        case Some(preferredAssignerUri: URI) =>
+          Redirect(addressOpt = Some(preferredAssignerUri))
+        case None =>
+          Redirect.EMPTY
+      }
+      preferredAssignerConfig.role match {
+        case AssignerRole.Preferred =>
+          // If the current assigner is preferred, handle the watch request. Canonicalize the
+          // request to its AppTarget identity (when use_alternative_target is enabled) only on
+          // this branch: a standby redirects the client to the preferred Assigner, which
+          // canonicalizes the request when the client retries there. Handling proceeds in
+          // `handleWatchAsPreferredAssigner`, which takes only the canonicalized request so the
+          // incoming (pre-canonicalization) `request` cannot be used past this point.
+          val canonicalizedRequest: ClientRequest = replaceWithAlternativeTarget(request)
+          handleWatchAsPreferredAssigner(rpcContext, canonicalizedRequest, outboundRedirect)
+        case AssignerRole.Standby =>
+          // If the current assigner is a standby, redirect the watch request to the preferred
+          // assigner.
           Future.successful(
             ClientResponse(
               syncState = KnownGeneration(Generation.EMPTY),
               suggestedRpcTimeout = getSuggestedWatchRpcTimeout(request),
-              redirect = Redirect(
-                addressOpt = Some(peerAssignerUri),
-                redirectTokenOpt = Some(redirectToken.toBytes)
-              )
+              redirect = outboundRedirect
             ).toProto
           )
-        case RoutingVerdict.Handle(redirectTokenOpt: Option[RedirectToken]) =>
-          // We still attach the latest known redirect token so that if we redirect to the preferred
-          // assigner, it will see a `targetMigrationConfigVersion` >= the one we received here. In
-          // case the preferred assigner has a stale migration config, this avoids ping-ponging the
-          // client back to the peer cluster.
-          val outboundRedirect: Redirect = preferredAssignerConfig.preferredAssignerUriOpt match {
-            case Some(preferredAssignerUri: URI) =>
-              Redirect(
-                addressOpt = Some(preferredAssignerUri),
-                redirectTokenOpt = redirectTokenOpt.map((_: RedirectToken).toBytes)
-              )
-            case None =>
-              Redirect.EMPTY
-          }
-          preferredAssignerConfig.role match {
-            case AssignerRole.Preferred =>
-              // If the current assigner is preferred, handle the watch request. Canonicalize the
-              // request to its AppTarget identity (when use_alternative_target is enabled) only
-              // here, where we handle it locally: a rerouted or standby request is canonicalized by
-              // the preferred Assigner that owns the target, so it is left unchanged above.
-              // Handling proceeds in `handleWatchAsPreferredAssigner`, which takes only the
-              // canonicalized request so the incoming (pre-canonicalization) `request` cannot be
-              // used past this point.
-              val canonicalizedRequest: ClientRequest = replaceWithAlternativeTarget(request)
-              handleWatchAsPreferredAssigner(rpcContext, canonicalizedRequest, outboundRedirect)
-            case AssignerRole.Standby =>
-              // If the current assigner is a standby, redirect the watch request to the preferred
-              // assigner.
-              Future.successful(
-                ClientResponse(
-                  syncState = KnownGeneration(Generation.EMPTY),
-                  suggestedRpcTimeout = getSuggestedWatchRpcTimeout(request),
-                  redirect = outboundRedirect
-                ).toProto
-              )
-          }
       }
     }
   }
@@ -322,26 +261,6 @@ class Assigner private (
       }(sec)
   }
 
-  /** Handles a gossip round initiated by a peer Assigner. */
-  def handleGossip(reqProto: GossipRequestP): Future[GossipResponseP] = sec.flatCall {
-    // Convert from the proto to the parsed form. We expect at most a singular
-    // [[TargetMigrationConfig]], and otherwise throw an error, resulting in a failed RPC.
-    val request = GossipRequest.fromProto(reqProto)
-    logger.debug(
-      s"Received gossip request from ${request.self} with config " +
-      s"${request.targetMigrationConfigOpt}.",
-      every = 10.seconds
-    )
-
-    // Exchange the gossiped target migration config with its owning component, collecting the
-    // config (if any) to gossip back.
-    val responseConfigOptFuture: Future[Option[TargetMigrationConfig]] =
-      targetMigrator.handleGossipRequest(request.targetMigrationConfigOpt)
-    responseConfigOptFuture.map { responseConfigOpt: Option[TargetMigrationConfig] =>
-      GossipResponse(getAssignerInfoSync, responseConfigOpt).toProto
-    }(sec)
-  }
-
   override def getSlicezData: Future[AssignerSlicezData] = sec.flatCall {
     // Collect the data for all generators and all subscribers.
     val targetSlicezDataSeq: Seq[Future[AssignerTargetSlicezData]] =
@@ -351,24 +270,11 @@ class Assigner private (
 
     val aggregatedTargetSlicezData: Future[Seq[AssignerTargetSlicezData]] =
       Future.sequence(targetSlicezDataSeq)(implicitly, sec)
-    // Surface the consistent-hashing snapshot from the active driver so the debug page reflects
-    // shadow-mode operation. The etcd-backed and disabled drivers, which do not run a
-    // consistent-hashing election, report `None`. The migration mode is read from conf here (rather
-    // than from the driver) since it is fixed for the process's lifetime.
-    val consistentHashingStateFuture: Future[Option[ConsistentHashingState]] =
-      preferredAssignerDriver.consistentHashingStateView
     aggregatedTargetSlicezData
-      .zip(consistentHashingStateFuture)
-      .map { tuple: (Seq[AssignerTargetSlicezData], Option[ConsistentHashingState]) =>
-        val (targetSlicezData, consistentHashingStateOpt): (
-            Seq[AssignerTargetSlicezData],
-            Option[ConsistentHashingState]) = tuple
+      .map { targetSlicezData: Seq[AssignerTargetSlicezData] =>
         AssignerSlicezData(
           this.getAssignerInfoSync,
-          PreferredAssignerSlicezData(
-            preferredAssignerConfig.knownPreferredAssigner,
-            consistentHashingStateOpt
-          ),
+          preferredAssignerConfig.knownPreferredAssigner,
           targetSlicezData
         )
       }(sec)
@@ -431,10 +337,6 @@ class Assigner private (
     // assigner abdicates when it receives a termination notice.
     logger.info("Shutdown hook triggered.")
     preferredAssignerDriver.sendTerminationNotice()
-    // Stop the membership checker so its polling loop and K8s client are released on shutdown. This
-    // method can run more than once (the shutdown hook and test teardown both call it), which is
-    // safe because stopAsync() is idempotent.
-    localClusterMembershipChecker.stopAsync()
   }
 
   /**
@@ -445,7 +347,7 @@ class Assigner private (
   private[this] def createAndStartDatabricksServer(): DatabricksServerWrapper = {
     sec.assertCurrentContext()
     val serviceBuilder: GenericRpcServiceBuilder = GenericRpcServiceBuilder.create()
-    // Register the assignment, preferred assigner, and gossip services with `serviceBuilder`. Using
+    // Register the assignment and preferred assigner services with `serviceBuilder`. Using
     // helpers here so that the registration process can use vanilla gRPC.
     WatchServerHelper.registerAssignmentService(
       serviceBuilder,
@@ -454,10 +356,6 @@ class Assigner private (
     PreferredAssignerServerHelper.registerPreferredAssignerService(
       serviceBuilder,
       (req: HeartbeatRequestP) => this.handleHeartbeat(req)
-    )
-    GossipRpcHelper.registerGossipService(
-      serviceBuilder,
-      (req: GossipRequestP) => this.handleGossip(req)
     )
 
     // The rate limiting strategy is always installed so that it records rate-limit decision
@@ -498,9 +396,6 @@ class Assigner private (
       conf.protoLoggerGenerationSampleFractionFlag,
       loggingSec
     )
-    // Start the membership checker before the preferred-assigner driver, which (in
-    // consistent-hashing mode) needs the checker running.
-    localClusterMembershipChecker.start(assignerProtoLogger)
     preferredAssignerDriver.start(assignerInfo, assignerProtoLogger)
 
     // Initially, we don't know who the preferred is, but `preferredAssignerDriver` will tell us.
@@ -549,49 +444,6 @@ class Assigner private (
   }
 
   /**
-   * Adopts `newResolver` as the latest [[TargetOwnershipResolver]] and shuts down the generators of
-   * any targets it would reroute to another Assigner. Those targets' watch requests will no longer
-   * be handled by this Assigner, so their generators must stop generating assignments — otherwise
-   * this Assigner keeps generating for a target now owned by the peer cluster. This is important
-   * because otherwise the generated assignments between the owning assigners would diverge, and if
-   * the ownership is moved back, this Assigner would reuse a stale assignment and create undue
-   * churn potentially causing an outage. Beyond this, it would also muddy metrics making them more
-   * difficult to reason about.
-   *
-   * PRECONDITION: Must be called on [[sec]].
-   */
-  private[this] def onTargetOwnershipResolverChange(newResolver: TargetOwnershipResolver): Unit = {
-    sec.assertCurrentContext()
-    val previousConfigVersion: Int = latestTargetOwnershipResolver.configVersion
-    latestTargetOwnershipResolver = newResolver
-    // Only sweep when the config version advances. Target ownership is a function of the config, so
-    // a resolver carrying the same version reroutes exactly the targets we already shut down; this
-    // skips resolver updates that only change the peer Assigner endpoint or as the result of a
-    // kubernetes resource version bump.
-    if (newResolver.configVersion > previousConfigVersion) {
-      // Collect the entries first to avoid mutating `activeTargetManagers` while iterating it. We
-      // use `wouldReroute` rather than `getRoutingVerdict` because this is off the request path: it
-      // must not record request-path metrics and must not fail.
-      val reroutedEntries: Vector[(Target, TargetManager)] =
-        activeTargetManagers.filterKeys(newResolver.wouldReroute).toVector
-      val firstFewReroutedTargets: Vector[Target] = reroutedEntries.take(5).map {
-        entry: (Target, TargetManager) =>
-          val (target, _): (Target, TargetManager) = entry
-          target
-      }
-      logger.info(
-        s"Config version advanced from $previousConfigVersion to ${newResolver.configVersion}; " +
-        s"shutting down ${reroutedEntries.size} rerouted generator(s). First few: " +
-        s"${firstFewReroutedTargets.mkString(", ")}"
-      )
-      for (entry <- reroutedEntries) {
-        val (target, _): (Target, _) = entry
-        removeManager(target, GeneratorShutdownReason.TARGET_MIGRATION_REROUTE)
-      }
-    }
-  }
-
-  /**
    * Stops and removes the [[TargetManager]] from [[activeTargetManagers]] for the given `target` if
    * one exists.
    *
@@ -606,8 +458,7 @@ class Assigner private (
   }
 
   /**
-   * Starts watching config value changes from SAFE for per-target config, and updates to target
-   * migrator resulting in an updated [[TargetOwnershipResolver]].
+   * Starts watching config value changes from SAFE for per-target config.
    */
   private[this] def startWatchingConfig(): Unit = {
     val configUpdatedCallback: ValueStreamCallback[InternalTargetConfigMap] = {
@@ -642,17 +493,6 @@ class Assigner private (
     }
     // Start watching config changes.
     configProvider.watch(configUpdatedCallback)
-
-    // Subscribe to TargetOwnershipResolver updates from the migrator. On each update we shut down
-    // the generators of any targets the new resolver reroutes to another Assigner.
-    targetMigrator.watch(
-      new ValueStreamCallback[TargetOwnershipResolver](sec) {
-        override protected def onSuccess(resolver: TargetOwnershipResolver): Unit = {
-          sec.assertCurrentContext()
-          onTargetOwnershipResolverChange(resolver)
-        }
-      }
-    )
   }
 
   /**
@@ -718,9 +558,9 @@ class Assigner private (
    * Replaces `request`'s target with the AppTarget in its `alternative_target` when
    * `use_alternative_target` is enabled in the target's advanced config. This translates the
    * request to its AppTarget identity, so downstream handling (generator lookup, validation) runs
-   * on the AppTarget rather than the incoming KubernetesTarget. Called only for a request this
-   * Assigner handles locally as the preferred Assigner; a rerouted or standby request is
-   * canonicalized by the preferred Assigner that owns the target. See the design doc:
+   * on the AppTarget rather than the incoming KubernetesTarget. Called only when this Assigner is
+   * the preferred Assigner; a standby redirects the request to the preferred Assigner, which
+   * canonicalizes it there. See the design doc:
    * <internal link>
    *
    * When enabled, the request is expected to carry an `alternativeTarget` AppTarget
@@ -1142,7 +982,8 @@ class Assigner private (
             healthWatcher = healthWatcherFactory.create(
               target,
               HealthWatcher.StaticConfig.fromConf(conf: HealthConf),
-              targetConfig.healthWatcherConfig
+              targetConfig.healthWatcherConfig,
+              targetConfig.ownerTeamName
             ),
             // TODO(<internal bug>): While we do not expose the specific `crashRecordRetention`
             // and `heuristicThreshold` configurations to the user currently, future
@@ -1156,7 +997,8 @@ class Assigner private (
             minAssignmentGenerationInterval,
             dicerSimulatorEventLogEmitter,
             assignerProtoLogger,
-            assignerServiceInfoOpt
+            assignerServiceInfoOpt,
+            filterSelfTransfers = () => conf.filterSelfTransfers
           )
 
           generatorOpt = Some(generator)
@@ -1231,8 +1073,6 @@ object Assigner {
       assignerClusterUri: URI,
       minAssignmentGenerationInterval: FiniteDuration,
       dPageNamespaceOpt: Option[String],
-      targetMigrator: TargetMigrator,
-      localClusterMembershipChecker: KubernetesMembershipChecker,
       assignerServiceInfoOpt: Option[AssignerServiceInfo])
       extends Assigner(
         assignerSecPool,
@@ -1248,18 +1088,13 @@ object Assigner {
         assignerClusterUri,
         minAssignmentGenerationInterval,
         dPageNamespace = dPageNamespaceOpt.getOrElse(uuid.toString),
-        targetMigrator = targetMigrator,
-        localClusterMembershipChecker = localClusterMembershipChecker,
         assignerServiceInfoOpt
       )
 
   /**
    * Creates an assigner using the given Kubernetes watcher factory and default health watcher
-   * factory, and starts the RPC server. The membership checker is created here, so its creation
-   * failures (bad env vars, K8s client init) fail startup.
+   * factory, and starts the RPC server.
    */
-  @throws[IllegalArgumentException]("if the checker's namespace or app name is empty")
-  @throws[java.io.IOException]("if the in-cluster Kubernetes client config is unavailable")
   def createAndStart(
       conf: DicerAssignerConf,
       configProvider: TargetConfigProvider,
@@ -1267,14 +1102,7 @@ object Assigner {
       hostName: String,
       assignerClusterUri: URI,
       kubernetesTargetWatcherFactory: KubernetesTargetWatcher.Factory,
-      localClusterMembershipCheckerFactory: KubernetesMembershipChecker.Factory,
-      remoteClusterMembershipCheckerFactoryOpt: Option[KubernetesMembershipChecker.Factory],
       assignerServiceInfoOpt: Option[AssignerServiceInfo]): Assigner = {
-    // The membership checker is a required dependency of the Assigner service: it discovers the
-    // assigner set that consistent-hashing selection needs. A pod that cannot create one fails
-    // startup here (the factory throws) rather than running blind.
-    val localClusterMembershipChecker: KubernetesMembershipChecker =
-      localClusterMembershipCheckerFactory.create(uuid)
     val assignerSecPool =
       SequentialExecutionContextPool.create(
         poolName = "Assigner",
@@ -1285,8 +1113,6 @@ object Assigner {
       name = "assigner-main",
       alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
     )
-    val targetMigratorSec: SequentialExecutionContext =
-      assignerSecPool.createExecutionContext("target-migrator")
     val assigner: Assigner = new Assigner(
       assignerSecPool,
       assignerSec,
@@ -1301,15 +1127,6 @@ object Assigner {
       assignerClusterUri,
       MIN_ASSIGNMENT_GENERATION_INTERVAL,
       dPageNamespace = "dicer",
-      targetMigrator = TargetMigrator.create(
-        targetMigratorSec,
-        conf,
-        uuid,
-        assignerClusterUri,
-        remoteClusterMembershipCheckerFactoryOpt,
-        TargetMigrator.DEFAULT_INITIAL_TARGET_OWNERSHIP_RESOLVER_AWAIT_TIMEOUT
-      ),
-      localClusterMembershipChecker = localClusterMembershipChecker,
       assignerServiceInfoOpt
     )
     assigner.start()

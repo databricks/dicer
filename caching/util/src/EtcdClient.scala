@@ -135,13 +135,13 @@ import com.databricks.rpc.tls.{JetcdTLS, TLSOptions}
  *     satisfy w < v0, and the watermark must be transactionally increased to w' > v0. Even if k
  *     previously existed in etcd at some version vp but was deleted from the store, when
  *     combined with the version upper bound on key updates, these constraints guarantee
- *     vp < w < v0 and thus strictly key increasing versions for insertions as well (this scheme
+ *     vp < w < v0 and thus strictly increasing key versions for insertions as well (this scheme
  *     actually has a stronger property, which is that new keys may only be inserted with the
  *     greatest version across all keys *ever* in the store, but we only care that it's greater
  *     than any previous version for that particular key).
  *
  * Given the scheme above, writes are inadmissible in two cases:
- *   - An *update* write is inadmissible if its proposed version exceeds the the version high
+ *   - An *update* write is inadmissible if its proposed version exceeds the version high
  *     watermark. In this case, EtcdClient runs a new txn to increase the watermark and returns an
  *     error to the caller, and a retry will succeed.
  *
@@ -416,7 +416,7 @@ final class EtcdClient private (jetcd: JetcdWrapper, val config: Config) {
           val getResponses: Seq[GetResponse] = response.getGetResponses.asScala
 
           // We issued a single Get Op for a single key; check that the dimensions of the result
-          // matches.
+          // match.
           iassert(
             getResponses.size == 1 && getResponses.head.getKvs.size() == 1,
             "In the Else clause for version high watermark initialization we read the " +
@@ -949,7 +949,7 @@ object EtcdClient {
        */
       case class Present(version: Version, newKeyVersionLowerBoundExclusive: Version)
           extends KeyState {
-        // Provide clarity in debug messages on what the contents is.
+        // Provide clarity in debug messages on what the contents are.
         override def toString: String =
           s"""Present(version=$version,
              | newKeyVersionLowerBoundExclusive=$newKeyVersionLowerBoundExclusive)""".stripMargin
@@ -960,7 +960,7 @@ object EtcdClient {
        * their version strictly exceeds `newKeyVersionLowerBoundExclusive`.
        */
       case class Absent(newKeyVersionLowerBoundExclusive: Version) extends KeyState {
-        // Provide clarity in debug messages on what the contents is.
+        // Provide clarity in debug messages on what the contents are.
         override def toString: String =
           s"Absent(newKeyVersionLowerBoundExclusive=$newKeyVersionLowerBoundExclusive)"
       }
@@ -1105,12 +1105,12 @@ object EtcdClient {
   }
 
   /**
-   * Low level etcd interface (compared to the higher level interface exposed by [[EtcdClient]] to
+   * Low level etcd interface (compared to the higher level interface exposed by [[EtcdClient]]) to
    * expose only a subset of the full jetcd API to callers, and to support error injection in tests.
    */
   private[util] trait JetcdWrapper {
 
-    /** Equivalent to `jetcd.KV.txn().If(ifs).Then(thens).Else(elses).commit(). */
+    /** Equivalent to `jetcd.KV.txn().If(ifs).Then(thens).Else(elses).commit()`. */
     def commit(ifs: Seq[Cmp], thens: Seq[Op], elses: Seq[Op]): CompletableFuture[TxnResponse]
 
     /** See `jetcd.KV.get(ByteSequence, GetOption)`. */
@@ -1172,7 +1172,7 @@ object EtcdClient {
       // and slowly leak memory. However, this is the recommended solution in
       // https://github.com/etcd-io/jetcd/issues/1326. We could consider ways to reclaim this
       // memory if it becomes a problem, e.g. by periodically recreating the client. However, the
-      // rate of leakage should be generally be very low.
+      // rate of leakage should generally be very low.
 
       // We unfortunately can't simply use CompletableFuture.orTimeout here because we're not on
       // Java 9.
@@ -1245,7 +1245,7 @@ object EtcdClient {
   private val VERSION_HIGH_WATERMARK_BLOCK_INCREMENT: Long = 1.hour.toMillis
 
   /**
-   * The duration after which etcd requests which get completed with an error if they fail to
+   * The duration after which etcd requests get completed with an error if they fail to
    * return.
    */
   private val ETCD_REQUEST_TIMEOUT: FiniteDuration = 10.seconds

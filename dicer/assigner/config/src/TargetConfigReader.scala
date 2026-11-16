@@ -133,7 +133,11 @@ object TargetConfigReader {
             advancedTargetOverrideOpt
           )
 
-        targetName -> InternalTargetConfig.fromProtos(configFields, advancedConfigFields)
+        targetName -> InternalTargetConfig.fromProtos(
+          configFields,
+          advancedConfigFields,
+          targetConfigProto.getOwnerTeamName
+        )
     }
 
     logger.info(s"Registered targets - ${targetConfigMap.keys.mkString(",")}")
@@ -343,7 +347,8 @@ object TargetConfigReader {
     // Create InternalTargetConfig based on the default sub-configs.
     val defaultConfig: InternalTargetConfig = InternalTargetConfig.fromProtos(
       defaultTargetConfig,
-      defaultAdvancedConfig
+      defaultAdvancedConfig,
+      targetConfig.getOwnerTeamName
     )
 
     // Create InternalTargetConfig based on per-scope overrides.
@@ -356,7 +361,8 @@ object TargetConfigReader {
         scope ->
         InternalTargetConfig.fromProtos(
           mergeOverride(defaultTargetConfig, targetConfigOverrideOpt),
-          mergeOverride(defaultAdvancedConfig, advancedConfigOverrideOpt)
+          mergeOverride(defaultAdvancedConfig, advancedConfigOverrideOpt),
+          targetConfig.getOwnerTeamName
         )
       }
     }.toMap

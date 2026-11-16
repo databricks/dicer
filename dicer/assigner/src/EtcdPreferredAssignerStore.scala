@@ -22,7 +22,7 @@ import com.databricks.dicer.assigner.EtcdPreferredAssignerStoreStateMachine.{
 import com.databricks.dicer.assigner.PreferredAssignerValue.PreferredAssignerWatchCellConsumer
 import com.databricks.caching.util.EtcdClient
 import com.databricks.caching.util.EtcdClient.{Version, WatchArgs}
-import com.databricks.dicer.common.{EtcdClientHelper, Generation, Incarnation}
+import com.databricks.dicer.common.{Generation, Incarnation}
 
 import scala.concurrent.duration.{Duration, FiniteDuration}
 import scala.concurrent.duration._

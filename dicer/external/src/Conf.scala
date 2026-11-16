@@ -1,12 +1,10 @@
 package com.databricks.dicer.external
 
-import java.net.URI
-
 import scala.concurrent.duration._
 
 import com.databricks.conf.DbConf
 import com.databricks.conf.trusted.{LocationConf, RPCPortConf}
-import com.databricks.dicer.client.DicerClientProtoLoggerConf
+import com.databricks.dicer.client.{DicerClientProtoLoggerConf, WatchAddress}
 import com.databricks.dicer.client.featurerollouts.{
   DicerClientFeatureRolloutFlag,
   DicerClientFeatureRolloutFlagImpl
@@ -17,10 +15,9 @@ import com.databricks.rpc.tls.TLSOptions
 /** The Dicer Clerk config that an application should derive from when using Dicer. */
 trait ClerkConf extends DicerClientConf {
 
-  /** Returns the Slicelet URI that the Clerk needs to connect to. */
-  private[dicer] final def getSliceletURI(sliceletHostName: String): URI = {
-    URI.create(s"$sliceletHostName:$dicerSliceletRpcPort")
-  }
+  /** Returns the Slicelet watch address that the Clerk needs to connect to. */
+  private[dicer] final def getSliceletWatchAddress(sliceletHostName: String): WatchAddress =
+    WatchAddress.fromHostPort(sliceletHostName, dicerSliceletRpcPort)
 }
 
 /** The Dicer Slicelet config that a customer should derive from when using Dicer. */
