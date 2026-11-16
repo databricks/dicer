@@ -42,7 +42,7 @@ import com.databricks.logging.AttributionContextTracing
  * watch can be interrupted. Note that cancellation has no effect until after an initial read has
  * been performed.
  *
- * The driver includes two features to mitigate the risk of a wedged watch, which is known issue
+ * The driver includes two features to mitigate the risk of a wedged watch, which is a known issue
  * with the etcd client that we use:
  *
  * - Backup polling: The driver periodically performs a tail read at the most recently known
@@ -310,7 +310,7 @@ class EtcdWatcher private (
       watcherOpt.get.close()
     } else {
       // The state machine cancelled during the initial read due to an error such as data
-      // corruption. We still need to invoke the failure callback and sent the WatchFailed event
+      // corruption. We still need to invoke the failure callback and send the WatchFailed event
       // in this case.
       handleWatchFailure()
     }
@@ -378,7 +378,7 @@ object EtcdWatcher {
      *
      * Backup polling occurs only in [[RunState.Watching]], so this value will be TickerTime.MAX in
      * all other states. While in the watching state, the state machine ensures that whenever the
-     * ticker team advances past this time, it will issue a read at the latest known version and
+     * ticker time advances past this time, it will issue a read at the latest known version and
      * increment the backup polling time by the backup polling interval.
      */
     private var nextBackupPollingTime: TickerTime = TickerTime.MAX
@@ -402,12 +402,12 @@ object EtcdWatcher {
         case RunState.Startup =>
           logger.info("Beginning initial read")
 
-          // Enter the `ProcessInitialRead` state and perform strong read for all currently stored
-          // versions of the watched key greater than [[knownVersionOpt]] (initially None) which
+          // Enter the `ProcessInitialRead` state and perform a strong read for all currently stored
+          // versions of the watched key greater than [[knownVersionOpt]] (initially None, which
           // starts the read from the minimum possible version) to get the initial state of the
-          // watched object.The state machine remains in ProcessInitialRead until it has processed
+          // watched object. The state machine remains in ProcessInitialRead until it has processed
           // all the pages of the initial state, after which it triggers a causal event and
-          // commences a watch against the underlying store starting the latest known version.
+          // commences a watch against the underlying store starting at the latest known version.
           outputBuilder.appendAction(DriverAction.Read(knownVersionOpt, watchArgs.pageLimit))
           runState = RunState.ProcessInitialRead
           onAdvanceInternal(tickerTime, outputBuilder)

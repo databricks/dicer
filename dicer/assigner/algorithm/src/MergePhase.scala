@@ -13,7 +13,8 @@ import com.databricks.dicer.assigner.algorithm.Algorithm.{Config, MAX_AVG_SLICE_
  * Merges adjacent cold Slices that both have the minimum number of replicas, to keep the total
  * replica count at most MAX_AVG_SLICE_REPLICAS per resource. This phase repeatedly merges the
  * coldest such pairs until the total replica count is within bounds. The merged Slice keeps the
- * minimum number of replicas, so merging never changes how many replicas any key has.
+ * minimum number of replicas, so merging never changes how many replicas any key has, or the total
+ * assignment size.
  */
 private[assigner] object MergePhase {
   def merge(config: Config, resources: Resources, assignment: MutableAssignment): Unit = {
@@ -33,9 +34,10 @@ private[assigner] object MergePhase {
 
     /**
      * A candidate is a pair of adjacent slices that may be merged. While the [[Merger]] is running,
-     * it repeatedly finds the pair of adjacent slices with the lowest total load and merges them.
-     * To motivate the data structures used in this implementation, consider the assignment with the
-     * following Slices and corresponding load values:
+     * it repeatedly finds the candidate with the lowest priority (the raw heat per replica of the
+     * merged Slice; see [[CandidateSlicePair.updatePriority]]) and merges it. To motivate the data
+     * structures used in this implementation, consider the assignment with the following Slices and
+     * corresponding load values, with one replica each and no size (so priority is total load):
      *
      *     ["","b")->10.0, ["b","c")->5.0, ["c","d")->5.0, ["d",∞)->10.0
      *
@@ -75,15 +77,14 @@ private[assigner] object MergePhase {
         predecessorOpt.get.successorOpt = Some(this)
       }
 
-      // Initialize the total load of the candidate pair by summing the current `left` and `right`
-      // load values.
+      // Initialize the priority of the candidate pair from the current `left` and `right` values.
       updatePriority()
 
       /**
        * REQUIRES: this candidate has been removed from [[candidates]].
        *
        * Merges [[left]] and [[right]]. Updates the priority of the predecessor and successor
-       * candidates (if any) to reflect the new total load they would have if they were merged and
+       * candidates (if any) to reflect the priority they would have if they were merged and
        * fixes up the successor and predecessor links to reflect the merge.
        *
        * For example, suppose we start in this state:
@@ -122,13 +123,17 @@ private[assigner] object MergePhase {
       }
 
       /**
-       * Updates this candidate's priority (which is the total load for the pair of Slices). The
+       * Updates this candidate's priority: the raw heat per replica the merged Slice would have,
+       * given its total raw load spread over the minimum number of replicas and its total size. The
        * priority determines the candidate's position in the [[candidates]] min-heap. This method
        * should be called when the candidate is initialized and when the candidate's `left` or
        * `right` values have been modified (due to the merging of adjacent Slices).
        */
       private def updatePriority(): Unit = {
-        setPriority(left.rawLoad + right.rawLoad)
+        val minReplicas: Int = config.resourceAdjustedKeyReplicationConfig.minReplicas
+        val mergedLoad: Double = (left.rawLoad + right.rawLoad) / minReplicas
+        val mergedSize: Double = left.rawSize + right.rawSize
+        setPriority(assignment.heatOf(mergedLoad, mergedSize))
       }
     }
 

@@ -1,4 +1,3 @@
-// LINT.IfChange
 package com.databricks.dicer.external.javaapi;
 
 import com.databricks.dicer.client.javaapi.SliceletConfImpl;
@@ -43,13 +42,11 @@ public final class SliceletConfig {
     @NotThreadSafe
   public static final class Builder {
 
-    /**
-     * TLS options override for Dicer RPCs.
-     *
-     * <p>Note: Today there is no use case for different client vs server TLS options. If one arises
-     * in the future, separate parameters can be added.
-     */
+    /** TLS options override for Dicer RPCs. */
     private Optional<JTLSOptions> tlsOptions = Optional.empty();
+
+    /** Optional override for inbound Slicelet server TLS. */
+    private Optional<JTLSOptions> serverTlsOptions = Optional.empty();
 
     /** Base config override. When unset, fallback to {@link RawConfigSingleton}. */
     private Optional<Config> baseConfigOpt = Optional.empty();
@@ -59,10 +56,22 @@ public final class SliceletConfig {
     /**
      * Sets the TLS configuration used for Dicer RPCs. If static configs such as
      * "databricks.dicer.library.client.truststore" are set explicitly for client or server, they
-     * take precedence over this value.
+     * take precedence over this value. For inbound connections, {@link #setServerTlsOptions} takes
+     * precedence over this value regardless of setter order.
      */
     public Builder setTlsOptions(JTLSOptions tlsOptions) {
       this.tlsOptions = Optional.of(tlsOptions);
+      return this;
+    }
+
+    /**
+     * Sets TLS options for inbound Slicelet server connections without changing outbound Dicer
+     * RPCs. Defaults to the options from {@link #setTlsOptions} when unset.
+     *
+     * <p>Explicit static server keystore and truststore configs take precedence over this value.
+     */
+    public Builder setServerTlsOptions(JTLSOptions serverTlsOptions) {
+      this.serverTlsOptions = Optional.of(serverTlsOptions);
       return this;
     }
 
@@ -80,11 +89,12 @@ public final class SliceletConfig {
     public SliceletConfig build() {
       Option<TLSOptions> scalaTlsOptions =
           OptionConverters.toScala(tlsOptions.map(JTLSOptions::toTLSOptions));
+      Option<TLSOptions> scalaServerTlsOptions =
+          OptionConverters.toScala(serverTlsOptions.map(JTLSOptions::toTLSOptions));
       Option<Config> scalaBaseConfigOpt = OptionConverters.toScala(baseConfigOpt);
-      SliceletConfImpl sliceletConf = SliceletConfImpl.create(scalaBaseConfigOpt, scalaTlsOptions);
+      SliceletConfImpl sliceletConf =
+          SliceletConfImpl.create(scalaBaseConfigOpt, scalaTlsOptions, scalaServerTlsOptions);
       return new SliceletConfig(sliceletConf);
     }
   }
 }
-// LINT.ThenChange(dicer/external/src/Conf.scala)
-// LINT.ThenChange(dicer/rust/external/slicelet/src/slicelet.rs)

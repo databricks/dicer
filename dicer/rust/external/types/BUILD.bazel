@@ -1,0 +1,83 @@
+load("//bazel/rules/rust:rules_rust.bzl", "rust_binary", "rust_library", "rust_test")
+
+rust_library(
+    name = "types_lib",
+    srcs = [
+        "src/lib.rs",
+        "src/resource_address.rs",
+        "src/slice.rs",
+        "src/slice_key.rs",
+        "src/slice_key_builder.rs",
+        "src/target.rs",
+    ],
+    crate_name = "dicer_rust_external_types",
+    visibility = ["//dicer:internal"],
+    deps = [
+        "//caching/rust/util:util_lib",
+        "@crates//:anyhow",
+        "@crates//:derive_more",
+        "@crates//:farmhash",
+        "@crates//:http",
+        "@crates//:smallvec",
+        "@crates//:static_assertions",
+        "@crates//:thiserror",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "slice_test",
+    srcs = ["tests/slice_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":types_lib",
+        "//dicer/rust/testing:testing_lib",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "slice_key_test",
+    srcs = ["tests/slice_key_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":types_lib",
+        "//caching/rust/util/testing:testing_lib",
+        "//dicer/rust/testing:testing_lib",
+    ],
+)
+
+rust_test(
+    name = "target_test",
+    srcs = ["tests/target_test.rs"],
+    args = ["--test-threads=1"],
+    crate_features = ["test"],
+    deps = [
+        ":types_lib",
+        "//caching/rust/util/testing:testing_lib",
+        "//caching/rust/util:util_lib",
+        "//dicer/rust/testing:testing_lib",
+    ],
+)
+
+rust_test(
+    name = "resource_address_test",
+    srcs = ["tests/resource_address_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":types_lib",
+        "//caching/rust/util/testing:testing_lib",
+        "//dicer/rust/testing:testing_lib",
+        "@crates//:tonic",
+    ],
+)
+
+rust_binary(
+    name = "slice_key_creation_benchmark",
+    srcs = ["tests/slice_key_creation_benchmark.rs"],
+    deps = [
+        ":types_lib",
+        "@crates//:criterion",
+        "@crates//:rand",
+    ],
+)

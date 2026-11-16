@@ -2,14 +2,24 @@ package com.databricks.dicer.assigner
 
 import scala.collection.mutable
 
+import com.databricks.api.proto.caching.external.ConfigScopeP
+import com.databricks.api.proto.dicer.assigner.config.{
+  InternalDicerOverrideP,
+  InternalDicerTargetConfigP
+}
 import com.databricks.caching.util.SafeConfigUtil.DICER_TARGET_CONFIG_FLAGS_NAME_PREFIX
+import com.databricks.caching.util.{ClusterConfigScope, ConfigScope, InstanceConfigScope}
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
 import com.databricks.featureflag.client.experimentation.MockFeatureFlagReaderProvider
 import com.databricks.featureflag.client.utils.RuntimeContext
 import com.databricks.rpc.DatabricksObjectMapper
 import com.typesafe.config.Config
 
-import com.databricks.dicer.assigner.config.{InternalTargetConfig, NamedInternalTargetConfig}
+import com.databricks.dicer.assigner.config.{
+  InternalTargetConfig,
+  InternalTargetConfigJsonConverter,
+  NamedInternalTargetConfig
+}
 import com.databricks.dicer.common.TargetName
 
 /**
@@ -40,10 +50,43 @@ class TestableDicerAssignerConf(config: Config)
    */
   def expectRequestsThroughS2SProxy: Boolean = false
 
-  /** Updates dynamic configuration targets to include the given parsed `config`. */
-  def putDynamicTargetConfig(targetName: TargetName, config: InternalTargetConfig): Unit = {
-    val json: String =
-      NamedInternalTargetConfig(targetName, config, overrides = Map.empty).toJsonString
+  /**
+   * Updates dynamic configuration targets to include the given parsed `config` and
+   * `overrides`.
+   */
+  def putDynamicTargetConfig(
+      targetName: TargetName,
+      config: InternalTargetConfig,
+      overrides: Map[ConfigScope, InternalTargetConfig]): Unit = {
+    // NamedInternalTargetConfig.toProto omits scoped entries, so add them to the proto's
+    // overrides field explicitly.
+    // TODO(<internal bug>): Use toJsonString directly once it serializes overrides.
+    val protoWithEmptyEffectiveConfigMap: InternalDicerTargetConfigP =
+      NamedInternalTargetConfig(targetName, config, overrides = Map.empty).toProto
+    val overrideProtos: Seq[InternalDicerOverrideP] = overrides.map {
+      case (scope: ConfigScope, scopedConfig: InternalTargetConfig) =>
+        val configScopeProto: ConfigScopeP = scope match {
+          case ClusterConfigScope(clusterUri: String) => ConfigScopeP().withClusterUri(clusterUri)
+          case InstanceConfigScope(instanceId: String) => ConfigScopeP().withInstanceId(instanceId)
+        }
+        // Creating a NamedInternalTargetConfig is a hack to extract the target_config and
+        // advanced_config proto fields.
+        // TODO(<internal bug>): This will be removed once toJsonString serializes the overrides.
+        val scopedProto: InternalDicerTargetConfigP =
+          NamedInternalTargetConfig(
+            targetName,
+            scopedConfig,
+            overrides = Map.empty
+          ).toProto
+        InternalDicerOverrideP(
+          overrideScope = Some(configScopeProto),
+          targetConfig = scopedProto.targetConfig,
+          advancedConfig = scopedProto.advancedConfig
+        )
+    }.toSeq
+    val protoWithOverrides: InternalDicerTargetConfigP =
+      protoWithEmptyEffectiveConfigMap.copy(overrides = overrideProtos)
+    val json: String = InternalTargetConfigJsonConverter.toJsonString(protoWithOverrides)
     putDynamicTargetConfig(targetName.value, json)
   }
 
@@ -63,21 +106,6 @@ class TestableDicerAssignerConf(config: Config)
     mockFeatureFlagReader.setMockValue(
       targetConfigBatchFlag.flagName,
       DatabricksObjectMapper.toJson(flagNames)
-    )
-  }
-
-  /**
-   * Updates the dynamic target migration config flag value with the provided JSON.
-   *
-   * @param jsonConfig The JSON-serialized [[TargetMigrationConfigP]] instance to set the flag
-   *                   value to. Note that the provided JSON can be invalid if test scenarios
-   *                   want to simulate a malformed config.
-   */
-  def putDynamicTargetMigrationConfig(jsonConfig: String): Unit = {
-    mockFeatureFlagReader.setMockValue(
-      targetMigrationConfigFlag.flagName,
-      value = jsonConfig,
-      runtimeCtxOpt = Some(RuntimeContext.EMPTY)
     )
   }
 

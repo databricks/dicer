@@ -39,9 +39,9 @@ import com.databricks.dicer.common.{
 /**
  * The passive state machine controlling assignment syncing.
  *
- * If the watch RPC response is slower than `config.watchRpcTimeout`, we add hedging - assume the
- * request failed and retry, but still incorporate the response from the old request if we hear back
- * and it is newer. At a high level the behavior is:
+ * If the watch RPC response is slower than `sliceLookupConfig.watchRpcTimeout`, we add hedging -
+ * assume the request failed and retry, but still incorporate the response from the old request if
+ * we hear back and it is newer. At a high level the behavior is:
  *  - If the response corresponds to the last request sent, initiate a new request immediately.
  *  - Otherwise send a new request if the last request has been inflight for more than
  *    `watchRpcTimeout` (at the RPC layer we have an additional buffer during which we will receive
@@ -55,14 +55,17 @@ import com.databricks.dicer.common.{
  *    assigner has changed, and the new assigner may not have a newer assignment yet, so we apply
  *    the redirect even if the response doesn't have a higher generation.
  *
- * @param config The internal configuration parameters used by the Clerk/Slicelet.
+ * @param sliceLookupConfig The lookup configuration parameters used by the Clerk/Slicelet.
+ * @param subscriberDebugName The debug name of the Clerk/Slicelet, shown in logs.
+ * @param defaultWatchAddress The address the state machine watches when no redirect is active.
  * @param random An rng to add jitter to exponential backoff.
  */
-class AssignmentSyncStateMachine(config: InternalClientConfig, random: Random)
+class AssignmentSyncStateMachine(
+    sliceLookupConfig: SliceLookupConfig,
+    subscriberDebugName: String,
+    defaultWatchAddress: WatchAddress,
+    random: Random)
     extends StateMachine[Event, DriverAction] {
-
-  private val sliceLookupConfig: SliceLookupConfig = config.sliceLookupConfig
-  private val subscriberDebugName: String = config.subscriberDebugName
 
   private val logger = PrefixLogger.create(this.getClass, subscriberDebugName)
 
@@ -105,10 +108,10 @@ class AssignmentSyncStateMachine(config: InternalClientConfig, random: Random)
   private var watchRpcTimeout: FiniteDuration = sliceLookupConfig.watchRpcTimeout
 
   /**
-   * The redirect to apply to the next request: the address to which the next request should be sent
-   * and an opaque token to echo back. If this is [[Redirect.EMPTY]], we fall back to the default
-   * behavior of sending to a random server. This field is set based on `ClientResponse.redirect`
-   * and reset to [[Redirect.EMPTY]] if the request fails.
+   * The redirect to apply to the next request: the address to which the next request should be
+   * sent. If this is [[Redirect.EMPTY]], we fall back to the default behavior of sending to a
+   * random server. This field is set based on `ClientResponse.redirect` and reset to
+   * [[Redirect.EMPTY]] if the request fails.
    */
   private var redirect: Redirect = Redirect.EMPTY
 
@@ -155,8 +158,10 @@ class AssignmentSyncStateMachine(config: InternalClientConfig, random: Random)
         onReadFailure(tickerTime, opId, error)
       case Event.Cancel => onCancel()
     }
-    // Always advance the state machine after handling events.
-    onAdvanceInternal(tickerTime, outputBuilder)
+    // Always advance the state machine after handling events, unless cancelled.
+    if (!isCancelled) {
+      onAdvanceInternal(tickerTime, outputBuilder)
+    }
     outputBuilder.build()
   }
 
@@ -180,7 +185,7 @@ class AssignmentSyncStateMachine(config: InternalClientConfig, random: Random)
       .map { responseAddress: URI =>
         responseAddress.toString
       }
-      .getOrElse(config.watchStubManagerConfig.watchAddress.toString)
+      .getOrElse(defaultWatchAddress.address)
     val isNewAssignment: Boolean =
       incorporateSyncState(response.syncState, syncSourceDebugName, outputBuilder)
 
@@ -360,9 +365,8 @@ class AssignmentSyncStateMachine(config: InternalClientConfig, random: Random)
   }
 
   /** Cancels this state machine. */
-  private def onCancel(): StateMachineOutput[DriverAction] = {
+  private def onCancel(): Unit = {
     isCancelled = true
-    StateMachineOutput.empty
   }
 
   /**
@@ -514,8 +518,7 @@ object AssignmentSyncStateMachine {
      *
      * Asks the driver to sync with the remote server, using the given sync state and optionally to
      * the given address. If `redirect.addressOpt` is defined, it indicates that the request should
-     * be sent to that address and that `redirect.redirectTokenOpt` should be echoed back to the
-     * server in the request. If `redirect` is [[Redirect.EMPTY]], we should fall back to the
+     * be sent to that address. If `redirect` is [[Redirect.EMPTY]], we should fall back to the
      * default behavior, which sends the request to a random server.
      *
      * The supplied `opId` (and `addressOpt` for [[Event.ReadSuccess]]) should be passed back in the

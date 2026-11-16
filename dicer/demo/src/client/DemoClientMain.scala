@@ -17,7 +17,6 @@ import com.databricks.api.proto.dicer.demo.{
   PutValueRequestP,
   PutValueResponseP
 }
-import com.databricks.backend.common.util.Project
 import com.databricks.caching.util.{PrefixLogger, ServerConf}
 import com.databricks.conf.Config
 import com.databricks.conf.trusted.ProjectConf
@@ -46,7 +45,7 @@ class DemoClientConf(projectName: String, rawConfig: Config)
  * - Load shifts every 60 seconds to simulate changing access patterns
  * - Logs operation type, latency, and response information
  */
-object DemoClientMain extends DatabricksMain(Project.DemoClient) {
+object DemoClientMain extends DatabricksMain("dicer-demo-client") {
   private val prefixLogger = PrefixLogger.create(getClass, "")
 
   /** Total number of keys that we will send requests for (0 to NUM_KEYS-1). */

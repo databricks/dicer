@@ -1,6 +1,6 @@
 package com.databricks.dicer.client
 
-import java.net.{InetAddress, URI}
+import java.net.InetAddress
 
 import com.databricks.dicer.common.ClientType
 import com.databricks.rpc.testing.TestTLSOptions
@@ -10,13 +10,13 @@ import com.databricks.testing.DatabricksTest
 class WatchStubManagerConfigSuite extends DatabricksTest {
 
   /** The watch address the base config connects to. */
-  private val TEST_WATCH_ADDRESS: URI = URI.create("https://localhost:8080")
+  private val TEST_WATCH_ADDRESS: WatchAddress = WatchAddress.fromAddress("https://localhost:8080")
 
   /**
-   * A second watch address, for the variant that differs from the base config in
-   * `watchAddress`.
+   * A second watch address, for configs that differ from the base config in `watchAddress`.
    */
-  private val TEST_OTHER_WATCH_ADDRESS: URI = URI.create("https://localhost:9090")
+  private val TEST_OTHER_WATCH_ADDRESS: WatchAddress =
+    WatchAddress.fromAddress("https://localhost:9090")
 
   /**
    * Builds a config for `targetName`, with each field overridable to derive one-field variants.
@@ -24,7 +24,7 @@ class WatchStubManagerConfigSuite extends DatabricksTest {
   private def createConfig(
       targetName: String,
       clientType: ClientType = ClientType.Clerk,
-      watchAddress: URI = TEST_WATCH_ADDRESS,
+      watchAddress: WatchAddress = TEST_WATCH_ADDRESS,
       tlsOptionsOpt: Option[TLSOptions] = None,
       watchFromDataPlane: Boolean = false,
       sourceIpOpt: Option[InetAddress] = None): WatchStubManagerConfig =
@@ -63,10 +63,9 @@ class WatchStubManagerConfigSuite extends DatabricksTest {
   }
 
   test("configs differing only in the source IP are distinct") {
-    // Test plan: Verify that `sourceIpOpt` reaches `clientName` and participates in equality, so a
-    // source-bound connection's channels and metrics stay distinct from an unbound one's. Verify
-    // this by building three configs differing only in `sourceIpOpt`, then checking their names
-    // and inequality.
+    // Test plan: Verify that `sourceIpOpt` reaches `clientName` and participates in equality.
+    // Verify this by building three configs differing only in `sourceIpOpt`, then checking their
+    // names and inequality.
 
     // Setup: One unbound config and two bound to different local addresses.
     val unboundConfig: WatchStubManagerConfig = createConfig("source-ip-test")
@@ -75,7 +74,7 @@ class WatchStubManagerConfigSuite extends DatabricksTest {
     val secondNicConfig: WatchStubManagerConfig =
       createConfig("source-ip-test", sourceIpOpt = Some(InetAddress.getByName("10.7.8.9")))
 
-    // Verify: A bound config's name carries its address, so metrics and channels stay distinct.
+    // Verify: A bound config's name carries its address.
     assertResult("dicer-clerk-source-ip-test")(unboundConfig.clientName)
     assertResult("dicer-clerk-source-ip-test-src-10.4.5.6")(firstNicConfig.clientName)
     assertResult("dicer-clerk-source-ip-test-src-10.7.8.9")(secondNicConfig.clientName)
@@ -124,7 +123,9 @@ class WatchStubManagerConfigSuite extends DatabricksTest {
       "watchAddress" -> createConfig(targetName, watchAddress = TEST_OTHER_WATCH_ADDRESS),
       "tlsOptionsOpt" ->
       createConfig(targetName, tlsOptionsOpt = TestTLSOptions.clientTlsOptionsOpt),
-      "watchFromDataPlane" -> createConfig(targetName, watchFromDataPlane = true)
+      "watchFromDataPlane" -> createConfig(targetName, watchFromDataPlane = true),
+      "sourceIpOpt" ->
+      createConfig(targetName, sourceIpOpt = Some(InetAddress.getByName("10.4.5.6")))
     )
 
     // Verify: Every variant is unequal to the base config.
@@ -139,13 +140,24 @@ class WatchStubManagerConfigSuite extends DatabricksTest {
   test("equals and hashCode treat configs with identical fields as the same value") {
     // Test plan: Verify that two separately built configs whose fields all match are equal and hash
     // equal, which is what [[SliceLookupCache]] relies on to key a lookup by its watch connection.
-    // Verify this by building the same config twice and comparing the two instances. Inequality of
-    // configs that differ is covered by the per-field test above.
+    // Verify this by building the same config twice, with every field set to a non-default value,
+    // and comparing the two instances. Inequality of configs that differ is covered by the
+    // per-field test above.
 
-    // Setup: Build the same config twice, so the two instances are distinct but field-identical.
+    // Setup: Build the same config twice, with every field set to a non-default value, so the two
+    // instances are distinct but field-identical and every field takes part in the comparison.
     val targetName: String = "equal-configs-test"
-    val config: WatchStubManagerConfig = createConfig(targetName)
-    val identicalConfig: WatchStubManagerConfig = createConfig(targetName)
+    def createFullySpecifiedConfig(): WatchStubManagerConfig =
+      createConfig(
+        targetName,
+        clientType = ClientType.Slicelet,
+        watchAddress = TEST_OTHER_WATCH_ADDRESS,
+        tlsOptionsOpt = TestTLSOptions.clientTlsOptionsOpt,
+        watchFromDataPlane = true,
+        sourceIpOpt = Some(InetAddress.getByName("10.4.5.6"))
+      )
+    val config: WatchStubManagerConfig = createFullySpecifiedConfig()
+    val identicalConfig: WatchStubManagerConfig = createFullySpecifiedConfig()
 
     // Verify: The two configs are equal and hash equal.
     assertResult(config)(identicalConfig)

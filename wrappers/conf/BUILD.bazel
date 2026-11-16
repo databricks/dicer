@@ -50,6 +50,7 @@ scala_library(
     deps = [
         ":dbconf",
         ":environment",
+        "//wrappers/testing:test_environment",
         "@maven//:com_fasterxml_jackson_core_jackson_annotations",
         "@maven//:com_fasterxml_jackson_core_jackson_core",
         "@maven//:com_fasterxml_jackson_core_jackson_databind",
@@ -118,6 +119,17 @@ scala_library(
 )
 
 scala_library(
+    name = "static_flag",
+    srcs = ["src/StaticFlag.scala"],
+    deps = [
+        ":dbconf",
+        "//wrappers/testing:test_environment",
+        "//wrappers/util:lock",
+        "@maven//:com_google_code_findbugs_jsr305",
+    ],
+)
+
+scala_library(
     name = "raw_config_singleton",
     srcs = ["src/RawConfigSingleton.scala"],
     deps = [
@@ -151,16 +163,5 @@ scala_library(
     ],
     deps = [
         ":dbconf",
-    ],
-)
-
-scala_library(
-    name = "kam-client-config",
-    srcs = [
-        "src/KamClientConfig.scala",
-        "src/KamEndpoint.scala",
-    ],
-    deps = [
-        "//wrappers/rpc:rpc_ssl",
     ],
 )

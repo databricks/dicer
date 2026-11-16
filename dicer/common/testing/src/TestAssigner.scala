@@ -2,8 +2,6 @@ package com.databricks.dicer.common.testing
 
 import com.databricks.api.proto.dicer.assigner.{HeartbeatRequestP, HeartbeatResponseP}
 import com.databricks.dicer.common.TargetHelper.TargetOps
-import io.kubernetes.client.openapi.ApiClient
-import io.kubernetes.client.openapi.apis.CoreV1Api
 import java.net.URI
 import java.time.Instant
 import java.util.UUID
@@ -32,7 +30,7 @@ import com.databricks.conf.Configs
 import com.databricks.dicer.assigner.InterposingEtcdPreferredAssignerDriver.ShutdownOption
 import com.databricks.dicer.assigner.Store.WriteAssignmentResult
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
-import com.databricks.dicer.assigner.config.{TargetConfigProvider, TargetMigrationConfig}
+import com.databricks.dicer.assigner.config.TargetConfigProvider
 import com.databricks.dicer.assigner.{
   Assigner,
   AssignerInfo,
@@ -45,10 +43,10 @@ import com.databricks.dicer.assigner.{
   InMemoryStore,
   InterposingEtcdPreferredAssignerDriver,
   InterposingEtcdPreferredAssignerStore,
-  KubernetesMembershipChecker,
   PreferredAssignerDriver,
+  ProposedAssignment,
+  ProposedSliceAssignment,
   Store,
-  TargetMigrator,
   TestableDicerAssignerConf
 }
 import com.databricks.dicer.assigner.testing.{AssignerRpcTestUtils}
@@ -59,10 +57,7 @@ import com.databricks.dicer.common.{
   ClientRequest,
   Generation,
   Incarnation,
-  ProposedAssignment,
-  ProposedSliceAssignment,
   Redirect,
-  SliceMapHelper,
   SliceletData
 }
 import com.databricks.dicer.common.testing.TestAssigner.AssignerReplyType
@@ -100,8 +95,6 @@ class TestAssigner private (
     assignerClusterUri: URI,
     minAssignmentGenerationInterval: FiniteDuration,
     dPageNamespaceOpt: Option[String],
-    targetMigrator: TargetMigrator,
-    localClusterMembershipChecker: KubernetesMembershipChecker,
     assignerServiceInfoOpt: Option[AssignerServiceInfo])
     extends Assigner.BaseForTest(
       secPool,
@@ -117,8 +110,6 @@ class TestAssigner private (
       assignerClusterUri,
       minAssignmentGenerationInterval,
       dPageNamespaceOpt,
-      targetMigrator = targetMigrator,
-      localClusterMembershipChecker = localClusterMembershipChecker,
       assignerServiceInfoOpt = assignerServiceInfoOpt
     ) {
 
@@ -360,12 +351,12 @@ class TestAssigner private (
       .flatMap {
         case Some(latestAssignment: Assignment) =>
           if (latestAssignment.isFrozen) {
-            // Write an assignment that is identical to the latest assignment but with the frozen
-            // bit cleared. We create a proposal carrying forward all details of the frozen
-            // assignment, including the load metrics from the frozen assignment.
+            // Clear the frozen bit and apply the configured self-transfer filtering. We create a
+            // proposal carrying forward all details of the frozen assignment, including the load
+            // metrics from the frozen assignment.
             val sliceAssignments: SliceMap[ProposedSliceAssignment] =
               latestAssignment.sliceMap.map(
-                SliceMapHelper.PROPOSED_SLICE_ASSIGNMENT_ACCESSOR
+                ProposedSliceAssignment.SLICE_ACCESSOR
               ) { sliceAssignment =>
                 ProposedSliceAssignment(
                   sliceAssignment.slice,
@@ -373,10 +364,11 @@ class TestAssigner private (
                   sliceAssignment.primaryRateLoadOpt
                 )
               }
-            val proposal = ProposedAssignment(
+            val proposal: ProposedAssignment = ProposedAssignment(
               Some(latestAssignment),
               sliceAssignments,
-              assignerServiceInfoOpt
+              assignerServiceInfoOpt,
+              filterSelfTransfers = conf.filterSelfTransfers
             )
             interceptableStore
               .writeAssignment(
@@ -425,7 +417,8 @@ class TestAssigner private (
           ProposedAssignment(
             predecessorOpt,
             sliceMap = proposal,
-            assignerServiceInfoOpt
+            assignerServiceInfoOpt,
+            filterSelfTransfers = conf.filterSelfTransfers
           )
         interceptableStore
           .writeAssignment(
@@ -571,10 +564,6 @@ object TestAssigner {
    *                                      failovers, for example. By default, it will use the
    *                                      production config found in
    *                                      [[EtcdPreferredAssignerDriver.Config]].
-   * @param targetMigratorOpt a [[TargetMigrator]] to inject into the constructed [[TestAssigner]].
-   *                          Tests exercising a behavior the real migrator cannot serve yet (e.g.
-   *                          an active migration) inject one here. Otherwise, a real
-   *                          [[TargetMigrator]] is built against the no-op migration config.
    * @param preferredAssignerDriverFactoryOverride When defined, builds the assigner's
    *                                               [[PreferredAssignerDriver]] instead of the
    *                                               conf-derived default, letting a test inject a
@@ -588,7 +577,6 @@ object TestAssigner {
   class Config private (
       val assignerConf: TestableDicerAssignerConf,
       val preferredAssignerDriverConfig: EtcdPreferredAssignerDriver.Config,
-      val targetMigratorOpt: Option[TargetMigrator],
       val preferredAssignerDriverFactoryOverride: Option[PreferredAssignerDriverFactory],
       val assignerServiceInfoOpt: Option[AssignerServiceInfo])
 
@@ -606,7 +594,6 @@ object TestAssigner {
         expectRequestsThroughS2SProxy: Boolean = false,
         preferredAssignerDriverConfig: EtcdPreferredAssignerDriver.Config =
           EtcdPreferredAssignerDriver.Config(),
-        targetMigratorOpt: Option[TargetMigrator] = None,
         // When `None`, the test environment supplies the conf-derived default bound to its
         // dockerized etcd (which only the environment owns).
         preferredAssignerDriverFactoryOverride: Option[PreferredAssignerDriverFactory] = None,
@@ -623,10 +610,6 @@ object TestAssigner {
         // Use a short poll interval for tests.
         override val dynamicConfigPollInterval: FiniteDuration = 100.milliseconds
 
-        // Likewise poll the target migration config quickly so SAFE-driven config changes
-        // propagate within a test's timeout.
-        override val dynamicTargetMigrationConfigPollInterval: FiniteDuration = 100.milliseconds
-
         override val dicerClientTlsOptions: Option[TLSOptions] =
           tlsOptionsOpt.orElse(TestTLSOptions.clientTlsOptionsOpt)
 
@@ -635,26 +618,9 @@ object TestAssigner {
 
         override val expectRequestsThroughS2SProxy: Boolean = expectRequestsThroughS2SProxyVar
       }
-      // This is a temporary workaround until the real TargetMigrator implementation is complete.
-      // For now, an injected `targetMigratorOpt` is always a [[FakeTargetMigrator]] used to
-      // exercise a specific behavior (e.g. an active migration) that the real migrator cannot serve
-      // yet. When no migrator is injected, we seed the SAFE value with a no-op target migration
-      // config and let [[TestAssigner.createAndStart]] build the real migrator (which only supports
-      // no-op migrations for now).
-      //
-      // TODO(<internal bug>): Once the real TargetMigrator supports active migrations, remove the
-      // `targetMigratorOpt` parameter and instead accept a `TargetMigrationConfig` to seed here, so
-      // tests drive both no-op and active migrations through the real migrator.
-      if (targetMigratorOpt.isEmpty) {
-        testConf.putDynamicTargetMigrationConfig(
-          TargetMigrationConfig.toJsonString(TargetMigrationConfig.NO_MIGRATION)
-        )
-      }
-
       new Config(
         testConf,
         preferredAssignerDriverConfig,
-        targetMigratorOpt,
         preferredAssignerDriverFactoryOverride,
         assignerServiceInfoOpt
       )
@@ -692,8 +658,10 @@ object TestAssigner {
     override def create(
         target: Target,
         config: HealthWatcher.StaticConfig,
-        healthWatcherTargetConfig: HealthWatcherTargetConfig): HealthWatcher = {
-      val healthWatcher = new HealthWatcher(target, config, healthWatcherTargetConfig)
+        healthWatcherTargetConfig: HealthWatcherTargetConfig,
+        ownerTeamName: String): HealthWatcher = {
+      val healthWatcher =
+        new HealthWatcher(target, config, healthWatcherTargetConfig, ownerTeamName)
 
       // We bypass the starting phase of HealthWatcher by advancing the HealthWater on two different
       // times with an interval no less than the bootstrapping delay.
@@ -742,12 +710,6 @@ object TestAssigner {
     val paSec: SequentialExecutionContext =
       secPool.createExecutionContext("test-preferred-assigner-sec")
     val uuid: UUID = UUID.randomUUID()
-    // The Assigner always requires a membership checker. Use an inert checker that does not affect
-    // the etcd election. The Assigner stops it on teardown. This mirrors
-    // KubernetesTestUtils.inertMembershipCheckerFactory but is kept local because that helper
-    // is 2.12-only (it depends on the fake K8s server), while TestAssigner also cross-builds 2.13.
-    val localClusterMembershipChecker: KubernetesMembershipChecker =
-      buildInertMembershipChecker(secPool, uuid)
     // The caller supplies the driver factory (binding any dockerized etcd it needs); here we just
     // build the driver from the driver's SEC.
     val preferredAssignerDriver: PreferredAssignerDriver =
@@ -763,31 +725,6 @@ object TestAssigner {
         // it won't cause the test to run too long but still provide a chance to exercise the
         // assignment generating rate limiting.
         50.milliseconds
-    }
-
-    // This is a temporary workaround until the real TargetMigrator implementation is complete.
-    // For now, if a `targetMigratorOpt` is injected, it is always a [[FakeTargetMigrator]] used
-    // to exercise a specific behavior (e.g. an active migration) that the real migrator cannot
-    // serve yet. When no migrator is injected, we build the real migrator against the no-op
-    // migration config that `Config.create` seeded into SAFE.
-    //
-    // TODO(<internal bug>): Once the real TargetMigrator supports active migrations, we will always build
-    // the real migrator here and no longer take in an injected `targetMigratorOpt` (see the
-    // corresponding TODO in `Config.create`).
-    val targetMigrator: TargetMigrator = config.targetMigratorOpt.getOrElse {
-      val targetMigratorSec: SequentialExecutionContext =
-        secPool.createExecutionContext("test-target-migrator")
-      // Since we're only building a real migrator against the no-op migration config for now (see
-      // comments above), it never enters an active migration: we pass no remote membership checker
-      // factory, which is never invoked.
-      TargetMigrator.create(
-        targetMigratorSec,
-        config.assignerConf,
-        assignerUuid = UUID.randomUUID(),
-        assignerClusterUri,
-        remoteClusterMembershipCheckerFactoryOpt = None,
-        TargetMigrator.DEFAULT_INITIAL_TARGET_OWNERSHIP_RESOLVER_AWAIT_TIMEOUT
-      )
     }
 
     val interceptableStore: InterceptableStore = new InterceptableStore(sec, store)
@@ -807,8 +744,6 @@ object TestAssigner {
       assignerClusterUri = assignerClusterUri,
       minAssignmentGenerationInterval = minAssignmentGenerationInterval,
       dPageNamespaceOpt = dPageNamespaceOpt,
-      targetMigrator = targetMigrator,
-      localClusterMembershipChecker = localClusterMembershipChecker,
       assignerServiceInfoOpt = config.assignerServiceInfoOpt
     )
     testAssigner.start()
@@ -837,29 +772,6 @@ object TestAssigner {
       )
       buildInterposingEtcdDriver(sec, conf, dockerizedEtcdOpt.get, driverConfig)
     }
-  }
-
-  /**
-   * Builds an inert [[KubernetesMembershipChecker]] for tests that don't supply their own factory.
-   * It targets a bare `CoreV1Api` and uses a one-hour poll interval, so it never polls within a
-   * test; it exists only to satisfy the Assigner's required-checker constructor and is not wired
-   * into the driver, so tests that don't exercise membership never observe it.
-   */
-  private def buildInertMembershipChecker(
-      secPool: SequentialExecutionContextPool,
-      uuid: UUID): KubernetesMembershipChecker = {
-    val checkerSec: SequentialExecutionContext =
-      secPool.createExecutionContext("test-membership-checker")
-    new KubernetesMembershipChecker(
-      checkerSec,
-      new CoreV1Api(new ApiClient()),
-      assignerUuid = uuid,
-      namespace = "test-namespace",
-      appName = "test-app",
-      pollingInterval = 1.hour,
-      rpcPort = 1,
-      kubeContextLabelOpt = None
-    )
   }
 
   /**

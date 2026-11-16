@@ -14,7 +14,6 @@ import com.databricks.api.proto.dicer.assigner.{
   AssignerSliceViewP,
   AssignerTargetViewP,
   ChurnViewP,
-  ConsistentHashingStateViewP,
   PreferredAssignerStateViewP,
   TargetConfigViewP
 }
@@ -418,75 +417,13 @@ object AssignerTargetSlicezData {
 }
 
 /**
- * Snapshot of the consistent-hashing preferred-assigner state for display on the Assigner
- * debug page (ZPage/DPage only). Populated by the consistent-hashing preferred-assigner driver
- * when active.
- *
- * @param localAssignerInfo This assigner instance's own identity (UUID + URI).
- * @param preferredAssignerInfoOpt The CH-elected preferred assigner (UUID + URI), or `None`
- *                                 when no assigner is currently elected.
- * @param eligiblePods The healthy assigner pods currently considered eligible for election.
- * @param k8sConnectionHealth Whether the Kubernetes API connection is currently considered
- *                            healthy by the membership checker's connection-health monitor.
- */
-case class ConsistentHashingState(
-    localAssignerInfo: AssignerInfo,
-    preferredAssignerInfoOpt: Option[AssignerInfo],
-    eligiblePods: Seq[AssignerInfo],
-    k8sConnectionHealth: ConsistentHashingState.K8sConnectionHealth)
-
-object ConsistentHashingState {
-
-  import com.databricks.api.proto.dicer.assigner.ConsistentHashingStateViewP.K8sConnectionHealthP
-
-  /** State of the Kubernetes API connection as tracked by the connection-health monitor. */
-  sealed abstract class K8sConnectionHealth(val toProto: K8sConnectionHealthP) {
-    override def toString: String = this match {
-      case K8sConnectionHealth.Init => "INIT"
-      case K8sConnectionHealth.Healthy => "HEALTHY"
-      case K8sConnectionHealth.Unhealthy => "UNHEALTHY"
-    }
-  }
-
-  object K8sConnectionHealth {
-
-    /** Membership checker has not yet observed a poll result. */
-    case object Init extends K8sConnectionHealth(K8sConnectionHealthP.INIT)
-
-    /** The K8s API connection is currently considered healthy. */
-    case object Healthy extends K8sConnectionHealth(K8sConnectionHealthP.HEALTHY)
-
-    /** The K8s API connection is currently considered unhealthy. */
-    case object Unhealthy extends K8sConnectionHealth(K8sConnectionHealthP.UNHEALTHY)
-  }
-}
-
-/**
- * All preferred-assigner data surfaced on the Assigner debug page: the elected preferred-assigner
- * value (common to every driver), the consistent-hashing election snapshot (present only while the
- * consistent-hashing driver is active). TODO(<internal bug>): since the migration to consistent-hashing PA
- * is no longer in progress, remove the consistent-hashing election snapshot.
- *
- * @param preferredAssignerValue the elected preferred-assigner value, shown for every driver.
- * @param consistentHashingStateOpt the consistent-hashing election snapshot, or `None` when the
- *                                  consistent-hashing driver is not active (the etcd-backed and
- *                                  disabled drivers).
- */
-private[assigner] case class PreferredAssignerSlicezData(
-    preferredAssignerValue: PreferredAssignerValue,
-    consistentHashingStateOpt: Option[ConsistentHashingState])
-
-/**
  * Class that contains the assigner information and the Slicez data for all targets.
  *
- * @param preferredAssignerSlicezData the elected preferred-assigner value plus the
- *                                    consistent-hashing snapshot for the debug page.
- *                                    TODO(<internal bug>): remove the consistent-hashing
- *                                    election snapshot.
+ * @param preferredAssignerValue the elected preferred-assigner value.
  */
 case class AssignerSlicezData(
     assignerInfo: AssignerInfo,
-    preferredAssignerSlicezData: PreferredAssignerSlicezData,
+    preferredAssignerValue: PreferredAssignerValue,
     targetsSlicezData: Seq[AssignerTargetSlicezData])
     extends SlicezData {
 
@@ -506,10 +443,6 @@ case class AssignerSlicezData(
         ),
         h3("Preferred Assigner State"),
         renderPreferredAssignerState,
-        // TODO(<internal bug>): remove the Consistent Hash based Preferred Assigner section
-        // (and all its supporting code in this file and the view proto).
-        h4("Consistent Hash based Preferred Assigner"),
-        renderConsistentHashingState,
         h3("Subscriber Information"),
         p(
           "This table lists Clerks and Slicelets that sent an RPC to this Dicer Assigner " +
@@ -569,9 +502,7 @@ case class AssignerSlicezData(
       preferredAssignerState = Some(preferredAssignerStateToViewProto),
       targets = targetsSlicezData.map { td: AssignerTargetSlicezData =>
         td.toViewProto
-      },
-      consistentHashing = preferredAssignerSlicezData.consistentHashingStateOpt
-        .map(consistentHashingStateToViewProto)
+      }
     )
   }
 
@@ -583,7 +514,7 @@ case class AssignerSlicezData(
    * and DPage JSON representations.
    */
   private def preferredAssignerStateDisplay: AssignerSlicezData.PreferredAssignerStateDisplay = {
-    preferredAssignerSlicezData.preferredAssignerValue match {
+    preferredAssignerValue match {
       case SomeAssigner(preferredAssignerInfo: AssignerInfo, generation: Generation) =>
         if (preferredAssignerInfo.uuid == assignerInfo.uuid) {
           AssignerSlicezData.PreferredAssignerStateDisplay(
@@ -648,58 +579,6 @@ case class AssignerSlicezData(
       Seq(tr(th("Generation"), td(display.generation.toString)))
     table(cls := "assigner-table")(rows: _*)
   }
-
-  /**
-   * Renders the consistent-hashing preferred-assigner state as an HTML table (ZPage only),
-   * or a placeholder when the driver view carries no consistent-hashing snapshot
-   * (the CH driver is not active). Renders the local and elected-preferred assigner UUIDs and URIs
-   * so DPages of different assigners can be compared.
-   */
-  private def renderConsistentHashingState: TypedTag[String] = {
-    preferredAssignerSlicezData.consistentHashingStateOpt match {
-      case Some(state: ConsistentHashingState) =>
-        val preferredStr: String = state.preferredAssignerInfoOpt
-          .map(AssignerSlicezData.assignerInfoDisplay)
-          .getOrElse("N/A")
-        // Render each eligible pod on its own line, prefixed by the count, so DPages of different
-        // assigners can be compared pod-by-pod rather than only on the count.
-        val eligiblePodDisplays: Seq[String] =
-          state.eligiblePods.map(AssignerSlicezData.assignerInfoDisplay)
-        val eligiblePodsCell: TypedTag[String] = td(
-          s"Count: ${eligiblePodDisplays.size}",
-          eligiblePodDisplays.map { display: String =>
-            div(display)
-          }
-        )
-        val rows: Seq[TypedTag[String]] = Seq(
-          tr(
-            th("Local assigner"),
-            td(AssignerSlicezData.assignerInfoDisplay(state.localAssignerInfo))
-          ),
-          tr(th("Preferred assigner"), td(preferredStr)),
-          tr(th("Eligible pods"), eligiblePodsCell),
-          tr(th("K8s connection health"), td(state.k8sConnectionHealth.toString))
-        )
-        table(cls := "assigner-table")(rows: _*)
-      case None =>
-        p("Consistent hash based preferred assigner: not active")
-    }
-  }
-
-  /**
-   * Converts a [[ConsistentHashingState]] to its [[ConsistentHashingStateViewP]] proto for
-   * DPage serialization.
-   */
-  private def consistentHashingStateToViewProto(
-      state: ConsistentHashingState): ConsistentHashingStateViewP = {
-    ConsistentHashingStateViewP(
-      localAssigner = Some(AssignerSlicezData.assignerInfoToViewProto(state.localAssignerInfo)),
-      preferredAssigner =
-        state.preferredAssignerInfoOpt.map(AssignerSlicezData.assignerInfoToViewProto),
-      eligiblePods = state.eligiblePods.map(AssignerSlicezData.assignerInfoToViewProto),
-      k8SConnectionHealth = Some(state.k8sConnectionHealth.toProto)
-    )
-  }
 }
 
 object AssignerSlicezData {
@@ -724,10 +603,5 @@ object AssignerSlicezData {
   /** Builds the [[AssignerInfoViewP]] (UUID + URI) for the given assigner. */
   private[assigner] def assignerInfoToViewProto(info: AssignerInfo): AssignerInfoViewP = {
     AssignerInfoViewP(uuid = Some(info.uuid.toString), uri = Some(info.uri.toString))
-  }
-
-  /** Human-readable "UUID (URI)" string for an assigner, used in ZPage tables. */
-  private[assigner] def assignerInfoDisplay(info: AssignerInfo): String = {
-    s"${info.uuid} (${info.uri})"
   }
 }

@@ -77,6 +77,7 @@ class MutableAssignmentSuite extends DatabricksTest {
       predecessor.sliceMap,
       resources,
       loadMap,
+      sizeMapOpt = None,
       ConfigTestUtils.ZERO_PENALTY_CHURN_CONFIG
     )
     mutableAssignment.forTest.checkInvariants()
@@ -155,6 +156,7 @@ class MutableAssignmentSuite extends DatabricksTest {
       predecessor.sliceMap,
       resources,
       loadMap,
+      sizeMapOpt = None,
       ConfigTestUtils.ZERO_PENALTY_CHURN_CONFIG
     )
     mutableAssignment.forTest.checkInvariants()
@@ -278,6 +280,7 @@ class MutableAssignmentSuite extends DatabricksTest {
       predecessor.sliceMap,
       resources,
       loadMap,
+      sizeMapOpt = None,
       ConfigTestUtils.ZERO_PENALTY_CHURN_CONFIG
     )
     mutableAssignment.forTest.checkInvariants()
@@ -382,6 +385,7 @@ class MutableAssignmentSuite extends DatabricksTest {
       predecessor.sliceMap,
       resources,
       LoadMap.UNIFORM_LOAD_MAP,
+      sizeMapOpt = None,
       ConfigTestUtils.ZERO_PENALTY_CHURN_CONFIG
     )
     mutableAssignment.forTest.checkInvariants()
@@ -436,6 +440,7 @@ class MutableAssignmentSuite extends DatabricksTest {
       predecessor.sliceMap,
       resources,
       loadMap,
+      sizeMapOpt = None,
       ConfigTestUtils.ZERO_PENALTY_CHURN_CONFIG
     )
     mutableAssignment.forTest.checkInvariants()
@@ -579,6 +584,7 @@ class MutableAssignmentSuite extends DatabricksTest {
       predecessor.sliceMap,
       resources,
       loadMap,
+      sizeMapOpt = None,
       ChurnConfig.DEFAULT
     )
     mutableAssignment.forTest.checkInvariants()
@@ -642,6 +648,7 @@ class MutableAssignmentSuite extends DatabricksTest {
         predecessor.sliceMap,
         resources,
         loadMap,
+        sizeMapOpt = None,
         ChurnConfig.DEFAULT
       )
 
@@ -657,7 +664,7 @@ class MutableAssignmentSuite extends DatabricksTest {
     val sliceAsn: mutableAssignment.MutableSliceAssignment = sliceAsns.head
     val split: Option[
       (mutableAssignment.MutableSliceAssignment, mutableAssignment.MutableSliceAssignment)] =
-      sliceAsn.split()
+      sliceAsn.split(MutableAssignment.Metric.Load)
     assert(split.isDefined)
 
     /** Return the `MutableSliceAssignment` with the higher `rawLoad`. */
@@ -690,7 +697,7 @@ class MutableAssignmentSuite extends DatabricksTest {
     // key.
     val split2: Option[
       (mutableAssignment.MutableSliceAssignment, mutableAssignment.MutableSliceAssignment)] =
-      higherLoadAsn.split()
+      higherLoadAsn.split(MutableAssignment.Metric.Load)
     assert(split2.isDefined)
     val higherLoadAsn2: mutableAssignment.MutableSliceAssignment = getHigherLoadAsn(split2.get)
     assert(higherLoadAsn2.slice == (hotKey -- hotKey.successor()))
@@ -704,7 +711,7 @@ class MutableAssignmentSuite extends DatabricksTest {
     assert(higherLoadAsn2.isAllocatedToResource("pod1"))
 
     // Since the Slice consists of a single key, it cannot be split further.
-    assert(higherLoadAsn2.split().isEmpty)
+    assert(higherLoadAsn2.split(MutableAssignment.Metric.Load).isEmpty)
   }
 
   test("Returns correct total number of slice replicas") {
@@ -728,16 +735,17 @@ class MutableAssignmentSuite extends DatabricksTest {
       predecessor.sliceMap,
       resources,
       LoadMap.UNIFORM_LOAD_MAP,
+      sizeMapOpt = None,
       ConfigTestUtils.ZERO_PENALTY_CHURN_CONFIG
     )
     mutableAssignment.forTest.checkInvariants()
     assert(mutableAssignment.currentNumTotalSliceReplicas == 6)
 
     // Split increases total number of slice replicas (each child inherits parent's replicas).
-    mutableAssignment.sliceAssignmentsIterator.toVector(0).split()
+    mutableAssignment.sliceAssignmentsIterator.toVector(0).split(MutableAssignment.Metric.Load)
     mutableAssignment.forTest.checkInvariants()
     assert(mutableAssignment.currentNumTotalSliceReplicas == 7)
-    mutableAssignment.sliceAssignmentsIterator.toVector.last.split()
+    mutableAssignment.sliceAssignmentsIterator.toVector.last.split(MutableAssignment.Metric.Load)
     mutableAssignment.forTest.checkInvariants()
     assert(mutableAssignment.currentNumTotalSliceReplicas == 10)
 

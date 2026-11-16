@@ -15,7 +15,7 @@ import com.databricks.dicer.assigner.AssignmentStats.{
   AssignmentLoadStats,
   ReassignmentChurnAndLoadStats
 }
-import com.databricks.dicer.assigner.algorithm.{Algorithm, LoadMap, Resources}
+import com.databricks.dicer.assigner.algorithm.{Algorithm, LoadMap, MetricMap, Resources}
 import com.databricks.dicer.common.Assignment.DiffUnused
 import com.databricks.dicer.common.{Assignment, Generation, SliceAssignment}
 import com.databricks.dicer.common.TargetHelper.TargetOps
@@ -235,7 +235,7 @@ object TargetMetrics {
   private val podSetSizeComputed: Gauge = Gauge
     .build()
     .name("dicer_assigner_podset_size")
-    .labelNames("targetCluster", "targetName", "targetInstanceId", "healthStatus")
+    .labelNames("targetCluster", "targetName", "targetInstanceId", "healthStatus", "ownerTeamName")
     .help("Number of resources for the target with the given healthStatus")
     .register()
 
@@ -244,7 +244,8 @@ object TargetMetrics {
       target: Target,
       statusName: String,
       reportedCount: Int,
-      computedCount: Int): Unit = {
+      computedCount: Int,
+      ownerTeamName: String): Unit = {
 
     podSetSizeReported
       .labels(
@@ -260,7 +261,8 @@ object TargetMetrics {
         target.getTargetClusterLabel,
         target.getTargetNameLabel,
         target.getTargetInstanceIdLabel,
-        statusName
+        statusName,
+        ownerTeamName
       )
       .set(computedCount)
   }
@@ -944,6 +946,19 @@ object TargetMetrics {
     .labelNames("targetCluster", "targetName", "targetInstanceId")
     .register()
 
+  // How far the size limit was relaxed when the current assignment was generated, as a fraction of
+  // the size limit hint: 0 when the hint is honored, positive when the maximum desired size per
+  // resource is above it (see<internal link>). Only reported for targets with size limits.
+  private val sizeLimitRelaxationRatioAtGeneration = Gauge
+    .build()
+    .name("dicer_assigner_size_limit_relaxation_ratio_at_generation")
+    .help(
+      "How far the maximum desired size per resource exceeds the size limit hint, as a fraction " +
+      "of the hint, for the current assignment at the time it is generated."
+    )
+    .labelNames("targetCluster", "targetName", "targetInstanceId")
+    .register()
+
   /** Tracks the number of slices assigned to each resource. */
   private val numAssignedSlicesPerResource = Gauge
     .build()
@@ -965,6 +980,8 @@ object TargetMetrics {
    *    `churnAndLoadStats.loadStatsUniformKeyAssignment`.
    *  - Per-resource min and max desired loads that were used to generate the new assignment,
    *    indicated by `desiredLoad`.
+   *  - The size limit relaxation ratio used to generate the new assignment, indicated by
+   *    `desiredSizeLimitOpt.relaxationRatio`.
    *  - The number of assigned slices per resource in the new assignment, included in
    *    `churnAndLoadStats.loadStatsAfter`.
    *
@@ -973,11 +990,15 @@ object TargetMetrics {
    * @param desiredLoadOpt the desired load range that was used to generate the new assignment, if
    *                       present. None when no load balancing was attempted in assignment
    *                       generation.
+   * @param desiredSizeLimitOpt the size limit that was used to generate the new assignment, if
+   *                            present. None when size limits are not configured or no load
+   *                            balancing was attempted in assignment generation.
    */
   def reportReassignmentStats(
       target: Target,
       churnAndLoadStats: ReassignmentChurnAndLoadStats,
-      desiredLoadOpt: Option[Algorithm.DesiredLoadRange]): Unit = {
+      desiredLoadOpt: Option[Algorithm.DesiredLoadRange],
+      desiredSizeLimitOpt: Option[Algorithm.DesiredSizeLimit] = None): Unit = {
 
     // Export churn ratios.
     val churnStats: AssignmentChangeStats = churnAndLoadStats.churnStats
@@ -1046,6 +1067,15 @@ object TargetMetrics {
         .set(desiredLoad.minDesiredLoadExistingResource)
 
     }
+    for (desiredSizeLimit: Algorithm.DesiredSizeLimit <- desiredSizeLimitOpt) {
+      sizeLimitRelaxationRatioAtGeneration
+        .labels(
+          target.getTargetClusterLabel,
+          target.getTargetNameLabel,
+          target.getTargetInstanceIdLabel
+        )
+        .set(desiredSizeLimit.relaxationRatio)
+    }
   }
 
   /**
@@ -1079,7 +1109,7 @@ object TargetMetrics {
   /** The Slice "buckets" over which load is measured. */
   private val SLICE_LOAD_BUCKETS: Vector[LoadDistributionHistogramBucket] = {
     val BUCKET_COUNT: Int = 64
-    val slices: Vector[Slice] = LoadMap.getUniformPartitioning(BUCKET_COUNT)
+    val slices: Vector[Slice] = MetricMap.getUniformPartitioning(BUCKET_COUNT)
     val buckets = Vector.newBuilder[LoadDistributionHistogramBucket]
     buckets.sizeHint(BUCKET_COUNT)
     for (i: Int <- 0 until BUCKET_COUNT) {
@@ -1315,7 +1345,10 @@ object TargetMetrics {
    * and the currently known `resourcesOpt` to prevent stale metrics from being retained after the
    * generator shuts down.
    */
-  def clearTerminatedGeneratorFromMetrics(target: Target, resources: Resources): Unit = {
+  def clearTerminatedGeneratorFromMetrics(
+      target: Target,
+      resources: Resources,
+      ownerTeamName: String): Unit = {
     val targetClusterLabel: String = target.getTargetClusterLabel
     val targetNameLabel: String = target.getTargetNameLabel
     val targetInstanceIdLabel: String = target.getTargetInstanceIdLabel
@@ -1329,7 +1362,8 @@ object TargetMetrics {
         targetClusterLabel,
         targetNameLabel,
         targetInstanceIdLabel,
-        statusName
+        statusName,
+        ownerTeamName
       )
       podSetSizeReported.remove(
         targetClusterLabel,
@@ -1420,6 +1454,11 @@ object TargetMetrics {
     numTopKeys.remove(targetClusterLabel, targetNameLabel, targetInstanceIdLabel)
     maxDesiredLoadAtGeneration.remove(targetClusterLabel, targetNameLabel, targetInstanceIdLabel)
     minDesiredLoadAtGeneration.remove(targetClusterLabel, targetNameLabel, targetInstanceIdLabel)
+    sizeLimitRelaxationRatioAtGeneration.remove(
+      targetClusterLabel,
+      targetNameLabel,
+      targetInstanceIdLabel
+    )
     // Clean up replica count distribution metrics.
     for (bucketLabel: String <- REPLICA_COUNT_BUCKETS.map(_.toDouble.toString) ++ Seq("+Inf")) {
       sliceReplicaCountHistogram.remove(
@@ -1599,10 +1638,6 @@ object TargetMetrics {
     case object GENERATOR_INACTIVITY extends GeneratorShutdownReason {
       override def toString: String = "GENERATOR_INACTIVITY"
     }
-
-    case object TARGET_MIGRATION_REROUTE extends GeneratorShutdownReason {
-      override def toString: String = "TARGET_MIGRATION_REROUTE"
-    }
   }
 
   object forTest {
@@ -1644,6 +1679,7 @@ object TargetMetrics {
       numTopKeys.clear()
       maxDesiredLoadAtGeneration.clear()
       minDesiredLoadAtGeneration.clear()
+      sizeLimitRelaxationRatioAtGeneration.clear()
       assignmentLoadDistributionHistogram.clear()
       sliceReplicaCountHistogram.clear()
       keyOfDeathHeuristic.clear()

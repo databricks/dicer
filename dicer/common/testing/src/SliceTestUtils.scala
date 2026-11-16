@@ -22,6 +22,7 @@ import com.databricks.caching.util.{
 }
 import com.databricks.caching.util.AsciiTable.Header
 import com.databricks.caching.util.MetricUtils.ChangeTracker
+import com.databricks.dicer.assigner.ProposedSliceAssignment
 import com.databricks.dicer.assigner.algorithm.{Algorithm, LoadMap, Resources}
 import com.databricks.dicer.assigner.config.InternalTargetConfig
 import com.databricks.dicer.assigner.AssignmentStats.AssignmentLoadStats
@@ -34,7 +35,6 @@ import com.databricks.dicer.common.{
   DiffAssignmentSliceMap,
   Generation,
   Incarnation,
-  ProposedSliceAssignment,
   Redirect,
   SliceAssignment,
   SliceHelper,
@@ -511,7 +511,7 @@ object SliceTestUtils extends Assertions {
 
         slice -> selectedResources
       }
-    SliceMapHelper.ofProposedSliceAssignments(sliceAssignments)
+    ProposedSliceAssignment.createSliceMap(sliceAssignments)
   }
 
   /**
@@ -569,7 +569,7 @@ object SliceTestUtils extends Assertions {
         slice -> selectedResources
       }
 
-    SliceMapHelper.ofProposedSliceAssignments(sliceAssignments)
+    ProposedSliceAssignment.createSliceMap(sliceAssignments)
   }
 
   def sampleProposal(): SliceMap[ProposedSliceAssignment] = {
@@ -714,7 +714,7 @@ object SliceTestUtils extends Assertions {
     for (entry: ProposedAssignmentEntry <- remainingEntries) {
       sliceAssignments ++= entry.toSliceAssignments
     }
-    SliceMapHelper.ofProposedSliceAssignments(sliceAssignments.result())
+    ProposedSliceAssignment.createSliceMap(sliceAssignments.result())
   }
 
   /**
@@ -1301,5 +1301,35 @@ object SliceTestUtils extends Assertions {
       s"$clientDescription made $watchRequests watch requests over $elapsedSeconds seconds " +
       s"($watchRequestsPerSecond QPS), exceeding the $MAX_WATCH_REQUESTS_PER_SECOND QPS ceiling"
     )
+  }
+
+  /**
+   * Asserts that the client described by `clientDescription` sends watch requests faster than the
+   * ceiling [[assertWatchRequestRateBounded]] holds a rate-limited client to, as counted by
+   * `getWatchRequestCount`, which tells a client whose rate limiting is off from one whose rate
+   * limiting is on.
+   *
+   * @param clientDescription The client under test, e.g. "Clerk", used in the assertion messages.
+   * @param getWatchRequestCount Yields how many watch requests the client has sent successfully.
+   */
+  def assertWatchRequestRateUnbounded(
+      clientDescription: String,
+      getWatchRequestCount: () => Long): Unit = {
+    val watchTracker: ChangeTracker[Long] = ChangeTracker(getWatchRequestCount)
+    AssertionWaiter(s"Wait for $clientDescription watch traffic").await {
+      assert(watchTracker.totalChange() > 0)
+    }
+
+    // Even with a full initial burst, a rate-limited client stays under the ceiling across the
+    // measurement window, so exceeding it within the window shows the limiter is off.
+    val watchesAtStart: Long = watchTracker.totalChange()
+    val watchRequestsOverCeiling: Long =
+      (MAX_WATCH_REQUESTS_PER_SECOND * MEASUREMENT_WINDOW.toSeconds).toLong + 1
+    AssertionWaiter(
+      s"Wait for $clientDescription watch traffic to exceed the rate-limiting ceiling",
+      timeout = MEASUREMENT_WINDOW
+    ).await {
+      assert(watchTracker.totalChange() - watchesAtStart >= watchRequestsOverCeiling)
+    }
   }
 }

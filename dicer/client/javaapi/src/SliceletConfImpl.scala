@@ -21,23 +21,31 @@ import com.databricks.rpc.tls.TLSOptions
 final class SliceletConfImpl private (
     projectName: String,
     baseConf: Config,
-    tlsOptions: Option[TLSOptions])
+    tlsOptions: Option[TLSOptions],
+    serverTlsOptions: Option[TLSOptions])
     extends ProjectConf(projectName, baseConf)
     with SliceletConf {
 
   override protected def dicerTlsOptions: Option[TLSOptions] = tlsOptions
+
+  override protected def dicerServerTlsOptions: Option[TLSOptions] =
+    serverTlsOptions.orElse(dicerTlsOptions)
 }
 
 object SliceletConfImpl {
 
   /**
-   * Creates a [[SliceletConfImpl]] instance.
+   * Creates a [[SliceletConfImpl]] with an optional inbound server TLS override.
    *
    * @param baseConfOpt optional base config override. Defaults to [[RawConfigSingleton]] if None.
    * @param tlsOptions the TLS options to use for Dicer RPCs.
+   * @param serverTlsOptions inbound server TLS options, falling back to tlsOptions if None.
    */
   @throws[IllegalStateException]("if CurrentProject is not initialized")
-  def create(baseConfOpt: Option[Config], tlsOptions: Option[TLSOptions]): SliceletConfImpl = {
+  def create(
+      baseConfOpt: Option[Config],
+      tlsOptions: Option[TLSOptions],
+      serverTlsOptions: Option[TLSOptions]): SliceletConfImpl = {
     val projectName = CurrentProjectInfo.projectNameOpt.getOrElse(
       throw new IllegalStateException(
         "CurrentProject not initialized. Ensure DatabricksMain has started or call " +
@@ -45,7 +53,12 @@ object SliceletConfImpl {
       )
     )
     val baseConf: Config = baseConfOpt.getOrElse(RawConfigSingleton.conf)
-    new SliceletConfImpl(projectName = projectName, baseConf = baseConf, tlsOptions = tlsOptions)
+    new SliceletConfImpl(
+      projectName = projectName,
+      baseConf = baseConf,
+      tlsOptions = tlsOptions,
+      serverTlsOptions = serverTlsOptions
+    )
   }
 
   private[dicer] object forTest {

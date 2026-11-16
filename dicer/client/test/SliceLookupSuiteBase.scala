@@ -20,7 +20,6 @@ import com.databricks.caching.util.AlertOwnerTeam
 import com.databricks.caching.util.MetricUtils.ChangeTracker
 import com.databricks.caching.util.TestUtils
 import com.databricks.caching.util.TestUtils.TestName
-import com.google.protobuf.ByteString
 import com.databricks.caching.util.{
   AssertionWaiter,
   FakeProxy,
@@ -33,7 +32,7 @@ import com.databricks.caching.util.{
   SequentialExecutionContext
 }
 import com.databricks.conf.Configs
-import com.databricks.dicer.assigner.TargetMetricsUtils
+import com.databricks.dicer.assigner.{ProposedSliceAssignment, TargetMetricsUtils}
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
 import com.databricks.dicer.common.TargetHelper
 import com.databricks.dicer.common.TargetHelper.TargetOps
@@ -57,7 +56,6 @@ import com.databricks.dicer.common.{
   ClientResponse,
   ClientType,
   Generation,
-  ProposedSliceAssignment,
   Redirect,
   SliceSetImpl,
   ClerkSubscriberSlicezData,
@@ -147,6 +145,14 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
   // TODO(<internal bug>): Investigate if we can always use SSL if we create a fake S2S proxy that uses TLS.
   protected def useSsl: Boolean = !watchFromDataPlane
 
+  /**
+   * The watch address the `SliceLookup` would use to watch the `testAssigner`.
+   */
+  protected def watchAddressFor(testAssigner: TestAssigner): WatchAddress = {
+    val scheme: String = if (useSsl) "https" else "http"
+    WatchAddress.fromAddress(s"$scheme://localhost:${portToConnectTo(testAssigner)}")
+  }
+
   override def beforeEach(): Unit = {
     // Reset replies so they don't pollute other tests.
     singleAssignerTestEnv.testAssigner.setReplyType(AssignerReplyType.Normal)
@@ -156,8 +162,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
     // TODO(<internal bug>): Remove the manual redirect overrides when we have integrated the preferred
     // assigner mechanism.
     val redirectToAssigner1: AssignerReplyType.OverwriteRedirect = createRedirectReply(
-      Some(multiAssignerTestEnv.testAssigners.head.localUri),
-      redirectTokenOpt = None
+      Some(multiAssignerTestEnv.testAssigners.head.localUri)
     )
     for (assigner <- multiAssignerTestEnv.testAssigners) {
       assigner.setReplyType(redirectToAssigner1)
@@ -169,13 +174,21 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
     multiAssignerTestEnv.stop()
   }
 
-  /** Creates but does not start a [[SliceLookup]] connecting to `testAssigner`. */
+  /**
+   * Creates but does not start a [[SliceLookup]] connecting to `testAssigner`.
+   *
+   * @param sharedWatchStubManagerNameOpt If provided, the lookup watches through the shared
+   *   [[WatchStubManager]] of this name, built on first use to watch `testAssigner`. Lookups given
+   *   the same name share its watch connections. If None, the lookup builds its own dedicated
+   *   manager.
+   */
   protected def createUnstartedSliceLookup(
       testAssigner: TestAssigner,
       clientType: ClientType,
       enableRateLimiting: Boolean = false,
       watchStubCacheTime: FiniteDuration = 20.seconds,
-      sec: SequentialExecutionContext = sec): SliceLookupHarness
+      sec: SequentialExecutionContext = sec,
+      sharedWatchStubManagerNameOpt: Option[String] = None): SliceLookupHarness
 
   /**
    * Creates and starts a [[SliceLookup]] connecting to `testAssigner`. Supplies the lookup and a
@@ -213,11 +226,11 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
       func: (SliceLookupHarness, LoggingStreamCallback[Assignment]) => Unit): Unit
 
   /**
-   * Creates the client configuration for a lookup for a local server listening on `assignerPort`.
-   * Uses test SSL parameters. Other parameters are used for the lookup's [[InternalClientConfig]].
+   * Creates the client configuration for a lookup that watches `watchAddress`. Uses test SSL
+   * parameters. Other parameters are used for the lookup's [[InternalClientConfig]].
    *
    * @param clientType         the [[ClientType]] (e.g. Clerk) for the [[SliceLookupConfig]].
-   * @param assignerPort       local port of the test assigner to connect to.
+   * @param watchAddress       the watch address the [[WatchStubManagerConfig]] is built with.
    * @param watchStubCacheTime how long gRPC stubs are cached before being evicted.
    * @param enableRateLimiting whether rate limiting is enabled for watch RPC calls.
    * @param testTarget         the [[Target]] to watch. Defaults to the suite's [[target]] field.
@@ -226,43 +239,12 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
    */
   protected def createInternalClientConfig(
       clientType: ClientType,
-      assignerPort: Int,
+      watchAddress: WatchAddress,
       watchStubCacheTime: FiniteDuration,
       subscriberDebugName: String,
       enableRateLimiting: Boolean = false,
       testTarget: Target = target,
       clientIdOpt: Option[UUID] = Some(TEST_CLIENT_UUID)): InternalClientConfig = {
-    val scheme: String = if (useSsl) "https" else "http"
-    createInternalClientConfig(
-      clientType,
-      new URI(s"$scheme://localhost:$assignerPort"),
-      watchStubCacheTime,
-      subscriberDebugName,
-      enableRateLimiting,
-      testTarget,
-      clientIdOpt
-    )
-  }
-
-  /**
-   * Creates the client configuration for a lookup that watches `watchAddress`, for tests that
-   * derive one config from another config's fields rather than from an assigner port.
-   *
-   * @param clientType         the [[ClientType]] (e.g. Clerk) for the [[SliceLookupConfig]].
-   * @param watchAddress       the address the client connects to in order to watch assignments.
-   * @param watchStubCacheTime how long gRPC stubs are cached before being evicted.
-   * @param enableRateLimiting whether rate limiting is enabled for watch RPC calls.
-   * @param testTarget         the [[Target]] to watch.
-   * @param clientIdOpt        optional client UUID included in the [[SliceLookupConfig]].
-   */
-  protected def createInternalClientConfig(
-      clientType: ClientType,
-      watchAddress: URI,
-      watchStubCacheTime: FiniteDuration,
-      subscriberDebugName: String,
-      enableRateLimiting: Boolean,
-      testTarget: Target,
-      clientIdOpt: Option[UUID]): InternalClientConfig = {
     InternalClientConfig(
       SliceLookupConfig(
         clientType = clientType,
@@ -281,15 +263,9 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
     )
   }
 
-  /**
-   * Creates an [[AssignerReplyType.OverwriteRedirect]] with the given optional URI and
-   * token.
-   */
-  protected def createRedirectReply(
-      uriOpt: Option[URI],
-      redirectTokenOpt: Option[ByteString]
-  ): AssignerReplyType.OverwriteRedirect = {
-    AssignerReplyType.OverwriteRedirect(Redirect(uriOpt, redirectTokenOpt = redirectTokenOpt))
+  /** Creates an [[AssignerReplyType.OverwriteRedirect]] with the given optional URI. */
+  protected def createRedirectReply(uriOpt: Option[URI]): AssignerReplyType.OverwriteRedirect = {
+    AssignerReplyType.OverwriteRedirect(Redirect(uriOpt))
   }
 
   /**
@@ -345,15 +321,9 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
       metricName: String,
       labels: Vector[(String, String)]): Double
 
-  /**
-   * The substring the `watchAddress` field in the SliceLookup's Slicez data is expected to
-   * contain when watching `assigner`. Defaults to the direct `http(s)://localhost:<port>` form
-   * used by tests that pass a direct URI as the watch address. Subclasses that route through DBNS
-   * names (and thus expose the DBNS string in the Slicez data) should override.
-   */
-  protected def expectedSlicezWatchAddressSubstring(assigner: TestAssigner): String = {
-    val scheme: String = if (useSsl) "https" else "http"
-    s"$scheme://localhost:${portToConnectTo(assigner)}"
+  /** The watch address expected in Slicez data when watching `assigner`. */
+  private def expectedSlicezWatchAddressSubstring(assigner: TestAssigner): String = {
+    watchAddressFor(assigner).address
   }
 
   test("getSlicezData exposes expected dPage data") {
@@ -372,7 +342,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
   test("getSlicezData returns appropriate watch address") {
     // Test plan: Verify that `watchAddress` from `lookup.getSlicezData` reflects the address used
     // by the lookup. In control-plane tests this is the assigner address; in data-plane tests this
-    // is the fake S2S proxy address. In DBNS-routing subclasses this is the DBNS resource string.
+    // is the fake S2S proxy address.
     val assigner1: TestAssigner = multiAssignerTestEnv.testAssigners(0)
 
     withLookup(assigner1) { (lookup: SliceLookupHarness, _: LoggingStreamCallback[Assignment]) =>
@@ -865,7 +835,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
       }
 
       // Redirect `lookup` to `assigner2`.
-      val redirectReply = createRedirectReply(Some(assigner2.localUri), redirectTokenOpt = None)
+      val redirectReply = createRedirectReply(Some(assigner2.localUri))
       assigner1.setReplyType(redirectReply)
       assigner2.setReplyType(redirectReply)
 
@@ -919,7 +889,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
         (lookup: SliceLookupHarness, _: LoggingStreamCallback[Assignment]) =>
           // Setup: Set the redirect to a URI which does not have a host or port
           fakeS2SProxyTestAssigner.setReplyType(
-            createRedirectReply(Some(URI.create("/bogus/redirect")), redirectTokenOpt = None)
+            createRedirectReply(Some(URI.create("/bogus/redirect")))
           )
 
           // Verify: Check that the lookup is still issuing watch requests despite the bogus
@@ -999,23 +969,13 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
           assigner2.setAndFreezeAssignment(target, sampleProposal()),
           Duration.Inf
         )
-      // Redirect `lookup` to `assigner2` with an opaque token. First ensure `assigner2` will keep
-      // directing requests to itself.
-      val redirectToken: ByteString = ByteString.copyFrom(Array[Byte](1, 2, 3, 4))
-      val redirectReply =
-        createRedirectReply(Some(assigner2.localUri), redirectTokenOpt = Some(redirectToken))
+      // Redirect `lookup` to `assigner2`. First ensure `assigner2` will keep directing requests to
+      // itself.
+      val redirectReply = createRedirectReply(Some(assigner2.localUri))
       assigner2.setReplyType(redirectReply)
       assigner1.setReplyType(redirectReply)
       AssertionWaiter("Lookup connects to redirected Assigner").await {
         assert(lookup.generationOpt.get == newAsn.generation)
-        // Verify: Watch requests sent to the redirected assigner echo back the opaque token.
-        val (_, latestRequest): (RequestHeaders, ClientRequest) = assigner2
-          .getLatestClerkWatchRequest(target)
-          .getOrElse(throw new AssertionError("No watch request received by redirected assigner"))
-        assert(
-          latestRequest.redirectTokenOpt.contains(redirectToken),
-          "Redirected assigner should have received the echoed redirect token"
-        )
       }
 
       AssertionWaiter("Cache evicts old stub").await {
@@ -1024,9 +984,8 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
         }
       }
 
-      // Fail requests to `assigner2`, succeed them from `assigner1`. `assigner1`'s redirect-to-self
-      // reply carries no token so we can observe the lookup clearing its token on fallback.
-      assigner1.setReplyType(createRedirectReply(Some(assigner1.localUri), redirectTokenOpt = None))
+      // Fail requests to `assigner2`, succeed them from `assigner1`.
+      assigner1.setReplyType(createRedirectReply(Some(assigner1.localUri)))
       assigner2.setReplyType(AssignerReplyType.Error())
 
       // Verify that the lookup enters backoff.
@@ -1042,15 +1001,6 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
         )
       AssertionWaiter("Lookup falls back to original Assigner").await {
         assert(lookup.generationOpt.get == defaultAsn2.generation)
-        // Verify: After the fallback, the lookup has cleared its redirect token, so watch requests
-        // to the original Assigner do not carry one.
-        val (_, latestRequest): (RequestHeaders, ClientRequest) = assigner1
-          .getLatestClerkWatchRequest(target)
-          .getOrElse(throw new AssertionError("No watch request received by original Assigner"))
-        assert(
-          latestRequest.redirectTokenOpt.isEmpty,
-          "Fallback request should have cleared the redirect token"
-        )
       }
 
       // Verify that the lookup exits backoff.
@@ -1086,7 +1036,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
       // current generation. Set a large `suggestedRpcTimeout` so that the assertion below will
       // run after the first request (rather than second or later), avoiding test flakiness.
 
-      val redirect = Redirect(Some(assigner2.localUri), redirectTokenOpt = None)
+      val redirect = Redirect(Some(assigner2.localUri))
       val response = ClientResponse(
         SyncAssignmentState.KnownGeneration(Generation.EMPTY),
         30.seconds,
@@ -1156,6 +1106,89 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
 
     assert(getNumSliceLookupsMetric(target, ClientType.Clerk) == initialClerkLookups + 2)
     assert(getNumSliceLookupsMetric(target, ClientType.Slicelet) == initialSliceletLookups + 1)
+  }
+
+  test("A second SliceLookup handed the same WatchStubManager opens no new watch channel") {
+    // Test plan: Verify that two SliceLookups handed one WatchStubManager watch over its
+    // connections rather than each opening their own. Verify this by starting the first lookup and
+    // recording the watch-channels-created count, then creating and starting the second, waiting
+    // for both to receive an assignment, and asserting the count does not rise: both were handed
+    // the manager the first lookup already watched through. The check is count-agnostic (a manager
+    // may open more than one channel). Also verify that the second lookup's Slicez data reports the
+    // shared manager's watch address.
+    val assigner: TestAssigner = singleAssignerTestEnv.testAssigner
+    val sharedManagerName: String = "shared-by-two-lookups"
+
+    // The shared manager's channels are recorded under the client name derived from the target.
+    def watchChannelsCreated(): Double =
+      readPrometheusMetric(
+        "dicer_client_watch_channels_created_total",
+        labels = Vector("clientName" -> s"dicer-${ClientType.Clerk}-${target.name}")
+      )
+
+    // Setup: Create and start one lookup that watches the assigner through the shared manager, and
+    // wait until its watch channels exist.
+    val lookup1: SliceLookupHarness = createUnstartedSliceLookup(
+      assigner,
+      ClientType.Clerk,
+      sharedWatchStubManagerNameOpt = Some(sharedManagerName)
+    )
+    var lookup2Opt: Option[SliceLookupHarness] = None
+
+    try {
+      lookup1.start()
+      val channelsAfterFirstLookup: Double =
+        AssertionWaiter("Wait for the first lookup to create its watch channel").await {
+          val channels: Double = watchChannelsCreated()
+          assert(channels > 0)
+          channels
+        }
+
+      // Verify: A second lookup handed the same manager opens no new channel. The second lookup is
+      // created only after the baseline is recorded, so a manager built per lookup rather than
+      // shared would raise the count here. Both creating and starting it must leave the count
+      // unchanged, because the two implementations build their watch stubs at different times:
+      // Scala when the lookup is created, Rust when it is started.
+      val lookup2: SliceLookupHarness = createUnstartedSliceLookup(
+        assigner,
+        ClientType.Clerk,
+        sharedWatchStubManagerNameOpt = Some(sharedManagerName)
+      )
+      lookup2Opt = Some(lookup2)
+      assert(
+        watchChannelsCreated() == channelsAfterFirstLookup,
+        s"creating a second lookup sharing the watch connection must not open new channels; " +
+        s"was $channelsAfterFirstLookup, now ${watchChannelsCreated()}"
+      )
+
+      lookup2.start()
+
+      // Verify: Both lookups receive an assignment, so both actually watch, and starting the second
+      // and watching through it opened no new channel.
+      val assignment: Assignment =
+        TestUtils.awaitResult(
+          singleAssignerTestEnv.setAndFreezeAssignment(target, sampleProposal()),
+          Duration.Inf
+        )
+      AssertionWaiter("Wait for both lookups to receive the assignment").await {
+        assert(lookup1.generationOpt.contains(assignment.generation))
+        assert(lookup2.generationOpt.contains(assignment.generation))
+      }
+      assert(
+        watchChannelsCreated() == channelsAfterFirstLookup,
+        s"starting a second lookup sharing the watch connection must not open new channels; " +
+        s"was $channelsAfterFirstLookup, now ${watchChannelsCreated()}"
+      )
+
+      // Verify: Slicez reports the shared manager's watch address.
+      assert(
+        lookup2.getSlicezData.watchAddress.toString
+          .contains(expectedSlicezWatchAddressSubstring(assigner))
+      )
+    } finally {
+      lookup1.cancel()
+      lookup2Opt.foreach((lookup: SliceLookupHarness) => lookup.cancel())
+    }
   }
 
   test("starting a lookup and redirecting creates exactly two watch channels") {
@@ -1237,7 +1270,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
       ).toLong
     }
 
-    assigner1.setReplyType(createRedirectReply(Some(assigner2.localUri), redirectTokenOpt = None))
+    assigner1.setReplyType(createRedirectReply(Some(assigner2.localUri)))
     assigner2.setReplyType(AssignerReplyType.Error())
 
     val failureTracker = ChangeTracker(() => getAbortedWatchFailureCount)
@@ -1500,7 +1533,7 @@ abstract class SliceLookupSuiteBase(watchFromDataPlane: Boolean)
 
       // Redirect `lookup` to `assigner2`. First ensure that the new Assigner will keep directing
       // requests to itself.
-      val redirectReply = createRedirectReply(Some(assigner2.localUri), redirectTokenOpt = None)
+      val redirectReply = createRedirectReply(Some(assigner2.localUri))
       assigner2.setReplyType(redirectReply)
       assigner1.setReplyType(redirectReply)
 

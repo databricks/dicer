@@ -2,19 +2,27 @@ package com.databricks.instrumentation.test
 
 import com.databricks.instrumentation.{DebugStringServlet, DebugStringServletRegistry}
 import com.databricks.testing.DatabricksTest
-import org.scalatest.concurrent.Eventually._
+import org.scalatest.concurrent.Eventually
+import org.scalatest.time.{Millis, Seconds, Span}
 
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.locks.ReentrantLock
 
 import com.databricks.HasDebugString
-import com.databricks.common.status.{ProbeStatus, ProbeStatusSource, ProbeStatuses}
+import com.databricks.common.status.{
+  ProbeStatus,
+  ProbeStatusManager,
+  ProbeStatusSource,
+  ProbeStatuses
+}
 import com.databricks.common.util.Lock
 import com.databricks.common.web.InfoService
-import com.databricks.rpc.armeria.ReadinessProbeTracker
 
-class InfoServiceSuite extends DatabricksTest {
+class InfoServiceSuite extends DatabricksTest with Eventually {
+
+  override implicit val patienceConfig: PatienceConfig =
+    PatienceConfig(timeout = Span(5, Seconds), interval = Span(10, Millis))
 
   /** A map from URI to expected content. */
   private val expectedContent: Map[String, String] = Map(
@@ -28,19 +36,19 @@ class InfoServiceSuite extends DatabricksTest {
   private val readinessSource: TestProbeStatusSource = new TestProbeStatusSource
 
   /**
-   * A ProbeStatusSource whose status can be changed at any time for testing. Thread-safe via
-   * volatile read/write.
+   * A ProbeStatusSource whose status can be changed at any time for testing.
    */
   private class TestProbeStatusSource extends ProbeStatusSource {
 
-    @volatile private var currentStatus: ProbeStatus = ProbeStatuses.ok("default")
+    private val lock: ReentrantLock = new ReentrantLock()
+    private var currentStatus: ProbeStatus = ProbeStatuses.ok("default") // Guarded by lock.
 
     /** Updates the status that will be returned by subsequent calls to [[getStatus]]. */
-    def setStatus(status: ProbeStatus): Unit = {
+    def setStatus(status: ProbeStatus): Unit = Lock.withLock(lock) {
       currentStatus = status
     }
 
-    override def getStatus: ProbeStatus = currentStatus
+    override def getStatus: ProbeStatus = Lock.withLock(lock) { currentStatus }
   }
 
   /** Makes an HTTP GET request and returns the response body as a string. Asserts status 200. */
@@ -86,8 +94,10 @@ class InfoServiceSuite extends DatabricksTest {
   override def beforeAll(): Unit = {
     // Verify that before the server is started, the port is 0.
     assert(InfoService.getActivePort() == 0)
-    ReadinessProbeTracker.resetForTesting()
-    InfoService.start(port = 0, readinessStatusSourceOpt = Some(readinessSource))
+    ProbeStatusManager.resetForTesting()
+    ProbeStatusManager.withPollIntervalMsForTesting(50L) {
+      InfoService.start(port = 0, readinessStatusSourceOpt = Some(readinessSource))
+    }
   }
 
   override def afterAll(): Unit = {
@@ -98,7 +108,7 @@ class InfoServiceSuite extends DatabricksTest {
     assert(InfoService.getActivePort() != 0)
     InfoService.stop(delaySeconds = 0)
     assert(InfoService.getActivePort() == 0)
-    ReadinessProbeTracker.resetForTesting()
+    ProbeStatusManager.resetForTesting()
   }
 
   test("ZPages Server content") {
@@ -265,10 +275,12 @@ class InfoServiceSuite extends DatabricksTest {
     readinessSource.setStatus(ProbeStatuses.ok("TestService"))
 
     val port: Int = InfoService.getActivePort()
-    val (statusCode, body): (Int, String) = makeHttpRequestRaw(s"http://localhost:$port/ready")
-
-    assert(statusCode == ProbeStatuses.OK_STATUS)
-    assert(body.contains("TestService is available"))
+    eventually {
+      val (statusCode, body): (Int, String) = makeHttpRequestRaw(s"http://localhost:$port/ready")
+      assert(statusCode == ProbeStatuses.OK_STATUS)
+      assert(body.contains("TestService is available"))
+      assert(ProbeStatusManager.isReady)
+    }
   }
 
   test("ready endpoint returns not-yet-ready when source reports not ready") {
@@ -277,30 +289,12 @@ class InfoServiceSuite extends DatabricksTest {
     readinessSource.setStatus(ProbeStatuses.notYetReady("TestService"))
 
     val port: Int = InfoService.getActivePort()
-    val (statusCode, body): (Int, String) = makeHttpRequestRaw(s"http://localhost:$port/ready")
-
-    assert(statusCode == ProbeStatuses.NOT_YET_READY_STATUS)
-    assert(body.contains("TestService has not yet been initialized"))
-  }
-
-  test("ready endpoint updates ReadinessProbeTracker") {
-    // Test plan: Set the source to NOT_YET_READY, hit /ready, and verify that
-    // ReadinessProbeTracker reflects pod-not-ready state. Then switch to OK, hit /ready again,
-    // and verify the tracker transitions to ready.
-    ReadinessProbeTracker.resetForTesting()
-    assert(ReadinessProbeTracker.isPodReady, "precondition: tracker starts ready")
-
-    val port: Int = InfoService.getActivePort()
-
-    // Transition to not-ready.
-    readinessSource.setStatus(ProbeStatuses.notYetReady("TestService"))
-    makeHttpRequestRaw(s"http://localhost:$port/ready")
-    assert(!ReadinessProbeTracker.isPodReady)
-
-    // Transition back to ready.
-    readinessSource.setStatus(ProbeStatuses.ok("TestService"))
-    makeHttpRequestRaw(s"http://localhost:$port/ready")
-    assert(ReadinessProbeTracker.isPodReady)
+    eventually {
+      val (statusCode, body): (Int, String) = makeHttpRequestRaw(s"http://localhost:$port/ready")
+      assert(statusCode == ProbeStatuses.NOT_YET_READY_STATUS)
+      assert(body.contains("TestService has not yet been initialized"))
+      assert(!ProbeStatusManager.isReady)
+    }
   }
 
 }

@@ -35,6 +35,7 @@ import com.databricks.dicer.assigner.config.InternalTargetConfig.{
   LoadBalancingMetricConfig,
   LoadWatcherTargetConfig,
   ReplicationThresholdOverride,
+  SizeLimitMetricConfig,
   TargetWatchRequestRateLimitConfig
 }
 import com.databricks.dicer.common.SliceKeySensitivity
@@ -103,6 +104,28 @@ class InternalTargetConfigSuite extends DatabricksTest {
     }
   }
 
+  test("SizeLimitMetricConfig accepts a positive, finite size limit hint") {
+    // Test plan: Verify that a valid size limit hint is kept as given. Do this by creating configs
+    // with a small and an ordinary positive hint and reading the hint back.
+    assert(SizeLimitMetricConfig(sizeLimitHint = 1e-9).sizeLimitHint == 1e-9)
+    assert(SizeLimitMetricConfig(sizeLimitHint = 100).sizeLimitHint == 100)
+  }
+
+  namedGridTest("SizeLimitMetricConfig rejects a size limit hint that isn't positive and finite")(
+    Map(
+      "zero" -> 0.0,
+      "negative" -> -1.0,
+      "NaN" -> Double.NaN,
+      "infinite" -> Double.PositiveInfinity
+    )
+  ) { sizeLimitHint: Double =>
+    // Test plan: Verify that invalid size limit hints are rejected. Do this by creating a config
+    // with each invalid hint and expecting an IllegalArgumentException.
+    assertThrow[IllegalArgumentException]("size limit hint must be a positive, finite number") {
+      SizeLimitMetricConfig(sizeLimitHint)
+    }
+  }
+
   test("InternalTargetConfig.fromProto") {
     // Test plan: verify that parsing valid `TargetConfigP` protos yields the expected
     // `InternalTargetConfig` values.
@@ -134,7 +157,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
           TargetWatchRequestRateLimitConfig.DEFAULT,
           AuthorizerHelper.DEFAULT_AUTHORIZER,
           KeySensitivityConfig.DEFAULT,
-          useAlternativeTarget = false
+          useAlternativeTarget = false,
+          ownerTeamName = ""
         )
       ),
       TestCase(
@@ -171,7 +195,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
           TargetWatchRequestRateLimitConfig.DEFAULT,
           AuthorizerHelper.DEFAULT_AUTHORIZER,
           KeySensitivityConfig.DEFAULT,
-          useAlternativeTarget = false
+          useAlternativeTarget = false,
+          ownerTeamName = ""
         )
       ),
       TestCase(
@@ -200,7 +225,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
           TargetWatchRequestRateLimitConfig.DEFAULT,
           AuthorizerHelper.DEFAULT_AUTHORIZER,
           KeySensitivityConfig.DEFAULT,
-          useAlternativeTarget = false
+          useAlternativeTarget = false,
+          ownerTeamName = ""
         )
       ),
       TestCase(
@@ -229,7 +255,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
           TargetWatchRequestRateLimitConfig.DEFAULT,
           AuthorizerHelper.DEFAULT_AUTHORIZER,
           KeySensitivityConfig.DEFAULT,
-          useAlternativeTarget = false
+          useAlternativeTarget = false,
+          ownerTeamName = ""
         )
       ),
       TestCase(
@@ -255,7 +282,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
           TargetWatchRequestRateLimitConfig.DEFAULT,
           AuthorizerHelper.DEFAULT_AUTHORIZER,
           KeySensitivityConfig.DEFAULT,
-          useAlternativeTarget = false
+          useAlternativeTarget = false,
+          ownerTeamName = ""
         )
       ),
       TestCase(
@@ -285,7 +313,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
           TargetWatchRequestRateLimitConfig.DEFAULT,
           AuthorizerHelper.DEFAULT_AUTHORIZER,
           KeySensitivityConfig.DEFAULT,
-          useAlternativeTarget = false
+          useAlternativeTarget = false,
+          ownerTeamName = ""
         )
       ),
       TestCase(
@@ -315,7 +344,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
           TargetWatchRequestRateLimitConfig.DEFAULT,
           AuthorizerHelper.DEFAULT_AUTHORIZER,
           KeySensitivityConfig.DEFAULT,
-          useAlternativeTarget = false
+          useAlternativeTarget = false,
+          ownerTeamName = ""
         )
       ),
       TestCase(
@@ -346,7 +376,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
           TargetWatchRequestRateLimitConfig(clientRequestsPerSecond = 500L),
           AuthorizerHelper.DEFAULT_AUTHORIZER,
           KeySensitivityConfig.DEFAULT,
-          useAlternativeTarget = false
+          useAlternativeTarget = false,
+          ownerTeamName = ""
         )
       ),
       TestCase(
@@ -367,7 +398,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
           TargetWatchRequestRateLimitConfig.DEFAULT,
           AuthorizerHelper.DEFAULT_AUTHORIZER,
           keySensitivityConfig = KeySensitivityConfig.DEFAULT,
-          useAlternativeTarget = false
+          useAlternativeTarget = false,
+          ownerTeamName = ""
         )
       ),
       TestCase(
@@ -392,7 +424,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
           AuthorizerHelper.DEFAULT_AUTHORIZER,
           keySensitivityConfig =
             KeySensitivityConfig(sliceKeySensitivity = SliceKeySensitivity.Sensitive),
-          useAlternativeTarget = false
+          useAlternativeTarget = false,
+          ownerTeamName = ""
         )
       ),
       TestCase(
@@ -417,7 +450,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
           AuthorizerHelper.DEFAULT_AUTHORIZER,
           keySensitivityConfig =
             KeySensitivityConfig(sliceKeySensitivity = SliceKeySensitivity.NonSensitive),
-          useAlternativeTarget = false
+          useAlternativeTarget = false,
+          ownerTeamName = ""
         )
       ),
       // use_alternative_target is parsed from the advanced config; unset (above) yields false,
@@ -440,14 +474,19 @@ class InternalTargetConfigSuite extends DatabricksTest {
           TargetWatchRequestRateLimitConfig.DEFAULT,
           AuthorizerHelper.DEFAULT_AUTHORIZER,
           KeySensitivityConfig.DEFAULT,
-          useAlternativeTarget = true
+          useAlternativeTarget = true,
+          ownerTeamName = ""
         )
       )
     )
     for (testCase <- testCases) {
       val expected: InternalTargetConfig = testCase.expected
       val actual =
-        InternalTargetConfig.fromProtos(testCase.proto, testCase.advancedProto)
+        InternalTargetConfig.fromProtos(
+          testCase.proto,
+          testCase.advancedProto,
+          ownerTeamName = ""
+        )
       assert(actual == expected, s"for $testCase")
     }
   }
@@ -472,7 +511,7 @@ class InternalTargetConfigSuite extends DatabricksTest {
       )
     )
     // Verify that parsing valid protos does not throw.
-    InternalTargetConfig.fromProtos(validProto, validAdvancedProto)
+    InternalTargetConfig.fromProtos(validProto, validAdvancedProto, ownerTeamName = "")
 
     case class TestCase(
         proto: TargetConfigFieldsP,
@@ -538,7 +577,11 @@ class InternalTargetConfigSuite extends DatabricksTest {
     )
     for (testCase <- testCases) {
       assertThrow[IllegalArgumentException](testCase.expectedErrorMessage) {
-        InternalTargetConfig.fromProtos(testCase.proto, testCase.advancedProto)
+        InternalTargetConfig.fromProtos(
+          testCase.proto,
+          testCase.advancedProto,
+          ownerTeamName = ""
+        )
       }
     }
   }
@@ -556,12 +599,17 @@ class InternalTargetConfigSuite extends DatabricksTest {
 
     // The default (unset) is false.
     val disabledConfig =
-      InternalTargetConfig.fromProtos(targetConfig, AdvancedTargetConfigFieldsP())
+      InternalTargetConfig.fromProtos(
+        targetConfig,
+        AdvancedTargetConfigFieldsP(),
+        ownerTeamName = ""
+      )
     assert(!disabledConfig.useAlternativeTarget)
 
     val enabledConfig = InternalTargetConfig.fromProtos(
       targetConfig,
-      AdvancedTargetConfigFieldsP(useAlternativeTarget = Some(true))
+      AdvancedTargetConfigFieldsP(useAlternativeTarget = Some(true)),
+      ownerTeamName = ""
     )
 
     // toProto emits the field only when enabled.
@@ -596,7 +644,11 @@ class InternalTargetConfigSuite extends DatabricksTest {
 
     // The default (unset) parses to Default.
     val disabledConfig =
-      InternalTargetConfig.fromProtos(targetConfig, AdvancedTargetConfigFieldsP())
+      InternalTargetConfig.fromProtos(
+        targetConfig,
+        AdvancedTargetConfigFieldsP(),
+        ownerTeamName = ""
+      )
     assertResult(ReplicationThresholdOverride.Default)(
       disabledConfig.loadBalancingConfig.replicationThresholdOverride
     )
@@ -607,7 +659,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
       AdvancedTargetConfigFieldsP(
         replicationThresholdOverride =
           Some(ReplicationThresholdOverrideP.REPLICATION_THRESHOLD_OVERRIDE_MAX_LOAD_HINT_BASED)
-      )
+      ),
+      ownerTeamName = ""
     )
     assertResult(ReplicationThresholdOverride.MaxLoadHintBased)(
       maxLoadHintConfig.loadBalancingConfig.replicationThresholdOverride
@@ -619,7 +672,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
       AdvancedTargetConfigFieldsP(
         replicationThresholdOverride =
           Some(ReplicationThresholdOverrideP.REPLICATION_THRESHOLD_OVERRIDE_MAX_DESIRED_LOAD_BASED)
-      )
+      ),
+      ownerTeamName = ""
     )
     assertResult(ReplicationThresholdOverride.MaxDesiredLoadBased)(
       maxDesiredLoadConfig.loadBalancingConfig.replicationThresholdOverride
@@ -716,7 +770,7 @@ class InternalTargetConfigSuite extends DatabricksTest {
     val nonDefaultKeyReplicationConfig = KeyReplicationConfig(minReplicas = 5, maxReplicas = 10)
     val nonDefaultHealthWatcherConfig =
       HealthWatcherTargetConfig(
-        observeSliceletReadiness = true,
+        observeSliceletReadinessOpt = Some(true),
         permitRunningToNotReady = true
       )
     val nonDefaultKeyOfDeathProtectionConfig =
@@ -735,7 +789,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
       AuthorizerHelper.DEFAULT_AUTHORIZER,
       keySensitivityConfig =
         KeySensitivityConfig(sliceKeySensitivity = SliceKeySensitivity.NonSensitive),
-      useAlternativeTarget = true
+      useAlternativeTarget = true,
+      ownerTeamName = "platform-team"
     )
     val expectedStringWithAllNonDefault = "InternalTargetConfig(, " +
       "LoadWatcherTargetConfig(minDuration=2 minutes, maxAge=20 minutes, useTopKeys=false, " +
@@ -747,7 +802,7 @@ class InternalTargetConfigSuite extends DatabricksTest {
       "KeyOfDeathProtectionConfig(homomorphicGenerationEnabled=true), " +
       "TargetWatchRequestRateLimitConfig(clientRequestsPerSecond=1000, burstCapacity=10000), " +
       "KeySensitivityConfig(sliceKeySensitivity=NonSensitive), " +
-      "useAlternativeTarget=true)"
+      "useAlternativeTarget=true, ownerTeamName=platform-team)"
     assert(
       internalTargetConfigWithAllNonDefault.toString ==
       expectedStringWithAllNonDefault
@@ -762,7 +817,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
       nonDefaultTargetWatchRequestRateLimitConfig,
       AuthorizerHelper.DEFAULT_AUTHORIZER,
       KeySensitivityConfig.DEFAULT,
-      useAlternativeTarget = false
+      useAlternativeTarget = false,
+      ownerTeamName = ""
     )
     val expectedStringWithDefaultKeyReplication = "InternalTargetConfig(, " +
       "LoadWatcherTargetConfig(minDuration=2 minutes, maxAge=20 minutes, useTopKeys=false, " +
@@ -825,14 +881,16 @@ class InternalTargetConfigSuite extends DatabricksTest {
       "permitRunningToNotReady can only be true if observeSliceletReadiness is also true"
     ) {
       HealthWatcherTargetConfig(
-        observeSliceletReadiness = false,
+        observeSliceletReadinessOpt = Some(false),
         permitRunningToNotReady = true
       )
     }
 
     // Test round-trip with non-default value (true).
-    val config1 =
-      HealthWatcherTargetConfig(observeSliceletReadiness = true, permitRunningToNotReady = true)
+    val config1 = HealthWatcherTargetConfig(
+      observeSliceletReadinessOpt = Some(true),
+      permitRunningToNotReady = true
+    )
     val proto1: HealthWatcherConfigP = config1.toProto
     val roundTrippedConfig1 = HealthWatcherTargetConfig.fromProto(proto1)
     assertResult(config1)(roundTrippedConfig1)
@@ -846,6 +904,28 @@ class InternalTargetConfigSuite extends DatabricksTest {
     // Test fromProto with empty proto (should return default).
     val emptyProto = HealthWatcherConfigP()
     assertResult(config2)(HealthWatcherTargetConfig.fromProto(emptyProto))
+
+    // An explicit false must survive serialization even though it equals the implicit default.
+    val explicitFalseProto = HealthWatcherConfigP(observeSliceletReadiness = Some(false))
+    val explicitFalseConfig = HealthWatcherTargetConfig.fromProto(explicitFalseProto)
+    assertResult(explicitFalseProto)(explicitFalseConfig.toProto)
+
+    // Unset, explicit false, and explicit true retain their presence and effective behavior.
+    for ((readinessOpt, expectedReadiness) <- Seq(
+        (None, false),
+        (Some(false), false),
+        (Some(true), true)
+      )) {
+      val proto = HealthWatcherConfigP(observeSliceletReadiness = readinessOpt)
+      val config = HealthWatcherTargetConfig.fromProto(proto)
+      assertResult(expectedReadiness)(config.observeSliceletReadiness)
+      assertResult(proto)(config.toProto)
+    }
+    assertThrow[IllegalArgumentException](
+      "permitRunningToNotReady can only be true if observeSliceletReadiness is also true"
+    ) {
+      HealthWatcherTargetConfig(observeSliceletReadinessOpt = None, permitRunningToNotReady = true)
+    }
   }
 
   test("KeySensitivityConfig verification and round-trip") {
@@ -927,7 +1007,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
           validTargetConfigFieldsP,
           validAdvancedTargetConfigFieldsP.withKeyReplicationConfig(
             KeyReplicationConfigP().withMinReplicas(3).withMaxReplicas(5)
-          )
+          ),
+          ownerTeamName = ""
         )
         .keyReplicationConfig == KeyReplicationConfig(minReplicas = 3, maxReplicas = 5)
     )
@@ -939,7 +1020,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
           validTargetConfigFieldsP,
           validAdvancedTargetConfigFieldsP.withKeyReplicationConfig(
             KeyReplicationConfigP().withMaxReplicas(3)
-          )
+          ),
+          ownerTeamName = ""
         )
     }
     assertThrow[IllegalArgumentException]("maxReplicas is not defined") {
@@ -948,7 +1030,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
           validTargetConfigFieldsP,
           validAdvancedTargetConfigFieldsP.withKeyReplicationConfig(
             KeyReplicationConfigP().withMinReplicas(3)
-          )
+          ),
+          ownerTeamName = ""
         )
     }
 
@@ -962,7 +1045,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
           ),
           validAdvancedTargetConfigFieldsP.withKeyReplicationConfig(
             KeyReplicationConfigP().withMinReplicas(3).withMaxReplicas(5)
-          )
+          ),
+          ownerTeamName = ""
         )
         .keyReplicationConfig == KeyReplicationConfig(minReplicas = 10, maxReplicas = 100)
     )
@@ -992,7 +1076,8 @@ class InternalTargetConfigSuite extends DatabricksTest {
         TargetWatchRequestRateLimitConfig.DEFAULT,
         AuthorizerHelper.DEFAULT_AUTHORIZER,
         KeySensitivityConfig.DEFAULT,
-        useAlternativeTarget = false
+        useAlternativeTarget = false,
+        ownerTeamName = ""
       ),
       overrides = Map.empty
     )

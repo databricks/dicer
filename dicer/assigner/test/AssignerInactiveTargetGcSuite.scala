@@ -1,7 +1,5 @@
 package com.databricks.dicer.assigner
 
-import java.net.URI
-
 import scala.concurrent.duration.Duration
 import scala.concurrent.duration._
 import scala.concurrent.{Await, Future}
@@ -24,7 +22,8 @@ import com.databricks.dicer.common.{
   SliceletData,
   SliceletState,
   SubscriberHandler,
-  SyncAssignmentState
+  SyncAssignmentState,
+  TargetName
 }
 import com.databricks.dicer.common.Version.LATEST_VERSION
 import com.databricks.dicer.common.testing.{
@@ -32,7 +31,11 @@ import com.databricks.dicer.common.testing.{
   SubscriberHandlerMetricTestUtils,
   TestAssigner
 }
-import com.databricks.dicer.assigner.config.InternalTargetConfigMetrics
+import com.databricks.dicer.assigner.config.{
+  InternalTargetConfig,
+  InternalTargetConfigMap,
+  InternalTargetConfigMetrics
+}
 import com.databricks.api.proto.dicer.common.ClientResponseP
 import com.databricks.caching.util.TestUtils.TestName
 import com.databricks.conf.Configs
@@ -40,7 +43,7 @@ import com.databricks.dicer.assigner.conf.DicerAssignerConf
 import com.databricks.dicer.external.{Slicelet, Target}
 import com.databricks.dicer.assigner.TargetMetrics.GeneratorShutdownReason
 import com.databricks.dicer.common.TargetHelper.TargetOps
-import com.databricks.dicer.client.{WatchStubManager, WatchStubManagerConfig}
+import com.databricks.dicer.client.{WatchAddress, WatchStubManager, WatchStubManagerConfig}
 import com.databricks.dicer.common.testing.SliceTestUtils.createTestSquid
 import com.databricks.rpc.testing.TestSslArguments
 import com.databricks.rpc.tls.TLSOptionsMigration
@@ -62,6 +65,9 @@ class AssignerInactiveTargetGcSuite extends DatabricksTest with TestName {
   private val GC_DEADLINE: FiniteDuration = 120.seconds
   private val INACTIVITY_SCAN_INTERVAL: FiniteDuration = 10.seconds
 
+  /** A target with ownership configured, used to verify metric emission and cleanup. */
+  private val OWNED_TARGET: Target = Target("owned-target")
+
   /** A fake clock to control time advancement. */
   private val fakeClock = new FakeTypedClock()
 
@@ -80,6 +86,13 @@ class AssignerInactiveTargetGcSuite extends DatabricksTest with TestName {
   /** A Dicer test environment where the assigner uses `fakeClock`. */
   private val testEnv: InternalDicerTestEnvironment = InternalDicerTestEnvironment.create(
     config = testAssignerConf,
+    targetConfigMap = InternalTargetConfigMap.create(
+      clusterConfigScopeOpt = None,
+      Map(
+        TargetName.forTarget(OWNED_TARGET) ->
+        InternalTargetConfig.forTest.DEFAULT.copy(ownerTeamName = "platform-team")
+      )
+    ),
     secPool = FakeSequentialExecutionContextPool.create(
       "assigner-inactive-target-gc",
       numThreads = 8,
@@ -98,7 +111,7 @@ class AssignerInactiveTargetGcSuite extends DatabricksTest with TestName {
     WatchStubManagerConfig(
       clientType = ClientType.Slicelet,
       targetName = "assigner-generator-clustertype2-test",
-      watchAddress = URI.create(s"http://localhost:${testEnv.getAssignerPort}"),
+      watchAddress = WatchAddress.fromAddress(s"http://localhost:${testEnv.getAssignerPort}"),
       tlsOptionsOpt = TLSOptionsMigration.convert(TestSslArguments.clientSslArgs),
       watchFromDataPlane = false,
       sourceIpOpt = None
@@ -129,7 +142,6 @@ class AssignerInactiveTargetGcSuite extends DatabricksTest with TestName {
       timeout = 5.seconds,
       subscriberData = ClerkData,
       supportsSerializedAssignment = true,
-      redirectTokenOpt = None,
       alternativeTargetOpt = None,
       clusterUriOpt = None,
       regionUriOpt = None
@@ -156,7 +168,6 @@ class AssignerInactiveTargetGcSuite extends DatabricksTest with TestName {
         keyCardinalityEstimateOpt = None
       ),
       supportsSerializedAssignment = true,
-      redirectTokenOpt = None,
       alternativeTargetOpt = None,
       clusterUriOpt = None,
       regionUriOpt = None
@@ -316,7 +327,14 @@ class AssignerInactiveTargetGcSuite extends DatabricksTest with TestName {
     // Test plan: Verify that an inactive target's assignment generator is removed, its generator
     // and subscriber metrics are cleaned up, and a later watch creates a new generator.
 
-    val target = Target(getSafeName)
+    val target: Target = OWNED_TARGET
+    val podSetLabels: Map[String, String] = Map(
+      "targetCluster" -> target.getTargetClusterLabel,
+      "targetName" -> target.getTargetNameLabel,
+      "targetInstanceId" -> target.getTargetInstanceIdLabel,
+      "healthStatus" -> "Running",
+      "ownerTeamName" -> "platform-team"
+    )
 
     // Setup: Create a slicelet to trigger generator creation.
     val slicelet: Slicelet =
@@ -349,6 +367,15 @@ class AssignerInactiveTargetGcSuite extends DatabricksTest with TestName {
     }
 
     AssertionWaiter("Wait for subscriber metrics").await {
+      assert(
+        MetricUtils
+          .getMetricValueOpt(
+            CollectorRegistry.defaultRegistry,
+            "dicer_assigner_podset_size",
+            podSetLabels
+          )
+          .contains(1.0)
+      )
       assert(
         SubscriberHandlerMetricTestUtils.getNumSliceletsByHandler(
           SubscriberHandler.Location.Assigner,
@@ -434,6 +461,15 @@ class AssignerInactiveTargetGcSuite extends DatabricksTest with TestName {
       )
 
       // Verify: metrics that are removed (not just decremented) should return None.
+      assert(
+        MetricUtils
+          .getMetricValueOpt(
+            CollectorRegistry.defaultRegistry,
+            "dicer_assigner_podset_size",
+            podSetLabels
+          )
+          .isEmpty
+      )
       // Check latestKnownGenerationGauge which is explicitly removed in
       // TargetMatrics.clearTerminatedGeneratorFromMetrics.
       val latestKnownGenerationOpt = MetricUtils.getMetricValueOpt(

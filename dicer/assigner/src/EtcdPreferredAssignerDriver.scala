@@ -102,11 +102,6 @@ class EtcdPreferredAssignerDriver(
       watchPreferredAssignerValueChanges()
     }
 
-  // The etcd-backed driver does not run a consistent-hashing election, so it has no snapshot.
-  override private[assigner] def consistentHashingStateView
-      : Future[Option[ConsistentHashingState]] =
-    Future.successful(None)
-
   /**
    * Performs the heartbeat RPC call against the preferred assigner. Exposed as protected to allow
    * test subclasses to layer on test functionality such as recording the OpID.
@@ -163,9 +158,7 @@ class EtcdPreferredAssignerDriver(
     sec.assertCurrentContext()
     logger.info("Received preferred assigner value: " + preferredAssignerValue)
 
-    assignerProtoLogger.logPreferredAssignerChange(
-      preferredAssignerValue,
-    )
+    assignerProtoLogger.logPreferredAssignerChange(preferredAssignerValue)
 
     baseDriver.handleEvent(Event.PreferredAssignerReceived(preferredAssignerValue))
   }

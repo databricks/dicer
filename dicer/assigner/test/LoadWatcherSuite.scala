@@ -12,7 +12,7 @@ import com.databricks.caching.util.CachingErrorCode.{
 import com.databricks.caching.util.TestUtils.assertThrow
 import com.databricks.caching.util.{MetricUtils, Severity, TickerTime}
 import com.databricks.dicer.assigner.config.InternalTargetConfig.LoadWatcherTargetConfig
-import com.databricks.dicer.assigner.algorithm.LoadMap
+import com.databricks.dicer.assigner.algorithm.{LoadMap, MetricMap}
 import com.databricks.dicer.assigner.algorithm.LoadMap.{Entry, KeyLoadMap}
 import com.databricks.dicer.assigner.LoadWatcher.{LOAD_WEIGHT_DECAYING_HALFLIFE, Measurement}
 import com.databricks.dicer.common.SliceKeyHelper.RichSliceKey
@@ -47,7 +47,7 @@ import com.databricks.testing.DatabricksTest
 class LoadWatcherSuite extends DatabricksTest {
 
   private val DEFAULT_STATIC_CONFIG =
-    LoadWatcher.StaticConfig(allowTopKeys = true, allowLoadDistribution = false)
+    LoadWatcher.StaticConfig(allowTopKeys = true)
 
   /**
    * Wrapper around [[LoadWatcher]] that checks invariants after all operations and includes
@@ -252,7 +252,7 @@ class LoadWatcherSuite extends DatabricksTest {
         useTopKeys = true,
         useLoadDistribution = true
       ),
-      LoadWatcher.StaticConfig(allowTopKeys = true, allowLoadDistribution = true)
+      LoadWatcher.StaticConfig(allowTopKeys = true)
     )
     val assignment: Assignment = createAssignment(
       12,
@@ -341,11 +341,10 @@ class LoadWatcherSuite extends DatabricksTest {
     }
   }
 
-  test("allowLoadDistribution and useLoadDistribution conf is respected") {
+  test("useLoadDistribution conf is respected") {
     // Test plan: verify that the load distribution is carried onto the returned Measurement only
-    // when both `LoadWatcher.StaticConfig.allowLoadDistribution` and
-    // `LoadWatcherTargetConfig.useLoadDistribution` are true, and is dropped (set to None) when
-    // either is false.
+    // when `LoadWatcherTargetConfig.useLoadDistribution` is true, and is dropped (set to None)
+    // otherwise.
     //
     // TODO(<internal bug>): The distribution is currently always unused downstream, so this asserts on the
     // Measurement field directly. Once it is consumed (incorporated into the LoadMap), verify the
@@ -355,18 +354,14 @@ class LoadWatcherSuite extends DatabricksTest {
       maxErrorFraction = 0.1
     )
 
-    def measurementWith(
-        useLoadDistribution: Boolean,
-        allowLoadDistribution: Boolean): Measurement = {
+    def measurementWith(useLoadDistribution: Boolean): Measurement = {
       val targetConfig = LoadWatcherTargetConfig(
         minDuration = 1.minute,
         maxAge = 1.minute,
         useTopKeys = true,
         useLoadDistribution = useLoadDistribution
       )
-      val staticConfig =
-        LoadWatcher.StaticConfig(allowTopKeys = true, allowLoadDistribution = allowLoadDistribution)
-      val watcher = new LoadWatcherWrapper(targetConfig, staticConfig)
+      val watcher = new LoadWatcherWrapper(targetConfig)
       watcher.createMeasurement(
         time = TickerTime.ofNanos(1.day.toNanos),
         windowDuration = 2.minutes,
@@ -379,20 +374,11 @@ class LoadWatcherSuite extends DatabricksTest {
       )
     }
 
-    // The distribution is carried onto the Measurement only when both flags are true, and dropped
-    // (set to None) when either is false.
-    for ((useLoadDistribution, allowLoadDistribution) <- Seq(
-        (true, true),
-        (true, false),
-        (false, true),
-        (false, false)
-      )) {
+    for (useLoadDistribution: Boolean <- Seq(true, false)) {
       val loadDistributionOpt: Option[LoadDistribution] =
-        measurementWith(useLoadDistribution, allowLoadDistribution).loadDistributionOpt
-      withClue(
-        s"useLoadDistribution=$useLoadDistribution, allowLoadDistribution=$allowLoadDistribution: "
-      ) {
-        if (useLoadDistribution && allowLoadDistribution) {
+        measurementWith(useLoadDistribution).loadDistributionOpt
+      withClue(s"useLoadDistribution=$useLoadDistribution: ") {
+        if (useLoadDistribution) {
           assert(loadDistributionOpt.contains(distribution))
         } else {
           assert(loadDistributionOpt.isEmpty)
@@ -975,7 +961,7 @@ class LoadWatcherSuite extends DatabricksTest {
         useTopKeys = true,
         useLoadDistribution = false
       ),
-      LoadWatcher.StaticConfig(allowTopKeys = false, allowLoadDistribution = false)
+      LoadWatcher.StaticConfig(allowTopKeys = false)
     )
 
     // Create an assignment with two Slices and no historical load data.
@@ -1017,7 +1003,7 @@ class LoadWatcherSuite extends DatabricksTest {
         useTopKeys = false,
         useLoadDistribution = false
       ),
-      LoadWatcher.StaticConfig(allowTopKeys = true, allowLoadDistribution = false)
+      LoadWatcher.StaticConfig(allowTopKeys = true)
     )
     val now2: TickerTime = watcher2.now
     watcher2.recordSliceletLoad(
@@ -1051,7 +1037,7 @@ class LoadWatcherSuite extends DatabricksTest {
         useTopKeys = true,
         useLoadDistribution = false
       ),
-      LoadWatcher.StaticConfig(allowTopKeys = true, allowLoadDistribution = false)
+      LoadWatcher.StaticConfig(allowTopKeys = true)
     )
     val now3: TickerTime = watcher3.now
     watcher3.recordSliceletLoad(
@@ -1090,7 +1076,7 @@ class LoadWatcherSuite extends DatabricksTest {
         useTopKeys = true,
         useLoadDistribution = false
       ),
-      LoadWatcher.StaticConfig(allowTopKeys = true, allowLoadDistribution = false)
+      LoadWatcher.StaticConfig(allowTopKeys = true)
     )
     val assignment: Assignment = createAssignment(
       42,
@@ -1138,7 +1124,7 @@ class LoadWatcherSuite extends DatabricksTest {
         useTopKeys = true,
         useLoadDistribution = false
       ),
-      LoadWatcher.StaticConfig(allowTopKeys = true, allowLoadDistribution = false)
+      LoadWatcher.StaticConfig(allowTopKeys = true)
     )
     val assignment: Assignment = createAssignment(
       42,
@@ -1172,7 +1158,7 @@ class LoadWatcherSuite extends DatabricksTest {
         useTopKeys = true,
         useLoadDistribution = false
       ),
-      LoadWatcher.StaticConfig(allowTopKeys = true, allowLoadDistribution = false)
+      LoadWatcher.StaticConfig(allowTopKeys = true)
     )
     // If load values are very small, alert should not fire.
     watcher2.recordSliceletLoad(
@@ -1205,7 +1191,7 @@ class LoadWatcherSuite extends DatabricksTest {
         useTopKeys = true,
         useLoadDistribution = false
       ),
-      LoadWatcher.StaticConfig(allowTopKeys = true, allowLoadDistribution = false)
+      LoadWatcher.StaticConfig(allowTopKeys = true)
     )
     // Cover the full keyspace to form a valid assignment.
     val hotKey: SliceKey = "d"
@@ -1290,7 +1276,7 @@ class LoadWatcherSuite extends DatabricksTest {
         useTopKeys = false,
         useLoadDistribution = true
       ),
-      LoadWatcher.StaticConfig(allowTopKeys = false, allowLoadDistribution = true)
+      LoadWatcher.StaticConfig(allowTopKeys = false)
     )
     val assignment: Assignment = createAssignment(
       12,
@@ -1619,7 +1605,7 @@ class LoadWatcherSuite extends DatabricksTest {
             useTopKeys = true,
             useLoadDistribution = true
           ),
-          LoadWatcher.StaticConfig(allowTopKeys = true, allowLoadDistribution = true)
+          LoadWatcher.StaticConfig(allowTopKeys = true)
         )
         val assignment: Assignment = createAssignment(
           12,
@@ -1741,7 +1727,7 @@ class LoadWatcherSuite extends DatabricksTest {
             useTopKeys = false,
             useLoadDistribution = true
           ),
-          LoadWatcher.StaticConfig(allowTopKeys = false, allowLoadDistribution = true)
+          LoadWatcher.StaticConfig(allowTopKeys = false)
         )
         val now: TickerTime = watcher.now
         watcher.recordSliceletLoad(
@@ -1836,7 +1822,7 @@ class LoadWatcherSuite extends DatabricksTest {
           useTopKeys,
           useLoadDistribution = true
         ),
-        LoadWatcher.StaticConfig(allowTopKeys = true, allowLoadDistribution = true)
+        LoadWatcher.StaticConfig(allowTopKeys = true)
       )
 
       // Build 1-5 contiguous Slices covering the whole keyspace [MIN, Infinity), recording one
@@ -2030,6 +2016,67 @@ class LoadWatcherSuite extends DatabricksTest {
         expectedLoadMap
       )
     }
+  }
+
+  test("Extreme loads are capped at MetricMap.MAX_ENTRY_VALUE") {
+    // Test plan: verify that the LoadWatcher caps each Slice's load at `MAX_ENTRY_VALUE` instead of
+    // letting it grow to infinity, for both measured and historical loads. Do this by reporting
+    // the largest finite load on 2 replicas, with load distributions, for one Slice, giving
+    // another Slice the largest finite historical load, and giving a third Slice an ordinary
+    // load. Check that the first two Slices report `MAX_ENTRY_VALUE` and the third keeps its load.
+    val watcher = new LoadWatcherWrapper(
+      LoadWatcherTargetConfig(
+        minDuration = 1.minute,
+        maxAge = 1.minute,
+        useTopKeys = true,
+        useLoadDistribution = true
+      )
+    )
+    val distribution = LoadDistribution(
+      points = IndexedSeq(CdfPoint(identityKey("dori"), 0.5)),
+      maxErrorFraction = 0.1
+    )
+    val now: TickerTime = watcher.now
+    val extremeMeasurements: Seq[Measurement] =
+      for (resource: String <- Seq("pod0", "pod1"))
+        yield {
+          watcher.createMeasurement(
+            time = now - 1.second,
+            windowDuration = 2.minutes,
+            slice = "" -- "fili",
+            resource,
+            numReplicas = 2,
+            load = Double.MaxValue,
+            topKeys = Seq.empty,
+            loadDistributionOpt = Some(distribution)
+          )
+        }
+    val ordinaryMeasurement: Measurement = watcher.createMeasurement(
+      time = now - 1.second,
+      windowDuration = 2.minutes,
+      slice = "nori" -- ∞,
+      resource = "pod2",
+      numReplicas = 1,
+      load = 42,
+      topKeys = Seq.empty
+    )
+    watcher.recordSliceletLoad(extremeMeasurements :+ ordinaryMeasurement)
+
+    val assignment: Assignment = createAssignment(
+      generation = 2 ## 42,
+      assignerServiceInfoOpt = None,
+      (("" -- "fili") @@ (2 ## 42) -> Seq("pod0", "pod1")).clearPrimaryRateLoad(),
+      (("fili" -- "nori") @@ (2 ## 42) -> Seq("pod0")).withPrimaryRateLoad(Double.MaxValue),
+      (("nori" -- ∞) @@ (2 ## 42) -> Seq("pod2")).clearPrimaryRateLoad()
+    )
+    val loadMap: LoadMap = watcher.getPrimaryRateLoadMap(assignment).get
+
+    // The measured Slice is split into buckets by its load distribution; together they carry the
+    // capped load.
+    val measuredLoad: Double = loadMap.getLoad("" -- "fili")
+    assert(Math.abs(measuredLoad / MetricMap.MAX_ENTRY_VALUE - 1) < 1e-9, measuredLoad)
+    assert(loadMap.getLoad("fili" -- "nori") == MetricMap.MAX_ENTRY_VALUE)
+    assert(loadMap.getLoad("nori" -- ∞) == 42)
   }
 
   test("Measurements from different resources are correctly accumulated") {

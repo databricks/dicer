@@ -1,6 +1,5 @@
 package com.databricks.dicer.client
 
-import java.net.URI
 import scala.concurrent.duration._
 
 import com.databricks.caching.util.TestUtils.assertThrow
@@ -12,13 +11,14 @@ import TestClientUtils.TEST_CLIENT_UUID
 class InternalClientConfigSuite extends DatabricksTest {
 
   /** The watch address the base config connects to. */
-  private val TEST_WATCH_ADDRESS: URI = URI.create("https://localhost:8080")
+  private val TEST_WATCH_ADDRESS: WatchAddress = WatchAddress.fromAddress("https://localhost:8080")
 
   /**
    * A second watch address, for the variant that differs from the base config in
    * `watchAddress`.
    */
-  private val TEST_OTHER_WATCH_ADDRESS: URI = URI.create("https://localhost:9090")
+  private val TEST_OTHER_WATCH_ADDRESS: WatchAddress =
+    WatchAddress.fromAddress("https://localhost:9090")
 
   /**
    * Builds a config for `target`, with each field overridable. The watch-connection parameters are
@@ -28,7 +28,7 @@ class InternalClientConfigSuite extends DatabricksTest {
       target: Target,
       clientType: ClientType = ClientType.Clerk,
       subscriberDebugName: String = "test-subscriber",
-      watchAddress: URI = TEST_WATCH_ADDRESS,
+      watchAddress: WatchAddress = TEST_WATCH_ADDRESS,
       watchFromDataPlane: Boolean = false,
       watchRpcTimeout: FiniteDuration = 5.seconds): InternalClientConfig =
     InternalClientConfig(

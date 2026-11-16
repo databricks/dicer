@@ -1,0 +1,22 @@
+load("//bazel/rules/rust:rules_rust.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "slice_key_accessor_lib",
+    srcs = ["src/lib.rs"],
+    crate_name = "dicer_rust_friend_external_slice_key_accessor",
+    visibility = [
+        "//caching:all_caching",
+        "//dicer:internal",
+    ],
+    deps = ["//dicer/rust/external/types:types_lib"],
+)
+
+rust_test(
+    name = "slice_key_accessor_test",
+    srcs = ["tests/slice_key_accessor_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":slice_key_accessor_lib",
+        "//dicer/rust/external/types:types_lib",
+    ],
+)

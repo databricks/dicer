@@ -1,5 +1,6 @@
 package com.databricks.dicer.external
 
+import com.databricks.dicer.assigner.ProposedSliceAssignment
 import com.databricks.dicer.client.testing.{ClerkHarness}
 
 import java.net.URI
@@ -17,12 +18,14 @@ import com.databricks.conf.Configs
 import com.databricks.conf.trusted.{LocationConf, LocationConfTestUtils}
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
 import com.databricks.rpc.DatabricksObjectMapper
+import com.databricks.dicer.client.TestClientUtils
 import com.databricks.dicer.client.featurerollouts.DicerClientFeatureRolloutFlag
 import com.databricks.dicer.common.testing.SliceTestUtils.{
   LowInclusiveSliceKeyFluent,
   LowInclusiveStringFluent,
   SliceAssignmentSliceFluent,
   assertWatchRequestRateBounded,
+  assertWatchRequestRateUnbounded,
   createProposal,
   fp,
   toProposedAssignmentEntry,
@@ -35,10 +38,10 @@ import com.databricks.dicer.common.{
   AssignerServiceInfo,
   Assignment,
   AssignmentMetricsSource,
-  ClientType,
-  ProposedSliceAssignment
+  ClientType
 }
 import com.databricks.dicer.common.testing.{InternalDicerTestEnvironment, TestAssigner}
+import com.databricks.dicer.external.ClerkSuite.RateLimitingTestCase
 import com.databricks.dicer.friend.SliceMap
 import com.databricks.testing.DatabricksTest
 import io.prometheus.client.CollectorRegistry
@@ -133,13 +136,6 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
   protected def supportsClientBranch: Boolean = true
 
   /**
-   * Whether the Clerks this suite creates can be configured for watch-request rate limiting, either
-   * through the conf override or the rollout flag. False for entry points that are handed no
-   * [[ClerkConf]] to read either from.
-   */
-  protected def supportsRateLimitingConfiguration: Boolean = true
-
-  /**
    * The `factoryContext` metric label that Clerks created by this suite carry, which identifies the
    * [[ClerkImpl]] entry point they came from.
    */
@@ -157,9 +153,11 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
    *                                      rate-limited. Leave it [[None]] to have the Clerk fall
    *                                      back to the default policy in its implementation. See
    *                                      [[ClerkImpl.create]] for more details.
-   * @param enableRateLimitingFeatureRollout Whether the Clerk's watch rate-limiting rollout flag
-   *                                         resolves as enabled for its target. When false, the
-   *                                         Clerk resolves the process-wide flag.
+   * @param enabledFeatureRolloutFlags The names of the Dicer client feature rollout flags to
+   *                                   force-enable for the Clerk. Every other flag resolves as
+   *                                   disabled. An empty set disables all flags in Rust;
+   *                                   [[ScalaClerkSuiteBase]] uses production rollout configuration
+   *                                   when the set is empty.
    * @param sliceletWatchRpcTimeoutOpt Watch RPC deadline for the Slicelet this Clerk watches, which
    *                                   the Slicelet suggests back to the Clerk. Ignored by suites
    *                                   whose Clerk watches the Assigner.
@@ -169,14 +167,14 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
       clerkLocationConfigMap: Option[Map[String, String]],
       clientBranchOpt: Option[String] = None,
       enableRateLimitingOverrideOpt: Option[Boolean] = Some(false),
-      enableRateLimitingFeatureRollout: Boolean = false,
+      enabledFeatureRolloutFlags: Set[String] = Set.empty,
       sliceletWatchRpcTimeoutOpt: Option[FiniteDuration] = None): (ClerkHarness, Target) = {
     val clerk: ClerkHarness = createClerkInternal(
       target,
       clerkLocationConfigMap,
       clientBranchOpt,
       enableRateLimitingOverrideOpt,
-      enableRateLimitingFeatureRollout,
+      enabledFeatureRolloutFlags,
       sliceletWatchRpcTimeoutOpt
     )
     val locationConf: LocationConf = LocationConfTestUtils.newTestLocationConfig(
@@ -197,7 +195,7 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
       clerkLocationConfigMap: Option[Map[String, String]],
       clientBranchOpt: Option[String] = None,
       enableRateLimitingOverrideOpt: Option[Boolean] = Some(false),
-      enableRateLimitingFeatureRollout: Boolean = false,
+      enabledFeatureRolloutFlags: Set[String] = Set.empty,
       sliceletWatchRpcTimeoutOpt: Option[FiniteDuration] = None): ClerkHarness
 
   /**
@@ -998,12 +996,7 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
 
       // Verify: Clerk can receive assignments.
       TestUtils.awaitResult(clerk.ready, Duration.Inf)
-      assert(
-        ClerkHarness.resourceAddressEquals(
-          clerk.getStubForKey(SliceKey.MIN).get,
-          slicelet.forTest.resourceAddress
-        )
-      )
+      assertResult(slicelet.forTest.resourceAddress)(clerk.getStubForKey(SliceKey.MIN).get)
 
       AssertionWaiter("Verify: Metrics are emitted with targetCluster correctly labeled.").await {
         assert(
@@ -1113,21 +1106,39 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
     clerk.stop()
   }
 
-  test("Rate limiting bounds the Clerk's watch request rate") {
-    assume(
-      supportsRateLimitingConfiguration,
-      "this Clerk entry point has no rate-limiting configuration source"
+  namedGridTest("Rate limiting bounds the Clerk's watch request rate")(
+    Seq[(String, RateLimitingTestCase)](
+      (
+        "conf override",
+        RateLimitingTestCase(
+          enableRateLimitingOverrideOpt = Some(true),
+          enabledFeatureRolloutFlags = Set.empty
+        )
+      ),
+      (
+        "rollout flag",
+        RateLimitingTestCase(
+          enableRateLimitingOverrideOpt = None,
+          enabledFeatureRolloutFlags =
+            Set(DicerClientFeatureRolloutFlag.CLERK_WATCH_RATE_LIMITING_FLAG_NAME)
+        )
+      )
     )
-    // Test plan: Verify that enabling the Clerk's rate-limiting override keeps watch traffic low
-    // while the Clerk continues making progress. Have the test environment answer the Clerk's watch
-    // requests as fast as it can send them, then measure the rate over a short window.
+  ) { testCase: RateLimitingTestCase =>
+    // Test plan: Verify that a Clerk whose rate limiting is enabled, by the conf override or by the
+    // watch rate-limiting rollout flag through which rate limiting reaches production Clerks, keeps
+    // its watch traffic under the rate bound while it keeps making progress. Have the test
+    // environment answer the Clerk's watch requests as fast as it can send them, then measure the
+    // rate over a short window.
+    // Setup: Create a Clerk with the given rate-limiting source. Keep the Slicelet's hanging gets
+    // short, at the 500ms floor `validateWatchRpcTimeout` enforces, so a watch arriving between
+    // assignment changes still turns over quickly.
     val target: Target = Target(getUniqueTargetName)
     val (clerk, expectedTarget): (ClerkHarness, Target) = createClerk(
       target,
       Some(LOCATION_CONFIG_MAP_DEV_AWS_US_WEST_2),
-      enableRateLimitingOverrideOpt = Some(true),
-      // Keep the Slicelet's hanging gets short, at the 500ms floor `validateWatchRpcTimeout`
-      // enforces, so a watch arriving between assignment changes still turns over quickly.
+      enableRateLimitingOverrideOpt = testCase.enableRateLimitingOverrideOpt,
+      enabledFeatureRolloutFlags = testCase.enabledFeatureRolloutFlags,
       sliceletWatchRpcTimeoutOpt = Some(500.milliseconds)
     )
 
@@ -1140,7 +1151,50 @@ abstract class ClerkSuiteBase extends DatabricksTest with TestName {
         target,
         useAssignmentChurn = getWatchSource == WatchSourceSlicelet
       ) {
+        // Verify: The Clerk keeps watching but stays under the rate bound.
         assertWatchRequestRateBounded(
+          clientDescription = "Clerk",
+          getWatchRequestCount = () => getWatchRequestCount(expectedTarget)
+        )
+      }
+    } finally {
+      clerk.stop()
+    }
+  }
+
+  namedGridTest("Clerk watch rate limiting can be disabled")(
+    Seq[(String, RateLimitingTestCase)](
+      (
+        "conf override disables an enabled rollout flag",
+        RateLimitingTestCase(
+          enableRateLimitingOverrideOpt = Some(false),
+          enabledFeatureRolloutFlags =
+            Set(DicerClientFeatureRolloutFlag.CLERK_WATCH_RATE_LIMITING_FLAG_NAME)
+        )
+      )
+    )
+  ) { testCase: RateLimitingTestCase =>
+    // Test plan: Verify that a Clerk is not rate limited when an explicit false conf override wins
+    // over an enabled rollout flag. Verify this by requiring more watches within the measurement
+    // window than the token bucket admits even with a full initial burst.
+    // Setup: Create a Clerk with the given override and rollout flag.
+    val target: Target = Target(getUniqueTargetName)
+    val (clerk, expectedTarget): (ClerkHarness, Target) = createClerk(
+      target,
+      Some(LOCATION_CONFIG_MAP_DEV_AWS_US_WEST_2),
+      enableRateLimitingOverrideOpt = testCase.enableRateLimitingOverrideOpt,
+      enabledFeatureRolloutFlags = testCase.enabledFeatureRolloutFlags,
+      sliceletWatchRpcTimeoutOpt = Some(500.milliseconds)
+    )
+
+    try {
+      withImmediateWatchResponses(
+        testEnv,
+        target,
+        useAssignmentChurn = getWatchSource == WatchSourceSlicelet
+      ) {
+        // Verify: The Clerk's watch traffic exceeds the rate-limiting ceiling.
+        assertWatchRequestRateUnbounded(
           clientDescription = "Clerk",
           getWatchRequestCount = () => getWatchRequestCount(expectedTarget)
         )
@@ -1173,12 +1227,17 @@ object ClerkSuite {
     name = "test-assigner",
     instanceId = "test-instance-id"
   )
+
+  /**
+   * How a rate-limiting test case configures its Clerk. Each field is passed to the
+   * [[ClerkSuiteBase.createClerk]] parameter of the same name.
+   */
+  private[external] case class RateLimitingTestCase(
+      enableRateLimitingOverrideOpt: Option[Boolean],
+      enabledFeatureRolloutFlags: Set[String])
 }
 
-/**
- * Abstract base class for Scala Clerk tests. This class contains test cases that are specific to
- * the Scala implementation or those that do not yet work for the Rust implementation.
- */
+/** Abstract base class for Scala Clerk tests. */
 abstract class ScalaClerkSuiteBase extends ClerkSuiteBase {
 
   override protected def clientLanguage: String = "Scala"
@@ -1190,51 +1249,18 @@ abstract class ScalaClerkSuiteBase extends ClerkSuiteBase {
   }
 
   /**
-   * Returns the [[DicerClientFeatureRolloutFlag]] that `createClerk` injects into the
-   * [[InternalDicerTestEnvironment]] when `enableRateLimitingFeatureRollout` is true. The flag
-   * reports enabled only for [[DicerClientFeatureRolloutFlag.CLERK_WATCH_RATE_LIMITING_FLAG_NAME]],
-   * so a Clerk querying any other flag name still fails in rollout tests.
+   * Returns the [[DicerClientFeatureRolloutFlag]] that `createClerk` injects for
+   * `enabledFeatureRolloutFlags`, or [[None]] if it is empty.
+   * The flag reports enabled, for every target, only for the flag names in
+   * `enabledFeatureRolloutFlags`, so a Clerk querying any other flag name still fails in rollout
+   * tests.
    */
-  protected final val clerkRateLimitingRolloutFlag: DicerClientFeatureRolloutFlag =
-    new DicerClientFeatureRolloutFlag {
-      override def isEnabled(flagName: String, target: Target): Boolean =
-        flagName == DicerClientFeatureRolloutFlag.CLERK_WATCH_RATE_LIMITING_FLAG_NAME
-    }
-
-  // TODO(<internal bug>): Move this test to ClerkSuiteBase once the Rust Clerk resolves rollout flags too,
-  // so that it covers both implementations.
-  test("The watch rate-limiting rollout flag bounds the Clerk's watch request rate") {
-    assume(
-      supportsRateLimitingConfiguration,
-      "this Clerk entry point has no rate-limiting configuration source"
-    )
-    // Test plan: Verify that a Clerk rate limits its watch requests when the watch rate-limiting
-    // rollout flag is enabled for its target, which is how rate limiting reaches production Clerks.
-    // Verify this by leaving the rate-limiting conf override unset, so that the Clerk has to
-    // resolve the flag, enabling it via createClerk, and then holding the Clerk to the same
-    // rate bound that the conf override is held to in ClerkSuiteBase.
-    val target: Target = Target(getUniqueTargetName)
-    val (clerk, expectedTarget): (ClerkHarness, Target) = createClerk(
-      target,
-      Some(LOCATION_CONFIG_MAP_DEV_AWS_US_WEST_2),
-      enableRateLimitingOverrideOpt = None,
-      enableRateLimitingFeatureRollout = true,
-      sliceletWatchRpcTimeoutOpt = Some(500.milliseconds)
-    )
-
-    try {
-      withImmediateWatchResponses(
-        testEnv,
-        target,
-        useAssignmentChurn = getWatchSource == WatchSourceSlicelet
-      ) {
-        assertWatchRequestRateBounded(
-          clientDescription = "Clerk",
-          getWatchRequestCount = () => getWatchRequestCount(expectedTarget)
-        )
-      }
-    } finally {
-      clerk.stop()
+  protected final def featureRolloutFlagOpt(
+      enabledFeatureRolloutFlags: Set[String]): Option[DicerClientFeatureRolloutFlag] = {
+    if (enabledFeatureRolloutFlags.isEmpty) {
+      None
+    } else {
+      Some(TestClientUtils.createFeatureRolloutFlag(enabledFeatures = enabledFeatureRolloutFlags))
     }
   }
 }

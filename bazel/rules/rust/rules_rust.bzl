@@ -7,6 +7,7 @@ load(
 load(
     "@rules_rust_prost//:defs.bzl",
     _rust_prost_library = "rust_prost_library",
+    _rust_prost_transform = "rust_prost_transform",
 )
 load(
     "//bazel/rules/rust:buffa.bzl",
@@ -34,6 +35,8 @@ def rust_binary(name, **kwargs):
     )
 
 rust_prost_library = _rust_prost_library
+
+rust_prost_transform = _rust_prost_transform
 
 def rust_test(name, **kwargs):
     """Declares a `rust_test` whose cases run serially.

@@ -8,10 +8,13 @@ import scala.concurrent.Future
 
 import com.databricks.caching.util.{Pipeline, PrefixLogger, TestUtils}
 import com.databricks.conf.Config
-import com.databricks.dicer.assigner.InterposingEtcdPreferredAssignerDriver
+import com.databricks.dicer.assigner.{
+  InterposingEtcdPreferredAssignerDriver,
+  ProposedSliceAssignment
+}
 import com.databricks.dicer.assigner.config.InternalTargetConfigMap
 import com.databricks.dicer.client.{Ports, TestClientUtils, TlsFilePaths}
-import com.databricks.dicer.common.{Assignment, Generation, ProposedSliceAssignment}
+import com.databricks.dicer.common.{Assignment, Generation}
 import com.databricks.dicer.common.testing.{InternalDicerTestEnvironment, TestAssigner}
 import com.databricks.dicer.external.DicerTestEnvironment.{
   AssignmentHandle,
@@ -38,7 +41,6 @@ case class DicerTlsFilePathsConfig(
     serverTlsPaths: DicerTlsFilePaths,
     clientTlsPaths: DicerTlsFilePaths)
 
-// LINT.IfChange
 /**
  * This is a test environment for applications to test against `Dicer`. It is strongly recommended
  * that the test code create a single [[DicerTestEnvironment]] for the entire test suite rather than
@@ -251,6 +253,9 @@ class DicerTestEnvironment private[dicer] (
    * Connection configuration for Clerks in the test environment. This should be injected
    * into services that instantiate a new Clerk. The same connection config must not be used for
    * different Clerks.
+   *
+   * The configuration turns off watch rate limiting for the Clerk, so a rollout rule cannot rate
+   * limit test Clerks.
    */
   def getConnectionConfigForNewClerk(slicelet: Slicelet): Config = {
     TestClientUtils.createClerkConfig(
@@ -340,10 +345,7 @@ object DicerTestEnvironment {
       tlsFilePathsConfigOpt = tlsFilePathsConfigOpt
     )
   }
-  // LINT.ThenChange(dicer/external/javaapi/src/DicerTestEnvironment.java)
-  // LINT.ThenChange(dicer/rust/external/testing/dicer_test_environment/src/dicer_test_environment.rs)
 
-  // LINT.IfChange
   /**
    * A handle that can be used by the application to determine if the frozen assignment has been
    * received by the relevant Clerk or Slicelet (see [[DicerTestEnvironment.hasReceivedAtLeast]].
@@ -352,9 +354,7 @@ object DicerTestEnvironment {
       private[external] val assignmentGeneration: Generation) {
     override def toString: String = assignmentGeneration.toString
   }
-  // LINT.ThenChange(dicer/external/javaapi/src/TestAssignmentHandle.java)
 
-  // LINT.IfChange
   /**
    * A builder for creating assignments. Overlapping assignments of keys to resources are not
    * permitted (see specs in [[build]].
@@ -423,8 +423,6 @@ object DicerTestEnvironment {
     /** The address of the resource to which all unassigned keys are routed. */
     private[dicer] val BLACKHOLE_RESOURCE: Squid = InternalDicerTestEnvironment.BLACKHOLE_RESOURCE
   }
-  // LINT.ThenChange(dicer/external/javaapi/src/TestAssignmentBuilder.java)
-  // LINT.ThenChange(dicer/rust/external/testing/dicer_test_environment/src/test_assignment_builder.rs)
 
   /**
    * The class that provides the assignment of keys to pods for freezing assignments. These

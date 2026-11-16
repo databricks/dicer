@@ -17,6 +17,14 @@ object DicerClientConfigTestInterop {
   def sliceletTlsOptions(config: SliceletConfig): Option[TLSOptions] =
     SliceletConfImpl.forTest.getTlsOptions(config.toScala())
 
+  /** Returns the effective TLS options used for outbound Slicelet RPCs. */
+  def sliceletClientTlsOptions(config: SliceletConfig): Option[TLSOptions] =
+    config.toScala().getDicerClientTlsOptions
+
+  /** Returns the effective TLS options used by the Slicelet watch server. */
+  def sliceletServerTlsOptions(config: SliceletConfig): Option[TLSOptions] =
+    config.toScala().getDicerServerTlsOptions
+
   /** Returns the configured TLS options from the given [[ClerkConfig]]. */
   def clerkTlsOptions(config: ClerkConfig): Option[TLSOptions] =
     ClerkConfImpl.forTest.getTlsOptions(config.toScala())

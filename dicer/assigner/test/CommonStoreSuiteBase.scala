@@ -22,14 +22,7 @@ import com.databricks.caching.util.{
 }
 import com.databricks.dicer.assigner.Store.WriteAssignmentResult
 import com.databricks.dicer.common.testing.SliceTestUtils.{createRandomProposal, createTestSquid}
-import com.databricks.dicer.common.{
-  Assignment,
-  Generation,
-  Incarnation,
-  ProposedAssignment,
-  ProposedSliceAssignment,
-  SliceMapHelper
-}
+import com.databricks.dicer.common.{Assignment, Generation, Incarnation}
 import com.databricks.dicer.external.Target
 import com.databricks.dicer.friend.{SliceMap, Squid}
 import com.databricks.testing.DatabricksTest
@@ -457,7 +450,7 @@ abstract class CommonStoreSuiteBase extends DatabricksTest with TestName {
           // Keep same assignment to avoid creating subslice annotations.
           val sliceAssignments: SliceMap[ProposedSliceAssignment] =
             predecessor.sliceMap.map(
-              SliceMapHelper.PROPOSED_SLICE_ASSIGNMENT_ACCESSOR
+              ProposedSliceAssignment.SLICE_ACCESSOR
             ) { sliceAssignment =>
               ProposedSliceAssignment(
                 sliceAssignment.slice,

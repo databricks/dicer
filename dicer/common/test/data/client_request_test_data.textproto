@@ -783,20 +783,6 @@ round_tripping_cases: [
     client_feature_support: { supports_serialized_assignment: false }
   },
 
-  # ClerkRequest echoing back an opaque redirect_token.
-  {
-    target: {
-      name: "softstore"
-    }
-    sync_assignment_state: {
-      known_generation: { incarnation: 10 number: 42 }
-    }
-    subscriber_debug_name: "subscriber"
-    chosen_rpc_timeout_millis: 600000
-    clerk_fields: { }
-    redirect_token: "\x01\x02\x03\x04"
-  },
-
   # ClerkRequest with alternative_target set to an AppTarget.
   {
     target: {
@@ -831,11 +817,11 @@ round_tripping_cases: [
   }
 ]
 
-# Requests that parse successfully but whose cluster_uri / region_uri are dropped to None because
-# they are unrecognized. These fields are advisory sender metadata, so an unrecognized value must
-# not fail the request.
-dropped_uri_cases: [
-  # Both URI fields unset: they decode to None.
+# Requests that parse successfully but whose cluster_uri is dropped to None because it is
+# unrecognized. The field is advisory sender metadata, so an unrecognized value must not fail the
+# request.
+dropped_cluster_uri_cases: [
+  # cluster_uri unset: it decodes to None.
   {
     target: {
       name: "softstore"
@@ -848,7 +834,7 @@ dropped_uri_cases: [
     clerk_fields: { }
   },
 
-  # Malformed cluster_uri and region_uri: they decode to None.
+  # Malformed cluster_uri: it decodes to None.
   {
     target: {
       name: "softstore"
@@ -860,10 +846,14 @@ dropped_uri_cases: [
     chosen_rpc_timeout_millis: 600000
     clerk_fields: { }
     cluster_uri: "not a uri %"
-    region_uri: "region:dev/cloud1/public/region1/extra"
-  },
+  }
+]
 
-  # Well-formed cluster_uri and region_uri that are absent from IDM: they decode to None.
+# Requests that parse successfully but whose region_uri is dropped to None because it is
+# unrecognized. The field is advisory sender metadata, so an unrecognized value must not fail the
+# request.
+dropped_region_uri_cases: [
+  # region_uri unset: it decodes to None.
   {
     target: {
       name: "softstore"
@@ -874,7 +864,33 @@ dropped_uri_cases: [
     subscriber_debug_name: "subscriber"
     chosen_rpc_timeout_millis: 600000
     clerk_fields: { }
-    cluster_uri: "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/99"
+  },
+
+  # Malformed region_uri: it decodes to None.
+  {
+    target: {
+      name: "softstore"
+    }
+    sync_assignment_state: {
+      known_generation: { incarnation: 10 number: 42 }
+    }
+    subscriber_debug_name: "subscriber"
+    chosen_rpc_timeout_millis: 600000
+    clerk_fields: { }
+    region_uri: "region:dev/cloud1/public/region1/extra"
+  },
+
+  # Well-formed region_uri that is absent from IDM: it decodes to None.
+  {
+    target: {
+      name: "softstore"
+    }
+    sync_assignment_state: {
+      known_generation: { incarnation: 10 number: 42 }
+    }
+    subscriber_debug_name: "subscriber"
+    chosen_rpc_timeout_millis: 600000
+    clerk_fields: { }
     region_uri: "region:dev/cloud1/public/nonexistent"
   }
 ]

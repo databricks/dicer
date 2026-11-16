@@ -1,8 +1,5 @@
 package com.databricks.caching.util
 
-import io.prometheus.client.CollectorRegistry
-
-import com.databricks.caching.util.MetricUtils.ChangeTracker
 import com.databricks.caching.util.TestUtils.loadTestData
 import com.databricks.caching.util.test.KubernetesClusterUriTestDataP
 import com.databricks.testing.DatabricksTest
@@ -14,37 +11,19 @@ class KubernetesClusterUriSuite extends DatabricksTest {
       "caching/util/test/data/kubernetes_cluster_uri_test_data.textproto"
     )
 
-  /** Returns the current `caching_util_idm_uri_parse_total` count for clusters with `status`. */
-  private def parseCount(status: String): Double =
-    MetricUtils.getMetricValue(
-      CollectorRegistry.defaultRegistry,
-      "caching_util_idm_uri_parse_total",
-      Map("uriType" -> "kubernetesCluster", "status" -> status)
-    )
-
-  gridTest("fromUri accepts cluster URIs present in the model")(TEST_DATA.validUris) {
-    uri: String =>
-      // Test plan: Verify that a cluster URI in the shared test data (present in the embedded
-      // InfraDataModel) parses successfully, round-trips back to its string form, and records
-      // metrics.
-      val successTracker = ChangeTracker(() => parseCount("success"))
-      val failureTracker = ChangeTracker(() => parseCount("failure"))
-      val parsed: Option[KubernetesClusterUri] = KubernetesClusterUri.fromUri(uri)
-      assert(parsed.isDefined, s"$uri should parse")
-      assertResult(uri)(parsed.get.uri)
-      assertResult(uri)(parsed.get.toString)
-      assertResult(1.0)(successTracker.totalChange())
-      assertResult(0.0)(failureTracker.totalChange())
+  gridTest("fromUri accepts well-formed cluster URIs")(TEST_DATA.validUris) { uri: String =>
+    // Test plan: Verify that a well-formed cluster URI in the shared test data parses successfully
+    // and round-trips back to its string form.
+    val parsed: Option[KubernetesClusterUri] = KubernetesClusterUri.fromUri(uri)
+    assert(parsed.isDefined, s"$uri should parse")
+    assertResult(uri)(parsed.get.uri)
+    assertResult(uri)(parsed.get.toString)
   }
 
   gridTest("fromUri rejects invalid URIs")(TEST_DATA.invalidUris) { uri: String =>
-    // Test plan: Verify that a value in the shared invalid set (wrong scheme, malformed, or absent
-    // from the embedded InfraDataModel) resolves to None rather than throwing, and records metrics.
-    val successTracker = ChangeTracker(() => parseCount("success"))
-    val failureTracker = ChangeTracker(() => parseCount("failure"))
+    // Test plan: Verify that a value in the shared invalid set (wrong or missing scheme, or
+    // structurally malformed) resolves to None rather than throwing.
     assertResult(None)(KubernetesClusterUri.fromUri(uri))
-    assertResult(0.0)(successTracker.totalChange())
-    assertResult(1.0)(failureTracker.totalChange())
   }
 
   test("equal cluster URIs compare equal") {

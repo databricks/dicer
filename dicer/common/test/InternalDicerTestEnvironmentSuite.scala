@@ -20,7 +20,7 @@ import com.databricks.dicer.assigner.config.InternalTargetConfig.{
   LoadBalancingMetricConfig
 }
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
-import com.databricks.dicer.assigner.TargetMetricsUtils
+import com.databricks.dicer.assigner.{ProposedSliceAssignment, TargetMetricsUtils}
 import com.databricks.dicer.assigner.config.{
   ChurnConfig,
   InternalTargetConfig,
@@ -138,9 +138,16 @@ class InternalDicerTestEnvironmentSuite extends DatabricksTest with TestName {
 
     // Now start two Clerks (one watches assignments from a Slicelet and the other from an Assigner)
     // and make sure that they both get the assignment.
-    val clerk1: Clerk[ResourceAddress] = testEnv.createClerk(slicelet0)
+    val clerk1: Clerk[ResourceAddress] = testEnv.createClerk(
+      slicelet0,
+      featureRolloutFlagOpt = Some(TestClientUtils.ALL_DISABLED_FEATURE_ROLLOUT_FLAG)
+    )
     val clerk2: Clerk[ResourceAddress] =
-      testEnv.createDirectClerk(target, initialAssignerIndex = 0) // points to the Assigner
+      testEnv.createDirectClerk(
+        target,
+        initialAssignerIndex = 0,
+        featureRolloutFlagOpt = Some(TestClientUtils.ALL_DISABLED_FEATURE_ROLLOUT_FLAG)
+      ) // points to the Assigner
     TestUtils.awaitResult(clerk1.ready, Duration.Inf)
     assert(clerk1.impl.forTest.getLatestAssignmentOpt.isDefined)
     TestUtils.awaitResult(clerk2.ready, Duration.Inf)
@@ -170,7 +177,7 @@ class InternalDicerTestEnvironmentSuite extends DatabricksTest with TestName {
     // Configure the first assigner to redirect to the second assigner.
     assigner1.setReplyType(
       AssignerReplyType.OverwriteRedirect(
-        Redirect(Some(assigner2.localUri), redirectTokenOpt = None)
+        Redirect(Some(assigner2.localUri))
       )
     )
 
@@ -192,7 +199,11 @@ class InternalDicerTestEnvironmentSuite extends DatabricksTest with TestName {
     // against assigner1. Subsequent watch requests should be issued against the assigner2 after the
     // redirect.
     val clerk0: Clerk[ResourceAddress] =
-      testEnv.createDirectClerk(target, initialAssignerIndex = 0)
+      testEnv.createDirectClerk(
+        target,
+        initialAssignerIndex = 0,
+        featureRolloutFlagOpt = Some(TestClientUtils.ALL_DISABLED_FEATURE_ROLLOUT_FLAG)
+      )
 
     val pod1: Squid = slicelet1.impl.squid
     val pod2: Squid = slicelet2.impl.squid
@@ -236,7 +247,10 @@ class InternalDicerTestEnvironmentSuite extends DatabricksTest with TestName {
     }
 
     // Now start a Clerk that connects to the Slicelet and make sure that it gets an assignment.
-    val clerk2: Clerk[ResourceAddress] = testEnv.createClerk(slicelet1)
+    val clerk2: Clerk[ResourceAddress] = testEnv.createClerk(
+      slicelet1,
+      featureRolloutFlagOpt = Some(TestClientUtils.ALL_DISABLED_FEATURE_ROLLOUT_FLAG)
+    )
     TestUtils.awaitResult(clerk2.ready, Duration.Inf)
     assert(clerk2.impl.forTest.getLatestAssignmentOpt.isDefined)
 
@@ -245,7 +259,7 @@ class InternalDicerTestEnvironmentSuite extends DatabricksTest with TestName {
     assigner1.setReplyType(AssignerReplyType.Normal)
     assigner2.setReplyType(
       AssignerReplyType.OverwriteRedirect(
-        Redirect(Some(assigner1.localUri), redirectTokenOpt = None)
+        Redirect(Some(assigner1.localUri))
       )
     )
 
@@ -292,7 +306,10 @@ class InternalDicerTestEnvironmentSuite extends DatabricksTest with TestName {
 
     val target = Target(getGlobalSafeName)
     val slicelet0 = testEnv.createSlicelet(target).start(selfPort = 1234, listenerOpt = None)
-    val clerk = testEnv.createClerk(slicelet0)
+    val clerk = testEnv.createClerk(
+      slicelet0,
+      featureRolloutFlagOpt = Some(TestClientUtils.ALL_DISABLED_FEATURE_ROLLOUT_FLAG)
+    )
 
     // Now wait for each of them to receive the assignment.
     TestUtils.awaitResult(clerk.ready, Duration.Inf)

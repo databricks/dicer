@@ -1,6 +1,6 @@
 package com.databricks.dicer.client
 
-import java.net.{InetAddress, URI}
+import java.net.InetAddress
 
 import com.databricks.rpc.tls.TLSOptions
 
@@ -12,14 +12,16 @@ import com.databricks.rpc.tls.TLSOptions
  *
  * See [[WatchStubManagerConfig]] for the watch-connection parameters.
  *
- * @param sliceLookupConfig The lookup-identity part of the [[SliceLookupCache]] key.
+ * @param sliceLookupConfig The configuration of the [[SliceLookup]] this client uses. Together
+ *                          with [[WatchStubManagerConfig]], it forms the lookup's
+ *                          [[SliceLookupCache]] key.
  * @param subscriberDebugName The debug name shown in the log and string representation of the
  *                            Clerk/Slicelet.
  */
 case class InternalClientConfig(
     sliceLookupConfig: SliceLookupConfig,
     subscriberDebugName: String,
-    watchAddress: URI,
+    watchAddress: WatchAddress,
     tlsOptionsOpt: Option[TLSOptions],
     watchFromDataPlane: Boolean,
     sourceIpOpt: Option[InetAddress]) {

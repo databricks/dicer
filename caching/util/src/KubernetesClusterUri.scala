@@ -1,14 +1,14 @@
 package com.databricks.caching.util
 
-import com.databricks.infra.lib.{InfraDataModel, InfraResource, ResourcePath}
+import java.net.URI
 
 /**
  * A validated Kubernetes cluster IDM URI, e.g. "kubernetes-cluster:prod/cloud1/public/region1/clustertype2/01"
  * (see <internal link>).
  *
- * An instance can only be obtained through [[KubernetesClusterUri.fromUri]], which resolves the URI
- * against the [[InfraDataModel]] owned by the Infra team, so holding one is a proof that the URI
- * named a real cluster in the model.
+ * An instance can only be obtained through [[KubernetesClusterUri.fromUri]], which validates the
+ * structure of the URI with [[WhereAmIHelper.validateCluster]], so holding one is a proof that the
+ * URI is well formed.
  */
 final class KubernetesClusterUri private (val uri: String) {
 
@@ -25,24 +25,16 @@ final class KubernetesClusterUri private (val uri: String) {
 object KubernetesClusterUri {
 
   /**
-   * Parses `uri` as a Kubernetes cluster IDM URI, resolving it against the embedded
-   * [[InfraDataModel]]. Returns `None` when `uri` is not a `kubernetes-cluster:` URI, or the
-   * cluster URI is not defined in IDM (see [[ResourcePath.getFromUri]]).
-   *
-   * The embedded model is co-versioned with the binary, so a cluster turned up after the binary was
-   * built resolves to `None`.
+   * Parses `uri` as a Kubernetes cluster IDM URI, validating its structure with
+   * [[WhereAmIHelper.validateCluster]]. Returns `None` when `uri` is not a well-formed
+   * Kubernetes cluster URI.
    */
   def fromUri(uri: String): Option[KubernetesClusterUri] = {
-    val clusterOpt: Option[InfraResource.KubernetesClusterResource] =
-      ResourcePath.getFromUri(InfraDataModel.fromEmbedded, uri).collect {
-        case cluster: InfraResource.KubernetesClusterResource => cluster
-      }
-    val resultOpt: Option[KubernetesClusterUri] =
-      clusterOpt.flatMap(_.uri).map(new KubernetesClusterUri(_))
-    IdmUriParseMetrics.recordParse(
-      IdmUriParseMetrics.UriType.KubernetesCluster,
-      succeeded = resultOpt.isDefined
-    )
-    resultOpt
+    try {
+      WhereAmIHelper.validateCluster(URI.create(uri))
+      Some(new KubernetesClusterUri(uri))
+    } catch {
+      case _: IllegalArgumentException => None
+    }
   }
 }

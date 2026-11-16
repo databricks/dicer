@@ -40,3 +40,37 @@ java_junit5_test(
         "@maven//:org_assertj_assertj_core",
     ],
 )
+
+java_library(
+    name = "slice_key_segmented_fingerprint_builder",
+    srcs = ["src/SliceKeySegmentedFingerprintBuilder.java"],
+    visibility = ["//dicer:internal"],
+    deps = [
+        "//dicer/external/javaapi:impl_friend",
+        "//dicer/external/javaapi:slicekey",
+        "//dicer/external:external_common",
+        "//dicer/friend/external:slice_key_segmented_fingerprint_builder",
+        "@com_google_protobuf_protobuf_java",
+    ],
+)
+
+java_junit5_test(
+    name = "slice_key_segmented_fingerprint_builder_test",
+    srcs = ["test/SliceKeySegmentedFingerprintBuilderTest.java"],
+    runtime_deps = [
+        "@contrib_rules_jvm_deps//:org_junit_jupiter_junit_jupiter_engine",
+        "@contrib_rules_jvm_deps//:org_junit_platform_junit_platform_launcher",
+        "@contrib_rules_jvm_deps//:org_junit_platform_junit_platform_reporting",
+    ],
+    size = "small",
+    test_class = "com.databricks.dicer.friend.external.javaapi.SliceKeySegmentedFingerprintBuilderTest",
+    timeout = "short",
+    deps = [
+        ":slice_key_segmented_fingerprint_builder",
+        "//dicer/external/javaapi:slicekey",
+        "//wrappers/java:databricks_java_test",
+        "@com_google_protobuf_protobuf_java",
+        "@contrib_rules_jvm_deps//:org_junit_jupiter_junit_jupiter_api",
+        "@maven//:org_assertj_assertj_core",
+    ],
+)

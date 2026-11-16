@@ -368,6 +368,48 @@ scala_test(
     ],
 )
 
+scala_library(
+    name = "quantile_summaries",
+    srcs = ["src/QuantileSummaries.scala"],
+    deps = [
+        ":assert_macros",
+        ":caching_error_code",
+        ":prefix_logger",
+        "@maven//:com_google_code_findbugs_jsr305",
+    ],
+)
+
+scala_library(
+    name = "ewma_quantile_summaries",
+    srcs = ["src/EwmaQuantileSummaries.scala"],
+    deps = [
+        ":ewma_amplifier",
+        ":quantile_summaries",
+        "@maven//:com_google_code_findbugs_jsr305",
+    ],
+)
+
+scala_test(
+    name = "ewma_quantile_summaries_test",
+    srcs = ["test/EwmaQuantileSummariesSuite.scala"],
+    data = ["//caching/util/test/data"],
+    timeout = "short",
+    deps = [
+        ":ewma_quantile_summaries",
+        ":test_utils",
+        "//caching/util/test/proto:test_data_proto_scala_lib",
+        "//wrappers/util:async_test_helpers",
+        "//wrappers/util:databricks-test",
+        "@com_google_protobuf_protobuf_java",
+        "@maven//:com_google_code_findbugs_jsr305",
+        "@maven//:com_google_guava_guava",
+        "@scala_proto_rules_grpc_api",
+        "@scala_proto_rules_grpc_netty",
+        "@scala_proto_rules_grpc_stub",
+        "@scala_proto_rules_scalapb_runtime",
+    ],
+)
+
 scala_test(
     name = "assert_macros_test",
     srcs = ["test/AssertMacrosSuite.scala"],
@@ -978,6 +1020,7 @@ scala_library(
     name = "typed_clock",
     srcs = ["src/TypedClock.scala"],
     exports = [":ticker_time"],
+    visibility = ["//caching:all_caching"],
     deps = [":ticker_time"],
 )
 
@@ -1491,11 +1534,9 @@ scala_library(
     name = "where_am_i_helper",
     srcs = ["src/WhereAmIHelper.scala"],
     deps = [
-        ":kubernetes_cluster_uri",
         "//wrappers/conf:dbconf",
         "//wrappers/conf:environment",
         "//wrappers/conf:location",
-        "@maven//:io_prometheus_simpleclient",
     ],
 )
 
@@ -1504,7 +1545,6 @@ scala_test(
     srcs = ["test/WhereAmIHelperSuite.scala"],
     timeout = "short",
     deps = [
-        ":metric_utils",
         ":where_am_i_helper",
         ":where_am_i_test_utils",
         "//wrappers/conf:dbconf",
@@ -1513,7 +1553,6 @@ scala_test(
         "//wrappers/util:async_test_helpers",
         "//wrappers/util:databricks-test",
         "@maven//:com_typesafe_config",
-        "@maven//:io_prometheus_simpleclient",
     ],
 )
 
@@ -1536,11 +1575,7 @@ scala_library(
 scala_library(
     name = "kubernetes_cluster_uri",
     srcs = ["src/KubernetesClusterUri.scala"],
-    deps = [
-        ":idm_uri_parse_metrics",
-        "//wrappers/deployment:infra_data_model_lib",
-        "//wrappers/deployment:kubernetes_cluster",
-    ],
+    deps = [":where_am_i_helper"],
 )
 
 scala_test(
@@ -1550,7 +1585,6 @@ scala_test(
     timeout = "short",
     deps = [
         ":kubernetes_cluster_uri",
-        ":metric_utils",
         ":test_utils",
         "//caching/util/test/proto:test_data_proto_scala_lib",
         "//wrappers/util:async_test_helpers",
@@ -1558,7 +1592,6 @@ scala_test(
         "@com_google_protobuf_protobuf_java",
         "@maven//:com_google_code_findbugs_jsr305",
         "@maven//:com_google_guava_guava",
-        "@maven//:io_prometheus_simpleclient",
         "@scala_proto_rules_grpc_api",
         "@scala_proto_rules_grpc_netty",
         "@scala_proto_rules_grpc_stub",

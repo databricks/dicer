@@ -4,6 +4,7 @@ import java.time.Instant
 import scala.concurrent.duration.Duration.Inf
 import scala.concurrent.{Future}
 
+import com.databricks.dicer.assigner.ProposedAssignment
 import com.databricks.dicer.common.testing.SliceTestUtils.{
   createAssignment,
   createRandomProposal,
@@ -15,19 +16,25 @@ import scala.util.Random
 import scala.util.control.NonFatal
 
 import com.databricks.api.proto.dicer.common.ClientRequestP.SliceletDataP.SliceLoadP
-import com.databricks.caching.util.{ExecutorUtil, FakeTypedClock, RealtimeTypedClock}
+import com.databricks.caching.util.{
+  CachingErrorCode,
+  ExecutorUtil,
+  FakeTypedClock,
+  MetricUtils,
+  RealtimeTypedClock,
+  Severity
+}
 import com.databricks.caching.util.TestUtils
-import com.databricks.caching.util.TestUtils.{TestName, loadTestData}
+import com.databricks.caching.util.TestUtils.{TestName, assertThrow, loadTestData}
 import com.databricks.dicer.client.TestClientUtils.{
   getAttributedLoadMetric,
   getUnattributedLoadMetric
 }
-import com.databricks.dicer.common.SliceletData.KeyLoad
+import com.databricks.dicer.common.SliceletData.{KeyLoad, LoadDistribution}
 import com.databricks.dicer.common.{
   Assignment,
   Generation,
   Incarnation,
-  ProposedAssignment,
   SliceAssignment,
   SliceHelper,
   SliceWithResources,
@@ -43,6 +50,7 @@ import com.databricks.dicer.common.test.SliceletLoadAccumulatorTestDataP.{
   CheckAttributedLoadsP,
   CheckUnattributedLoadP,
   ExpectedSliceInfoP,
+  FactoryParameterP,
   ValidCaseP,
   messageCompanion
 }
@@ -54,6 +62,12 @@ class SliceletLoadAccumulatorSuite extends DatabricksTest with TestName {
   private val TEST_DATA: SliceletLoadAccumulatorTestDataP =
     loadTestData[SliceletLoadAccumulatorTestDataP](
       "dicer/common/test/data/slicelet_load_accumulator_test_data.textproto"
+    )
+
+  /** The load-distribution test data from .textproto. */
+  private val DISTRIBUTION_TEST_DATA: SliceletLoadAccumulatorTestDataP =
+    loadTestData[SliceletLoadAccumulatorTestDataP](
+      "dicer/common/test/data/slicelet_load_accumulator_distribution_test_data.textproto"
     )
 
   /** The sequence number and the helper method to get the next unique target name. */
@@ -127,6 +141,19 @@ class SliceletLoadAccumulatorSuite extends DatabricksTest with TestName {
         case action => fail(s"unknown action $action")
       }
     }
+    verifyNoUnexpectedCachingErrors(target)
+  }
+
+  /** Verifies that there are no unexpected caching errors for load reporting. */
+  private def verifyNoUnexpectedCachingErrors(target: Target): Unit = {
+    for (severity: Severity <- Seq(Severity.DEGRADED, Severity.CRITICAL)) {
+      val errorCount: Int = MetricUtils.getPrefixLoggerErrorCount(
+        severity,
+        CachingErrorCode.SLICELET_LOAD_ACCUMULATOR_UNEXPECTED_ERROR,
+        prefix = target.toString
+      )
+      assert(errorCount == 0)
+    }
   }
 
   /** Checks the unattributed load based on the proto data, and returns the load. */
@@ -153,6 +180,11 @@ class SliceletLoadAccumulatorSuite extends DatabricksTest with TestName {
     proto.expectedCounterValue.map { expected: Long =>
       assert(getUnattributedLoadMetric(target) == expected)
     }
+
+    assert(
+      unattributedLoad.loadDistributionOpt.isEmpty,
+      s"$debugMessage: unattributed load must not include a distribution"
+    )
 
     // Return the primary rate load for further assertions (like decay check) if needed.
     unattributedLoad.primaryRateLoad
@@ -202,6 +234,35 @@ class SliceletLoadAccumulatorSuite extends DatabricksTest with TestName {
               s"$debugMessage: expected top keys $topSliceKeys but got $actual"
             )
           }
+
+          val expectedDistributionOpt: Option[LoadDistribution] =
+            expected.expectedLoadDistribution.map(LoadDistribution.fromProto)
+          val distributionsMatch: Boolean =
+            (actualLoad.loadDistributionOpt, expectedDistributionOpt) match {
+              case (None, None) => true
+              case (Some(actual: LoadDistribution), Some(expected: LoadDistribution)) =>
+                val sameLengthAndMaxError: Boolean =
+                  math.abs(actual.maxErrorFraction - expected.maxErrorFraction) <= 1e-9 &&
+                  actual.points.size == expected.points.size
+                // Allow floating-point rounding in cumulative fractions from EWMA amplification
+                // and normalization.
+                val samePoints: Boolean = actual.points.zip(expected.points).forall {
+                  case (
+                      actualPoint: LoadDistribution.CdfPoint,
+                      expectedPoint: LoadDistribution.CdfPoint
+                      ) =>
+                    val fractionDiff: Double =
+                      actualPoint.cumulativeLoadFraction - expectedPoint.cumulativeLoadFraction
+                    actualPoint.key == expectedPoint.key && math.abs(fractionDiff) <= 1e-9
+                }
+                sameLengthAndMaxError && samePoints
+              case _ => false
+            }
+          assert(
+            distributionsMatch,
+            s"$debugMessage: Slice ${actualLoad.slice}: expected distribution " +
+            s"$expectedDistributionOpt, but got ${actualLoad.loadDistributionOpt}"
+          )
       }
     }
 
@@ -259,14 +320,32 @@ class SliceletLoadAccumulatorSuite extends DatabricksTest with TestName {
     actualTotalLoad
   }
 
-  test("Valid cases") {
-    // Test plan: Verify that SliceletLoadAccumulator correctly handles valid cases --
-    // no exceptions thrown.
-    for (validCase <- TEST_DATA.validCases) {
+  /** Runs a series of valid cases. */
+  private def runValidCases(validCases: Seq[ValidCaseP]): Unit = {
+    for (validCase <- validCases) {
       val target = Target(getNextUniqueTargetName)
       val fakeClock = new FakeTypedClock
-      val accumulator =
-        new SliceletLoadAccumulator(fakeClock, new SliceletMetrics(target))
+
+      // Resolve the factory parameters for SliceletLoadAccumulator.
+      val (cdfPointBudget, maxKeyLengthBytes): (Int, Int) = validCase.factoryParameterOpt match {
+        case Some(factoryParameter: FactoryParameterP) =>
+          val cdfPointBudget: Int =
+            factoryParameter.cdfPointBudget.getOrElse(fail("cdf_point_budget is required")).toInt
+          val maxKeyLengthBytes: Int = factoryParameter.maxKeyLengthBytes
+            .getOrElse(fail("max_key_length_bytes is required"))
+            .toInt
+          (cdfPointBudget, maxKeyLengthBytes)
+        // Empty factory parameters config means using default parameters as follows.
+        case None => (0, Int.MaxValue)
+      }
+
+      val accumulator = new SliceletLoadAccumulator(
+        fakeClock,
+        target,
+        new SliceletMetrics(target),
+        cdfPointBudget,
+        maxKeyLengthBytes
+      )
       val testName: String =
         validCase.name.getOrElse(fail("expected test name for valid case"))
       val startTime: Instant = fakeClock.instant()
@@ -278,6 +357,84 @@ class SliceletLoadAccumulatorSuite extends DatabricksTest with TestName {
           fail(s"expected no exception for test case $testName, but got ${e.getMessage}")
       }
     }
+  }
+
+  test("Basic valid cases") {
+    // Test plan: Verify that SliceletLoadAccumulator correctly handles basic valid cases that do
+    // not create load distributions -- no exceptions thrown and all actions execute successfully.
+    runValidCases(TEST_DATA.validCases)
+  }
+
+  test("Load distribution cases") {
+    // Test plan: Check CDF points, error bounds, and total load against the shared
+    // Scala/Rust cases.
+    runValidCases(DISTRIBUTION_TEST_DATA.validCases)
+  }
+
+  test("Zero max key length is rejected") {
+    // Test plan: Verify that a zero maxKeyLengthBytes is rejected by the SliceletLoadAccumulator
+    // constructor.
+    val target = Target(getNextUniqueTargetName)
+    assertThrow[IllegalArgumentException]("max_key_length_bytes must be positive") {
+      new SliceletLoadAccumulator(
+        new FakeTypedClock,
+        target,
+        new SliceletMetrics(target),
+        cdfPointBudget = 0,
+        maxKeyLengthBytes = 0
+      )
+    }
+  }
+
+  test("Unattributed top keys exceeding max length are dropped") {
+    // Test plan: Record unattributed load for a key at the length limit and an oversized key.
+    // Verify that both count toward total load, only the shorter key is reported, and the longer
+    // key fires an alert. Check the retained key's contribution again after a half-life.
+    val target = Target(getNextUniqueTargetName)
+    val fakeClock = new FakeTypedClock
+    val accumulator = new SliceletLoadAccumulator(
+      fakeClock,
+      target,
+      new SliceletMetrics(target),
+      cdfPointBudget = 0,
+      maxKeyLengthBytes = 4
+    )
+
+    accumulator.incrementPrimaryRateBy(toSliceKey("wxyz"), value = 1)
+    accumulator.incrementPrimaryRateBy(toSliceKey("wxyzab"), value = 1)
+
+    // Advance the time to pass the buffer so that the incremented load will be reported by the
+    // accumulator.
+    fakeClock.advanceBy(1.second)
+
+    val (attributed, unattributed): (Vector[SliceletData.SliceLoad], SliceletData.SliceLoad) =
+      accumulator.readLoad()
+    assert(attributed.isEmpty)
+    assert(math.abs(unattributed.primaryRateLoad - 2.0) <= 1e-9)
+    // Only the key within the limit is reported.
+    assert(unattributed.topKeys.map((_: KeyLoad).key) == Seq(toSliceKey("wxyz")))
+    assert(math.abs(unattributed.topKeys.head.underestimatedPrimaryRateLoad - 2.0) <= 1e-9)
+
+    // Oversized keys do not affect the relative contributions of retained top keys.
+    fakeClock.advanceBy(119.seconds)
+    accumulator.incrementPrimaryRateBy(toSliceKey("wxyz"), value = 1)
+    fakeClock.advanceBy(1.second)
+    val (_, afterDecay): (Vector[SliceletData.SliceLoad], SliceletData.SliceLoad) =
+      accumulator.readLoad()
+    assert(
+      math.abs(
+        afterDecay.topKeys.head.underestimatedPrimaryRateLoad /
+        afterDecay.primaryRateLoad - 1.0
+      ) <= 1e-9
+    )
+
+    // Only the longer key fires an alert.
+    val keyTooLongAlertCount: Int = MetricUtils.getPrefixLoggerErrorCount(
+      Severity.DEGRADED,
+      CachingErrorCode.SLICELET_LOAD_ACCUMULATOR_KEY_TOO_LONG,
+      prefix = target.toString
+    )
+    assert(keyTooLongAlertCount == 1)
   }
 
   test("SliceletLoadAccumulator is thread-safe") {
@@ -304,8 +461,13 @@ class SliceletLoadAccumulatorSuite extends DatabricksTest with TestName {
     // method does. In production, the Squid is immutable and has the same lifetime as the Slicelet,
     // so we just need to ensure that every time we call `onAssignmentChanged`, we pass the
     // currentSquid.
-    val accumulator =
-      new SliceletLoadAccumulator(RealtimeTypedClock, new SliceletMetrics(target))
+    val accumulator = new SliceletLoadAccumulator(
+      RealtimeTypedClock,
+      target,
+      new SliceletMetrics(target),
+      cdfPointBudget = 100,
+      maxKeyLengthBytes = 64
+    )
 
     // Setup: create a random array with 1000 unique generation numbers.
     // Ensure generations are unique to avoid non-deterministic behavior when multiple assignments

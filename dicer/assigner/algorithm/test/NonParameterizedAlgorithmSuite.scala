@@ -4,15 +4,17 @@ import scala.concurrent.duration._
 
 import com.databricks.api.proto.dicer.external.LoadBalancingMetricConfigP.ImbalanceToleranceHintP
 import com.databricks.caching.util.TestUtils.assertThrow
+import com.databricks.dicer.assigner.ProposedAssignment
 import com.databricks.dicer.assigner.config.{ChurnConfig, InternalTargetConfig}
 import com.databricks.dicer.assigner.config.testing.{ConfigTestUtils}
 import com.databricks.dicer.assigner.config.InternalTargetConfig.{
   KeyReplicationConfig,
   LoadBalancingConfig,
   LoadBalancingMetricConfig,
-  ReplicationThresholdOverride
+  ReplicationThresholdOverride,
+  SizeLimitMetricConfig
 }
-import com.databricks.dicer.common.{Assignment, ProposedAssignment, SliceAssignment}
+import com.databricks.dicer.common.{Assignment, Generation, SliceAssignment}
 import com.databricks.dicer.common.SliceKeyHelper.RichSliceKey
 import com.databricks.dicer.common.testing.SliceTestUtils.{
   LowInclusiveSliceKeyFluent,
@@ -21,6 +23,8 @@ import com.databricks.dicer.common.testing.SliceTestUtils.{
   ProposedSliceAssignmentFluent,
   SliceAssignmentSliceFluent,
   assertDesirableAssignmentProperties,
+  createAssignment,
+  createLooseGeneration,
   createProposal,
   createResources,
   toProposedAssignmentEntry,

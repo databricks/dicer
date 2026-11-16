@@ -160,6 +160,18 @@ abstract class TargetMetricsSuiteBase extends DatabricksTest with TestName {
     )
   }
 
+  private def getSizeLimitRelaxationRatioAtGenerationGauge(target: Target): Double = {
+    MetricUtils.getMetricValue(
+      registry,
+      "dicer_assigner_size_limit_relaxation_ratio_at_generation",
+      Map(
+        "targetCluster" -> target.getTargetClusterLabel,
+        "targetName" -> target.getTargetNameLabel,
+        "targetInstanceId" -> target.getTargetInstanceIdLabel
+      )
+    )
+  }
+
   private def getPerResourceLoadAfterGenerationGauge(target: Target, resourceHash: Int): Double = {
     MetricUtils.getMetricValue(
       registry,
@@ -677,6 +689,47 @@ abstract class TargetMetricsSuiteBase extends DatabricksTest with TestName {
     )
   }
 
+  test("reportReassignmentStats exports the size limit relaxation ratio") {
+    // Test plan: Verify that the size limit relaxation ratio gauge reports how far the maximum
+    // desired size exceeds the size limit hint (as a fraction of it), and is left unchanged when no
+    // size limit is reported. Do
+    // this by reporting reassignment stats with a relaxed size limit, an honored size limit, and no
+    // size limit, checking the gauge after each.
+    val loadMap: LoadMap = LoadMap.newBuilder().putLoad(Entry(Slice.FULL, 1.0)).build()
+    val assignment: Assignment = createAssignment(
+      12 ## 42,
+      assignerServiceInfoOpt = None,
+      ("" -- ∞) @@ (12 ## 42) -> Seq("pod0")
+    )
+    val reassignmentStats: ReassignmentChurnAndLoadStats =
+      ReassignmentChurnAndLoadStats.calculate(assignment, assignment, loadMap)
+
+    TargetMetrics.reportReassignmentStats(
+      defaultTarget,
+      reassignmentStats,
+      desiredLoadOpt = None,
+      Some(Algorithm.DesiredSizeLimit(sizeLimitHint = 100, maxDesiredSize = 150))
+    )
+    assertResult(expected = 0.5)(getSizeLimitRelaxationRatioAtGenerationGauge(defaultTarget))
+
+    TargetMetrics.reportReassignmentStats(
+      defaultTarget,
+      reassignmentStats,
+      desiredLoadOpt = None,
+      Some(Algorithm.DesiredSizeLimit(sizeLimitHint = 100, maxDesiredSize = 100))
+    )
+    assertResult(expected = 0.0)(getSizeLimitRelaxationRatioAtGenerationGauge(defaultTarget))
+
+    // Reporting with no size limit must leave the gauge at its previous value.
+    TargetMetrics.reportReassignmentStats(
+      defaultTarget,
+      reassignmentStats,
+      desiredLoadOpt = None,
+      desiredSizeLimitOpt = None
+    )
+    assertResult(expected = 0.0)(getSizeLimitRelaxationRatioAtGenerationGauge(defaultTarget))
+  }
+
   test("reportAssignmentSnapshotStats exports load metrics correctly") {
     // Test plan: Call reportAssignmentSnapshotStats with test data and verify that the load metrics
     // are set correctly in Prometheus.
@@ -793,7 +846,11 @@ abstract class TargetMetricsSuiteBase extends DatabricksTest with TestName {
     // resources are empty. We are testing this method directly because its existing callers do
     // not pass empty resources to this method.
     val emptyResources: Resources = Resources.empty
-    TargetMetrics.clearTerminatedGeneratorFromMetrics(defaultTarget, emptyResources)
+    TargetMetrics.clearTerminatedGeneratorFromMetrics(
+      defaultTarget,
+      emptyResources,
+      ownerTeamName = ""
+    )
   }
 
   test("AssignmentDistributionSource.values contains all sealed trait variants") {

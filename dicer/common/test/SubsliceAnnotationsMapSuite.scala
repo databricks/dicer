@@ -2,6 +2,7 @@ package com.databricks.dicer.common
 
 import scala.util.Random
 
+import com.databricks.dicer.assigner.{ProposedAssignment, ProposedSliceAssignment}
 import com.databricks.dicer.common.SubsliceAnnotationsMap.SliceWithAnnotations
 import com.databricks.dicer.common.testing.{SliceTestUtils}
 import com.databricks.dicer.common.testing.SliceTestUtils.{

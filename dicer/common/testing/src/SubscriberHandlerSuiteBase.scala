@@ -17,6 +17,7 @@ import com.databricks.caching.util.{
   TestUtils
 }
 import com.databricks.caching.util.TestUtils.TestName
+import com.databricks.dicer.assigner.ProposedAssignment
 import com.databricks.dicer.common.{
   Assignment,
   ClerkData,
@@ -25,7 +26,6 @@ import com.databricks.dicer.common.{
   DiffAssignment,
   Generation,
   Incarnation,
-  ProposedAssignment,
   SliceletData,
   SliceletState,
   SubscriberData,
@@ -139,7 +139,6 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
       TIMEOUT,
       data,
       supportsSerializedAssignment = true,
-      redirectTokenOpt = None,
       version = version,
       alternativeTargetOpt = alternativeTargetOpt,
       clusterUriOpt = clusterUriOpt,
@@ -928,7 +927,6 @@ abstract class SubscriberHandlerSuiteBase extends DatabricksTest with TestName {
       TIMEOUT,
       ClerkData,
       supportsSerializedAssignment = false,
-      redirectTokenOpt = None,
       alternativeTargetOpt = None,
       clusterUriOpt = None,
       regionUriOpt = None

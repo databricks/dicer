@@ -37,6 +37,8 @@ import com.databricks.dicer.friend.SliceMap
  * @param adjustedLoadMap load information to use for load balancing. May include adjustments to
  *                        actual recent load measurements to account for (say) estimated future
  *                        load.
+ * @param sizeMapOpt ignored but kept for interface compatibility with internal code. Size limits
+ *                   are not supported in OSS, so all Slices have zero size and heat equals load.
  * @param churnConfig ignored but kept for interface compatibility with internal code.
  */
 private[assigner] class MutableAssignment(
@@ -44,6 +46,7 @@ private[assigner] class MutableAssignment(
     baseAssignmentSliceMap: SliceMap[SliceAssignment],
     resources: Resources,
     adjustedLoadMap: LoadMap,
+    sizeMapOpt: Option[SizeMap],
     churnConfig: ChurnConfig) {
 
   /**
@@ -203,6 +206,27 @@ private[assigner] class MutableAssignment(
    * including those not assigned to any resource!
    */
   def currentNumTotalSliceReplicas: Int = numTotalSliceReplicas
+
+  /** Returns the number of available resources (`resources.availableResources`). */
+  def numAvailableResources: Int = resources.availableResources.size
+
+  /** Always zero: size limits are not supported in OSS. */
+  def currentTotalAssignmentSize: Double = 0.0
+
+  /** No-op, kept for interface compatibility with internal code. */
+  def lockReplicaCounts(): Unit = {}
+
+  /** Size limits are not supported in OSS. */
+  @throws[UnsupportedOperationException]("always")
+  def enableSizeLimit(maxDesiredLoad: Double, maxDesiredSize: Double): Unit = {
+    throw new UnsupportedOperationException("Size limits are not supported.")
+  }
+
+  /** Always empty: size limits are not supported in OSS. */
+  def getMaxDesiredSizeOpt: Option[Double] = None
+
+  /** Returns `load`: size limits are not supported in OSS, so heat equals load. */
+  def heatOf(load: Double, size: Double): Double = load
 
   /**
    * Converts this mutable assignment to a complete, disjoint list of Slice -> Resource mappings.
@@ -481,6 +505,15 @@ private[assigner] class MutableAssignment(
       allocatedReplicasByResource.size
     }
 
+    /** Always zero: size limits are not supported in OSS. */
+    def rawSize: Double = 0.0
+
+    /** Equal to [[rawLoadPerReplica]]: size limits are not supported in OSS. */
+    def rawHeatPerReplica: Double = rawLoadPerReplica
+
+    /** Always [[MutableAssignment.Metric.Load]]: size limits are not supported in OSS. */
+    def dominantMetric: MutableAssignment.Metric = MutableAssignment.Metric.Load
+
     /**
      * PRECONDITION: `this` must be attached to the outer MutableAssignment.
      *
@@ -492,10 +525,15 @@ private[assigner] class MutableAssignment(
      * its place, which are returned as a tuple).
      *
      * When unsuccessful, returns None. The Slice is unsplittable if it includes only a single key
-     * or if it has no load.
+     * or if it has no load. Always unsuccessful for [[MutableAssignment.Metric.Size]], since Slices
+     * have no size in OSS.
      */
-    def split(): Option[(MutableSliceAssignment, MutableSliceAssignment)] = {
+    def split(metric: MutableAssignment.Metric)
+        : Option[(MutableSliceAssignment, MutableSliceAssignment)] = {
       assertAttachedToOuterAssignment()
+      if (metric == MutableAssignment.Metric.Size) {
+        return None
+      }
       val existingLoad = adjustedLoadMap.getLoad(slice)
       val split: LoadMap.Split = adjustedLoadMap.getSplit(slice, existingLoad / 2)
       if (slice.lowInclusive < split.splitKey && split.splitKey < slice.highExclusive) {
@@ -962,5 +1000,20 @@ private[assigner] class MutableAssignment(
         )
       }
     }
+  }
+}
+
+private[assigner] object MutableAssignment {
+
+  /** A metric by which a Slice can be split (see [[MutableSliceAssignment.split]]). */
+  sealed trait Metric
+
+  object Metric {
+
+    /** The primary rate metric, measured by the load map. */
+    case object Load extends Metric
+
+    /** The primary gauge metric, measured by the size map. Unused in OSS. */
+    case object Size extends Metric
   }
 }

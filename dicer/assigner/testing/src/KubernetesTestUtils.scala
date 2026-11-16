@@ -1,6 +1,5 @@
 package com.databricks.dicer.assigner.testing
 
-import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 import scala.collection.JavaConverters._
@@ -11,14 +10,10 @@ import io.kubernetes.client.openapi.apis.CoreV1Api
 import io.kubernetes.client.openapi.models.{V1ObjectMeta, V1Pod, V1PodCondition, V1PodStatus}
 import okhttp3.OkHttpClient
 
-import com.databricks.caching.util.AlertOwnerTeam
-import com.databricks.caching.util.SequentialExecutionContext
-import com.databricks.dicer.assigner.KubernetesMembershipChecker
-
 /** Shared utilities for tests that use a [[FakeKubernetesServer]]. */
 private[assigner] object KubernetesTestUtils {
 
-  /** Connect timeout matching [[KubernetesMembershipChecker.create]]. */
+  /** Default connect timeout for fake-server clients. */
   val DEFAULT_CONNECT_TIMEOUT: FiniteDuration = 5.seconds
 
   /** Default read timeout for fake-server clients. */
@@ -56,31 +51,4 @@ private[assigner] object KubernetesTestUtils {
       .metadata(new V1ObjectMeta().uid(uid))
       .status(new V1PodStatus().podIP(podIP).conditions(List(readyCondition).asJava))
   }
-
-  /**
-   * A [[KubernetesMembershipChecker.Factory]] that builds an inert checker over a bare
-   * [[CoreV1Api]] (no server). The checker satisfies the Assigner's required dependency but never
-   * polls: the one-hour interval schedules the first poll well past any test. Use when a test needs
-   * the Assigner to start but does not exercise membership.
-   */
-  val inertMembershipCheckerFactory: KubernetesMembershipChecker.Factory =
-    new KubernetesMembershipChecker.Factory {
-      override def create(assignerUuid: UUID): KubernetesMembershipChecker = {
-        val checkerSec: SequentialExecutionContext =
-          SequentialExecutionContext.createWithDedicatedPool(
-            name = "membership-checker-inert",
-            alertOwnerTeam = AlertOwnerTeam.CACHING_TEAM_NAME
-          )
-        new KubernetesMembershipChecker(
-          checkerSec,
-          new CoreV1Api(new ApiClient()),
-          assignerUuid,
-          namespace = "test-namespace",
-          appName = "test-app",
-          pollingInterval = 1.hour,
-          rpcPort = 1,
-          kubeContextLabelOpt = None
-        )
-      }
-    }
 }

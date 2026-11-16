@@ -15,10 +15,11 @@ import com.databricks.dicer.external.{AppTarget, Target}
  *
  * Configuration for SliceLookup used by Clerk or Slicelet clients.
  *
- * Note: The config is used as a key for indexing into a map. Therefore, it should contain only the
- * information that is needed to uniquely identify the SliceLookup instance. The fields describing
- * the watch connection itself live on [[WatchStubManagerConfig]], so that lookups differing only in
- * a connection field are distinguished by that config rather than by this one.
+ * Note: Together with a [[WatchStubManagerConfig]], the config is used as a key for indexing into
+ * a map. Therefore, it should contain only the information that is needed to uniquely identify the
+ * SliceLookup instance. The fields describing the watch connection itself live on
+ * [[WatchStubManagerConfig]], so that lookups differing only in a connection field are
+ * distinguished by that config rather than by this one.
  *
  * Instances are created through [[SliceLookupConfig.apply]], which populates `clientClusterUriOpt`
  * and `clientRegionUriOpt` from [[WhereAmIHelper]]; the primary constructor is `private` so callers
@@ -126,14 +127,8 @@ object SliceLookupConfig {
 
   /**
    * Creates a [[SliceLookupConfig]], capturing the current pod's Kubernetes cluster and region URIs
-   * from [[WhereAmIHelper]] and validating them against the binary's embedded model. Each resolves
-   * to `None` when WhereAmI is unavailable.
-   *
-   * Validation resolving to `None` is a theoretical case rather than an expected one: the URIs name
-   * the cluster and region this pod is itself running in, so the embedded model is essentially
-   * guaranteed to include them, as deploying a pod to a cluster the model does not know would be
-   * nonsensical. Resolving to `None` rather than throwing keeps that theoretical case from failing
-   * config creation.
+   * from [[WhereAmIHelper]] and validating them. Each resolves to `None` when WhereAmI is
+   * unavailable.
    */
   def apply(
       clientType: ClientType,

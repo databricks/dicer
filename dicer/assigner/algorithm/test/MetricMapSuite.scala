@@ -181,8 +181,11 @@ class MetricMapSuite extends DatabricksTest {
      * the desired load. Errors need to be tolerated for cases where exact solutions are not
      * possible.
      */
-    def checkSplit(slice: Slice, desiredLoad: Double, expectedSplitKey: HighSliceKey)(
-        implicit tolerance: Double = 0.0): Unit = {
+    def checkSplit(
+        slice: Slice,
+        desiredLoad: Double,
+        expectedSplitKey: HighSliceKey,
+        tolerance: Double = 0.0): Unit = {
       val actualSplit: LoadMap.Split = MAP.getSplit(slice, desiredLoad)
       assert(actualSplit.splitKey == expectedSplitKey)
       if (actualSplit.splitKey == slice.highExclusive) {
@@ -219,8 +222,7 @@ class MetricMapSuite extends DatabricksTest {
     checkSplit(
       "a" -- "c",
       6.0,
-      identityKey("b333333@")
-    )(
+      identityKey("b333333@"),
       // Error tolerance is needed because the nearest 8-byte split key cannot represent "b plus a
       // fifth of the distance between b and c".
       tolerance = 1e-15
@@ -394,10 +396,10 @@ class MetricMapSuite extends DatabricksTest {
     val mapBuilder: LoadMap.Builder = LoadMap.newBuilder()
 
     /**
-     * Creates a SliceKey with the given bytes, with default length of ceil(bytes.bitLength / 8).
+     * Creates a SliceKey with the given bytes, with length of ceil(bytes.bitLength / 8).
      */
-    def key(bytes: BigInt)(implicit length: Int = (bytes.bitLength + 7) / 8): SliceKey = {
-      SliceKeyHelper.fromBigInt(magnitude = bytes, length)
+    def key(bytes: BigInt): SliceKey = {
+      SliceKeyHelper.fromBigInt(magnitude = bytes, length = (bytes.bitLength + 7) / 8)
     }
 
     /** Helper concatenating two keys. */
@@ -454,7 +456,7 @@ class MetricMapSuite extends DatabricksTest {
       offset = offset >> 1
 
       // Maintain stable 256-byte length for the suffix as the offset shrinks.
-      val suffix = key(offset)(length = 256)
+      val suffix = SliceKeyHelper.fromBigInt(magnitude = offset, length = 256)
       val actual = map.getLoad(prefix -- concat(prefix, suffix))
       if (actual > 0) {
         assert(actual == expected)
@@ -701,11 +703,11 @@ class MetricMapSuite extends DatabricksTest {
       ),
       TestCase(
         "Add uniform load to uniform Slices",
-        input = LoadMap.getUniformPartitioning(16).map { slice: Slice =>
+        input = MetricMap.getUniformPartitioning(16).map { slice: Slice =>
           Entry(slice, 41.0)
         },
         addedLoad = 16.0,
-        expected = LoadMap.getUniformPartitioning(16).map { slice: Slice =>
+        expected = MetricMap.getUniformPartitioning(16).map { slice: Slice =>
           Entry(slice, 42.0)
         }
       ),
@@ -875,5 +877,42 @@ class MetricMapSuite extends DatabricksTest {
         .build()
     )
     assert(sizeMap.toString.startsWith("SizeMap("))
+  }
+
+  test("Entry values are capped at MAX_ENTRY_VALUE") {
+    // Test plan: verify that a built LoadMap or SizeMap, and the LoadMap returned by
+    // `withAddedUniformLoad`, never hold an entry larger than `MAX_ENTRY_VALUE`, while smaller
+    // values are kept. Do this by building each kind of map with the largest finite value for one
+    // Slice and an ordinary value for another, including the largest value on a key, then adding a
+    // uniform load that pushes an entry just at the cap above it.
+    val maxValue: Double = MetricMap.MAX_ENTRY_VALUE
+    val loadMap: LoadMap = LoadMap
+      .newBuilder()
+      .putLoad(LoadMap.Entry("a" -- "c", Double.MaxValue), KeyLoadMap(identityKey("b") -> 1.0))
+      .putLoad(LoadMap.Entry("d" -- "g", 20.0), KeyLoadMap(identityKey("e") -> Double.MaxValue))
+      .build()
+    for (entry: LoadMap.Entry <- loadMap.sliceMap.entries) {
+      assert(entry.load <= maxValue, s"$entry")
+    }
+    val keyB: SliceKey = identityKey("b")
+    val keyE: SliceKey = identityKey("e")
+    assert(loadMap.getLoad(Slice(keyB, keyB.successor())) == 1.0)
+    assert(loadMap.getLoad(Slice(keyE, keyE.successor())) == maxValue)
+    // The rest of the second Slice keeps its ordinary load.
+    assertApproxEqual(
+      loadMap.getLoad("d" -- keyE) + loadMap.getLoad(keyE.successor() -- "g"),
+      20.0
+    )
+
+    val sizeMap: SizeMap = SizeMap
+      .newBuilder()
+      .putSize(SizeMap.Entry("a" -- "c", Double.MaxValue), SizeMap.Entry("d" -- "g", 20.0))
+      .build()
+    assert(sizeMap.getSize("a" -- "c") == maxValue)
+    assert(sizeMap.getSize("d" -- "g") == 20.0)
+
+    val cappedMap: LoadMap =
+      LoadMap.newBuilder().putLoad(LoadMap.Entry(Slice.FULL, maxValue)).build()
+    assert(cappedMap.withAddedUniformLoad(maxValue).getLoad(Slice.FULL) == maxValue)
   }
 }

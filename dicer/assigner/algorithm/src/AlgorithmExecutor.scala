@@ -60,7 +60,7 @@ private[assigner] object AlgorithmExecutor {
     // - Later steps can assume replicas are in range and won't be clamped again
     // - Split/merge decisions are made with correct per-replica loads
     ConstraintPhase.clampReplicas(config, assignment)
-    Splitter.splitHotSlices(config, assignment)
+    Splitter.splitHotLoadSlices(config, assignment)
     MergePhase.merge(config, resources, assignment)
 
     // Ensure minimum total replicas. Done now because de-replication/merge may have reduced the

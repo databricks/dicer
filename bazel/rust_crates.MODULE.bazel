@@ -23,6 +23,10 @@ crate.spec(
     version = "=4.6.6",
 )
 crate.spec(
+    package = "criterion",
+    version = "=0.5.1",
+)
+crate.spec(
     default_features = False,
     features = [
         "debug",
@@ -48,6 +52,14 @@ crate.spec(
     version = "=1.2.0",
 )
 crate.spec(
+    package = "lazy_static",
+    version = "=1.5.1",
+)
+crate.spec(
+    package = "linked-hash-map",
+    version = "=0.5.6",
+)
+crate.spec(
     package = "ordered-float",
     version = "=4.6.0",
 )
@@ -62,6 +74,10 @@ crate.spec(
 crate.spec(
     package = "rand_distr",
     version = "=0.5.1",
+)
+crate.spec(
+    package = "rangemap",
+    version = "=1.8.0",
 )
 crate.spec(
     default_features = False,
@@ -109,11 +125,24 @@ crate.spec(
 )
 crate.spec(
     package = "serde_json",
-    version = "=1.0.149",
+    version = "=1.0.154",
+)
+crate.spec(
+    package = "serde_with",
+    version = "=3.24.0",
+)
+crate.spec(
+    features = ["const_new"],
+    package = "smallvec",
+    version = "=1.15.2",
 )
 crate.spec(
     package = "static_assertions",
     version = "=1.1.0",
+)
+crate.spec(
+    package = "tar",
+    version = "=0.4.46",
 )
 crate.spec(
     package = "tempfile",
@@ -156,11 +185,21 @@ crate.spec(
     package = "tracing-test",
     version = "=0.2.6",
 )
+crate.spec(
+    features = ["v4"],
+    package = "uuid",
+    version = "=1.21.0",
+)
 
 # ---- prost toolchain + service crates ----
 crate.spec(
     package = "prost",
     version = "=0.14.1",
+)
+crate.spec(
+    features = ["text-format"],
+    package = "prost-reflect",
+    version = "=0.16.2",
 )
 crate.spec(
     package = "prost-types",
@@ -178,11 +217,11 @@ crate.spec(
     default_features = False,
     features = [
         "codegen",
-        "router",
-        "transport",
         "gzip",
+        "router",
         "tls-aws-lc",
         "tls-native-roots",
+        "transport",
     ],
     package = "tonic",
     version = "=0.14.5",

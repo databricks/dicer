@@ -6,6 +6,7 @@ import scala.util.Random
 import com.databricks.caching.util.AssertionWaiter
 import com.databricks.caching.util.TestUtils
 import com.databricks.caching.util.TestUtils.TestName
+import com.databricks.dicer.assigner.ProposedSliceAssignment
 import com.databricks.dicer.client.TestClientUtils.{waitForAssignment, waitForGenerationAtLeast}
 import com.databricks.dicer.common.testing.SliceTestUtils.{
   LowInclusiveStringFluent,
@@ -17,7 +18,7 @@ import com.databricks.dicer.common.testing.SliceTestUtils.{
   toSquid,
   `∞`
 }
-import com.databricks.dicer.common.{Assignment, ProposedSliceAssignment, SliceAssignment}
+import com.databricks.dicer.common.{Assignment, SliceAssignment}
 import com.databricks.dicer.external.{ResourceAddress, Slice, Slicelet, Target}
 import com.databricks.dicer.friend.SliceMap.{GapEntry, IntersectionEntry}
 import com.databricks.testing.DatabricksTest

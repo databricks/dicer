@@ -10,7 +10,7 @@ import com.google.protobuf.ByteString
 
 import com.databricks.caching.util.{AssertionWaiter, MetricUtils, TestUtils}
 import com.databricks.caching.util.TestUtils.TestName
-import com.databricks.dicer.common.{ProposedSliceAssignment}
+import com.databricks.dicer.assigner.ProposedSliceAssignment
 import com.databricks.dicer.common.testing.{InternalDicerTestEnvironment}
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.common.testing.SliceTestUtils.{
@@ -296,10 +296,7 @@ abstract class TwoLevelShardingClerkAccessorSuiteBase extends DatabricksTest wit
     for (i: Int <- 0 until EXPECTED_OWNERS.size) {
       val owner: ResourceAddress = clerk.getStubForKey(primaryKey, fp(s"secondary_$i")).get
       val expectedOwner: ResourceAddress = ResourceAddress(URI.create(EXPECTED_OWNERS(i)))
-      assert(
-        ClerkHarness.resourceAddressEquals(owner, expectedOwner),
-        s"secondary_$i routed to $owner, expected $expectedOwner"
-      )
+      assert(owner == expectedOwner, s"secondary_$i routed to $owner, expected $expectedOwner")
       assertResult(i + 1)(getStubForKeyCallCount(target, secondaryKeyProvided = true))
     }
 

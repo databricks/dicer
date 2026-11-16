@@ -1,0 +1,336 @@
+load("//bazel/rules/rust:rules_rust.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "common_lib",
+    srcs = [
+        "src/assigner_service_info.rs",
+        "src/assignment.rs",
+        "src/assignment_cell_value.rs",
+        "src/client_request.rs",
+        "src/client_response.rs",
+        "src/client_type.rs",
+        "src/common_slicez.rs",
+        "src/dicer_internal_headers.rs",
+        "src/diff_assignment.rs",
+        "src/dpage_view_helpers.rs",
+        "src/generation.rs",
+        "src/lib.rs",
+        "src/metric_measurement.rs",
+        "src/recent_subscribers_tracker.rs",
+        "src/redirect.rs",
+        "src/slice_map.rs",
+        "src/slice_set.rs",
+        "src/slice_util.rs",
+        "src/subscriber_handler.rs",
+        "src/subslice_annotation.rs",
+        "src/sync_assignment_state.rs",
+        "src/target_metric_labels.rs",
+        "src/target_name.rs",
+        "src/target_util.rs",
+        "src/transfer.rs",
+        "src/version.rs",
+        "src/watch_server_util.rs",
+    ],
+    crate_name = "dicer_rust_common",
+    proc_macro_deps = ["@crates//:async-trait"],
+    visibility = ["//dicer:internal"],
+    deps = [
+        "//caching/rust/util:util_lib",
+        "//dicer/common/proto:common_proto_prost_lib",
+        "//dicer/common/proto:dpage_proto_library_prost_lib",
+        "//dicer/friend/proto:friend_proto_prost_lib",
+        "//dicer/rust/external/types:types_lib",
+        "//dicer/rust/friend/external/slice_key_accessor:slice_key_accessor_lib",
+        "//dicer/rust/friend:friend_lib",
+        "//wrappers/rust/metrics",
+        "//wrappers/rust/server",
+        "//wrappers/rust/tls",
+        "@crates//:chrono",
+        "@crates//:derive_more",
+        "@crates//:http",
+        "@crates//:linked-hash-map",
+        "@crates//:prometheus-client",
+        "@crates//:prost",
+        "@crates//:rand",
+        "@crates//:rangemap",
+        "@crates//:smallvec",
+        "@crates//:static_assertions",
+        "@crates//:tokio",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "target_name_test",
+    srcs = ["tests/target_name_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":common_lib",
+        "//dicer/rust/external/types:types_lib",
+        "//dicer/rust/testing:testing_lib",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "target_util_test",
+    srcs = ["tests/target_util_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":common_lib",
+        "//dicer/common/proto:common_proto_prost_lib",
+        "//dicer/rust/external/types:types_lib",
+        "//dicer/rust/testing:testing_lib",
+    ],
+)
+
+rust_test(
+    name = "assignment_test",
+    srcs = ["tests/assignment_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":common_lib",
+        "//dicer/common/proto:common_proto_prost_lib",
+        "//dicer/common/test/proto:test_data_proto_prost_lib",
+        "//dicer/friend/proto:friend_proto_prost_lib",
+        "//dicer/rust/external/types:types_lib",
+        "//dicer/rust/friend:friend_lib",
+        "//dicer/rust/testing:testing_lib",
+        "@crates//:rand",
+        "@crates//:tokio",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "client_request_test",
+    srcs = ["tests/client_request_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":common_lib",
+        "//dicer/common/proto:common_proto_prost_lib",
+        "//dicer/rust/external/types:types_lib",
+        "//dicer/rust/testing:testing_lib",
+        "@crates//:chrono",
+        "@crates//:rand",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "client_response_test",
+    srcs = ["tests/client_response_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":common_lib",
+        "//caching/rust/util:util_lib",
+        "//dicer/common/proto:common_proto_prost_lib",
+        "//dicer/rust/testing:testing_lib",
+        "@crates//:rand",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "dpage_view_helpers_test",
+    srcs = ["tests/dpage_view_helpers_test.rs"],
+    crate_features = ["test"],
+    data = ["//dicer/common/test/data"],
+    deps = [
+        ":common_lib",
+        "//dicer/common/proto:dpage_proto_library_prost_lib",
+        "//dicer/common/test/proto:test_data_proto_prost_lib",
+        "//dicer/friend/proto:friend_proto_prost_lib",
+        "//dicer/rust/external/types:types_lib",
+        "//dicer/rust/friend/external/slice_key_accessor:slice_key_accessor_lib",
+        "//dicer/rust/friend:friend_lib",
+        "//dicer/rust/testing:testing_lib",
+        "@crates//:chrono",
+        "@crates//:uuid",
+    ],
+)
+
+rust_test(
+    name = "diff_assignment_test",
+    srcs = ["tests/diff_assignment_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":common_lib",
+        "//caching/rust/util/testing:testing_lib",
+        "//dicer/common/proto:common_proto_prost_lib",
+        "//dicer/common/test/proto:test_data_proto_prost_lib",
+        "//dicer/rust/testing:testing_lib",
+        "//wrappers/rust/metrics/testing",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "generation_test",
+    srcs = ["tests/generation_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":common_lib",
+        "//caching/rust/util/testing:testing_lib",
+        "//dicer/common/proto:common_proto_prost_lib",
+        "//dicer/rust/testing:testing_lib",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "slice_map_test",
+    srcs = ["tests/slice_map_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":common_lib",
+        "//dicer/common/test/proto:test_data_proto_prost_lib",
+        "//dicer/friend/proto:friend_proto_prost_lib",
+        "//dicer/rust/external/types:types_lib",
+        "//dicer/rust/testing:testing_lib",
+        "@crates//:rand",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "subscriber_data_test",
+    srcs = ["tests/subscriber_data_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":common_lib",
+        "//dicer/common/proto:common_proto_prost_lib",
+        "//dicer/rust/testing:testing_lib",
+    ],
+)
+
+rust_test(
+    name = "slice_assignment_test",
+    srcs = ["tests/slice_assignment_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":common_lib",
+        "//dicer/common/proto:common_proto_prost_lib",
+        "//dicer/common/test/proto:test_data_proto_prost_lib",
+        "//dicer/friend/proto:friend_proto_prost_lib",
+        "//dicer/rust/external/types:types_lib",
+        "//dicer/rust/friend:friend_lib",
+        "//dicer/rust/testing:testing_lib",
+        "@crates//:rand",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "slice_set_test",
+    srcs = ["tests/slice_set_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":common_lib",
+        "//dicer/rust/external/types:types_lib",
+        "//dicer/rust/testing:testing_lib",
+    ],
+)
+
+rust_test(
+    name = "slice_util_test",
+    srcs = ["tests/slice_util_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":common_lib",
+        "//dicer/friend/proto:friend_proto_prost_lib",
+        "//dicer/rust/external/types:types_lib",
+        "//dicer/rust/testing:testing_lib",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "subslice_annotation_test",
+    srcs = ["tests/subslice_annotation_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":common_lib",
+        "//dicer/common/proto:common_proto_prost_lib",
+        "//dicer/friend/proto:friend_proto_prost_lib",
+        "//dicer/rust/external/types:types_lib",
+        "//dicer/rust/friend:friend_lib",
+        "//dicer/rust/testing:testing_lib",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "target_metric_labels_test",
+    srcs = ["tests/target_metric_labels_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":common_lib",
+        "//dicer/rust/external/types:types_lib",
+    ],
+)
+
+rust_test(
+    name = "transfer_test",
+    srcs = ["tests/transfer_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":common_lib",
+        "//dicer/friend/proto:friend_proto_prost_lib",
+        "//dicer/rust/friend:friend_lib",
+        "//dicer/rust/testing:testing_lib",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "assignment_cell_value_test",
+    srcs = ["tests/assignment_cell_value_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":common_lib",
+        "//caching/rust/util:util_lib",
+        "//dicer/rust/external/types:types_lib",
+        "//dicer/rust/friend:friend_lib",
+        "//dicer/rust/testing:testing_lib",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "recent_subscribers_tracker_test",
+    srcs = ["tests/recent_subscribers_tracker_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":common_lib",
+        "//caching/rust/util/testing:testing_lib",
+        "//caching/rust/util:util_lib",
+        "@crates//:rand",
+        "@crates//:tokio",
+    ],
+)
+
+rust_test(
+    name = "watch_server_util_test",
+    srcs = ["tests/watch_server_util_test.rs"],
+    crate_features = ["test"],
+    deps = [":common_lib"],
+)
+
+rust_test(
+    name = "assigner_service_info_test",
+    srcs = ["tests/assigner_service_info_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":common_lib",
+        "//dicer/common/proto:common_proto_prost_lib",
+        "//dicer/rust/testing:testing_lib",
+    ],
+)
+
+rust_test(
+    name = "metric_measurement_test",
+    srcs = ["tests/metric_measurement_test.rs"],
+    crate_features = ["test"],
+    deps = [":common_lib"],
+)

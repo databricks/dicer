@@ -1,16 +1,11 @@
 package com.databricks.dicer.assigner.algorithm
 
 import com.databricks.api.proto.dicer.external.LoadBalancingMetricConfigP.ImbalanceToleranceHintP
+import com.databricks.dicer.assigner.{ProposedAssignment, ProposedSliceAssignment}
 import com.databricks.dicer.assigner.config.{ChurnConfig, InternalTargetConfig}
 import com.databricks.dicer.assigner.config.testing.{ConfigTestUtils}
 import com.databricks.dicer.assigner.config.InternalTargetConfig.KeyReplicationConfig
-import com.databricks.dicer.common.{
-  Assignment,
-  Generation,
-  ProposedAssignment,
-  ProposedSliceAssignment,
-  SliceAssignment
-}
+import com.databricks.dicer.common.{Assignment, Generation, SliceAssignment}
 import com.databricks.dicer.common.testing.SliceTestUtils.{
   LowInclusiveLongFluent,
   LowInclusiveStringFluent,
@@ -186,9 +181,10 @@ class MergePhaseSuite extends AlgorithmPhaseSuiteBase {
 
   test("Merge only combines Slices with the minimum number of replicas") {
     // Test plan: Verify that the merge phase never merges a Slice with more than the minimum
-    // number of replicas, even when it is the coldest. Do this by running the merge phase on an
-    // assignment with too many slice replicas whose two coldest Slices are replicated, and checking
-    // that those Slices survive with their replica counts while other Slices are merged.
+    // number of replicas, even when it is the coldest, and that merging preserves the total
+    // assignment size. Do this by running the merge phase on an assignment with too many slice
+    // replicas whose two coldest Slices are replicated, and checking that those Slices survive
+    // with their replica counts while other Slices are merged.
     //
     // This test calls `MergePhase.merge` directly rather than `Algorithm.generateAssignment`: the
     // de-replication phase that runs before merge would de-replicate Slices this cold, so they
@@ -218,7 +214,9 @@ class MergePhaseSuite extends AlgorithmPhaseSuiteBase {
         LoadMap.Entry(slice, 10.0)
       }: _*)
       .build()
-    val assignment: MutableAssignment = createMutableAssignment(predecessor, resources, loadMap)
+    val sizeMap: SizeMap = SizeMap.newBuilder().putSize(SizeMap.Entry(Slice.FULL, 100.0)).build()
+    val assignment: MutableAssignment =
+      createMutableAssignment(predecessor, resources, loadMap, Some(sizeMap))
     val config: Algorithm.Config = createAlgorithmConfig(
       createConfigForLoadBalancing(ConfigTestUtils.ZERO_PENALTY_CHURN_CONFIG, maxLoadHint = 1000)
         .copy(keyReplicationConfig = KeyReplicationConfig(minReplicas = 1, maxReplicas = 2)),
@@ -227,10 +225,16 @@ class MergePhaseSuite extends AlgorithmPhaseSuiteBase {
     )
     // 2 * 2 + 127 = 131 slice replicas, above the maximum of 64 * 2 = 128.
     assert(assignment.currentNumTotalSliceReplicas == 131)
+    assignment.lockReplicaCounts()
+    val totalAssignmentSizeBefore: Double = assignment.currentTotalAssignmentSize
 
     MergePhase.merge(config, resources, assignment)
 
     assert(assignment.currentNumTotalSliceReplicas == 128)
+    assert(
+      Math.abs(assignment.currentTotalAssignmentSize - totalAssignmentSizeBefore) < 1e-6,
+      "merging must not change the total assignment size"
+    )
     val replicaCountBySlice: Map[Slice, Int] = assignment.sliceAssignmentsIterator.map {
       sliceAssignment: assignment.MutableSliceAssignment =>
         (sliceAssignment.slice, sliceAssignment.currentNumReplicas)
@@ -274,7 +278,8 @@ class MergePhaseSuite extends AlgorithmPhaseSuiteBase {
         case (slice: Slice, i: Int) => LoadMap.Entry(slice, if (coldIndices(i)) 1.0 else 10.0)
       }: _*)
       .build()
-    val assignment: MutableAssignment = createMutableAssignment(predecessor, resources, loadMap)
+    val assignment: MutableAssignment =
+      createMutableAssignment(predecessor, resources, loadMap, sizeMapOpt = None)
     val config: Algorithm.Config = createAlgorithmConfig(
       createConfigForLoadBalancing(ConfigTestUtils.ZERO_PENALTY_CHURN_CONFIG, maxLoadHint = 1000)
         .copy(keyReplicationConfig = KeyReplicationConfig(minReplicas = 1, maxReplicas = 2)),
@@ -284,6 +289,7 @@ class MergePhaseSuite extends AlgorithmPhaseSuiteBase {
     // 128 + 2 = 130 slice replicas, so two merges bring the total to the maximum of 64 * 2 = 128.
     assert(assignment.currentNumTotalSliceReplicas == 130)
 
+    assignment.lockReplicaCounts()
     MergePhase.merge(config, resources, assignment)
 
     assert(assignment.currentNumTotalSliceReplicas == 128)
@@ -308,4 +314,5 @@ class MergePhaseSuite extends AlgorithmPhaseSuiteBase {
       assert(resultSlices(i - 1).highExclusive == resultSlices(i).lowInclusive)
     }
   }
+
 }

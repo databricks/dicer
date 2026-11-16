@@ -132,6 +132,7 @@ scala_test(
         "//caching/util:test_utils",
         "//dicer/assigner/config:internal_target_config_map",
         "//dicer/assigner:assigner_slicez",
+        "//dicer/assigner:proposed_assignment",
         "//dicer/client/testing:clerk_harness",
         "//dicer/common/testing:test_common",
         "//dicer/common/testing:test_environment",

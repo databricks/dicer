@@ -1,4 +1,3 @@
-// LINT.IfChange
 package com.databricks.dicer.external.javaapi;
 
 /**
@@ -28,4 +27,3 @@ public final class TestAssignmentHandle {
     return scalaHandle.toString();
   }
 }
-// LINT.ThenChange(dicer/external/src/DicerTestEnvironment.scala)

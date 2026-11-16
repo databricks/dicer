@@ -39,9 +39,4 @@ private[dicer] class StandbyPreferredAssignerDriver extends PreferredAssignerDri
   /** No-op: the fake never acts as a preferred assigner, so it receives no heartbeats. */
   override def handleHeartbeatRequest(request: HeartbeatRequest): Future[HeartbeatResponse] =
     Future.successful(HeartbeatResponse(request.opId, request.preferredAssignerValue))
-
-  /** The fake runs no consistent-hashing election, so it has no snapshot. */
-  override private[assigner] def consistentHashingStateView
-      : Future[Option[ConsistentHashingState]] =
-    Future.successful(None)
 }

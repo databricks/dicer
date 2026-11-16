@@ -11,7 +11,6 @@ import com.databricks.api.proto.dicer.assigner.{
   AssignerSliceViewP,
   AssignerTargetViewP,
   ChurnViewP,
-  ConsistentHashingStateViewP,
   PreferredAssignerStateViewP
 }
 import com.databricks.api.proto.dicer.dpage.{
@@ -42,7 +41,6 @@ import com.databricks.dicer.common.{
   Assignment,
   ClerkSubscriberSlicezData,
   Generation,
-  ProposedAssignment,
   SliceAssignment,
   SliceletSubscriberSlicezData
 }
@@ -236,7 +234,7 @@ class AssignerSlicezSuite extends DatabricksTest {
           ),
           keyReplicationConfig = KeyReplicationConfig(minReplicas = 1, maxReplicas = 2),
           healthWatcherConfig = HealthWatcherTargetConfig(
-            observeSliceletReadiness = true,
+            observeSliceletReadinessOpt = Some(true),
             permitRunningToNotReady = true
           )
         )
@@ -320,10 +318,7 @@ class AssignerSlicezSuite extends DatabricksTest {
     val assignerSlicezData =
       AssignerSlicezData(
         FAKE_ASSIGNER_INFO,
-        PreferredAssignerSlicezData(
-          PreferredAssignerValue.ModeDisabled(GENERATION),
-          consistentHashingStateOpt = None
-        ),
+        PreferredAssignerValue.ModeDisabled(GENERATION),
         allTargetsData
       )
     // Get HTML rendered result in String.
@@ -337,7 +332,7 @@ class AssignerSlicezSuite extends DatabricksTest {
     }
   }
 
-  test("Check PreferredAssignerSlicezData data table HTML contents for all roles") {
+  test("Check preferred assigner state data table HTML contents for all roles") {
     val otherAssignerInfo: AssignerInfo =
       AssignerInfo(UUID.randomUUID(), new java.net.URI("http://localhost:12345"))
 
@@ -351,10 +346,7 @@ class AssignerSlicezSuite extends DatabricksTest {
 
       val assignerSlicezData = AssignerSlicezData(
         FAKE_ASSIGNER_INFO,
-        PreferredAssignerSlicezData(
-          mode,
-          consistentHashingStateOpt = None
-        ),
+        mode,
         Seq()
       )
       val html = assignerSlicezData.getHtml.render
@@ -423,10 +415,7 @@ class AssignerSlicezSuite extends DatabricksTest {
     val assignerSlicezData =
       AssignerSlicezData(
         FAKE_ASSIGNER_INFO,
-        PreferredAssignerSlicezData(
-          PreferredAssignerValue.ModeDisabled(GENERATION),
-          consistentHashingStateOpt = None
-        ),
+        PreferredAssignerValue.ModeDisabled(GENERATION),
         Seq(targetSlicezData)
       )
 
@@ -450,10 +439,7 @@ class AssignerSlicezSuite extends DatabricksTest {
     val data: AssignerSlicezData =
       AssignerSlicezData(
         FAKE_ASSIGNER_INFO,
-        PreferredAssignerSlicezData(
-          PreferredAssignerValue.ModeDisabled(GENERATION),
-          consistentHashingStateOpt = None
-        ),
+        PreferredAssignerValue.ModeDisabled(GENERATION),
         Seq.empty
       )
 
@@ -471,10 +457,7 @@ class AssignerSlicezSuite extends DatabricksTest {
     val data: AssignerSlicezData =
       AssignerSlicezData(
         FAKE_ASSIGNER_INFO,
-        PreferredAssignerSlicezData(
-          PreferredAssignerValue.ModeDisabled(GENERATION),
-          consistentHashingStateOpt = None
-        ),
+        PreferredAssignerValue.ModeDisabled(GENERATION),
         Seq.empty
       )
 
@@ -491,10 +474,7 @@ class AssignerSlicezSuite extends DatabricksTest {
     // proto with "Preferred assigner" role and pa_uuid set to "Self".
     val data: AssignerSlicezData = AssignerSlicezData(
       FAKE_ASSIGNER_INFO,
-      PreferredAssignerSlicezData(
-        PreferredAssignerValue.SomeAssigner(FAKE_ASSIGNER_INFO, GENERATION),
-        consistentHashingStateOpt = None
-      ),
+      PreferredAssignerValue.SomeAssigner(FAKE_ASSIGNER_INFO, GENERATION),
       Seq.empty
     )
 
@@ -513,10 +493,7 @@ class AssignerSlicezSuite extends DatabricksTest {
       AssignerInfo(UUID.randomUUID(), new java.net.URI("http://localhost:22222"))
     val data: AssignerSlicezData = AssignerSlicezData(
       FAKE_ASSIGNER_INFO,
-      PreferredAssignerSlicezData(
-        PreferredAssignerValue.SomeAssigner(otherAssignerInfo, GENERATION),
-        consistentHashingStateOpt = None
-      ),
+      PreferredAssignerValue.SomeAssigner(otherAssignerInfo, GENERATION),
       Seq.empty
     )
 
@@ -534,10 +511,7 @@ class AssignerSlicezSuite extends DatabricksTest {
     val data: AssignerSlicezData =
       AssignerSlicezData(
         FAKE_ASSIGNER_INFO,
-        PreferredAssignerSlicezData(
-          PreferredAssignerValue.NoAssigner(GENERATION),
-          consistentHashingStateOpt = None
-        ),
+        PreferredAssignerValue.NoAssigner(GENERATION),
         Seq.empty
       )
 
@@ -567,10 +541,7 @@ class AssignerSlicezSuite extends DatabricksTest {
     val data: AssignerSlicezData =
       AssignerSlicezData(
         FAKE_ASSIGNER_INFO,
-        PreferredAssignerSlicezData(
-          PreferredAssignerValue.ModeDisabled(GENERATION),
-          consistentHashingStateOpt = None
-        ),
+        PreferredAssignerValue.ModeDisabled(GENERATION),
         Seq(td)
       )
 
@@ -590,10 +561,7 @@ class AssignerSlicezSuite extends DatabricksTest {
     val data: AssignerSlicezData =
       AssignerSlicezData(
         FAKE_ASSIGNER_INFO,
-        PreferredAssignerSlicezData(
-          PreferredAssignerValue.NoAssigner(GENERATION),
-          consistentHashingStateOpt = None
-        ),
+        PreferredAssignerValue.NoAssigner(GENERATION),
         Seq.empty
       )
 
@@ -604,86 +572,6 @@ class AssignerSlicezSuite extends DatabricksTest {
     assert(result.targets.isEmpty)
   }
 
-  test("Consistent-hashing state renders as HTML and view proto when populated") {
-    // Test plan: Verify that an AssignerSlicezData carrying a populated consistent-hashing snapshot
-    // renders the CH UUIDs, the full eligible-pod list, and connection health on the ZPage HTML and
-    // emits the corresponding ConsistentHashingStateViewP on the view proto. Covers the populated
-    // path only; the Etcd placeholder is exercised by every other test in this suite via the
-    // default constructor.
-    val localInfo: AssignerInfo =
-      AssignerInfo(UUID.randomUUID(), new java.net.URI("http://localhost:11111"))
-    val preferredInfo: AssignerInfo =
-      AssignerInfo(UUID.randomUUID(), new java.net.URI("http://localhost:22222"))
-    val otherEligibleInfo: AssignerInfo =
-      AssignerInfo(UUID.randomUUID(), new java.net.URI("http://localhost:33333"))
-    val eligiblePods: Seq[AssignerInfo] = Seq(localInfo, preferredInfo, otherEligibleInfo)
-    val chState: ConsistentHashingState = ConsistentHashingState(
-      localAssignerInfo = localInfo,
-      preferredAssignerInfoOpt = Some(preferredInfo),
-      eligiblePods = eligiblePods,
-      k8sConnectionHealth = ConsistentHashingState.K8sConnectionHealth.Healthy
-    )
-    val data: AssignerSlicezData = AssignerSlicezData(
-      FAKE_ASSIGNER_INFO,
-      PreferredAssignerSlicezData(
-        PreferredAssignerValue.NoAssigner(GENERATION),
-        consistentHashingStateOpt = Some(chState)
-      ),
-      Seq.empty
-    )
-
-    val html: String = data.getHtml.render
-    assert(html.contains("<h4>Consistent Hash based Preferred Assigner</h4>"))
-    assert(
-      html.contains(s"<th>Local assigner</th><td>${localInfo.uuid} (${localInfo.uri})</td>")
-    )
-    assert(
-      html.contains(
-        s"<th>Preferred assigner</th><td>${preferredInfo.uuid} (${preferredInfo.uri})</td>"
-      )
-    )
-    // The eligible-pods cell shows the count followed by one <div> per pod.
-    assert(html.contains("Count: 3"))
-    for (pod: AssignerInfo <- eligiblePods) {
-      assert(html.contains(s"<div>${pod.uuid} (${pod.uri})</div>"))
-    }
-    assert(html.contains("<th>K8s connection health</th><td>HEALTHY</td>"))
-
-    val viewProto: AssignerSliceViewP = data.toViewProto
-    assert(viewProto.consistentHashing.isDefined)
-    val chProto: ConsistentHashingStateViewP = viewProto.consistentHashing.get
-    assert(chProto.localAssigner.exists(_.uuid.contains(localInfo.uuid.toString)))
-    assert(chProto.localAssigner.exists(_.uri.contains(localInfo.uri.toString)))
-    assert(chProto.preferredAssigner.exists(_.uuid.contains(preferredInfo.uuid.toString)))
-    assert(chProto.preferredAssigner.exists(_.uri.contains(preferredInfo.uri.toString)))
-    assertResult(eligiblePods.map(_.uuid.toString))(
-      chProto.eligiblePods.map(_.uuid.getOrElse(""))
-    )
-    assert(
-      chProto.k8SConnectionHealth.contains(ConsistentHashingStateViewP.K8sConnectionHealthP.HEALTHY)
-    )
-  }
-
-  test("Consistent-hashing state omitted from view proto when no snapshot is present") {
-    // Test plan: Verify that an AssignerSlicezData with no consistent-hashing snapshot (the
-    // etcd-backed and disabled drivers report `None`) produces a ConsistentHashingStateViewP-less
-    // proto and the ZPage HTML renders the "not active" placeholder.
-    val data: AssignerSlicezData = AssignerSlicezData(
-      FAKE_ASSIGNER_INFO,
-      PreferredAssignerSlicezData(
-        PreferredAssignerValue.NoAssigner(GENERATION),
-        consistentHashingStateOpt = None
-      ),
-      Seq.empty
-    )
-
-    val html: String = data.getHtml.render
-    assert(html.contains("Consistent hash based preferred assigner: not active"))
-
-    val viewProto: AssignerSliceViewP = data.toViewProto
-    assert(viewProto.consistentHashing.isEmpty)
-  }
-
   test("toJson returns valid JSON containing expected fields") {
     // Test plan: Verify that toJson produces a JSON string containing the expected assigner
     // info and preferred assigner state fields. Do this by creating AssignerSlicezData with
@@ -691,10 +579,7 @@ class AssignerSlicezSuite extends DatabricksTest {
     val data: AssignerSlicezData =
       AssignerSlicezData(
         FAKE_ASSIGNER_INFO,
-        PreferredAssignerSlicezData(
-          PreferredAssignerValue.ModeDisabled(GENERATION),
-          consistentHashingStateOpt = None
-        ),
+        PreferredAssignerValue.ModeDisabled(GENERATION),
         Seq.empty
       )
 

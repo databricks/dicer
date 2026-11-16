@@ -10,6 +10,7 @@ rust_library(
         "src/clock.rs",
         "src/code_ext.rs",
         "src/consistent_hash_ring.rs",
+        "src/constants.rs",
         "src/deterministic_sampling.rs",
         "src/ewma_accumulator.rs",
         "src/ewma_amplifier.rs",

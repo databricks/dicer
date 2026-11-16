@@ -3,7 +3,7 @@ package com.databricks.dicer.assigner
 import scala.concurrent.Future
 
 import com.databricks.caching.util.{Cancellable, ValueStreamCallback}
-import com.databricks.dicer.common.{Assignment, Generation, Incarnation, ProposedAssignment}
+import com.databricks.dicer.common.{Assignment, Generation, Incarnation}
 import com.databricks.dicer.external.Target
 
 /**

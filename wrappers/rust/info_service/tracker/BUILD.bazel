@@ -1,0 +1,20 @@
+load("//bazel/rules/rust:rules_rust.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "tracker",
+    srcs = ["src/lib.rs"],
+    crate_name = "raf_info_service_tracker",
+    visibility = ["//dicer/rust/client:__pkg__"],
+    deps = ["@crates//:http"],
+)
+
+rust_test(
+    name = "tracker_test",
+    timeout = "short",
+    testonly = True,
+    srcs = ["tests/tracker_test.rs"],
+    deps = [
+        ":tracker",
+        "@crates//:http",
+    ],
+)

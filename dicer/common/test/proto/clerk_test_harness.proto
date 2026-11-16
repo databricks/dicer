@@ -73,6 +73,11 @@ message CreateClerkRequestP {
 
   // The Slicelet port for the Clerk to connect.
   optional int32 slicelet_port = 2;
+
+  // A list of feature names that will be force-enabled by the Dicer client feature rollout flags
+  // for the Clerk, for every target. See [[DicerClientFeatureRolloutFlag]] in Rust. All other
+  // features are disabled; an empty list disables all features.
+  repeated string force_enabled_features = 3;
 }
 
 // The response to a `CreateClerk` request.
@@ -179,6 +184,11 @@ message CreateCrossClusterClerkRequestP {
 
   // The Slicelet port for the Clerk to connect to.
   optional int32 slicelet_port = 3;
+
+  // A list of feature names that will be force-enabled by the Dicer client feature rollout flags
+  // for the Clerk, for every target. See [[DicerClientFeatureRolloutFlag]] in Rust. All other
+  // features are disabled; an empty list disables all features.
+  repeated string force_enabled_features = 4;
 }
 
 // The response to a `CreateCrossClusterClerk` request.
@@ -196,6 +206,11 @@ message CreateMultiNicClerkRequestP {
 
   // The local (source) address to bind the Clerk's watch connection to.
   optional string source_ip = 3;
+
+  // A list of feature names that will be force-enabled by the Dicer client feature rollout flags
+  // for the Clerk, for every target. See [[DicerClientFeatureRolloutFlag]] in Rust. All other
+  // features are disabled; an empty list disables all features.
+  repeated string force_enabled_features = 4;
 }
 
 // The response to a `CreateMultiNicClerk` request.

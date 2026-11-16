@@ -9,7 +9,7 @@ class HyperLogLogSuite extends DatabricksTest {
   /** Returns a HyperLogLog containing keys created from ints in the given range. */
   def hllOfRange(start: Int, end: Int): HyperLogLog = {
     val hll = new HyperLogLog()
-    for (i <- 0 until end) {
+    for (i: Int <- start until end) {
       hll.add(intToKey(i))
     }
     hll
@@ -43,7 +43,7 @@ class HyperLogLogSuite extends DatabricksTest {
     // cardinalities.
     val hll = new HyperLogLog()
 
-    for (i <- 0 to 15000) {
+    for (i: Int <- 0 to 15000) {
       hll.add(intToKey(i))
       hll.add(intToKey(i))
 
@@ -59,7 +59,7 @@ class HyperLogLogSuite extends DatabricksTest {
     // low cardinalities.
     val hll = new HyperLogLog()
 
-    for (i <- 0 to 1000000) {
+    for (i: Int <- 0 to 1000000) {
       hll.add(intToKey(i))
       hll.add(intToKey(i))
 

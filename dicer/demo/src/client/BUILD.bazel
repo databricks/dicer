@@ -16,7 +16,6 @@ scala_library(
         "//dicer/external:conf",
         "//dicer/external:external_common",
         "//wrappers/conf:core",
-        "//wrappers/conf:project",
         "//wrappers/conf:project-conf",
         "//wrappers/conf:rpc-port-conf",
         "//wrappers/logging",

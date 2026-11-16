@@ -27,11 +27,4 @@ trait PreferredAssignerDriver {
 
   /** Handles the heartbeat request from an assigner who identifies itself as a standby. */
   def handleHeartbeatRequest(request: HeartbeatRequest): Future[HeartbeatResponse]
-
-  /**
-   * Consistent-hashing election snapshot for the Assigner debug page, or `None` for drivers that
-   * do not run a consistent-hashing election (the etcd-backed and disabled drivers).
-   * TODO(<internal bug>): Remove this once the debug page no longer uses the consistent-hashing state.
-   */
-  private[assigner] def consistentHashingStateView: Future[Option[ConsistentHashingState]]
 }

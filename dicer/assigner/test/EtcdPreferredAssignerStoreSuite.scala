@@ -28,7 +28,7 @@ import com.databricks.dicer.assigner.EtcdPreferredAssignerStore.{
   WriteResult
 }
 import com.databricks.dicer.assigner.InterposingEtcdPreferredAssignerDriver.ShutdownOption
-import com.databricks.dicer.common.{EtcdClientHelper, Generation, Incarnation}
+import com.databricks.dicer.common.{Generation, Incarnation}
 import com.databricks.caching.util.EtcdClient.Version
 import com.databricks.caching.util.{
   EtcdTestEnvironment,

@@ -8,12 +8,6 @@ import com.databricks.dicer.external.Target
 import com.databricks.featureflag.client.DynamicConf
 
 /**
- * A member pod discovered during a Kubernetes membership check: its UUID paired with its
- * Kubernetes pod name. Maps to the `MemberPodP` proto in the membership-check log.
- */
-private[assigner] case class MemberPod(uuid: String, podName: String)
-
-/**
  * The Assigner's structured logging utility. No-op logger implementation.
  */
 private[assigner] trait AssignerProtoLogger {
@@ -34,31 +28,6 @@ private[assigner] trait AssignerProtoLogger {
       sliceKeySensitivity: SliceKeySensitivity): Unit
 
   /**
-   * Convenience method to log membership check events from the [[KubernetesMembershipChecker]].
-   *
-   * @param latencyMs the elapsed time of the Kubernetes API call in milliseconds.
-   * @param httpStatusCode the HTTP status code returned by the Kubernetes API.
-   * @param namespace the Kubernetes namespace of the application whose membership is being checked.
-   * @param appName the name of the application whose membership is being checked.
-   * @param emitterPodNameOpt the pod name of the assigner emitting this log, if known.
-   * @param members the pods discovered for the given namespace + appName, each carrying its UUID
-   *                and pod name as a [[MemberPod]].
-   * @param filteredMembers the subset of `members` that passed readiness/termination filtering.
-   * @param kubernetesResourceVersion the resource version token returned by the Kubernetes API.
-   * @param kubeContextOpt the kube context of the tracked application, if known.
-   */
-  def logMembershipCheck(
-      latencyMs: Long,
-      httpStatusCode: Int,
-      namespace: String,
-      appName: String,
-      emitterPodNameOpt: Option[String],
-      members: Seq[MemberPod],
-      filteredMembers: Seq[MemberPod],
-      kubernetesResourceVersion: String,
-      kubeContextOpt: Option[String]): Unit
-
-  /**
    * Convenience method to log preferred assigner change events.
    *
    * @param preferredAssignerValue the preferred assigner value containing role and assigner info
@@ -75,20 +44,6 @@ private object NoopAssignerProtoLogger extends AssignerProtoLogger {
       assignment: Assignment,
       contextOpt: Option[AssignmentGenerator.AssignmentGenerationContext],
       sliceKeySensitivity: SliceKeySensitivity): Unit = {
-    // No-op
-    ()
-  }
-
-  override def logMembershipCheck(
-      latencyMs: Long,
-      httpStatusCode: Int,
-      namespace: String,
-      appName: String,
-      emitterPodNameOpt: Option[String],
-      members: Seq[MemberPod],
-      filteredMembers: Seq[MemberPod],
-      kubernetesResourceVersion: String,
-      kubeContextOpt: Option[String]): Unit = {
     // No-op
     ()
   }

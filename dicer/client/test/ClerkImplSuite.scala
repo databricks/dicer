@@ -26,6 +26,7 @@ import com.databricks.caching.util.{
   MetricUtils
 }
 import com.databricks.caching.util.MetricUtils.ChangeTracker
+import com.databricks.dicer.assigner.ProposedSliceAssignment
 import com.databricks.dicer.common.TargetHelper.TargetOps
 import com.databricks.dicer.common.testing.SliceTestUtils.sampleProposal
 import com.databricks.dicer.common.{
@@ -33,8 +34,7 @@ import com.databricks.dicer.common.{
   Assignment,
   AssignmentMetricsSource,
   ClientRequest,
-  ClientType,
-  ProposedSliceAssignment
+  ClientType
 }
 import com.databricks.dicer.common.testing.{InternalDicerTestEnvironment}
 import com.databricks.dicer.external.{Clerk, ClerkConf, ResourceAddress, SliceKey, Slicelet, Target}
@@ -327,7 +327,8 @@ class ClerkImplSuite extends DatabricksTest with TestName {
   private type ClerkImplFactory = (Target, ClientUuidStatus) => ClerkImpl[ResourceAddress]
 
   /** A dummy watch address to use in tests. */
-  private val DUMMY_WATCH_ADDRESS: URI = URI.create("https://localhost:12345")
+  private val DUMMY_WATCH_ADDRESS: WatchAddress =
+    WatchAddress.fromAddress("https://localhost:12345")
 
   /** Creates a [[ClerkConf]] for metric testing with the specified client UUID status. */
   private def createClientUuidTestClerkConf(status: ClientUuidStatus): ClerkConf = {
@@ -390,10 +391,12 @@ class ClerkImplSuite extends DatabricksTest with TestName {
     }
     ClerkImpl.createForShardedStub(
       target,
-      watchAddress = DUMMY_WATCH_ADDRESS,
+      watchAddress = URI.create(DUMMY_WATCH_ADDRESS.address),
       protoLoggerConf = TestClientUtils.createTestProtoLoggerConf(sampleFraction = 0.0),
       tlsOptions = None,
-      clientUuidOpt = clientUuidOpt
+      clientUuidOpt = clientUuidOpt,
+      featureRolloutFlag = TestClientUtils.ALL_DISABLED_FEATURE_ROLLOUT_FLAG,
+      enableRateLimitingOverrideOpt = Some(false)
     )
   }
 

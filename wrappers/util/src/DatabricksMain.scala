@@ -11,13 +11,15 @@ import com.databricks.logging.ConsoleLogging
 
 /**
  * Abstract base class that implements a main method common to all Databricks services. It starts
- * the InfoService and keeps the JVM alive until shutdown.
+ * the InfoService and keeps the JVM alive until shutdown. Construction throws
+ * [[NoSuchElementException]] if `projectName` is not a registered [[Project]].
  */
-abstract class DatabricksMain(project: Project.Project, rawConfigOpt: Option[Config] = None)
+abstract class DatabricksMain(projectName: String, rawConfigOpt: Option[Config] = None)
     extends ConsoleLogging {
-  CurrentProject.initializeProject(project)
 
-  override def loggerName: String = s"DatabricksMain(${project.name})"
+  CurrentProject.initializeProject(Project.fromName(projectName))
+
+  override def loggerName: String = s"DatabricksMain($projectName)"
 
   /** The configuration: the explicitly-provided override if any, else the environment config. */
   protected val rawConfig: Config = rawConfigOpt.getOrElse(RawConfigSingleton.conf)
@@ -31,13 +33,13 @@ abstract class DatabricksMain(project: Project.Project, rawConfigOpt: Option[Con
   /** Main entry point that sets up the service and calls wrappedMain. */
   def main(args: Array[String]): Unit = {
     try {
-      logger.info(s"Starting ${project.name} service...")
+      logger.info(s"Starting $projectName service...")
 
       // Register shutdown hook to release the latch on JVM exit.
       Runtime.getRuntime.addShutdownHook(new Thread(() => {
-        logger.info(s"${project.name} shutting down")
+        logger.info(s"$projectName shutting down")
         keepAliveLatch.countDown()
-      }, s"${project.name}-ShutdownHook"))
+      }, s"$projectName-ShutdownHook"))
 
       InfoService.start(port = INFO_SERVICE_PORT)
 
@@ -45,13 +47,13 @@ abstract class DatabricksMain(project: Project.Project, rawConfigOpt: Option[Con
       wrappedMain(args)
 
       // Keep the service running until shutdown.
-      logger.info(s"${project.name} initialization complete, waiting for shutdown signal")
+      logger.info(s"$projectName initialization complete, waiting for shutdown signal")
       keepAliveLatch.await()
 
-      logger.info(s"${project.name} shutdown complete")
+      logger.info(s"$projectName shutdown complete")
     } catch {
       case e: Exception =>
-        logger.error(s"Fatal error in ${project.name}: ${e.getMessage}")
+        logger.error(s"Fatal error in $projectName: ${e.getMessage}")
         e.printStackTrace()
         sys.exit(1)
     }

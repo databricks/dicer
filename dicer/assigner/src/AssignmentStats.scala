@@ -1,13 +1,19 @@
 package com.databricks.dicer.assigner
 
+import scala.collection.mutable
+
 import com.databricks.caching.util.AssertMacros.iassert
-import com.databricks.dicer.assigner.algorithm.{Algorithm, LoadMap}
+import com.google.protobuf.ByteString
+import com.databricks.dicer.assigner.algorithm.{Algorithm, LoadMap, MetricMap}
 import com.databricks.dicer.assigner.config.InternalTargetConfig.LoadBalancingConfig
 import com.databricks.dicer.common.{Assignment, SliceAssignment}
 import com.databricks.dicer.external.Slice
 import com.databricks.dicer.friend.{SliceMap, Squid}
 
 object AssignmentStats {
+
+  /** The length of the key prefixes over which [[AssignmentLoadStats]] measures key locality. */
+  private val KEY_LOCALITY_PREFIX_LENGTH_BYTES: Int = 8
 
   /**
    * An immutable data structure that represents the statistics information associated with a
@@ -204,11 +210,16 @@ object AssignmentStats {
    * @param loadBySlice the load on each slice in the assignment
    * @param numOfAssignedSlicesByResource the number of assigned slices per resource in the
    *                                      assignment.
+   * @param maxResourcesPer8BytePrefix the maximum number of distinct resources assigned keys
+   *                                   sharing an 8-byte prefix. Lower values indicate better
+   *                                   key locality, which means SliceKeys that are closer in Slice
+   *                                   space are more likely assigned on the same resource.
    */
   case class AssignmentLoadStats private (
       loadByResource: Map[Squid, Double],
       loadBySlice: Map[Slice, Double],
-      numOfAssignedSlicesByResource: Map[Squid, Int]
+      numOfAssignedSlicesByResource: Map[Squid, Int],
+      maxResourcesPer8BytePrefix: Int
   )
 
   object AssignmentLoadStats {
@@ -235,6 +246,17 @@ object AssignmentStats {
       val loadBySliceBuilder = Map.newBuilder[Slice, Double]
       loadBySliceBuilder.sizeHint(sliceAssignments.size)
 
+      // States used to calculate key locality measures how many distinct resources serve keys
+      // sharing an 8-byte prefix.
+      //
+      // Keep the union of resources for just the current prefix we are visiting and retain the
+      // maximum count; once the prefix changes, its resource set can be cleared without losing the
+      // maximum.
+      val currentPrefixResources = mutable.Set.empty[Squid]
+      var previousPrefix: ByteString = ByteString.EMPTY
+      var maxResourcesPer8BytePrefix: Int = 0
+      var previousSliceAssignmentOpt: Option[SliceAssignment] = None
+
       for (sliceAssignment: SliceAssignment <- sliceAssignments) {
         val slice: Slice = sliceAssignment.slice
 
@@ -251,6 +273,32 @@ object AssignmentStats {
           loadPerResource(resourceIndex) += loadPerReplica
           sliceCountPerResource(resourceIndex) += 1
         }
+
+        // Maintain the states to calculate key locolity.
+        val lowKey: ByteString = slice.lowInclusive.toRawBytes
+        val prefix: ByteString =
+          lowKey.substring(0, lowKey.size().min(KEY_LOCALITY_PREFIX_LENGTH_BYTES))
+        if (prefix != previousPrefix) {
+          currentPrefixResources.clear()
+        }
+        currentPrefixResources ++= sliceResources
+        // A low key longer than 8 bytes splits the keys sharing `prefix` with the previous
+        // Slice. E.g., 0x00000000000000010000 splits [0x0000000000000001, 0x0000000000000002)
+        // into [0x0000000000000001, 0x00000000000000010000) and
+        // [0x00000000000000010000, 0x0000000000000002). We must include the resources from both
+        // Slice assignments, even when this is the first boundary seen for the current prefix.
+        // Boundaries of at most 8 bytes do not split a prefix, so they need no previous resources.
+        if (lowKey.size() > KEY_LOCALITY_PREFIX_LENGTH_BYTES) {
+          previousSliceAssignmentOpt.foreach { previousSliceAssignment: SliceAssignment =>
+            currentPrefixResources ++= previousSliceAssignment.resourcesSet
+          }
+        }
+        maxResourcesPer8BytePrefix = maxResourcesPer8BytePrefix.max(currentPrefixResources.size)
+        previousPrefix = prefix
+        previousSliceAssignmentOpt = Some(sliceAssignment)
+        // Note we don't track prefix ranges completely enclosed in a Slice assignment. Their
+        // resource count cannot exceed that of the prefix at the Slice's low key, whose union
+        // already includes all resources assigned to this Slice. They cannot increase the maximum.
       }
 
       val loadByResourceBuilder = Map.newBuilder[Squid, Double]
@@ -266,7 +314,8 @@ object AssignmentStats {
       AssignmentLoadStats(
         loadByResource = loadByResourceBuilder.result(),
         loadBySlice = loadBySliceBuilder.result(),
-        numOfAssignedSlicesByResource = sliceCountByResourceBuilder.result()
+        numOfAssignedSlicesByResource = sliceCountByResourceBuilder.result(),
+        maxResourcesPer8BytePrefix = maxResourcesPer8BytePrefix
       )
     }
 
@@ -320,7 +369,7 @@ object AssignmentStats {
       // slices and resources. The `loadBySlice` and `numOfAssignedSlicesByResource` fields in
       // `AssignmentLoadStats` are also populated similarly based on these hypothetical slices and
       // mapping.
-      val slices: Vector[Slice] = LoadMap.getUniformPartitioning(numResources)
+      val slices: Vector[Slice] = MetricMap.getUniformPartitioning(numResources)
       // Sort so that if the resources don't change, the assignment is stable.
       val sortedResources: Seq[Squid] = resources.toVector.sorted
       val loadByResource: Map[Squid, Double] = sortedResources
@@ -340,7 +389,10 @@ object AssignmentStats {
       AssignmentLoadStats(
         loadByResource,
         loadBySlice,
-        numOfAssignedSlicesByResource
+        numOfAssignedSlicesByResource,
+        // The uniform partitioning's boundaries are 8-byte keys, so each prefix is assigned to
+        // exactly one resource.
+        maxResourcesPer8BytePrefix = 1
       )
     }
 

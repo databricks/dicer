@@ -6,8 +6,8 @@ import scala.collection.immutable
 import scala.collection.immutable.VectorBuilder
 import scala.util.Random
 import com.databricks.caching.util.TestUtils.{assertThrow, loadTestData}
+import com.databricks.dicer.assigner.ProposedSliceAssignment
 import com.databricks.dicer.common.{
-  ProposedSliceAssignment,
   SliceAssignment,
   SliceHelper,
   SliceMapHelper,
@@ -367,7 +367,7 @@ class SliceMapSuite extends DatabricksTest {
     val sliceMaps: Vector[SliceMap[_]] = Vector(
       SliceMap.ofSlices(Vector[Slice](Slice.FULL)),
       new SliceMap(Vector[Slice](Slice.FULL), (x: Slice) => x),
-      SliceMapHelper.ofProposedSliceAssignments(
+      ProposedSliceAssignment.createSliceMap(
         immutable.Vector[ProposedSliceAssignment](
           ("" -- 10) -> Set("resource1"),
           (10 -- 40) -> Set("resource2"),

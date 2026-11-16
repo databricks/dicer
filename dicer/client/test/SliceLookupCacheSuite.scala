@@ -1,7 +1,7 @@
 package com.databricks.dicer.client
 
 import java.io.File
-import java.net.{InetAddress, URI}
+import java.net.InetAddress
 import java.util.UUID
 import scala.collection.mutable
 import scala.concurrent.duration._
@@ -34,7 +34,7 @@ class SliceLookupCacheSuite extends DatabricksTest with TestName {
   private val CACHE_TARGET_HIT_METRIC_NAME: String =
     "dicer_client_num_slice_lookup_cache_hits_total"
 
-  /** A cluster URI present in the embedded InfraDataModel. */
+  /** A well-formed cluster URI, so the config captures a non-empty clientClusterUriOpt. */
   private val TEST_CLUSTER_URI: String = "kubernetes-cluster:test-env/cloud1/public/region1/clustertype2/01"
 
   /**
@@ -65,7 +65,7 @@ class SliceLookupCacheSuite extends DatabricksTest with TestName {
   private def createTestConfig(
       target: Target,
       clientType: ClientType = ClientType.Clerk,
-      watchAddress: URI = URI.create("https://localhost:8080"),
+      watchAddress: WatchAddress = WatchAddress.fromAddress("https://localhost:8080"),
       clientIdOpt: Option[UUID] = Some(TEST_CLIENT_UUID),
       tlsOptionsOpt: Option[TLSOptions] = None,
       watchStubCacheTime: FiniteDuration = 5.minutes,
@@ -404,25 +404,31 @@ class SliceLookupCacheSuite extends DatabricksTest with TestName {
     // intentionally not tested here, and instead exercised in their own dedicated tests above.
     // `target` is omitted because a differing target results in a `TargetMiss` rather than a config
     // mismatch. The other three are omitted because they are `Option`s, and each require a test
-    // that exercises `None` alongside two variants. The base config leaves the sender cluster URI
-    // unset, so the `clientClusterUriOpt` variation supplies one to differ from it.
-    // `subscriberDebugName` is excluded from the key and tested separately above.
+    // that exercises `None` alongside two variants. `alternativeTargetOpt` is also an `Option`, so
+    // this test exercises it the same way: the base config's `None` alongside two variants. The
+    // base config leaves the sender cluster URI unset, so the `clientClusterUriOpt` variation
+    // supplies one to differ from it. `subscriberDebugName` is excluded from the key and tested
+    // separately above.
 
-    // Setup: Create a shared cache, a base config, and an alternative AppTarget for the same name.
+    // Setup: Create a shared cache, a base config, and two alternative AppTargets for the same
+    // name.
     val cache = new SliceLookupCache
     val target: Target = Target(getSafeName)
     val baseConfig: InternalClientConfig = createTestConfig(target)
-    val alternativeTarget: AppTarget =
-      Target.createAppTarget(target.name, "alternative-instance") match {
+    // Creates an AppTarget with `target`'s name and the given instance ID.
+    def createAlternativeTarget(instanceId: String): AppTarget =
+      Target.createAppTarget(target.name, instanceId) match {
         case appTarget: AppTarget => appTarget
         case _: Target => throw new IllegalStateException("Expected an AppTarget")
       }
+    val alternativeTarget: AppTarget = createAlternativeTarget("alternative-instance")
+    val otherAlternativeTarget: AppTarget = createAlternativeTarget("other-alternative-instance")
 
     // Setup: Derive one config per field, each differing from `baseConfig` in exactly that field.
     val variedConfigs: List[(String, InternalClientConfig)] = List(
       "clientType" -> createTestConfig(target, clientType = ClientType.Slicelet),
       "watchAddress" ->
-      createTestConfig(target, watchAddress = URI.create("https://other-host:9090")),
+      createTestConfig(target, watchAddress = WatchAddress.fromAddress("https://other-host:9090")),
       "watchStubCacheTime" -> createTestConfig(target, watchStubCacheTime = 10.minutes),
       "watchFromDataPlane" -> createTestConfig(target, watchFromDataPlane = true),
       "watchRpcTimeout" -> createTestConfig(target, watchRpcTimeout = 10.seconds),
@@ -432,6 +438,10 @@ class SliceLookupCacheSuite extends DatabricksTest with TestName {
       "alternativeTargetOpt" -> createTestConfig(
         target,
         alternativeTargetOpt = Some(alternativeTarget)
+      ),
+      "alternativeTargetOpt (other instance)" -> createTestConfig(
+        target,
+        alternativeTargetOpt = Some(otherAlternativeTarget)
       ),
       "clientClusterUriOpt" -> createTestConfig(target, kubernetesClusterUri = TEST_CLUSTER_URI)
     )

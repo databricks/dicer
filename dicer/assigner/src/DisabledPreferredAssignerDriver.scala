@@ -52,9 +52,4 @@ class DisabledPreferredAssignerDriver extends PreferredAssignerDriver {
     val heartbeatResponse = HeartbeatResponse(request.opId, DISABLED_PREFERRED_ASSIGNER_VALUE)
     Future.successful(heartbeatResponse)
   }
-
-  // The disabled driver does not run a consistent-hashing election, so it has no snapshot.
-  override private[assigner] def consistentHashingStateView
-      : Future[Option[ConsistentHashingState]] =
-    Future.successful(None)
 }

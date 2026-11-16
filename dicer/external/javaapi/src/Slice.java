@@ -1,4 +1,3 @@
-// LINT.IfChange
 package com.databricks.dicer.external.javaapi;
 
 /**
@@ -110,5 +109,3 @@ public final class Slice implements Comparable<Slice> {
     return this.scalaSlice;
   }
 }
-// LINT.ThenChange(dicer/external/src/Slice.scala)
-// LINT.ThenChange(dicer/rust/external/types/src/slice.rs)

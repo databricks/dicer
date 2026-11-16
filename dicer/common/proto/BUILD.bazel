@@ -1,10 +1,20 @@
-load("//bazel/rules/rust:rules_rust.bzl", "rust_prost_library")
+load("//bazel/rules/rust:rules_rust.bzl", "rust_prost_library", "rust_prost_transform")
 load("@rules_proto//proto:defs.bzl", "proto_library")
 load("@rules_scala//scala_proto:scala_proto.bzl", "scala_proto_library")
+
+rust_prost_transform(
+    name = "dpage_proto_json_transform",
+    prost_opts = ["type_attribute=.=#[serde_with::skip_serializing_none] #[derive(serde::Serialize)]"],
+    deps = [
+        "@crates//:serde",
+        "@crates//:serde_with",
+    ],
+)
 
 proto_library(
     name = "dpage_proto_library",
     srcs = ["dpage.proto"],
+    data = [":dpage_proto_json_transform"],
     visibility = ["//dicer:internal"],
     deps = ["//wrappers/rpc:scalapb_proto"],
 )

@@ -45,8 +45,7 @@ import com.databricks.dicer.assigner.{
   PreferredAssignerConfig,
   PreferredAssignerDriver,
   PreferredAssignerMetrics,
-  PreferredAssignerValue,
-  TargetMigrator
+  PreferredAssignerValue
 }
 
 object PreferredAssignerTestUtils {
@@ -102,7 +101,7 @@ object PreferredAssignerTestUtils {
         assertAssignerGeneratesAssignmentByDirectWatchRequest(
           assigners.head,
           target,
-          Redirect(Some(assigners.head.localUri), redirectTokenOpt = None)
+          Redirect(Some(assigners.head.localUri))
         )
       }
       assigners.head
@@ -190,8 +189,7 @@ object PreferredAssignerTestUtils {
 
   def createAssignerConfig(
       preferredAssignerStoreIncarnation: Incarnation,
-      preferredAssignerEnabled: Boolean = true,
-      targetMigratorOpt: Option[TargetMigrator] = None): TestAssigner.Config = {
+      preferredAssignerEnabled: Boolean = true): TestAssigner.Config = {
     val baseConfigEntries: Seq[(String, Any)] = Seq(
       "databricks.dicer.assigner.preferredAssigner.modeEnabled" -> preferredAssignerEnabled,
       "databricks.dicer.assigner.preferredAssigner.storeIncarnation" ->
@@ -199,8 +197,7 @@ object PreferredAssignerTestUtils {
       "databricks.dicer.assigner.store.etcd.sslEnabled" -> false
     )
     TestAssigner.Config.create(
-      assignerConf = new DicerAssignerConf(Configs.parseMap(baseConfigEntries: _*)),
-      targetMigratorOpt = targetMigratorOpt
+      assignerConf = new DicerAssignerConf(Configs.parseMap(baseConfigEntries: _*))
     )
   }
 
@@ -249,7 +246,6 @@ object PreferredAssignerTestUtils {
         keyCardinalityEstimateOpt = None
       ),
       supportsSerializedAssignment = true,
-      redirectTokenOpt = None,
       alternativeTargetOpt = None,
       clusterUriOpt = None,
       regionUriOpt = None
@@ -265,7 +261,6 @@ object PreferredAssignerTestUtils {
       WATCH_RPC_TIMEOUT,
       ClerkData,
       supportsSerializedAssignment = true,
-      redirectTokenOpt = None,
       alternativeTargetOpt = None,
       clusterUriOpt = None,
       regionUriOpt = None

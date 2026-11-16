@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use backoff::{ExponentialBackoff, ExponentialBackoffBuilder};
 
-// LINT.IfChange
 /// Per-step multiplier matching [`caching.util.ExponentialBackoff`] (always doubles).
 const BACKOFF_MULTIPLIER: f64 = 2.0;
 
@@ -12,7 +11,6 @@ const BACKOFF_MULTIPLIER: f64 = 2.0;
 /// `0.2` here. See `caching/util/src/ExponentialBackoff.scala` and
 /// `caching/util/test/ExponentialBackoffSuite.scala`.
 const BACKOFF_RANDOMIZATION_FACTOR: f64 = 0.2;
-// LINT.ThenChange(caching/util/src/ExponentialBackoff.scala)
 
 /// Creates exponential backoff matching Scala `new ExponentialBackoff(random, min, max)`.
 ///

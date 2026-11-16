@@ -1,5 +1,6 @@
 package com.databricks.dicer.common
 
+import com.databricks.dicer.assigner.ProposedSliceAssignment
 import com.databricks.dicer.common.testing.{SliceTestUtils}
 import com.databricks.dicer.common.testing.SliceTestUtils.{
   GenerationIncarnationFluent,
@@ -124,7 +125,7 @@ class SliceTestUtilsSuite extends DatabricksTest {
         ((42 -- 52) -> Seq("resource3")).subdivide(2),
         (52 -- ∞) -> Seq("resource2", "resource3")
       )
-      == SliceMapHelper.ofProposedSliceAssignments(
+      == ProposedSliceAssignment.createSliceMap(
         Vector(
           createProposedSliceAssignmentAssumingUniformLoad(
             Slice(SliceKey.MIN, toSliceKey(42)),

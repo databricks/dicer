@@ -5,8 +5,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.databricks.backend.common.util.CurrentProject;
 import com.databricks.backend.common.util.Project;
+import com.databricks.rpc.testing.TestTLSOptions;
 import com.databricks.rpc.tls.JTLSOptions;
 import com.databricks.testing.DatabricksJavaTest;
+import java.io.File;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterAll;
@@ -138,6 +140,42 @@ final class SliceletTest extends DatabricksJavaTest {
     SliceletConfig config = builder.setTlsOptions(jTlsOptions).build();
     assertThat(DicerClientConfigTestInterop.sliceletTlsOptions(config).get())
         .isEqualTo(jTlsOptions.toTLSOptions());
+  }
+
+  @Test
+  public void testServerTlsOverridePreservesClientTlsOptions() {
+    // Test plan: Verify that the public builder overrides only inbound TLS, regardless of setter
+    // order. Check the effective options consumed by the client and watch server, then verify
+    // shared-TLS fallback and that a server-only override leaves outbound TLS unset.
+    JTLSOptions clientTls = JTLSOptions.builder().build();
+    JTLSOptions serverTls =
+        JTLSOptions.builder()
+            .addTrustManager(new File(TestTLSOptions.serverTruststorePath()))
+            .build();
+    assertThat(clientTls.toTLSOptions()).isNotEqualTo(serverTls.toTLSOptions());
+
+    for (SliceletConfig config :
+        new SliceletConfig[] {
+          SliceletConfig.builder().setTlsOptions(clientTls).setServerTlsOptions(serverTls).build(),
+          SliceletConfig.builder().setServerTlsOptions(serverTls).setTlsOptions(clientTls).build()
+        }) {
+      assertThat(DicerClientConfigTestInterop.sliceletClientTlsOptions(config))
+          .isEqualTo(Option.apply(clientTls.toTLSOptions()));
+      assertThat(DicerClientConfigTestInterop.sliceletServerTlsOptions(config))
+          .isEqualTo(Option.apply(serverTls.toTLSOptions()));
+    }
+
+    SliceletConfig shared = SliceletConfig.builder().setTlsOptions(clientTls).build();
+    assertThat(DicerClientConfigTestInterop.sliceletClientTlsOptions(shared))
+        .isEqualTo(Option.apply(clientTls.toTLSOptions()));
+    assertThat(DicerClientConfigTestInterop.sliceletServerTlsOptions(shared))
+        .isEqualTo(Option.apply(clientTls.toTLSOptions()));
+
+    SliceletConfig serverOnly = SliceletConfig.builder().setServerTlsOptions(serverTls).build();
+    assertThat(DicerClientConfigTestInterop.sliceletClientTlsOptions(serverOnly))
+        .isEqualTo(Option.empty());
+    assertThat(DicerClientConfigTestInterop.sliceletServerTlsOptions(serverOnly))
+        .isEqualTo(Option.apply(serverTls.toTLSOptions()));
   }
 
   @Test

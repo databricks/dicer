@@ -21,8 +21,7 @@ import com.databricks.dicer.external.{
  * N must be no more than 8 (that is, `nextFingerprint()` can be called no more than 7 times before
  * `build()`). Otherwise, `build()` throws an `IllegalArgumentException`.
  *
- * Access is restricted until the Assigner has been validated with 64-byte keys. Contact
- * the maintainers to request access.
+ * Contact the maintainers to request access.
  *
  * For example, the following code
  *

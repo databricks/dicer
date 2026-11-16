@@ -4,6 +4,7 @@ pub mod caching_errors;
 pub mod caching_latency_histogram;
 pub mod code_ext;
 pub mod consistent_hash_ring;
+pub mod constants;
 pub mod deterministic_sampling;
 pub mod ewma_counter;
 pub mod ewma_quantile_summaries;

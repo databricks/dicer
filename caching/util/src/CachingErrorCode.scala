@@ -12,7 +12,7 @@ object Severity {
 
   /**
    * Degraded severity, system will continue to work albeit in degraded state. This should though be
-   * investigated. Pages SEV1 i.e. only during business hours.
+   * investigated. CachingDegradedError alerts are SEV2 in dev and SEV1 elsewhere (business hours).
    */
   case object DEGRADED extends Severity
 
@@ -65,16 +65,6 @@ object CachingErrorCode {
    * state is normalized to [[com.databricks.dicer.common.SliceletState.Running]] on ingestion.
    */
   case object SLICELET_UNKNOWN_PROTO_STATE extends CachingErrorCode {
-    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
-  }
-
-  /**
-   * The Assigner failed to parse an inbound `redirect_token` sent by a previous Assigner redirect
-   * and echoed by the client. This likely indicates there was a backwards-incompatible change to
-   * the `RedirectToken` proto that should be fixed. The token is treated as absent so routing falls
-   * back to the local target migration config.
-   */
-  case object ASSIGNER_INVALID_REDIRECT_TOKEN extends CachingErrorCode {
     override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
   }
 
@@ -260,110 +250,6 @@ object CachingErrorCode {
   }
 
   /**
-   * The dynamic target migration config from SAFE is unexpectedly empty. A default fallback must
-   * always be defined.
-   */
-  case object MISSING_DYNAMIC_TARGET_MIGRATION_CONFIG extends CachingErrorCode {
-    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
-  }
-
-  /**
-   * The dynamic target migration config from SAFE could not be parsed as a valid
-   * `TargetMigrationConfigP`. Indicates malformed JSON or a value that violates the proto schema.
-   */
-  case object MALFORMED_DYNAMIC_TARGET_MIGRATION_CONFIG extends CachingErrorCode {
-    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
-  }
-
-  /**
-   * The Assigner's initial blocking poll for the dynamic target migration config from SAFE failed
-   * (the SAFE call threw or the poll timed out). Distinct from `MISSING_*` (empty value) and
-   * `MALFORMED_*` (unparseable value) — this signals a SAFE availability/error issue at startup.
-   */
-  case object DYNAMIC_TARGET_MIGRATION_CONFIG_INITIAL_POLL_FAILED extends CachingErrorCode {
-    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
-  }
-
-  /**
-   * The Assigner received a target migration config requesting an active migration, but active
-   * target migrations are not yet supported. The migrator falls back to a no-op (no active
-   * migration) so routing continues to handle every target locally. Investigate why an active
-   * migration config was published.
-   */
-  case object UNSUPPORTED_ACTIVE_TARGET_MIGRATION_CONFIG extends CachingErrorCode {
-    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
-  }
-
-  /**
-   * Building the remote cluster membership checker factory failed, so the Assigner will not be
-   * able to watch the remote cluster specified in its configuration. The Assigner recovers by
-   * skipping creation of the factory rather than failing startup. Since there are a few ways that
-   * the factory creation can fail, investigate the exception in the alert message, which describes
-   * the specific failure and how to resolve it.
-   */
-  case object REMOTE_MEMBERSHIP_CHECKER_FACTORY_CREATION_FAILED extends CachingErrorCode {
-    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
-  }
-
-  /**
-   * The Assigner's [[TargetMigrator]] did not produce its initial [[TargetOwnershipResolver]]
-   * within the startup await timeout. The Assigner cannot start without a valid resolver, so this
-   * blocks startup and should be investigated (e.g. SAFE availability or migrator wiring).
-   */
-  case object INITIAL_TARGET_OWNERSHIP_RESOLVER_CREATION_TIMED_OUT extends CachingErrorCode {
-    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
-  }
-
-  /**
-   * The Assigner's [[TargetMigrator]] failed to apply a state transition upon receiving a new
-   * [[TargetMigrationConfig]]. The alert message should identify the specific cause of the failure
-   * so that we can investigate it.
-   *
-   * NOTE: The migrator will remain in its previous state and keep serving its existing
-   * [[TargetOwnershipResolver]] if the state transition fails.
-   */
-  case object TARGET_MIGRATOR_STATE_TRANSITION_FAILED extends CachingErrorCode {
-    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
-  }
-
-  /**
-   * Constructing the Assigner's `KamEndpoint` for authenticating to remote clusters failed. This
-   * likely indicates a misconfiguration of
-   * `databricks.dicer.assigner.remote.kamDestinationClusterUri` or
-   * `databricks.dicer.assigner.remote.kamDbnsIdentifier`, check the logs for more details. This
-   * will result in disabling remote-cluster membership checking, but this is not catastrophic for
-   * the [[TargetMigrationType.GeneralToSmk]] migration. See the comment for
-   * [[ACTIVE_TARGET_MIGRATION_REMOTE_CLUSTER_ENDPOINT_WATCHER_CREATION_FAILED]] below for more
-   * details. Based on the error logs, fix the misconfiguration as required.
-   */
-  case object KAM_ENDPOINT_CONSTRUCTION_FAILED extends CachingErrorCode {
-    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
-  }
-
-  /**
-   * The [[TargetMigrator]] failed to create the remote cluster endpoint watcher. This will result
-   * in watch requests failing for targets that need to be redirected since we don't know
-   * where (i.e. which Assigner pods) to redirect them to. However, for the
-   * [[TargetMigrationType.GeneralToSmk]] migration, this is not catastrophic since clients will
-   * retry their watch requests and eventually, by random chance, have these requests end up on an
-   * Assigner in the intended/correct cluster (since we will set up the Assigner's ClusterIP service
-   * and DBNS target to span both the General and SMK clusters).
-   *
-   * There are a few ways this can fail, so investigate the exception in the alert message to
-   * determine which one occurred:
-   *  - No remote cluster membership checker factory was configured. In this case, the
-   *    [[REMOTE_MEMBERSHIP_CHECKER_FACTORY_CREATION_FAILED]] alert should have already fired on
-   *    this Assigner's startup with more granular details; this most likely indicates a remote
-   *    cluster watching config misconfiguration (see [[RemoteMembershipCheckerConf]]).
-   *  - The factory was configured but could not create the checker, or starting the checker threw.
-   *    In this case, the exception in the alert message describes the specific failure.
-   */
-  case object ACTIVE_TARGET_MIGRATION_REMOTE_CLUSTER_ENDPOINT_WATCHER_CREATION_FAILED
-      extends CachingErrorCode {
-    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
-  }
-
-  /**
    * In the context of state transfer, the state provider is requested to start providing
    * application state before it has received the requested Slice. This is a violation of our
    * invariants and indicates a code bug to be investigated.
@@ -424,6 +310,18 @@ object CachingErrorCode {
   }
 
   /**
+   * A [[QuantileSummaries]] had to break its accuracy invariant to stay under the memory
+   * constraint. When this happens, we need to check with the customer on their load pattern, adjust
+   * the memory constraint or relative error of [[QuantileSummaries]].
+   *
+   * This condition is typically triggered by some pathological SliceKey access pattern. After the
+   * pattern ends, the alert should be able to recover by its own.
+   */
+  case object QUANTILE_SUMMARIES_ACCURACY_INVARIANT_BROKEN extends CachingErrorCode {
+    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
+  }
+
+  /**
    * Indicates that [[SubscriberHandler]] received an assignment that is older than its cached
    * assignment. The subscriber handler will continue using the newer cached assignment, but this
    * indicates an issue with assignment distribution, likely a bug in the [[AssignmentGenerator]].
@@ -461,6 +359,20 @@ object CachingErrorCode {
     // tests.
     override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
     // $COVERAGE-ON$
+  }
+
+  /** Unexpected internal error in the Scala `SliceletLoadAccumulator`. */
+  case object SLICELET_LOAD_ACCUMULATOR_UNEXPECTED_ERROR extends CachingErrorCode {
+    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
+  }
+
+  /**
+   * A key exceeding `maxKeyLengthBytes` was reported to the Scala `SliceletLoadAccumulator`. The
+   * key's load still counts toward its Slice's total load, but the key is omitted from top keys and
+   * the load distribution, which may degrade Dicer's split and load balancing decisions.
+   */
+  case object SLICELET_LOAD_ACCUMULATOR_KEY_TOO_LONG extends CachingErrorCode {
+    override val alertOwnerTeam: AlertOwnerTeam = AlertOwnerTeam.CachingTeam
   }
 
   /**

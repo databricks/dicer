@@ -7,20 +7,14 @@ import scala.concurrent.duration._
 
 import com.databricks.api.proto.dicer.external.LoadBalancingMetricConfigP.ImbalanceToleranceHintP
 import com.databricks.caching.util.UnixTimeVersion
+import com.databricks.dicer.assigner.{ProposedAssignment, ProposedSliceAssignment}
 import com.databricks.dicer.assigner.algorithm.Algorithm.computeAdjustedLoadMap
 import com.databricks.dicer.assigner.AssignmentStats.AssignmentLoadStats
 import com.databricks.dicer.assigner.config.{ChurnConfig, InternalTargetConfig}
 import com.databricks.dicer.assigner.config.testing.{ConfigTestUtils}
 import com.databricks.dicer.assigner.config.InternalTargetConfig.KeyReplicationConfig
 import com.databricks.dicer.assigner.MigrationTestAssignment
-import com.databricks.dicer.common.{
-  Assignment,
-  ProposedAssignment,
-  ProposedSliceAssignment,
-  SliceAssignment,
-  SliceMapHelper,
-  SubsliceAnnotation
-}
+import com.databricks.dicer.common.{Assignment, SliceAssignment, SliceMapHelper, SubsliceAnnotation}
 import com.databricks.dicer.common.testing.SliceTestUtils.{
   SliceAssignmentFluet,
   assertDesirableAssignmentProperties
@@ -100,7 +94,8 @@ abstract class AlgorithmPhaseSuiteBase extends AlgorithmSuiteBase {
             targetConfig,
             resources,
             predecessorAssignment.sliceMap,
-            loadMap
+            loadMap,
+            sizeMapOpt = None
           )
           .sliceAssignments,
         assignerServiceInfoOpt = None

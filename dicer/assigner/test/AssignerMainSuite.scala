@@ -6,7 +6,6 @@ import com.databricks.dicer.assigner.testing.FakeKubernetesServer
 import com.databricks.dicer.common.Generation
 import com.databricks.conf.{Config, Configs, RichConfig}
 import com.databricks.dicer.assigner.conf.DicerAssignerConf
-import com.databricks.dicer.common.EtcdBootstrapper
 import com.databricks.caching.util.AlertOwnerTeam
 import com.databricks.caching.util.{EtcdTestEnvironment, EtcdClient, EtcdKeyValueMapper}
 import com.databricks.caching.util.UnixTimeVersion
@@ -58,9 +57,6 @@ class AssignerMainSuite extends DatabricksTest with TestName {
       override def create(): ApiClient = KubernetesTestUtils.buildApiClient(fakeServer)
     }
 
-  private val KUBERNETES_NAMESPACE: String = sys.env("NAMESPACE")
-  private val KUBERNETES_APP_NAME: String = sys.env("APP_NAME")
-
   /** A [[LocationConf]] that includes cluster location. */
   private val LOCATION_CONFIG_WITH_CLUSTER_LOCATION: LocationConf =
     LocationConfTestUtils.newTestLocationConfig(
@@ -81,7 +77,6 @@ class AssignerMainSuite extends DatabricksTest with TestName {
 
   override def beforeEach(): Unit = {
     etcd.deleteAll()
-    fakeServer.setPods(KUBERNETES_NAMESPACE, KUBERNETES_APP_NAME, Some(List.empty))
   }
 
   override def afterEach(): Unit = {

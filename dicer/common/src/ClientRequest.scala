@@ -1,7 +1,7 @@
 package com.databricks.dicer.common
 
 import java.net.URI
-import java.time.Instant
+import java.time.{Duration => JavaDuration, Instant}
 import scala.concurrent.duration._
 import com.databricks.api.proto.dicer.common.ClientRequestP.SubscriberDataP.{
   ClerkFields,
@@ -220,7 +220,11 @@ object SliceletData {
    * @param loadDistributionOpt Optional approximate distribution (CDF) of load across keys within
    *                            `slice`, present for range-sharded targets that collect it.
    *
-   * @throws IllegalArgumentException If `primaryRateLoad` is a negative or infinite value.
+   * @throws IllegalArgumentException If `primaryRateLoad` is not a number, is negative, or is
+   *                                  larger than [[MetricMeasurement.MAX_REPORTED_MEASUREMENT]].
+   * @throws IllegalArgumentException If `windowLowInclusive` or `windowHighExclusive` is before
+   *                                  [[SliceLoad.MIN_WINDOW_EPOCH_SECONDS]] or after
+   *                                  [[SliceLoad.MAX_WINDOW_EPOCH_SECONDS]].
    * @throws IllegalArgumentException If any key in `topKeys` is not contained within `slice`.
    * @throws IllegalArgumentException If `numReplicas` <= 0.
    * @throws IllegalArgumentException If any keys in `loadDistributionOpt` are not contained within
@@ -234,7 +238,9 @@ object SliceletData {
       topKeys: Seq[KeyLoad],
       numReplicas: Int,
       loadDistributionOpt: Option[LoadDistribution] = None) {
-    MetricMeasurement.requireValidMeasurement(primaryRateLoad)
+    MetricMeasurement.requireValidReportedMeasurement(primaryRateLoad)
+    SliceLoad.requireValidWindowTimestamp(windowLowInclusive.getEpochSecond)
+    SliceLoad.requireValidWindowTimestamp(windowHighExclusive.getEpochSecond)
     require(
       windowHighExclusive.compareTo(windowLowInclusive) >= 0,
       s"High exclusive time must be >= low inclusive time: " +
@@ -266,6 +272,24 @@ object SliceletData {
       (windowHighExclusive.toEpochMilli - windowLowInclusive.toEpochMilli).millis
     }
 
+    /**
+     * Returns how long before `now` this load's window ended. Returns zero if the window ends
+     * after `now`, which happens when the Slicelet's clock runs ahead of the caller's. Because
+     * window timestamps are limited (see [[SliceLoad.MAX_WINDOW_EPOCH_SECONDS]]), the age fits in
+     * a [[FiniteDuration]] for any `now` in the same range; for a `now` far outside it, the age is
+     * capped at the largest [[FiniteDuration]].
+     */
+    def ageAt(now: Instant): FiniteDuration = {
+      val age: JavaDuration = JavaDuration.between(windowHighExclusive, now)
+      if (age.isNegative) {
+        Duration.Zero
+      } else if (age.compareTo(SliceLoad.MAX_AGE) > 0) {
+        Duration.fromNanos(Long.MaxValue)
+      } else {
+        Duration.fromNanos(age.toNanos)
+      }
+    }
+
     private[common] def toProto: SliceletDataP.SliceLoadP = {
       import SliceHelper.RichSlice
       new SliceletDataP.SliceLoadP(
@@ -283,11 +307,26 @@ object SliceletData {
   object SliceLoad {
 
     /**
+     * The earliest and latest allowed window timestamps, in seconds since the Unix epoch (1970
+     * through 2106). They are close enough together that the gap between any two window
+     * timestamps, or between one and the Assigner's clock, fits in a [[FiniteDuration]].
+     */
+    val MIN_WINDOW_EPOCH_SECONDS: Long = 0L
+    val MAX_WINDOW_EPOCH_SECONDS: Long = 1L << 32
+
+    /** The largest age [[SliceLoad.ageAt]] returns: the largest [[FiniteDuration]]. */
+    private val MAX_AGE: JavaDuration = JavaDuration.ofNanos(Long.MaxValue)
+
+    /**
      * Converts the given `proto` to a [[SliceLoad]] instance.
      *
      * @throws IllegalArgumentException if the proto is not valid.
      */
     private[common] def fromProto(proto: SliceletDataP.SliceLoadP): SliceLoad = {
+      // Check the seconds before creating `Instant`s, because `Instant.ofEpochSecond` throws
+      // `DateTimeException` for very large values.
+      requireValidWindowTimestamp(proto.getWindowLowInclusiveSeconds)
+      requireValidWindowTimestamp(proto.getWindowHighExclusiveSeconds)
       SliceLoad(
         primaryRateLoad = proto.getPrimaryRateLoad,
         windowLowInclusive = Instant.ofEpochSecond(proto.getWindowLowInclusiveSeconds),
@@ -303,6 +342,18 @@ object SliceletData {
       )
     }
 
+    /** Checks that `epochSeconds` is between the allowed window timestamps. */
+    @throws[IllegalArgumentException](
+      "if `epochSeconds` is before MIN_WINDOW_EPOCH_SECONDS or after MAX_WINDOW_EPOCH_SECONDS"
+    )
+    private def requireValidWindowTimestamp(epochSeconds: Long): Unit = {
+      require(
+        epochSeconds >= MIN_WINDOW_EPOCH_SECONDS && epochSeconds <= MAX_WINDOW_EPOCH_SECONDS,
+        s"Window timestamp must be within [$MIN_WINDOW_EPOCH_SECONDS, " +
+        s"$MAX_WINDOW_EPOCH_SECONDS] seconds since the epoch: $epochSeconds."
+      )
+    }
+
     object forTest {
 
       /** Test-only method to convert the given `proto` to a `SliceLoad` instance. */
@@ -313,17 +364,21 @@ object SliceletData {
   }
 
   /**
-   * REQUIRES: `underestimatedPrimaryRateLoad` is a non-negative, finite value.
-   *
    * Load measurement for a single key.
    *
    * @param key The key for which this load measurement applies.
    * @param underestimatedPrimaryRateLoad Estimated primary rate load for this particular key. Note
    *                                      this should be an underestimate, i.e. the real
    *                                      time-weighted load is greater than or equal to this value.
+   *
+   * @throws IllegalArgumentException If `underestimatedPrimaryRateLoad` is not a number, is
+   *                                  negative, or is larger than
+   *                                  [[MetricMeasurement.MAX_REPORTED_MEASUREMENT]].
    */
-  case class KeyLoad(key: SliceKey, underestimatedPrimaryRateLoad: Double) {
-    MetricMeasurement.requireValidMeasurement(underestimatedPrimaryRateLoad)
+  case class KeyLoad @throws[IllegalArgumentException]()(
+      key: SliceKey,
+      underestimatedPrimaryRateLoad: Double) {
+    MetricMeasurement.requireValidReportedMeasurement(underestimatedPrimaryRateLoad)
 
     private[common] def toProto: SliceletDataP.KeyLoadP = {
       new SliceletDataP.KeyLoadP(
@@ -542,39 +597,25 @@ object SyncAssignmentState {
  *
  * @param addressOpt URI to which the client should send future requests. If `None`, the client
  *                   falls back to its default server-selection behavior.
- * @param redirectTokenOpt Optional opaque token produced by the server alongside `addressOpt`. The
- *                         client echoes this back in the next [[ClientRequest]] sent to
- *                         `addressOpt`.
  *
  * @throws IllegalArgumentException If `addressOpt` is not None but contains an empty URI.
- * @throws IllegalArgumentException If `redirectTokenOpt` is set but `addressOpt` is not.
  *
  * TODO(<internal bug>): rename this to `RoutingHint`.
  */
-case class Redirect @throws[IllegalArgumentException]() private (
-    addressOpt: Option[URI],
-    redirectTokenOpt: Option[ByteString]) {
+case class Redirect @throws[IllegalArgumentException]() private (addressOpt: Option[URI]) {
   if (addressOpt.isDefined) {
     require(addressOpt.get.toString.nonEmpty, "Redirect address must not be empty")
-  } else {
-    require(
-      redirectTokenOpt.isEmpty,
-      "Redirect token must not be set without a redirect address"
-    )
   }
 
   def toProto: RedirectP = {
-    new RedirectP(
-      address = addressOpt.map(_.toString),
-      redirectToken = redirectTokenOpt
-    )
+    new RedirectP(address = addressOpt.map(_.toString))
   }
 }
 
 object Redirect {
 
   /** The empty redirect, which causes the sender to send to a random address. */
-  val EMPTY: Redirect = Redirect(addressOpt = None, redirectTokenOpt = None)
+  val EMPTY: Redirect = Redirect(addressOpt = None)
 
   /**
    * Create [[Redirect]] from `proto` if it is valid.
@@ -588,7 +629,7 @@ object Redirect {
     } else {
       Some(new URI(proto.getAddress))
     }
-    Redirect(addressOpt, proto.redirectToken)
+    Redirect(addressOpt)
   }
 }
 
@@ -598,10 +639,6 @@ object Redirect {
  * @param supportsSerializedAssignment indicates whether the client supports parsing serialized
  *                                     assignments. If true, the server may return a serialized
  *                                     assignment in response to this watch request.
- * @param redirectTokenOpt Opaque token echoed back from the most recent
- *                         [[Redirect.redirectTokenOpt]] the client received. `None` when the client
- *                         is not currently acting on a redirect. The client does not inspect the
- *                         bytes — the server on the redirected address is responsible for decoding.
  * @param alternativeTargetOpt See [[ClientRequestP.alternativeTarget]].
  * @param clusterUriOpt Sender pod's Kubernetes cluster IDM URI, if available from WhereAmI;
  *                      region consistency with `regionUriOpt` is not enforced.
@@ -617,7 +654,6 @@ case class ClientRequest @throws[IllegalArgumentException]("if an argument is in
     timeout: FiniteDuration,
     subscriberData: SubscriberData,
     supportsSerializedAssignment: Boolean,
-    redirectTokenOpt: Option[ByteString],
     version: Long = LATEST_VERSION,
     alternativeTargetOpt: Option[AppTarget],
     // TODO(<internal bug>): Remove once DBNS replaces the Kubernetes API server termination-signal watch
@@ -646,7 +682,6 @@ case class ClientRequest @throws[IllegalArgumentException]("if an argument is in
       clientFeatureSupport = Some(
         ClientFeatureSupportP(supportsSerializedAssignment = Some(supportsSerializedAssignment))
       ),
-      redirectToken = redirectTokenOpt,
       alternativeTarget = alternativeTargetOpt.map((_: AppTarget).toProto),
       clusterUri = clusterUriOpt.map((_: KubernetesClusterUri).uri),
       regionUri = regionUriOpt.map((_: RegionUri).uri)
@@ -726,9 +761,9 @@ object ClientRequest {
         }
     }
 
-    // A URI that is malformed or names a resource absent from IDM is dropped to None rather than
-    // rejecting the request: these fields are advisory sender metadata, so an unrecognized value
-    // should not fail an otherwise-valid watch.
+    // A URI that fails validation is dropped to None rather than rejecting the request: these
+    // fields are advisory sender metadata, so an unrecognized value should not fail an
+    // otherwise-valid watch.
     val clusterUriOpt: Option[KubernetesClusterUri] =
       proto.clusterUri.flatMap { uri: String =>
         val parsedUriOpt: Option[KubernetesClusterUri] = KubernetesClusterUri.fromUri(uri)
@@ -759,7 +794,6 @@ object ClientRequest {
       chosenRpcTimeout,
       subscriberData,
       supportsSerializedAssignment,
-      proto.redirectToken,
       version = proto.version.getOrElse(UNKNOWN_VERSION),
       alternativeTargetOpt = alternativeTargetOpt,
       clusterUriOpt = clusterUriOpt,

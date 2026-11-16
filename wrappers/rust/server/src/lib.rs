@@ -20,7 +20,7 @@ use tonic::transport::{Server, ServerTlsConfig};
 /// Idle time before TCP keepalive probes start on accepted connections.
 const TCP_KEEPALIVE_TIME: Duration = Duration::from_secs(25);
 
-/// A standard Rust gRPC server in Databricks. Dropping the server without calling
+/// A standard Rust gRPC server (backed by Tonic). Dropping the server without calling
 /// [`stop`](Self::stop) leaves it serving until the Tokio runtime shuts down.
 ///
 /// # Examples

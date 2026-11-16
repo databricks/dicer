@@ -18,7 +18,7 @@ import com.databricks.caching.util.{
   TickerTime
 }
 import com.databricks.dicer.assigner.config.InternalTargetConfig.LoadWatcherTargetConfig
-import com.databricks.dicer.assigner.algorithm.LoadMap
+import com.databricks.dicer.assigner.algorithm.{LoadMap, MetricMap}
 import com.databricks.dicer.assigner.algorithm.LoadMap.KeyLoadMap
 import com.databricks.dicer.assigner.LoadWatcher.{
   Measurement,
@@ -65,7 +65,10 @@ import com.databricks.dicer.external.{InfinitySliceKey, ResourceAddress, Slice, 
  *
  * Assuming there are N load reports tracked for a Slice, the aggregated load for the Slice is
  * calculated as
- *   TotalLoad(Slice) = sum(i=1..N, Wi * Li * Ri) / sum(i=1..N, Wi).
+ *   TotalLoad(Slice) = sum(i=1..N, Wi * min(Li * Ri, MaxEntryValue)) / sum(i=1..N, Wi).
+ *
+ * where MaxEntryValue is [[MetricMap.MAX_ENTRY_VALUE]], the largest value a [[LoadMap]] entry can
+ * hold. The cap keeps the sum finite even for extreme reported loads.
  *
  * See <internal link> for more information.
  *
@@ -146,6 +149,7 @@ private[assigner] class LoadWatcher(config: LoadWatcherTargetConfig, staticConfi
    *    section of the main class doc.
    *  * If no usable measurement is available, historical measurements from `assignment` will be
    *    used instead.
+   *  * The load of each Slice is capped at [[MetricMap.MAX_ENTRY_VALUE]].
    *  * Absent both measurements and historical load data, the load information is considered
    *    incomplete.
    *
@@ -257,7 +261,7 @@ private[assigner] class LoadWatcher(config: LoadWatcherTargetConfig, staticConfi
         Seq.empty
       }
     val overriddenLoadDistributionOpt: Option[LoadDistribution] =
-      if (staticConfig.allowLoadDistribution && config.useLoadDistribution) {
+      if (config.useLoadDistribution) {
         loadDistributionOpt
       } else {
         None
@@ -349,21 +353,14 @@ private[assigner] object LoadWatcher {
    * @param allowTopKeys whether to allow any target to use top key information from the Slicelet.
    *                     [[LoadWatcherTargetConfig.useTopKeys]] must still be enabled to actually
    *                     use the top keys.
-   * @param allowLoadDistribution whether to allow any target to use the per-key load distribution
-   *                              (CDF) reported by the Slicelet.
-   *                              [[LoadWatcherTargetConfig.useLoadDistribution]] must still be
-   *                              enabled to actually use the load distribution.
    */
-  case class StaticConfig(allowTopKeys: Boolean, allowLoadDistribution: Boolean)
+  case class StaticConfig(allowTopKeys: Boolean)
 
   object StaticConfig {
 
     /** Create a [[StaticConfig]] derived from the DbConfs in [[LoadWatcherConf]]. */
     def fromConf(conf: LoadWatcherConf): StaticConfig = {
-      StaticConfig(
-        allowTopKeys = conf.allowTopKeys,
-        allowLoadDistribution = conf.allowLoadDistribution
-      )
+      StaticConfig(allowTopKeys = conf.allowTopKeys)
     }
   }
 
@@ -854,9 +851,10 @@ private[assigner] object LoadWatcher {
 
         // Feed this Measurement's distribution (if any) into the mixture.
         for (distribution: LoadDistribution <- measurement.loadDistributionOpt) {
+          // Cap the load, which weights this distribution, so the sum of weights stays finite.
           loadDistributionAggregator.addDistribution(
             measurementNormalizedAge,
-            measurement.load,
+            MetricMap.capValue(measurement.load),
             distribution
           )
         }
@@ -1101,15 +1099,18 @@ private[assigner] object LoadWatcher {
      * PRECONDITION: `numReplicas` > 0.
      *
      * Accumulates `load` for a slice replica that reported that it was one of `numReplicas`, and
-     * whose age is `age`.
+     * whose age is `age`. The Slice load this implies (`load` times `numReplicas`) is capped at
+     * [[MetricMap.MAX_ENTRY_VALUE]].
      */
     def accumulate(age: FiniteDuration, load: Double, numReplicas: Int): Unit = {
       MetricMeasurement.requireValidMeasurement(load)
       iassert(numReplicas > 0)
 
       val weight: Double = Math.pow(2, -age.toMillis.toDouble / halfLife.toMillis)
+      // Cap the Slice load so that adding it to the running total can't reach infinity.
+      val sliceLoad: Double = MetricMap.capValue(load * numReplicas)
       totalWeight += weight
-      totalWeightedLoad += (weight * load * numReplicas)
+      totalWeightedLoad += weight * sliceLoad
     }
 
     /**

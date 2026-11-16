@@ -103,12 +103,6 @@ scala_library(
     srcs = ["src/Headers.scala"],
 )
 
-# Armeria readiness probe tracker
-scala_library(
-    name = "readiness_probe_tracker",
-    srcs = ["armeria/ReadinessProbeTracker.scala"],
-)
-
 # Armeria HTTP client components
 scala_library(
     name = "client",

@@ -5,6 +5,9 @@
 # and EwmaAmplifier. For more detailed tests about the histogram tracking functionality, see tests
 # for QuantileSummaries. For more detailed tests about the EWMA handling, see tests for
 # EwmaAmplifier.
+#
+# Write exponent literals with a decimal point (e.g. `1.0e-3`): the ScalaPB text parser rejects
+# `1e-3`.
 valid_cases: [
   {
     test_case_name: "empty summary"
@@ -12,11 +15,11 @@ valid_cases: [
     # of how many quantiles are batched together.
     ewma_quantile_summaries: {
       half_life_seconds: 10.0
-      relative_error: 1e-3
+      relative_error: 1.0e-3
       sample_count_upper_bound: 1000
     }
     actions: [
-      { assert_query_within: { quantiles: [0, 0.5, 1] relative_error: 1e-3 } }
+      { assert_query_within: { quantiles: [0, 0.5, 1] relative_error: 1.0e-3 } }
     ]
   },
   {
@@ -25,7 +28,7 @@ valid_cases: [
     # observation is recorded.
     ewma_quantile_summaries: {
       half_life_seconds: 10.0
-      relative_error: 1e-3
+      relative_error: 1.0e-3
       sample_count_upper_bound: 1000
     }
     actions: [
@@ -33,7 +36,7 @@ valid_cases: [
       {
         assert_query_within: {
           quantiles: [0, 0.5, 1]
-          relative_error: 1e-3
+          relative_error: 1.0e-3
           expected_results: [
             { value: 42 cumulative_weight_fraction: 1.0 },
             { value: 42 cumulative_weight_fraction: 1.0 },
@@ -50,7 +53,7 @@ valid_cases: [
     # `elapsed_ms = 0` and checking the standard quartile answers.
     ewma_quantile_summaries: {
       half_life_seconds: 10.0
-      relative_error: 1e-3
+      relative_error: 1.0e-3
       sample_count_upper_bound: 1000
     }
     actions: [
@@ -61,7 +64,7 @@ valid_cases: [
       {
         assert_query_within: {
           quantiles: [0, 0.25, 0.5, 0.75, 1]
-          relative_error: 1e-3
+          relative_error: 1.0e-3
           expected_results: [
             { value: 10 cumulative_weight_fraction: 0.25 },
             { value: 10 cumulative_weight_fraction: 0.25 },
@@ -76,7 +79,7 @@ valid_cases: [
   {
     test_case_name: "inserting zero weight is a no-op"
     # Test plan: Verify that inserting a 0 weight is a no-op.
-    ewma_quantile_summaries: { half_life_seconds: 10.0 relative_error: 1e-3 sample_count_upper_bound: 1000 }
+    ewma_quantile_summaries: { half_life_seconds: 10.0 relative_error: 1.0e-3 sample_count_upper_bound: 1000 }
     actions: [
       { insert: { value: 0 weight: 0 elapsed_ms: 0 } },
       { insert: { value: 10 weight: 1 elapsed_ms: 0 } },
@@ -84,7 +87,7 @@ valid_cases: [
       {
         assert_query_within: {
           quantiles: [0, 0.5, 1]
-          relative_error: 1e-3
+          relative_error: 1.0e-3
           expected_results: [
             { value: 10 cumulative_weight_fraction: 1.0 },
             { value: 10 cumulative_weight_fraction: 1.0 },
@@ -98,7 +101,7 @@ valid_cases: [
     test_case_name: "inserting negative weight is a no-op"
     # Test plan: Verify that a negative-weight insert for an already-present value does not reduce
     # that value's stored weight (or its quantile coverage).
-    ewma_quantile_summaries: { half_life_seconds: 10.0 relative_error: 1e-3 sample_count_upper_bound: 1000 }
+    ewma_quantile_summaries: { half_life_seconds: 10.0 relative_error: 1.0e-3 sample_count_upper_bound: 1000 }
     actions: [
       { insert: { value: 10 weight: 2 elapsed_ms: 0 } },
       { insert: { value: 20 weight: 2 elapsed_ms: 0 } },
@@ -106,7 +109,7 @@ valid_cases: [
       {
         assert_query_within: {
           quantiles: [0, 0.5, 1]
-          relative_error: 1e-3
+          relative_error: 1.0e-3
           expected_results: [
             # The cumulative weight fraction for value 10 is still 50%.
             { value: 10 cumulative_weight_fraction: 0.5 },
@@ -121,7 +124,7 @@ valid_cases: [
     test_case_name: "newer inserts dominate older ones by exact half-life ratio"
     # Test plan: Verify that an insert one half-life later has exactly twice the effective
     # weight of an earlier same-weight insert.
-    ewma_quantile_summaries: { half_life_seconds: 1.0 relative_error: 1e-3 sample_count_upper_bound: 1000 }
+    ewma_quantile_summaries: { half_life_seconds: 1.0 relative_error: 1.0e-3 sample_count_upper_bound: 1000 }
     actions: [
       # Despite both weights being 1, the value inserted 1s later should have twice the weight.
       { insert: { value: 10 weight: 1 elapsed_ms: 0 } },
@@ -129,7 +132,7 @@ valid_cases: [
       {
         assert_query_within: {
           quantiles: [0, 0.32, 0.34, 0.5, 1]
-          relative_error: 1e-3
+          relative_error: 1.0e-3
           expected_results: [
             { value: 10 cumulative_weight_fraction: 0.3333333333333333 },
             { value: 10 cumulative_weight_fraction: 0.3333333333333333 },
@@ -145,7 +148,7 @@ valid_cases: [
     test_case_name: "non-monotonic timestamp does not regress amplification"
     # Test plan: Verify that a backward timestamp passed to insert is treated as belonging to
     # the latest seen time.
-    ewma_quantile_summaries: { half_life_seconds: 1.0 relative_error: 1e-3 sample_count_upper_bound: 1000 }
+    ewma_quantile_summaries: { half_life_seconds: 1.0 relative_error: 1.0e-3 sample_count_upper_bound: 1000 }
     actions: [
       { insert: { value: 10 weight: 1 elapsed_ms: 0 } },
       { insert: { value: 20 weight: 1 elapsed_ms: 1000 } },
@@ -156,7 +159,7 @@ valid_cases: [
       {
         assert_query_within: {
           quantiles: [0, 0.19, 0.6, 1]
-          relative_error: 1e-3
+          relative_error: 1.0e-3
           expected_results: [
             { value: 10 cumulative_weight_fraction: 0.2 },
             { value: 10 cumulative_weight_fraction: 0.2 },
@@ -173,7 +176,7 @@ valid_cases: [
     # things strongly and lets old things fade away.
     ewma_quantile_summaries: {
       half_life_seconds: 1.0
-      relative_error: 1e-3
+      relative_error: 1.0e-3
       sample_count_upper_bound: 1000
     }
     actions: [
@@ -195,7 +198,7 @@ valid_cases: [
       {
         assert_query_within: {
           quantiles: [0, 0.32, 0.34, 0.5, 1]
-          relative_error: 1e-3
+          relative_error: 1.0e-3
           expected_results: [
             { value: 10 cumulative_weight_fraction: 0.3333333333333333 },
             { value: 10 cumulative_weight_fraction: 0.3333333333333333 },
@@ -212,7 +215,7 @@ valid_cases: [
     # Test plan: Verify that EwmaQuantileSummaries correctly rescales internally.
     ewma_quantile_summaries: {
       half_life_seconds: 0.5
-      relative_error: 1e-3
+      relative_error: 1.0e-3
       sample_count_upper_bound: 1000
     }
     actions: [
@@ -224,7 +227,7 @@ valid_cases: [
       {
         assert_query_within: {
           quantiles: [0, 0.24, 0.26, 0.5, 1]
-          relative_error: 1e-3
+          relative_error: 1.0e-3
           expected_results: [
             # The initial weight 1 for value 10 should be decayed to near 0.
             { value: 10 cumulative_weight_fraction: 0.25 },

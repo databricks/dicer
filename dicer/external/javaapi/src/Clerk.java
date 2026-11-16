@@ -1,4 +1,3 @@
-// LINT.IfChange
 package com.databricks.dicer.external.javaapi;
 
 import java.util.Optional;
@@ -73,5 +72,3 @@ public class Clerk<Stub> {
     return scalaClerk;
   }
 }
-// LINT.ThenChange(dicer/external/src/Clerk.scala)
-// LINT.ThenChange(dicer/rust/external/clerk/src/clerk.rs)

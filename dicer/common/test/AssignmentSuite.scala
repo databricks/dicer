@@ -212,6 +212,59 @@ class AssignmentSuite extends DatabricksTest {
     }
   }
 
+  test("Assignment fromDiff rejects gaps that do not cover whole known Slices") {
+    // Test plan: Verify that Assignment.fromDiff reports INCONSISTENCY, rather than throwing,
+    // for a partial diff whose gaps do not line up with the Slices of the known assignment, and
+    // that a diff whose gaps are exactly known Slices still merges. Do this by building newer
+    // assignments whose Slice boundaries differ from the known assignment's inside a Slice left
+    // unchanged since the diff generation, taking their diffs against the known generation, and
+    // checking fromDiff's result for each.
+    val knownAssignment: Assignment = createAssignment(
+      2 ## 42,
+      assignerServiceInfoOpt = None,
+      ("" -- "Kili") @@ (2 ## 40) -> Seq("pod0"),
+      ("Kili" -- ∞) @@ (2 ## 40) -> Seq("pod1")
+    )
+    val misalignedAssignments: Seq[(String, Assignment)] = Seq(
+      "gap ends inside a known Slice" -> createAssignment(
+        2 ## 47,
+        assignerServiceInfoOpt = None,
+        ("" -- "Fili") @@ (2 ## 40) -> Seq("pod0"),
+        ("Fili" -- ∞) @@ (2 ## 47) -> Seq("pod2")
+      ),
+      "gap starts inside a known Slice" -> createAssignment(
+        2 ## 47,
+        assignerServiceInfoOpt = None,
+        ("" -- "Fili") @@ (2 ## 47) -> Seq("pod2"),
+        ("Fili" -- ∞) @@ (2 ## 40) -> Seq("pod1")
+      ),
+      "gap spans a known Slice boundary" -> createAssignment(
+        2 ## 47,
+        assignerServiceInfoOpt = None,
+        ("" -- "Fili") @@ (2 ## 47) -> Seq("pod2"),
+        ("Fili" -- "Nori") @@ (2 ## 40) -> Seq("pod0"),
+        ("Nori" -- ∞) @@ (2 ## 47) -> Seq("pod2")
+      )
+    )
+    for (entry <- misalignedAssignments) {
+      val (description, newerAssignment): (String, Assignment) = entry
+      withClue(description) {
+        val diff: DiffAssignment = newerAssignment.toDiff(knownAssignment.generation)
+        assert(Assignment.fromDiff(Some(knownAssignment), diff) == Right(DiffUnused.INCONSISTENCY))
+      }
+    }
+
+    // A diff whose only gap is an unchanged known Slice merges into the newer assignment.
+    val alignedAssignment: Assignment = createAssignment(
+      2 ## 47,
+      assignerServiceInfoOpt = None,
+      ("" -- "Kili") @@ (2 ## 40) -> Seq("pod0"),
+      ("Kili" -- ∞) @@ (2 ## 47) -> Seq("pod2")
+    )
+    val alignedDiff: DiffAssignment = alignedAssignment.toDiff(knownAssignment.generation)
+    assert(Assignment.fromDiff(Some(knownAssignment), alignedDiff) == Left(alignedAssignment))
+  }
+
   test("Assignment.toDiff higher diff generation") {
     // Test plan: Verify that Assignment.toDiff fails when the diff generation is
     // higher than assignment generation.

@@ -1,0 +1,35 @@
+load("//bazel/rules/rust:rules_rust.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "friend_lib",
+    srcs = [
+        "src/lib.rs",
+        "src/squid.rs",
+    ],
+    crate_name = "dicer_rust_friend",
+    visibility = ["//dicer:internal"],
+    deps = [
+        "//caching/rust/util:util_lib",
+        "//dicer/friend/proto:friend_proto_prost_lib",
+        "//dicer/rust/external/types:types_lib",
+        "@crates//:tonic",
+        "@crates//:uuid",
+    ],
+)
+
+rust_test(
+    name = "squid_test",
+    srcs = ["tests/squid_test.rs"],
+    crate_features = ["test"],
+    deps = [
+        ":friend_lib",
+        "//caching/rust/util/testing:testing_lib",
+        "//caching/rust/util:util_lib",
+        "//dicer/common/test/proto:test_data_proto_prost_lib",
+        "//dicer/friend/proto:friend_proto_prost_lib",
+        "//dicer/rust/external/types:types_lib",
+        "//dicer/rust/testing:testing_lib",
+        "@crates//:lazy_static",
+        "@crates//:uuid",
+    ],
+)

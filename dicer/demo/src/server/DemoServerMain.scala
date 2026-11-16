@@ -21,7 +21,6 @@ import com.databricks.api.proto.dicer.demo.{
   PutValueRequestP,
   PutValueResponseP
 }
-import com.databricks.backend.common.util.Project
 import com.databricks.caching.util.{PrefixLogger, ServerConf}
 import com.databricks.common.util.ShutdownHookManager
 import com.databricks.conf.Config
@@ -58,7 +57,7 @@ class DemoServerConf(projectName: String, rawConfig: Config)
  * - Stores all state in an in-memory cache (5,000 entry maximum)
  * - Registers with Dicer via Slicelet to receive key assignments
  */
-object DemoServerMain extends DatabricksMain(Project.DemoServer) {
+object DemoServerMain extends DatabricksMain("dicer-demo-server") {
 
   /** The gRPC server port for client requests. */
   private val SERVER_PORT: Int = 8080

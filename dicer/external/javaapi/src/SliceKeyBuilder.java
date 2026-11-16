@@ -1,4 +1,3 @@
-// LINT.IfChange
 package com.databricks.dicer.external.javaapi;
 
 import com.google.protobuf.ByteString;
@@ -59,5 +58,3 @@ public final class SliceKeyBuilder {
     return new SliceKey(scalaSliceKey);
   }
 }
-// LINT.ThenChange(dicer/external/src/SliceKeyBuilder.scala)
-// LINT.ThenChange(dicer/rust/external/types/src/slice_key_builder.rs)

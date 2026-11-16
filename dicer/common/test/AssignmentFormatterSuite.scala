@@ -6,6 +6,7 @@ import scala.io.Source
 import scala.util.Random
 
 import com.databricks.testing.DatabricksTest
+import com.databricks.dicer.assigner.{ProposedAssignment, ProposedSliceAssignment}
 import com.databricks.dicer.common.testing.SliceTestUtils.{
   GenerationIncarnationFluent,
   LowInclusiveStringFluent,

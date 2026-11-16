@@ -1,12 +1,10 @@
-// LINT.IfChange
 package com.databricks.dicer.external
 
-import java.net.URI
 import javax.annotation.concurrent.ThreadSafe
 
 import scala.concurrent.Future
 
-import com.databricks.dicer.client.ClerkImpl
+import com.databricks.dicer.client.{ClerkImpl, WatchAddress}
 
 /**
  * The class that allows a caller to route requests to the right resource (e.g., pod) in the same
@@ -82,8 +80,7 @@ object Clerk {
    * that request. As a result, the application should check for ownership/affinity on the Slicelet
    * side using the Slicelet's API when handling a request.
    *
-   * @param sliceletHostName This is the domain name address of the Slicelet service that serves
-   *                         assignments, usually backed by clusterIP.
+   * @param sliceletHostName The hostname of the Slicelet service that serves assignments.
    */
   // TODO(<internal bug>): Enforce this REQUIRES clause.
   def create[Stub <: AnyRef](
@@ -91,11 +88,9 @@ object Clerk {
       target: Target,
       sliceletHostName: String,
       stubFactory: ResourceAddress => Stub): Clerk[Stub] = {
-    val watchAddress: URI = clerkConf.getSliceletURI(sliceletHostName)
+    val watchAddress: WatchAddress = clerkConf.getSliceletWatchAddress(sliceletHostName)
     val clerkImpl =
       ClerkImpl.create[Stub](clerkConf, target, watchAddress, stubFactory, sourceIpOpt = None)
     new Clerk[Stub](clerkImpl)
   }
 }
-// LINT.ThenChange(dicer/external/javaapi/src/Clerk.java)
-// LINT.ThenChange(dicer/rust/external/clerk/src/clerk.rs)

@@ -10,7 +10,10 @@ import com.databricks.dicer.common.TargetName
  * The abstraction that tracks the configuration for each sharded target.
  */
 private[dicer] trait InternalTargetConfigMap {
-  // The scope of the configs used by the map (for debugging purposes).
+
+  /**
+   * Cluster scope used to resolve this map's configs, if one was supplied.
+   */
   val clusterConfigScopeOpt: Option[ClusterConfigScope]
 
   /** Returns the number of targets in this config map. */
@@ -34,7 +37,8 @@ object InternalTargetConfigMap {
   /**
    * The implementation of InternalTargetConfigMap.
    *
-   * @param clusterConfigScopeOpt scope of the configs used by the map (for debugging purposes).
+   * @param clusterConfigScopeOpt cluster scope used to resolve this map's configs, if one was
+   *                              supplied.
    * @param configMap map from target name to its config. Configs are shared for all targets with
    *                  the same name, regardless of their cluster.
    */
